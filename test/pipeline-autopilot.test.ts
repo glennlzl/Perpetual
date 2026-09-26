@@ -29,6 +29,11 @@ test('the Badge reads the work under way, else the latest change, else the mode'
   assert.equal(autopilotBadge(stage('ask', change('c3', 'needs-review')))!.tone, 'blocked');
   assert.equal(autopilotBadge(stage('merge', change('c4', 'not-merged')))!.tone, 'failed');
   assert.equal(autopilotBadge(stage('merge', change('c5', 'passed', { title: 'Rerunning build' })))!.tone, 'passed', 'A failure that cleared without a change.');
+  const older = change('c6', 'not-merged', { sha: 'a'.repeat(40) });
+  assert.deepEqual(autopilotBadge(stage('merge', older), 'b'.repeat(40)), { text: 'Autopilot', tone: 'idle', change: null }, 'An older commit\'s end no longer describes the stage.');
+  assert.deepEqual(autopilotBadge(stage('merge', older), 'a'.repeat(40)), { text: 'Not merged', tone: 'failed', change: older }, 'The scanned commit\'s end does.');
+  assert.deepEqual(autopilotBadge({ ...stage('merge', older), failed: { sha: 'a'.repeat(40), runs: [] } }, 'b'.repeat(40)), { text: 'Not merged', tone: 'failed', change: older }, 'So does the watched head\'s.');
+  assert.deepEqual(autopilotBadge(stage('merge', change('c7', 'running', { sha: 'a'.repeat(40) })), 'b'.repeat(40))!.text, 'Updating dependencies', 'Work under way always names itself.');
   assert.deepEqual(Object.values(CHANGE_LABELS), ['Running', 'Merged', 'Passed', 'Needs review', 'Not merged']);
   assert.deepEqual(MODE_LABELS, { merge: 'Autopilot', ask: 'Ask first' });
 });

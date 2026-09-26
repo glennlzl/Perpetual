@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from 'react';
-import { Check, ChevronDown, CircleCheck, CircleX, Code, Copy, ExternalLink, Eye, GitBranch, ListChecks, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, Sparkles, Square, Trash2, Undo2 } from 'lucide-react';
+import { Check, ChevronDown, CircleCheck, CircleX, Code, Copy, ExternalLink, Eye, GitBranch, ListChecks, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, RotateCcw, Sparkles, Square, Trash2, Undo2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -345,8 +345,9 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
   </Dialog>;
 }
 
-// Generated code is a draft beside the approved code: it is verified, then approved in review, or discarded.
-function CodeActions({ code, modelConfigured, onGenerate, onStop, onVerify, onStopVerifying, onApprove, onDiscard }: { code: ReturnType<typeof journeyCode>; modelConfigured: boolean; onGenerate: () => void; onStop: () => void; onVerify: () => void; onStopVerifying: () => void; onApprove: () => void; onDiscard: () => void }) {
+// Generated code is a draft beside the approved code: it is verified, then approved in review, or discarded. Approved
+// code the edited journey made stale can be reused as the draft, when its actions still fit.
+function CodeActions({ code, modelConfigured, onGenerate, onStop, onVerify, onStopVerifying, onApprove, onDiscard, onReuse }: { code: ReturnType<typeof journeyCode>; modelConfigured: boolean; onGenerate: () => void; onStop: () => void; onVerify: () => void; onStopVerifying: () => void; onApprove: () => void; onDiscard: () => void; onReuse: () => void }) {
   const busy = code.generating || code.verifying;
   return <>
     <DropdownMenuSeparator />
@@ -356,6 +357,7 @@ function CodeActions({ code, modelConfigured, onGenerate, onStop, onVerify, onSt
     {code.verifying ? <DropdownMenuItem onSelect={onStopVerifying}><Square />Stop verifying</DropdownMenuItem>
       : code.verifiable && <DropdownMenuItem disabled={busy} onSelect={onVerify}><ListChecks />Verify code</DropdownMenuItem>}
     {code.approvable && <DropdownMenuItem disabled={busy} onSelect={onApprove}><Check />Approve code</DropdownMenuItem>}
+    {code.reusable && <DropdownMenuItem disabled={busy} onSelect={onReuse}><RotateCcw />Reuse approved code</DropdownMenuItem>}
     {code.draft && <DropdownMenuItem disabled={busy} onSelect={onDiscard}><Undo2 />Discard draft</DropdownMenuItem>}
   </>;
 }
@@ -614,7 +616,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
               {reviewed(item) && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
               {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => codeAction('generate-code', 'specs/generate', { caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
                 onVerify={() => codeAction('verify-code', 'specs/verify', { caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
-                onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} />}
+                onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
               <DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
             skipping={pending === 'skip'}

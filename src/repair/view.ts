@@ -76,7 +76,7 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
   const rerun = repair.category === 'availability' && (repair.status === 'rerunning' || repair.status === 'flaky');
   const reason = repair.reason ?? (repair.status === 'cancelled' ? 'Stopped.' : undefined);
   return {
-    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: steps(repair, names, reason),
+    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: steps(repair, names, reason), sha: repair.sha,
     ...(repair.pullRequest ? { pullRequest: { number: repair.pullRequest.number, url: repair.pullRequest.url } } : {}), ...(reason ? { reason } : {}),
     startedAt: repair.createdAt, ...(repair.completedAt ? { endedAt: repair.completedAt } : {}),
   };

@@ -257,7 +257,7 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 }
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
-  const { stage, services, repoPath, scannedAt, blocked, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
+  const { stage, services, repoPath, scannedAt, sha, blocked, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
   const status = stageStatus(stage, { blocked, environment, buildStatus, origin, revision, services, gate, gated });
   const sandbox = stage.kind === 'sandbox';
   // The changes Autopilot records for the stage; one under way lights the card's beam.
@@ -283,7 +283,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
           <div className="stage-badges">
             <StageStatus stage={stage} status={status} environment={environment} beat={beat} />
             {sandbox && <GateBadge gate={isStageGate(gate) ? gate : null} />}
-            {autopilot && <AutopilotBadge repoPath={repoPath} stage={stage} autopilot={autopilot} />}
+            {autopilot && <AutopilotBadge repoPath={repoPath} stage={stage} autopilot={autopilot} sha={sha} />}
             {behind && <Hint text={behind}><Badge asChild variant="outline" className="stage-behind"><button type="button">Behind</button></Badge></Hint>}
             {repairHead && <Hint text={repairHead}><Badge asChild variant="outline" className="stage-behind"><button type="button">PR head</button></Badge></Hint>}
             {sandbox && <Badge variant="outline" className="stage-kind">Sandbox</Badge>}

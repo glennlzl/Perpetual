@@ -406,3 +406,31 @@ test('a repair gate\'s context, scanned from its pull request checkout, runs the
   assert.deepEqual([report.run.status,report.run.specHashes,report.run.sourceRevision],['passed',{[journey.id]:saved.draft!.hash},head]);
   assert.equal(f.manager.summary(f.context).runs[0].id,report.run.id,'The stage lists the run its repair gate made.');
 });
+
+test('stale approved code is reused as the draft of the edited journey when its actions still fit',async t=>{
+  const code=spec(),approvedAt='2026-09-24T09:00:00.000Z',provenance={harness:'opencode@1.18.32'};
+  const other={...journey,id:'other'};
+  const f=await fixture(t,{events:noticing,before:async dataDir=>{
+    const scope=createHash('sha256').update('repo\0beta').digest('hex');
+    await mkdir(join(dataDir,'browser'),{recursive:true});
+    await writeFile(join(dataDir,'browser','state.json'),JSON.stringify({version:1,configs:{[scope]:{targetUrl:'http://localhost:3000/'}},cases:{[scope]:[journey,other]},analyses:{},runs:[],specs:{[scope]:{
+      [journey.id]:{approved:{code,hash:specHash(code),caseHash:caseHash(journey),savedAt:approvedAt,provenance,approvedAt,approvedRunIds:['run-1','run-2','run-3','run-4']},draft:null},
+    }}}));
+  }});
+  await assert.rejects(f.manager.reuseSpec(f.context,{caseId:journey.id}),/The approved code is current\./,'Current approved code needs no draft.');
+  await assert.rejects(f.manager.reuseSpec(f.context,{caseId:other.id}),/no approved code to reuse/);
+  // A person adds a check: the approved code is stale, and its actions still fit the milestones.
+  const edited={...journey,steps:[journey.steps[0],{...journey.steps[1],checks:[...journey.steps[1].checks,{type:'text-visible',value:'Saved'}]}]};
+  await f.manager.saveCases(f.context,[edited,other]);
+  assert.deepEqual((await f.manager.view(f.context)).specs[journey.id],{approved:{hash:specHash(code),stale:true,approvedAt,provenance}});
+  const reused=await f.manager.reuseSpec(f.context,{caseId:journey.id});
+  assert.deepEqual(reused.spec,{caseId:journey.id,approved:{hash:specHash(code),stale:true,approvedAt,provenance},draft:{hash:specHash(code),stale:false,provenance}},'The draft is the approved code, current for the edited journey, with its provenance.');
+  await assert.rejects(f.manager.reuseSpec(f.context,{caseId:journey.id}),/Discard the draft first\./);
+  const verification=await verified(f,specHash(code));
+  assert.deepEqual(verification,{status:'passed',passes:3,control:'caught'},'The reused draft is verified like any draft.');
+  await f.manager.approveSpec(f.context,{caseId:journey.id,hash:specHash(code)});
+  assert.deepEqual((await f.manager.view(f.context)).specs[journey.id],{approved:{hash:specHash(code),stale:false,approvedAt:(await f.manager.view(f.context)).specs[journey.id].approved!.approvedAt,provenance}});
+  // A milestone renamed: the code no longer fits, so it needs the generator again.
+  await f.manager.saveCases(f.context,[{...edited,steps:[edited.steps[0],{...edited.steps[1],id:'save'}]},other]);
+  await assert.rejects(f.manager.reuseSpec(f.context,{caseId:journey.id}),/Generate code for this test again: /);
+});

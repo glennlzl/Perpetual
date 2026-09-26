@@ -1051,6 +1051,16 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(typeof input.hash!=='string'||draft.hash!==input.hash)throw conflict('The code changed. Reload it and discard again.');
       return {approved,draft:null};
     }),
+    // A person takes the stale approved code as the draft for the edited journey, to verify and approve again, when its
+    // actions still fit the journey's milestones. The draft keeps the approved code's provenance.
+    reuseSpec:(context:BrowserStageContext,input:{caseId?:unknown})=>writeSpec(context,input?.caseId,(item,{approved,draft})=>{
+      if(!approved)throw Object.assign(new Error('This test has no approved code to reuse.'),{statusCode:404});
+      if(approved.caseHash===caseHash(item))throw conflict('The approved code is current.');
+      if(draft&&draft.caseHash===caseHash(item))throw conflict('Discard the draft first.');
+      let code:string;
+      try{code=validateJourneySpec(approved.code,item);}catch(error){throw new Error(`Generate code for this test again: ${(error as Error).message}`);}
+      return {approved,draft:drafted(item,code,approved.provenance?{provenance:structuredClone(approved.provenance)}:{})};
+    }),
     // The code itself, for a person to review before approval. It is stage data and never holds the account.
     async specCode(context:BrowserStageContext,input:{caseId?:unknown}){
       const scope=scopeId(context),item=(state.cases[scope]||[]).find(value=>value.id===input?.caseId);

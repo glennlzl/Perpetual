@@ -64,7 +64,7 @@ export interface StageNodeContext<D = unknown, R = unknown> {
 export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { scan, source = null, pipeline, sha = null, latest = {}, snapshot = {}, arrivals = {}, healthBeat = () => '', build = null, buildStatus = null, github = null, gates = null, production = null, autopilot = null, selection = null, selectedStageId = null, busyStages = [], busy = false, openDialog, toggleStage, addTest, createSandbox }: StageNodeContext<D, R>) {
   const environment = latest[stage.id], services = stage.kind === 'production' && production ? production : stageServices(scan, stage);
   return {
-    stage, services, repoPath: scan?.repo?.path, scannedAt: scan?.scannedAt,
+    stage, services, repoPath: scan?.repo?.path, scannedAt: scan?.scannedAt, sha,
     blocked: Boolean(pipeline?.transitions?.some(edge => edge.target === stage.id && edge.blocked)),
     ...outgoingTransition(stage, pipeline),
     busy, openDialog, toggleStage, addTest, selected: stage.id === selectedStageId, selection, environment, createSandbox,

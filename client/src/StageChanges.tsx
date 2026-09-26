@@ -81,12 +81,12 @@ export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoP
   </Collapsible>;
 }
 
-// The stage's Autopilot Badge: the work under way, the latest change's end, or the
-// mode. It opens the mode menu; a mode that could not be saved says so there.
-export function AutopilotBadge({ repoPath, stage, autopilot }: { repoPath?: string; stage: PipelineStage; autopilot: StageAutopilot }) {
+// The stage's Autopilot Badge: the work under way, the end of the latest change for the scanned commit or the watched
+// head, or the mode. It opens the mode menu; a mode that could not be saved says so there.
+export function AutopilotBadge({ repoPath, stage, autopilot, sha }: { repoPath?: string; stage: PipelineStage; autopilot: StageAutopilot; sha?: string | null }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const badge = autopilotBadge(autopilot)!, pullRequest = badge.change?.pullRequest;
+  const badge = autopilotBadge(autopilot, sha)!, pullRequest = badge.change?.pullRequest;
   const Mark = BADGE_MARKS[badge.tone];
   async function choose(value: string) {
     if (!isAutopilotMode(value) || value === autopilot.mode || !repoPath) return;

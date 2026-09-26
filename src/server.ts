@@ -546,6 +546,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(operation==='specs')return reply(res,200,await browser.saveSpec(context,{caseId:input.caseId,code:input.code}));
           if(operation==='specs/approve')return reply(res,200,await browser.approveSpec(context,{caseId:input.caseId,hash:input.hash}));
           if(operation==='specs/discard')return reply(res,200,await browser.discardSpec(context,{caseId:input.caseId,hash:input.hash}));
+          if(operation==='specs/reuse')return reply(res,200,await browser.reuseSpec(context,{caseId:input.caseId}));
           if(operation==='specs/verify')return reply(res,202,await browser.verifySpec(context,{caseId:input.caseId,hash:input.hash}));
           if(operation==='specs/verify/cancel')return reply(res,200,await browser.cancelSpecVerification(context,{caseId:input.caseId}));
           if(operation==='specs/generate')return reply(res,202,await browser.generateSpec(context,{caseId:input.caseId}));

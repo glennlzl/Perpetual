@@ -16,6 +16,8 @@ export type ChangeStatus = 'running' | 'merged' | 'passed' | 'needs-review' | 'n
 /** A change Autopilot makes for a stage: a pull request and the steps that led to it. `title` names the work, such as Fixing build. */
 export interface AutopilotChange {
   id: string; stageId: string; kind: string; title: string; status: ChangeStatus; steps: ChangeStep[];
+  /** The commit the change is for, when it is one commit's, such as a build repair's failing commit. */
+  sha?: string;
   pullRequest?: { number: number; url: string } | null; reason?: string; startedAt?: string; endedAt?: string;
 }
 /** A failed workflow run at the watched head, which a person may hand to Autopilot. */

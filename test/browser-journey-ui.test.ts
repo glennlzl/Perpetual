@@ -443,8 +443,9 @@ test('a run is offered when every chosen journey has current code and Playwright
 
 test('journey code shows its approved code and the draft beside it, which is approvable only after a passed verification', () => {
   const hash = 'a'.repeat(64), draft = (verification?: CodeVerification): JourneySpec => ({ draft: { hash, stale: false, ...(verification ? { verification } : {}) } });
-  assert.deepEqual(journeyCode(undefined), { approved: '', draft: '', hash: '', verificationError: '', generating: false, error: '', exists: false, verifying: false, verifiable: false, approvable: false });
+  assert.deepEqual(journeyCode(undefined), { approved: '', draft: '', hash: '', verificationError: '', generating: false, error: '', exists: false, verifying: false, verifiable: false, approvable: false, reusable: false });
   assert.deepEqual([journeyCode({ approved: { hash, stale: false } }).approved, journeyCode({ approved: { hash, stale: true } }).approved], ['Approved', 'Stale']);
+  assert.deepEqual([journeyCode({ approved: { hash, stale: false } }).reusable, journeyCode({ approved: { hash, stale: true } }).reusable, journeyCode({ approved: { hash, stale: true }, draft: { hash, stale: false } }).reusable, journeyCode({ approved: { hash, stale: true }, draft: { hash, stale: true } }).reusable], [false, true, false, true], 'Stale approved code is reusable while no current draft exists.');
   const states: [CodeVerification | undefined, string, boolean, boolean][] = [
     [undefined, 'Draft', true, false], [{ status: 'running', passes: 2, control: null }, 'Verifying 2/3', false, false],
     [{ status: 'passed', passes: 3, control: 'caught' }, 'Verified', false, true], [{ status: 'failed', passes: 3, control: 'missed', error: 'The journey passed with every change blocked. Strengthen its checks.' }, 'Verification failed', true, false],
@@ -513,7 +514,7 @@ test('journey code is generated, verified, approved in a Dialog showing the code
   assert.doesNotMatch(dialog, /Engine|engine|Browser Use/);
   assert.doesNotMatch(card, />Playwright</);assert.doesNotMatch(steps, /provenance|'Agent'/);assert.doesNotMatch(evidence, /Agent ·|OUTCOMES|result\?\.outcomes/);
   const actions = panel.slice(panel.indexOf('function CodeActions'), panel.indexOf('function ApproveCodeDialog'));
-  for (const label of ['Generating code', 'Stop generating', "'Regenerate code' : 'Generate code'", 'Stop verifying', 'Verify code', 'Approve code', 'Discard draft']) assert.ok(actions.includes(label), label);
+  for (const label of ['Generating code', 'Stop generating', "'Regenerate code' : 'Generate code'", 'Stop verifying', 'Verify code', 'Approve code', 'Reuse approved code', 'Discard draft']) assert.ok(actions.includes(label), label);
   const approve = panel.slice(panel.indexOf('function ApproveCodeDialog'), panel.indexOf('function DeleteCaseDialog'));
   assert.match(approve, /return <Dialog open /);assert.ok(approve.includes('<DialogHeader><DialogTitle>Approve code</DialogTitle></DialogHeader>'));
   assert.match(approve, /api\(`\/api\/browser\/specs\/code\?\$\{new URLSearchParams\(\{ repoPath, stageId, caseId: item\.id \}\)\}`\)/);

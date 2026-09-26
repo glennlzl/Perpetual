@@ -218,6 +218,7 @@ export const runReady = (capabilities: BrowserCapabilities | null | undefined, c
  * A case's code: the approved code (Approved, or Stale once the reviewed journey changed) and the draft beside it
  * (Draft, Verifying n/3, Verified, Verification failed, Stale draft), and a running or failed generation. A current
  * draft is verified before it is approvable: three passing runs, then a control run in which a reviewed check fails.
+ * Stale approved code is reusable as the draft while no current draft exists.
  */
 export function journeyCode(spec: JourneySpec | null | undefined) {
   const { approved, draft, generation }: JourneySpec = spec || {}, verification = draft?.verification, verifying = verification?.status === 'running';
@@ -227,6 +228,7 @@ export function journeyCode(spec: JourneySpec | null | undefined) {
     verificationError: draftState === 'Verification failed' ? verification?.error || 'Verification failed.' : '',
     generating: generation?.status === 'running', error: generation?.status === 'failed' ? generation.error || 'Code generation failed.' : '',
     exists: Boolean(approved || draft), verifying, verifiable: current(draft) && !verifying && verification?.status !== 'passed', approvable: current(draft) && verification?.status === 'passed',
+    reusable: approved?.stale === true && !current(draft),
   };
 }
 /** The lines a person approves: the draft's code, or its line diff against the approved code (kind same, added, removed). */

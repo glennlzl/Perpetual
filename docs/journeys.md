@@ -118,7 +118,7 @@ Twin test accounts are generated local test data, so evidence, results, live fra
 
 ## Journey code
 
-Journey code is the Playwright actions of one reviewed journey, saved as stage data. A journey has at most one **approved** code and one **draft** beside it. Generated or saved code is always the draft and never replaces the approved code by itself. Editing the goal, preconditions, milestones, checks, expected outcomes or final assertions makes both stale; renaming or selecting does not. Removing a case removes its code. Code references call it the journey's spec.
+Journey code is the Playwright actions of one reviewed journey, saved as stage data. A journey has at most one **approved** code and one **draft** beside it. Generated or saved code is always the draft and never replaces the approved code by itself. Editing the goal, preconditions, milestones, checks, expected outcomes or final assertions makes both stale; renaming or selecting does not. Stale approved code whose actions still fit the edited journey's milestones can be taken as its draft again with **Reuse approved code**, to verify and approve like any draft, so an edit to a check needs no model. Removing a case removes its code. Code references call it the journey's spec.
 
 ### Grammar
 
@@ -211,6 +211,7 @@ The main routes are below. Every request is scoped to `repoPath` and a Sandbox `
 | `POST /api/browser/specs/verify` | `caseId`, `hash`; `POST /api/browser/specs/verify/cancel` with `caseId` stops it. |
 | `POST /api/browser/specs/approve` | `caseId`, `hash`: approves the verified draft. |
 | `POST /api/browser/specs/discard` | `caseId`, `hash`: removes the draft. |
+| `POST /api/browser/specs/reuse` | `caseId`: takes the stale approved code as the draft, when it still fits the journey. |
 | `POST /api/browser/specs/generate` | `caseId`; `POST /api/browser/specs/generate/cancel` stops it. |
 
 App-wide model settings are not scoped to a stage: `GET` and `POST /api/settings/model` read and save the OpenRouter model and key, and `GET /api/settings/models` lists the eligible models.

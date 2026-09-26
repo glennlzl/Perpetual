@@ -22,12 +22,15 @@ export const stageActive = (stage: Pick<StageAutopilot, 'changes'> | null | unde
 /** Whether any stage has a change under way, so the view is read more often. */
 export const autopilotActive = (view: AutopilotView | null | undefined) => Object.values(view?.stages || {}).some(stageActive);
 
-/** The stage Badge: the work under way, else the latest change's end, else the mode. */
-export function autopilotBadge(stage: StageAutopilot | null | undefined) {
+/**
+ * The stage Badge: the work under way; else the latest change's end, while that change is the scanned commit's (`sha`)
+ * or the watched head's, since an older commit's end no longer describes the stage; else the mode.
+ */
+export function autopilotBadge(stage: StageAutopilot | null | undefined, sha?: string | null) {
   if (!stage) return null;
   const running = stage.changes.find(changeActive), latest = stage.changes[0];
   if (running) return { text: running.title, tone: TONES.running, change: running };
-  if (latest) return { text: CHANGE_LABELS[latest.status], tone: TONES[latest.status], change: latest };
+  if (latest && (!latest.sha || latest.sha === sha || latest.sha === stage.failed?.sha)) return { text: CHANGE_LABELS[latest.status], tone: TONES[latest.status], change: latest };
   return { text: MODE_LABELS[stage.mode], tone: 'idle' as const, change: null };
 }
 
