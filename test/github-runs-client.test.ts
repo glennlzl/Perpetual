@@ -359,10 +359,10 @@ test('a new stage proposes the Greek letter that fits its position, always uniqu
   assert.equal(nextStageName(pipeline('Beta'), 'beta'), 'Gamma');
   assert.equal(nextStageName(pipeline('Beta', 'Gamma'), 'gamma'), 'Delta', 'After the last sandbox, the next letter.');
   assert.equal(nextStageName(pipeline('Alpha', 'Delta'), 'alpha'), 'Beta', 'Between two letters, the first unused one between them.');
-  assert.equal(nextStageName(pipeline(), 'build'), 'Alpha');
+  assert.equal(nextStageName(pipeline(), 'build'), 'Beta', 'The first sandbox is Beta, as the docs name it.');
   assert.equal(nextStageName(pipeline('Alpha', 'Beta'), 'alpha'), 'Sandbox', 'No letter fits between Alpha and Beta.');
   assert.equal(nextStageName(pipeline('Alpha', 'Beta', 'Sandbox'), 'build'), 'Sandbox 2');
-  assert.equal(nextStageName(pipeline('Staging'), 'staging'), 'Alpha', 'Renamed sandboxes do not bound the sequence.');
+  assert.equal(nextStageName(pipeline('Staging'), 'staging'), 'Beta', 'Renamed sandboxes do not bound the sequence.');
   assert.equal(nextStageName(pipeline('BETA'), 'build'), 'Alpha', 'Letters match case-insensitively.');
   assert.equal(nextStageName(pipeline('Omega'), 'omega'), 'Sandbox');
   for (const names of [['Beta'], ['Alpha', 'Beta', 'Gamma'], ['Gamma', 'Beta'], ['Sandbox', 'Alpha', 'Beta']]) {

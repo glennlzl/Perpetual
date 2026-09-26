@@ -11,7 +11,7 @@ The first public release: a local, single-user control room that runs on your ma
 - A GitHub connection through the local GitHub CLI session or browser device sign-in, repository and branch selection with a managed source checkout, and a Git graph of real commits and branch refs.
 - Production lists the deployments GitHub records for the scanned commit, as Vercel, Railway and other Git integrations report them, each by its environment with its state and address: a provider set up on the provider's side, with no file in the repository, appears this way, beside the targets discovered from files.
 - Read-only GitHub, Vercel and Railway adapters, failed-run diagnosis, and a starter CI workflow for repositories without one.
-- The Autopilot interface on every stage but Source: a Badge with the mode, merge once verified or ask first, and the work under way; a beam along the card while a change runs; and each change's steps on the rail. It renders the controller's records, and the controller does not make changes yet. See [Autopilot](docs/pipeline-ui.md#autopilot).
+- The Autopilot interface: a Badge beside a stage's status with the mode, merge once verified or ask first, or the work under way; a beam along the card while a change runs; each change's steps on the rail with Stop; and Repair on a failed workflow row. It renders the controller's records, and today only Build makes changes, for a managed GitHub source. See [Autopilot](docs/pipeline-ui.md#autopilot).
 
 ### Business journeys
 
@@ -29,6 +29,13 @@ The first public release: a local, single-user control room that runs on your ma
 - Twins: a Sandbox stage's application environment as a Docker Compose project running the product's actual code, with services from official local or sandbox modes (PostgreSQL, Redis, MongoDB, Mailpit, a real LLM, generated secrets, Supabase, Stripe, Trigger.dev) and `vercel-labs/emulate` where no official mode exists. Stripe takes the user's test keys or a Stripe sandbox that Perpetual creates on request, without a Stripe account, and renews before it expires. Apps run on the Node.js major the repository declares. See [Twins](docs/twins.md).
 - Generated twin configs: when a stage's config is still the detected skeleton and App Settings has a model, an agent writes the config from the repository's evidence, and the controller keeps it only once the twin it describes is ready, every app answers and a test account exists. See [Generated twin config](docs/twins.md#generated-twin-config).
 - The journey gate: for each push to the target branch, or on **Run now**, rebuild the stage's twin at that commit, replay its reviewed journeys' approved code and report a `perpetual/<stage>` GitHub commit status, with release and promotion to the next stage. A local checkout's gate rebuilds only while the checkout is at the tested commit without uncommitted changes. See [Journey gate](docs/gate.md).
+
+### Build repair
+
+- When the target branch's head fails its GitHub Actions runs, a repair opens: triage without a model sends credential and permission failures to a person and reruns network and deadline failures once; everything else goes to an AI SDK tool loop that reproduces and fixes the failure inside a Docker repair box with no host mount, socket, credential or route to the host, up to four attempts under a cost cap, the last two on the Escalation model of App Settings. See [Build repair](docs/repair.md).
+- Change rules before every push refuse credential text, `.git`, submodules, `.github/` and deploy configuration, and hold tests and large changes for a person. The host copy alone commits and pushes, to `perpetual/repair/<sha7>` only, and opens a draft pull request with the failure, diagnosis, change, attempts, models and cost, redacted.
+- The pull request merges itself only once its CI and every Sandbox stage's journey gate pass at its exact head, nothing holds it and Build's Autopilot mode is Merge changes; Ask before merging leaves it ready for a person. A merged repair that fails again opens no repair by itself. See [ADR 0002](docs/adr/0002-repairs-merge-after-ci-and-journey-gates.md).
+- The agent loop was chosen in a bake-off of six harnesses over 20 repair cases, kept as the dev-only package `bench/repair` with its reports. See [the bench](bench/repair/README.md).
 
 ### Other
 

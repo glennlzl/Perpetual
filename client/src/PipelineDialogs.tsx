@@ -21,8 +21,8 @@ type OnAction = (input: PipelineAction) => Promise<PipelineActionResult>;
 
 const GREEK = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu', 'Nu', 'Xi', 'Omicron', 'Pi', 'Rho', 'Sigma', 'Tau', 'Upsilon', 'Phi', 'Chi', 'Psi', 'Omega'];
 const stageKey = (value: unknown) => String(value ?? '').trim().normalize('NFKC').toLowerCase();
-// A new sandbox proposes the unused Greek letter that keeps its neighbours in order
-// (Alpha before Beta, Delta after Gamma); with no letter between them, a unique neutral name.
+// A new sandbox proposes the unused Greek letter that keeps its neighbours in order (Alpha before Beta, Delta after
+// Gamma); the first sandbox is Beta, as the docs name it; with no letter between them, a unique neutral name.
 function nextStageName(pipeline: PipelineView | null | undefined, afterStageId: string) {
   const stages = pipeline?.stages || [];
   const used = new Set(stages.map(stage => stageKey(stage.name)));
@@ -30,7 +30,8 @@ function nextStageName(pipeline: PipelineView | null | undefined, afterStageId: 
   const letters = (list: PipelineView['stages']) => list.map(stage => stage.kind === 'sandbox' ? GREEK.findIndex(name => stageKey(name) === stageKey(stage.name)) : -1).filter(index => index >= 0);
   const before = letters(stages.slice(0, position + 1)).at(-1) ?? -1;
   const after = letters(stages.slice(position + 1))[0] ?? GREEK.length;
-  const letter = GREEK.slice(before + 1, after).find(name => !used.has(stageKey(name)));
+  const first = letters(stages).length === 0 ? 1 : 0;
+  const letter = GREEK.slice(Math.max(before + 1, first), after).find(name => !used.has(stageKey(name)));
   if (letter) return letter;
   for (let count = 1; ; count++) {
     const name = count === 1 ? 'Sandbox' : `Sandbox ${count}`;
