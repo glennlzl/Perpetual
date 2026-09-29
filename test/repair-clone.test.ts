@@ -82,7 +82,8 @@ test('the host copy stages a diff against the failing commit, and commits each a
 test('the host copy stages a case-only rename into its index, whatever the host filesystem', async t => {
   const f = await copy(t);
   const directory = join(f.dataDir, 'repairs', 'r1', 'clone');
-  const host = createRepairHost({ dataDir: f.dataDir });
+  const trace = join(f.dataDir, 'git-events.jsonl'), exec = promisify(execFile);
+  const host = createRepairHost({ dataDir: f.dataDir, run: (file, args, options) => exec(file, args, { ...options, env: { ...options.env, GIT_TRACE2_EVENT: trace } }) });
   await host.clone({ repair: { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair, directory });
   assert.equal(fixtureGit(directory, 'config', 'core.ignorecase'), 'false', 'The copy the box gets reads names with their case, as Linux does.');
   const rename = ['diff --git a/add.js b/add.js', 'deleted file mode 100644', '--- a/add.js', '+++ /dev/null', '@@ -1 +0,0 @@', '-module.exports = (a, b) => a - b;',
@@ -91,6 +92,11 @@ test('the host copy stages a case-only rename into its index, whatever the host 
   assert.deepEqual([...staged.paths].sort(), ['Add.js', 'add.js']);
   const sha = await host.commit({ directory, parent: f.sha, message: 'Rename', author: { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' } });
   assert.deepEqual(fixtureGit(directory, 'ls-tree', '--name-only', sha!).split('\n').filter(name => name.endsWith('.js')), ['Add.js', 'check.js']);
+  const children = (await readFile(trace, 'utf8')).trim().split('\n').flatMap(line => {
+    const event: unknown = JSON.parse(line);
+    return event && typeof event === 'object' && 'event' in event && event.event === 'child_start' && 'argv' in event && Array.isArray(event.argv) ? [event.argv] : [];
+  });
+  assert.ok(children.every(args => !args.includes('maintenance') && !args.includes('gc')), 'A repair command must not leave automatic maintenance writing its private clone.');
 });
 
 // Git diffs a Latin-1 file as text; its bytes must reach the commit unchanged.
