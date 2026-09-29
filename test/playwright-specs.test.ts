@@ -322,11 +322,13 @@ test('every run executes Playwright code with no model, approved unless a person
   const file=join(f.dataDir,'browser','state.json'),stored:Stored=JSON.parse(await readFile(file,'utf8'));
   for(const specs of Object.values(stored.specs))Object.assign(specs[journey.id].approved!,{code:spec(body()+'\n  const p = process;')});
   await writeFile(file,JSON.stringify(stored));
-  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.playwright});t.after(()=>restarted.close());
-  const launches=f.launches.length,refused=await completed({manager:restarted,context:f.context},(await restarted.run(f.context,{})).run.id);
-  assert.equal(refused.results?.[0].status,'needs_review');
-  assert.match(refused.results?.[0].error??'',/^Generate code for this journey again: Line 6: the test body only awaits journey\.milestone/);
-  assert.equal(f.launches.length,launches);
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.playwright});
+  try {
+    const launches=f.launches.length,refused=await completed({manager:restarted,context:f.context},(await restarted.run(f.context,{})).run.id);
+    assert.equal(refused.results?.[0].status,'needs_review');
+    assert.match(refused.results?.[0].error??'',/^Generate code for this journey again: Line 6: the test body only awaits journey\.milestone/);
+    assert.equal(f.launches.length,launches);
+  } finally { await restarted.close(); }
 });
 
 test('a journey without runnable code needs review without a browser while the others of its run still run',async t=>{
