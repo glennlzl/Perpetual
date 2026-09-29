@@ -43,7 +43,8 @@ const TEXT_LIMIT = 64 * 1024 * 1024;
 /** The host copy's git through a runner; tests supply one that records a push instead of reaching GitHub. */
 export function createRepairHost({ dataDir, run = exec }: { dataDir: string; run?: CommandRunner }): RepairHost {
   const git = async (directory: string, args: string[], failure: string, env: Record<string, string> = {}, maxBuffer = 16 * 1024 * 1024) => {
-    try { return (await run('git', gitArgs(['-C', directory, ...args]), { timeout: 120_000, maxBuffer, encoding: 'utf8', windowsHide: true, env: { ...commandEnvironment(), ...env } })).stdout; }
+    // The private clone can be copied or removed as soon as this command ends; no detached maintenance may outlive it.
+    try { return (await run('git', gitArgs(['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', '-C', directory, ...args]), { timeout: 120_000, maxBuffer, encoding: 'utf8', windowsHide: true, env: { ...commandEnvironment(), ...env } })).stdout; }
     catch (error) { throw Object.assign(new Error(failure), { code: (error as { code?: unknown }).code }); }
   };
   return {
