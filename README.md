@@ -10,6 +10,7 @@
 <p align="center">Rebuild a local twin of your app on every push, replay approved business journeys, and report a GitHub check.</p>
 
 <p align="center">
+  <a href="#demo">Demo</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
@@ -21,9 +22,16 @@
   <a href="https://github.com/willlzl/Perpetual/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/willlzl/Perpetual/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
-Unit tests pass, CI is green, and sign-up or checkout is still broken. Perpetual catches that before the merge: it runs your real app with its real dependencies and walks through complete user journeys, then reports the result as a commit status your branch protection can require.
+## Demo
+
+**Watch the walkthrough · 2 min 56 sec**
+
+Recorded in a simulated demo environment. Production deployment is a preview; see [Status](#status) for what is available today.
 
 ## How it works
+
+Unit tests pass, CI is green, and sign-up or checkout is still broken. Perpetual catches that before the merge: it runs your real app with its real dependencies and walks through complete user journeys, then reports the result as a commit status your branch protection can require.
+
 
 ```mermaid
 flowchart LR
