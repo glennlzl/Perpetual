@@ -5,12 +5,13 @@
   </picture>
 </p>
 
-<p align="center"><b>Every push, tested the way your users use your app.</b></p>
+<p align="center"><b>The self-evolving CI/CD pipeline and testing platform.</b></p>
 
-<p align="center">Rebuild a local twin of your app on every push, replay approved business journeys, and report a GitHub check.</p>
+<p align="center">Repair broken builds, create test environments from your app, and make business journeys part of every release.</p>
 
 <p align="center">
   <a href="#demo">Demo</a> ·
+  <a href="#what-self-evolving-means">Vision</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
@@ -30,39 +31,67 @@ https://github.com/user-attachments/assets/5e7a7941-2b9f-48b0-8aa1-dc7676b38960
 
 Recorded in a simulated demo environment. Production deployment is a preview; see [Status](#status) for what is available today.
 
-## How it works
+## Why Perpetual
 
-Unit tests pass, CI is green, and sign-up or checkout is still broken. Perpetual catches that before the merge: it runs your real app with its real dependencies and walks through complete user journeys, then reports the result as a commit status your branch protection can require.
+Shipping a change means more than writing the code. Someone still has to repair the build, prepare a test environment, check that the feature works, and make sure existing user journeys still work too. As a product grows, that work grows with it.
+
+A green build can still ship a broken checkout. Tests with fixed mock responses can miss failures across authentication, billing and application state. Manual testing catches some of those gaps, but makes every release depend on someone repeating the same work.
+
+**Testing belongs inside the delivery pipeline. Its results should decide whether a change moves forward.**
+
+Perpetual brings build repair, test environments, business testing and promotion gates into one workflow. It works with GitHub Actions and your existing deployment workflows, connecting the question “does it build?” to “does the product still work for its users?”
+
+## What self-evolving means
+
+The goal is a pipeline that can recover from failures, reduce delivery time, and keep its tests useful as the product changes. The **0.1 alpha** starts with build repair and business-journey gates.
+
+| Capability | What it means | Available today and planned |
+| --- | --- | --- |
+| **Self-healing** | Recover from delivery failures through verified fixes. | **Today:** repair failed builds through pull requests, with CI and journey gates before automatic merge. **Planned:** merge-conflict resolution, deployment repair, pipeline snapshots and production rollback. |
+| **Self-improving** | Reduce the time and work needed to ship as a project grows. | **Planned:** change-aware incremental testing, build and deployment optimization, and dependency upgrades that also fix affected application code. |
+| **Self-testing** | Create stateful test environments and exercise complete business scenarios. | **Today:** application twins, AI-drafted journeys, live browser runs, recordings and approved tests as CI/CD gates. **Planned:** learn from failures to expand scenario coverage and propose repairs to outdated test code. |
+
+See the [roadmap](ROADMAP.md) for the next implementation steps.
+
+## How it works today
 
 ```mermaid
 flowchart LR
-  push["Push to the target branch"] --> twin["Rebuild the Beta twin<br/>at that commit"]
-  twin --> journeys["Replay the approved<br/>journey code"]
-  journeys --> status["Post perpetual/Beta<br/>commit status"]
+  push["Push to your target branch"] --> twin["Rebuild the stage's twin"]
+  twin --> journeys["Run approved business journeys"]
+  journeys --> gate["Report the GitHub status"]
+  gate --> promotion["Promote or block the commit"]
 ```
 
-1. **Twin.** Perpetual builds a Docker Compose twin of your application from its own code, with each dependency supplied by the vendor's official local mode or sandbox: local Supabase, a Stripe sandbox with `stripe listen` (Perpetual can create one for you), Mailpit, a real model.
-2. **Journeys.** A browser agent explores the running app and drafts two to four complete business journeys, such as *sign up → subscribe → use a paid feature → see credits decrease*. You review each journey's goal, milestones and checks; an agent then writes its actions as Playwright code, with no checks of its own. You approve the code, seeing it or its diff, after it passes three runs and a control run with every write blocked, which a reviewed check must catch.
-3. **Gate.** On every push to the target branch, Perpetual rebuilds the twin at that commit, replays the reviewed journeys' approved code with no model and posts a `perpetual/<Stage>` commit status. A failed journey blocks promotion; a blocked or needs-review result, including a journey without approved code, waits for a person to release it; a pass promotes the commit.
-4. **Repair.** When the target branch's head fails its workflow runs, an agent reproduces and fixes the failure in a Docker repair box and opens a draft pull request. Once its CI and every Sandbox journey gate pass at that head, Perpetual merges it, unless Build's Autopilot is set to `Ask first`.
+1. **Connect your repository and branch.** Perpetual shows your GitHub Actions workflows and configured deployment targets in one pipeline.
+2. **Create a Beta environment.** Perpetual builds a Docker Compose twin from your application's code, with stateful dependencies, fixtures and test accounts. Add another Sandbox stage, such as Gamma, when you need another gate.
+3. **Discover and review business journeys.** An agent explores the running app and drafts complete scenarios. You can add your own cases and edit their goals, prerequisites and expected outcomes. For example: *sign in → create a workflow → save and reopen it → run it → see the result and credits deducted*.
+4. **Turn those journeys into a release gate.** Generate, verify and approve their Playwright code. On each new push to the target branch, Perpetual rebuilds the twin at that commit and runs the approved tests. Watch the browser live and inspect the recordings afterward. A failed journey blocks promotion; a blocked or needs-review result requires a manual release; a pass advances to the next Sandbox stage.
+5. **Repair failed builds through a PR.** For eligible build failures, an agent works in an isolated Docker repair box and opens a fix. Build's **Autopilot** can merge after CI and every configured Sandbox journey gate pass at the exact PR head, provided no change rule holds it. Choose **Ask first** to keep the merge decision with you.
 
-## Why Perpetual
+Perpetual posts a `perpetual/<Stage>` GitHub commit status. Require it when promoting from the tested branch into a protected release branch, or have your deployment workflow check it. **Perpetual currently gates promotion; your existing workflow performs the production deployment.** [Gate configuration →](docs/gate.md#requiring-the-status-on-github)
 
-- **Real code, real services.** Official simulations come first; [vercel-labs/emulate](https://github.com/vercel-labs/emulate) is used only where a vendor has none, and no API is hand-mocked. Each twin shows where every dependency came from.
-- **Business outcomes, not clicks.** A journey passes only when its reviewed checks observe the result. Generated code performs actions and never contains checks, and a missing account or integration is reported as blocked, never simulated.
-- **Same commit, same verdict.** Runs replay approved code with no model and no automatic retries, so replaying a journey costs no tokens. A model is used once per journey, to draft it and write its code.
-- **A gate, not a report.** The commit status plugs into branch protection, so a broken journey stops the merge.
-- **Local-first.** The controller runs on your machine and binds to loopback. It polls GitHub instead of needing a webhook or public URL, never deploys, and never copies production credentials.
+## Test the application and its dependencies together
+
+A twin runs your application's actual code against working services with test data. A journey keeps its session and business state across steps, so it can exercise the interaction between your UI, backend and dependencies.
+
+Official local modes and sandboxes come first. Where a vendor has none, Perpetual uses [vercel-labs/emulate](https://github.com/vercel-labs/emulate). It records each dependency's source on the environment; an unsupported integration or missing test account stays an explicit blocker.
+
+| Dependency | What the twin uses |
+| --- | --- |
+| PostgreSQL, MongoDB, Redis | Actual databases and cache |
+| Supabase | Official local stack, including Auth and database |
+| Stripe | Official sandbox, fixtures and webhook forwarding; Perpetual can create a sandbox on request |
+| Trigger.dev | Self-hosted instance with a project and worker for the twin |
+| Email | Mailpit |
+| AI features | A real model through OpenRouter |
+| GitHub, Google, AWS, Linear, Vercel API, Sign in with Apple | `vercel-labs/emulate` |
+
+Twins use test credentials and fixtures, not copies of production customer data. A working environment alone is never a passing test: the journey's reviewed checks must observe its business outcome. [Twin setup and supported services →](docs/twins.md)
 
 ## Quickstart
 
-Paste this into your coding agent, in the repository you want tested. It installs Perpetual, then follows [docs/onboarding.md](docs/onboarding.md) with you: connecting GitHub, choosing the branch to gate, what the twin can and cannot simulate in your application, and creating the Beta environment.
-
-```text
-Set up Perpetual (https://github.com/willlzl/Perpetual) for this repository: clone it outside this repository, run `npm run setup` in the clone and install anything it reports missing, then follow the clone's docs/onboarding.md with me, asking me its questions one at a time. Leave this repository unchanged, and ask me before you enter an API key or sign in anywhere.
-```
-
-Or by hand. Setup installs the dependencies, the interface, Chromium and the browser runtime, and names what the machine still lacks: Node.js 24.12+, Docker, [uv](https://docs.astral.sh/uv/) or the GitHub CLI.
+You need **Node.js 24.12+**, **Docker** for twins and build repair, the **GitHub CLI**, and **[uv](https://docs.astral.sh/uv/)**. Setup installs the project dependencies, interface, Chromium and browser runtime, and reports missing prerequisites.
 
 ```sh
 git clone https://github.com/willlzl/Perpetual.git && cd Perpetual
@@ -72,29 +101,42 @@ node src/cli.ts serve --repo /path/to/your/app
 
 Then open <http://127.0.0.1:4317>:
 
-1. **Settings**: add an [OpenRouter API key](https://openrouter.ai/keys). A model writes the twin config, drafts journeys and writes their code; runs use none.
+1. **Settings**: add an [OpenRouter API key](https://openrouter.ai/keys).
 2. **Connect GitHub** and choose the repository and target branch. The gate watches repositories chosen this way.
-3. Add a **Beta** stage and choose **Create Beta environment**. An agent writes the twin config from the repository, and the first build takes a few minutes.
-4. Review each drafted journey, then **Generate code**, **Verify code** and **Approve code** from its menu. Run it and watch the browser live.
-5. Push to the target branch: `perpetual/Beta` appears on the commit. Require it in your branch protection rules.
+3. Add **Beta**, choose **Create Beta environment**, and connect any requested test services or accounts.
+4. Review the drafted journeys, then **Generate code**, **Verify code** and **Approve code**. Approval requires three passing runs and a control run whose blocked writes cause a reviewed check to fail.
+5. Push a new commit to the target branch while the controller is running. Use its `perpetual/Beta` status to gate release-branch promotion or deployment.
+
+<details>
+<summary>Let your coding agent guide setup</summary>
+
+Paste this into your coding agent in the repository you want tested:
+
+```text
+Set up Perpetual (https://github.com/willlzl/Perpetual) for this repository: clone it outside this repository, run `npm run setup` in the clone and install anything it reports missing, then follow the clone's docs/onboarding.md with me, asking me its questions one at a time. Leave this repository unchanged, and ask me before you enter an API key or sign in anywhere.
+```
+
+</details>
 
 ## Status
 
 > [!NOTE]
-> Perpetual is a 0.1 alpha: one controller per machine, for web applications that can run under Docker Compose.
+> Perpetual is a **0.1 alpha** for web applications. The controller runs locally, watches one active repository and branch, and uses Docker Compose for application twins.
 
-<details>
-<summary>Twin services and their provenance</summary>
+- **You review the tests.** AI writes twin configurations, drafts journeys and code, and proposes build repairs. Only reviewed journeys with approved code run automatically in the gate.
+- **Approved tests replay without an agent.** Runs execute approved Playwright code with independent browser checks and no automatic retries. API and database checks are planned. Test execution uses no model; AI features inside your application can still use one.
+- **You control the environment.** The controller binds to localhost and polls GitHub while running. Hosted twins, a GitHub App and webhooks are not available yet. The desktop sandbox is experimental.
+- **The full vision is still being built.** Pipeline optimization, dependency upgrades, test-code repair, deployment automation and production rollback are planned.
 
-| Service | Provided by |
-| --- | --- |
-| PostgreSQL, MongoDB, Redis, Mailpit, an LLM through OpenRouter | The actual service |
-| Supabase, Stripe, Trigger.dev | The vendor's official local mode or sandbox |
-| GitHub, Google, AWS, Linear, Vercel, Sign in with Apple | [vercel-labs/emulate](https://github.com/vercel-labs/emulate) |
+[Journey approval and verification →](docs/journeys.md#journey-code) · [Build repair and its limits →](docs/repair.md) · [Changelog →](CHANGELOG.md)
 
-</details>
+## Why we're building it
 
-Gate and manual runs replay approved Playwright code in a local Chromium with no model at run time; a manual run can also try a draft. An agent drafts journeys and writes their code, and a person approves code after 3 passing runs and a caught control run ([ADR 0001](docs/adr/0001-gate-runs-approved-playwright-code.md)). A failed build on the target branch is repaired through a pull request that merges once CI and the journey gates pass ([Build repair](docs/repair.md)); it needs Docker and the OpenRouter key. Not yet available: deployment and dependency changes by Autopilot, repairing journey code after the app changes, a GitHub App or webhooks, hosted twins, and production deploys. The desktop sandbox is experimental. See the [roadmap](ROADMAP.md).
+I started Perpetual after 4+ years as a software engineer at Amazon and more than 20 freelance projects. I kept spending time maintaining delivery pipelines, fixing failed builds, preparing test environments and manually checking releases.
+
+One production incident made the gap clear: mocked integration tests missed a broken business scenario, and getting the fix through the pipeline took hours. In my freelance work, skipping pipeline setup simply moved that effort into manual checks before every release.
+
+Perpetual's goal is to make a reliable delivery pipeline practical to set up and keep running as a product grows.
 
 ## Documentation
 
@@ -109,7 +151,7 @@ Gate and manual runs replay approved Playwright code in a local Chromium with no
 
 ## Open source and Cloud
 
-Perpetual is fully usable on your own machine under the AGPL. A hosted version is planned.
+Run the current open-source alpha on your own machine under the AGPL. A hosted version with subscription and usage-based pricing is planned.
 
 ## Community
 
