@@ -1,6 +1,6 @@
 // A gate's work on the controller: rebuild the stage's twin through the environments manager,
 // then run its reviewed, selected journeys through the browser manager.
-import { IN_PROGRESS, holdsResources } from '../environments/usage.ts';
+import { IN_PROGRESS, holdsResources, isEnvironmentBusy } from '../environments/usage.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { EnvironmentSummary } from '../environments/manager.ts';
 import type { GateSteps } from './manager.ts';
@@ -106,9 +106,15 @@ export function createGateSteps<C extends StageContext>({ environments, browser,
       } finally { readiness.forget(environment.id); }
     },
     async run(context, twin) {
-      const { config } = await browser.view(context);
-      if (!config.targetUrl || environments.resolveTarget(config.targetUrl)?.id !== twin.id) throw new Error('Set the application URL to the rebuilt twin.');
-      const { run } = await browser.run(context, {});
+      // A health probe can take the newly ready twin before the browser admits its run. Wait for that
+      // reservation only; once a run exists, its execution and verdict are never retried.
+      let run: { id: string };
+      for (;;) {
+        const { config } = await browser.view(context);
+        if (!config.targetUrl || environments.resolveTarget(config.targetUrl)?.id !== twin.id) throw new Error('Set the application URL to the rebuilt twin.');
+        try { ({ run } = await browser.run(context, {})); break; }
+        catch (error) { if (!isEnvironmentBusy(error)) throw error; await pause(interval, signal); }
+      }
       for (;;) {
         const { run: current } = await browser.runProgress(context, run.id);
         if (!RUNNING.includes(current.status)) return current;

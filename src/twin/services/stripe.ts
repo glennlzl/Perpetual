@@ -117,7 +117,11 @@ async function createSandbox({ inputs, docker, tempDir }: Parameters<ServiceProv
 const webhook = (options: Options) => options.webhook ? optionText(options.webhook, 'stripe.webhook') : undefined;
 const events = (options: Options) => {
   const names = options.events ?? EVENTS;
-  if (!Array.isArray(names) || !names.every((name): name is string => typeof name === 'string')) throw new Error('stripe.events must list webhook event names.');
+  if (!Array.isArray(names) || !names.length || !names.every((name): name is string => typeof name === 'string' && name.trim().length > 0)) throw new Error('stripe.events must list webhook event names.');
+  if (names.includes('*')) throw new Error('stripe.events must name explicit events; the Stripe CLI does not accept *.');
+  // The pinned CLI classifies thin events by their API-version prefix, without an event-name catalog.
+  const thin = names.filter(name => /^v\d+\./.test(name)).length;
+  if (thin && thin !== names.length) throw new Error('stripe.events cannot mix snapshot and thin events for one webhook.');
   return names;
 };
 
@@ -132,17 +136,18 @@ export default {
   id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox',
   detect: { packages: ['stripe', '@stripe/stripe-js', '@stripe/react-stripe-js'], env: [/^STRIPE_/] },
   describe: {
-    summary: 'Stripe\'s official sandbox: test keys the user connects or a sandbox Perpetual creates for them, `stripe listen` forwarding signed events, and `stripe fixtures`.',
+    summary: 'Stripe\'s official sandbox, created on request or connected with test keys, with `stripe listen` forwarding signed events and `stripe fixtures`.',
     options: {
       fixtures: 'A `stripe fixtures` file in the repository, or, when it has none, the document itself: { fixtures: [{ name, path: "/v1/...", method, params }], env: { NAME: "${<name>:id}" } }, such as the products and prices its code expects. It runs at setup against the sandbox; each variable its env map names is provided.',
       webhook: 'The URL `stripe listen` forwards events to, such as {{apps.<id>.url}}/<the app\'s webhook path>.',
       events: `The events forwarded; default ${EVENTS.join(', ')}.`,
     },
     provides: ['STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY'],
+    owns: OWN,
     // As setup gives them: a webhook's signing secret, and the fixtures' names.
     optionProvides: options => [...fixtureNames(options.fixtures), ...(options.webhook ? ['STRIPE_WEBHOOK_SECRET'] : [])],
     setupProvides: (options, variable) => typeof options.fixtures === 'string' && !OWN.includes(variable),
-    notes: ['STRIPE_WEBHOOK_SECRET is provided only with a webhook.', 'Blocked until the user connects keys; the twin runs without it.'],
+    notes: ['STRIPE_WEBHOOK_SECRET is provided only with a webhook.', 'Create sandbox generates test credentials from an email on the user\'s explicit action; no existing Stripe account or key is required.'],
   },
   validate: options => {
     if (plain(options.fixtures)) inlineFixtures(options.fixtures);

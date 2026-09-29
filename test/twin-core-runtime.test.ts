@@ -43,6 +43,16 @@ const secretsIn = (text: string) => [KEY, WEBHOOK_SECRET, 'db-password-1'].filte
 const INSTALL_RUN = ['--progress', 'quiet', '--profile', 'install', 'run', '--rm', '--no-TTY', 'install'];
 const SOURCE_RUN = ['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'];
 
+test('Prepare returns host-browser app URLs while container wiring keeps Docker host addresses', async t => {
+  const { prepare, dir, dataDir } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const result = await prepare();
+  assert.deepEqual(result.apps.map(app => app.url), [`http://127.0.0.1:${PORT_BASE}`, `http://127.0.0.1:${PORT_BASE + 2}`]);
+  const file = YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8'));
+  assert.deepEqual(file.services['payments-listener'].command, ['listen', '--forward-to', `http://host.docker.internal:${PORT_BASE + 2}/hook`]);
+  assert.match(await readFile(join(dir, '.env'), 'utf8'), new RegExp(`^WEB__API_URL="http://host.docker.internal:${PORT_BASE + 2}"$`, 'm'));
+});
+
 test('Prepare runs setup in placeholder order, then services, fixtures and the whole twin', async t => {
   const { calls, steps, prepare, dir, source, dataDir } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -54,7 +64,7 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
       { id: 'jobs', fidelity: 'actual', status: 'ready' }, { id: 'payments', fidelity: 'official-sandbox', status: 'ready' },
       { id: 'database', fidelity: 'actual', status: 'ready' }, { id: 'mail', fidelity: 'actual', status: 'ready' },
     ],
-    apps: [{ id: 'web', url: `http://host.docker.internal:${PORT_BASE}`, directory: 'web' }, { id: 'api', url: `http://host.docker.internal:${PORT_BASE + 2}`, directory: 'api' }],
+    apps: [{ id: 'web', url: `http://127.0.0.1:${PORT_BASE}`, directory: 'web' }, { id: 'api', url: `http://127.0.0.1:${PORT_BASE + 2}`, directory: 'api' }],
   });
 
   // The machine-wide package cache exists before any container needs it.
@@ -174,13 +184,13 @@ test('Host ports come from a free block that skips busy ports and other twins', 
   const only = { apps: { web: { start: 'node x', port: 3000 } } };
   const first = await runtime.prepare({ dataDir, id: 'one', config: only, source });
   const second = await runtime.prepare({ dataDir, id: 'two', config: only, source });
-  assert.equal(first.apps[0].url, `http://host.docker.internal:${PORT_BASE}`);
+  assert.equal(first.apps[0].url, `http://127.0.0.1:${PORT_BASE}`);
   const one: { block: number[] } = JSON.parse(await readFile(join(dataDir, 'environments', 'one', 'twin', 'twin.json'), 'utf8'));
   const two: { block: number[] } = JSON.parse(await readFile(join(dataDir, 'environments', 'two', 'twin', 'twin.json'), 'utf8'));
   assert.equal(one.block.length, PORT_BLOCK);
   assert.equal(one.block.includes(BUSY), false);
   assert.equal(two.block.some(port => one.block.includes(port)), false);
-  assert.equal(second.apps[0].url, `http://host.docker.internal:${two.block[0]}`);
+  assert.equal(second.apps[0].url, `http://127.0.0.1:${two.block[0]}`);
   const server = createServer();
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   assert.equal(await portFree((server.address() as AddressInfo).port), false);
@@ -249,14 +259,14 @@ test('Logs, health and command failures never reveal secret values', async t => 
   let failUp = false;
   const { runtime, prepare, dataDir } = await setup(args => {
     if (args.includes('logs')) return { stdout: `web | ${leak}\n`, stderr: `payments | ${KEY}\n` };
-    if (args.includes('ps')) return { stdout: '{"Service":"web","State":"running","Health":"healthy","ExitCode":0}\n{"Service":"database","State":"running","Health":"starting"}\n' };
+    if (args[0] === 'compose' && args.includes('ps')) return { stdout: '{"Service":"web","State":"running","Health":"healthy","ExitCode":0}\n{"Service":"database","State":"running","Health":"starting"}\n' };
     if (failUp && args.includes('up')) throw Object.assign(new Error('Command failed'), { stderr: `listener exited: ${leak}` });
     return {};
   });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await prepare();
   const text = await runtime.logs({ dataDir, id: 'beta', service: 'web', tail: 50 });
-  assert.equal(text, 'web | key=[redacted] whsec=[redacted] url=postgres://postgres:[redacted]@db\npayments | [redacted]\n');
+  assert.equal(text, 'web | key=[redacted] whsec=[redacted] url=postgres://[REDACTED]@db\npayments | [redacted]\n');
   assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'starting', containers: [
     { name: 'web', state: 'running', health: 'healthy', exitCode: 0 }, { name: 'database', state: 'running', health: 'starting', exitCode: null }] });
   await assert.rejects(runtime.logs({ dataDir, id: 'beta', service: 'web; rm' }), /Choose a service/);
@@ -309,10 +319,27 @@ test('Destroy takes Compose down with volumes, then tears services down in rever
   calls.length = 0;
   assert.deepEqual(await runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } }), { status: 'destroyed' });
   assert.deepEqual(compose(calls[0]), ['down', '--volumes', '--remove-orphans']);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.deepEqual(calls[1].args.slice(-2), ['payments/cli:1.0', 'logout']);
   assert.deepEqual(calls[2].args.slice(-3, -1), ['jobs/cli:2.0', 'delete']);
   assert.match(calls[2].args.at(-1)!, /^perpetual-beta-\d+$/);
+  await assert.rejects(access(dir));
+});
+
+test('Destroy removes detached one-shot containers and confirms none remain before dropping ownership', async t => {
+  let orphan = true;
+  const id = 'a'.repeat(64);
+  const { runtime, prepare, calls, dataDir, dir } = await setup(args => {
+    if (args[0] === 'ps') return { stdout: orphan ? id : '' };
+    if (args[0] === 'rm') { assert.deepEqual(args, ['rm', '--force', id]); orphan = false; }
+    return {};
+  });
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await prepare(); await runtime.destroy({ dataDir, id: 'beta' });
+  assert.equal(orphan, false, 'An interrupted docker run can leave its guest after the CLI exits.');
+  const scans = calls.filter(call => call.args[0] === 'ps');
+  assert.equal(scans.length, 2);
+  assert.ok(scans.every(call => call.args.includes('label=perpetual.environment=beta') && call.args.includes('label=perpetual.owner=owner-1')));
   await assert.rejects(access(dir));
 });
 
@@ -340,7 +367,7 @@ test('Setup failures name the service, keep its record for teardown and cannot r
   const state = JSON.parse(await readFile(join(dataDir, 'environments', 'r1', 'twin', 'twin.json'), 'utf8'));
   assert.deepEqual(state.services, [{ id: 'rogue', options: {}, outputs: {} }]);
   await runtime.destroy({ dataDir, id: 'r1' });
-  assert.deepEqual(calls.map(args => args.slice(-2)), [['tool:1', 'clean']]);
+  assert.deepEqual(calls.filter(args => args[0] === 'run').map(args => args.slice(-2)), [['tool:1', 'clean']]);
 });
 
 test('Inline SQL fixtures pass the query to psql as an argument, never through the shell', async t => {
@@ -372,6 +399,21 @@ test('A service address is allocated before any setup, so a webhook can reach a 
   const typo = structuredClone(input);
   typo.services.payments.webhook = '{{services.jobs.url.http}}/hook';
   await assert.rejects(prepare({ config: typo }), /^Error: services\.payments\.webhook references \{\{services\.jobs\.url\.http\}\}, but Jobs has no port http\.$/);
+});
+
+test('Service options resolve explicit browser addresses using the same allocated ports as app env', async t => {
+  const { prepare, dir, dataDir } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await prepare({ config: { services: { jobs: { database: '{{services.mail.publicUrl.web}}/api?return={{apps.web.publicUrl}}' }, mail: {} },
+    apps: { web: { start: 'node app.js', port: 3000, env: { MAIL_PUBLIC: '{{services.mail.publicUrl.web}}', MAIL_INTERNAL: '{{services.mail.url.web}}' } } } } });
+  const saved = JSON.parse(await readFile(join(dir, 'twin.json'), 'utf8'));
+  const address = `http://127.0.0.1:${saved.ports['mail.web']}`;
+  assert.equal(saved.services.find((item: { id: string }) => item.id === 'jobs').options.database, `${address}/api?return=http://127.0.0.1:${PORT_BASE}`);
+  const env = await readFile(join(dir, '.env'), 'utf8');
+  assert.ok(env.includes(`WEB__MAIL_PUBLIC="${address}"`));
+  assert.ok(env.includes(`WEB__MAIL_INTERNAL="http://host.docker.internal:${saved.ports['mail.web']}"`));
+  await assert.rejects(prepare({ config: { services: { mail: {} }, apps: { web: { start: 'node app.js', port: 3000, env: { URL: '{{services.mail.publicUrl.missing}}' } } } } }),
+    /\{\{services\.mail\.publicUrl\.missing\}\}.*Mail has no port missing/);
 });
 
 test('A blocked service leaves its variables out of env options, while other options that reference it block their service', async t => {

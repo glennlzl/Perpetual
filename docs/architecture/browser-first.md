@@ -15,7 +15,7 @@ A developer supplies a running application URL (localhost included) and, optiona
 - Browser testing is the default in Beta and Gamma. It works without Docker, Cua or an environment plan.
 - Browser Use with a dedicated local Chromium profile provides the model-driven loop that discovers journeys. Runs execute approved Playwright code in their own dedicated Chromium, with no model. No personal browser profile, cookies or saved credentials are reused.
 - The environment creator is optional: it starts the application's actual code and dependencies when the developer needs an independent runtime. Existing URLs skip it.
-- A fresh browser session resets browser state only. Preconditions, test accounts and backend data are separate, explicit responsibilities, and no environment is claimed to be equivalent to production.
+- Existing URLs share an origin reservation across discovery, code generation, verification and runs; unconfirmed cleanup retains ownership across restarts. A fresh browser session resets browser state only. Preconditions, test accounts and backend data are separate, explicit responsibilities, and no environment is claimed to be equivalent to production.
 
 ## Case and result contract
 
@@ -29,7 +29,7 @@ The milestone protocol, verdict and scheduling are specified in [Journey contrac
 
 The Node controller owns bounded subprocesses and their dedicated browsers: one `playwright test` process per run journey, and a Python process for discovery. Newline-delimited JSON carries lifecycle events, actual action and milestone states and JPEG webpage frames. The interface uses native shadcn components, a webpage-only live view and actual progress. Closing the viewer does not stop a run; **Stop** cancels it. A finished journey shows its recording or its last frame, labelled as such. The controller limits run time, output and memory, checks source and stage ownership and tears down the browser processes it owns. Neither the agent nor journey code gets a shell, file tools, a personal profile or browsing outside the approved origins.
 
-The user supplies the model for discovery through an OpenAI-compatible endpoint, and for code generation through OpenRouter, which the interface configures. Runs need no model. Missing dependencies or credentials produce actionable configuration errors. Tests that use a scripted protocol fixture do not establish a real model's correctness. Model prompts and page content leave the machine only through the configured provider; frames and recordings are private local artifacts.
+The user supplies the model for discovery through an OpenAI-compatible endpoint with function calling, and for code generation through OpenRouter, which the interface configures. Discovery requests one native function call per actual browser observation and validates its complete arguments against the single-action schema. Multiple calls, additional response text, concatenated JSON and truncated output are rejected before any browser action. Runs need no model. Missing dependencies or credentials produce actionable configuration errors. Tests that use a scripted protocol fixture do not establish a real model's correctness. Model prompts and page content leave the machine only through the configured provider; frames and recordings are private local artifacts.
 
 ## Verification
 

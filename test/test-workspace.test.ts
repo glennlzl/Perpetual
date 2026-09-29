@@ -2,6 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestWorkspace, type StageRemoval } from '../client/src/lib/test-workspace.ts';
 import type { Controller } from '../client/src/lib/api.ts';
+import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
 
 test('a rejected graph skip reaches the graph error projection without an open inspector', async () => {
   const workspace = createTestWorkspace({pollInterval:0,controller:async()=>{throw new Error('Journey no longer exists');}});
@@ -13,6 +14,53 @@ test('a rejected graph skip reaches the graph error projection without an open i
 });
 
 const source = { path: '/project', branch: 'main' };
+const pipelineStages = (ids: string[]) => ids.map(id => ({ id, name: id, kind: id === 'source' ? 'source' : 'sandbox' }));
+
+test('source polling publishes stages added or renamed in another tab without replacing local drafts', async t => {
+  const initial = defaultPipeline(source.path);
+  let pipeline = applyPipelineAction(initial, { action: 'add-stage', name: 'Beta' });
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => ({ scan: { repo: source }, pipeline, browserTests: {}, environments: [] }) });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { pipeline: initial, browserTests: {} });
+  workspace.stage('build').edit('note', 'unsaved');
+  await workspace.refreshSource();
+  assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Beta', 'Production']);
+  const unchanged = workspace.getSnapshot().pipeline;
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().pipeline, unchanged, 'Unchanged polls do not lay out the canvas again.');
+  const beta = pipeline.stages.find(stage => stage.name === 'Beta')!;
+  pipeline = applyPipelineAction(pipeline, { action: 'rename-stage', stageId: beta.id, name: 'Gamma' });
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().pipeline?.stages[2].name, 'Gamma');
+  assert.equal(workspace.stage('build').getSnapshot().drafts.note, 'unsaved');
+});
+
+test('pipeline writes keep earlier polls from restoring the graph before the write', async t => {
+  const initial = defaultPipeline(source.path), saved = applyPipelineAction(initial, { action: 'add-stage', name: 'Beta' });
+  const old = deferred();
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => old.promise });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { pipeline: initial, browserTests: {} });
+  const reading = workspace.refreshSource(), release = workspace.holdPipeline();
+  workspace.updatePipeline(saved);
+  release();
+  old.resolve({ scan: { repo: source }, pipeline: initial, browserTests: {} });
+  await reading;
+  assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Beta', 'Production']);
+});
+
+test('a late pipeline read from the previous branch cannot change the new source graph', async t => {
+  const old = deferred(), initial = defaultPipeline(source.path);
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => old.promise });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { pipeline: initial, browserTests: {} });
+  const reading = workspace.refreshSource();
+  const next = applyPipelineAction(initial, { action: 'add-stage', name: 'Gamma' });
+  workspace.activate({ ...source, branch: 'feature' }, { pipeline: next, browserTests: {} });
+  old.resolve({ scan: { repo: source }, pipeline: initial, browserTests: {} });
+  await reading;
+  assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Gamma', 'Production']);
+});
 const scenario = { id: 'journey', name: 'Complete checkout', goal: 'Buy a product', expectedOutcomes: ['Order saved'], preconditions: [], assertions: [], needsReview: true, selected: false };
 const deferred = () => { let resolve = (_value: unknown) => {}; const promise = new Promise<unknown>(done => { resolve = done; }); return { promise, resolve }; };
 function fixture(t: TestContext, controller: Controller) {
@@ -178,32 +226,32 @@ test('scanned preview URLs follow the active source and keep their identity acro
 
 test('drafts of a stage that left the pipeline are pruned on activation and on each source refresh', async t => {
   const pruned: [string, string[]][] = [];
-  let stages = [{ id: 'source' }, { id: 'beta' }, { id: 'gamma' }];
-  const workspace = createTestWorkspace({ pollInterval: 0, pruneDrafts: (repoPath, ids) => pruned.push([repoPath, ids]), controller: async () => ({ scan: { repo: source }, pipeline: { repoPath: source.path, stages }, stageRemovals: [] }) });
+  let stages = pipelineStages(['source', 'beta', 'gamma']);
+  const workspace = createTestWorkspace({ pollInterval: 0, pruneDrafts: (repoPath, ids) => pruned.push([repoPath, ids]), controller: async () => ({ scan: { repo: source }, pipeline: { repoPath: source.path, stages, transitions: [] }, stageRemovals: [] }) });
   t.after(() => workspace.dispose());
-  workspace.activate(source, { browserTests: {}, pipeline: { repoPath: source.path, stages } });
+  workspace.activate(source, { browserTests: {}, pipeline: { repoPath: source.path, stages, transitions: [] } });
   assert.deepEqual(pruned, [['/project', ['source', 'beta', 'gamma']]]);
-  stages = [{ id: 'source' }, { id: 'beta' }];
+  stages = pipelineStages(['source', 'beta']);
   await workspace.refreshSource();
   assert.deepEqual(pruned.at(-1), ['/project', ['source', 'beta']], 'A deleted Gamma stage no longer keeps its drafts');
   const before = pruned.length;
   workspace.activate(source, { browserTests: {} });
-  workspace.activate(source, { browserTests: {}, pipeline: { repoPath: '/elsewhere', stages: [] } });
+  workspace.activate(source, { browserTests: {}, pipeline: { repoPath: '/elsewhere', stages: [], transitions: [] } });
   assert.equal(pruned.length, before, 'An unknown or foreign pipeline prunes nothing');
 });
 
 test('a poll that races a stage deletion is not the page error, and the deleted stage is read no more', async t => {
-  let stages = [{ id: 'source' }, { id: 'beta' }], reads = 0;
+  let stages = pipelineStages(['source', 'beta']), reads = 0;
   const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
-    if (path === '/api/state') return { scan: { repo: source }, pipeline: { repoPath: source.path, stages }, stageRemovals: [] };
+    if (path === '/api/state') return { scan: { repo: source }, pipeline: { repoPath: source.path, stages, transitions: [] }, stageRemovals: [] };
     reads++;
     throw new Error('Choose a Sandbox stage.');
   } });
   t.after(() => workspace.dispose());
-  workspace.activate(source, { browserTests: { beta: { cases: [], runs: [] } }, pipeline: { repoPath: source.path, stages } });
+  workspace.activate(source, { browserTests: { beta: { cases: [], runs: [] } }, pipeline: { repoPath: source.path, stages, transitions: [] } });
   await workspace.stage('beta').refresh('browser');
   assert.match(workspace.getSnapshot().error, /Sandbox stage/, 'A listed stage still reports its read failure');
-  stages = [{ id: 'source' }];
+  stages = pipelineStages(['source']);
   await workspace.refreshSource();
   assert.equal(workspace.getSnapshot().error, '', 'The deleted stage no longer reports the failure');
   const before = reads;

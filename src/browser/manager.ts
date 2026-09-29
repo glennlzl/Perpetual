@@ -1,10 +1,10 @@
 import {createSaveQueue,privateDirectory,readStateFile,writeStateFile} from '../store.ts';
 import {randomUUID} from 'node:crypto';
 import {mkdir,lstat,readdir,rm} from 'node:fs/promises';
-import {join,resolve} from 'node:path';
+import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
-import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys} from '../business/browser-cases.ts';
+import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
@@ -25,7 +25,6 @@ import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
 import type {Blocker,JourneyResult,RunStatus} from './results.ts';
 import type {ConcurrencyLimit} from './journey-scheduler.ts';
-import type {RunCredentials} from './run-credentials.ts';
 import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
 import type {EnvironmentUsage} from '../environments/usage.ts';
@@ -42,7 +41,7 @@ export type BrowserStageContext={key:string;stageId:string;scan:StageScan;contro
  */
 export type BrowserConfig={targetUrl:string;signInUrl:string;scope:string;requirements:string;maxSteps:number;journeyTimeoutSeconds:number;externalOrigins:string[];authEndpoints:string[]};
 /** The environment behind a target URL, as the environments manager resolves it (src/environments/manager.ts). */
-export type TargetEnvironment={id:string;status:string;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
+export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
 /** One test account's sign-in, read from the twin's private state for one operation. */
 type AccountSignIn=Pick<TwinAccount,'username'|'password'|'authEndpoints'>;
 /** What the manager uses of environment leases. */
@@ -83,9 +82,11 @@ export type BrowserRun={
 };
 type VerificationRun=BrowserRun&{verification:Verification};
 type Preparation={environmentId:string;status:string;createdAt:string;targetUrl?:string;runId?:string;error?:string;completedAt?:string};
+/** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
+type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
-  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,Record<string,CaseSpecs>>;
+  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,Record<string,CaseSpecs>>;externalOperations:Record<string,ExternalOperation>;
 };
 type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
 /**
@@ -164,6 +165,8 @@ const actionErrorCodes:ReadonlySet<string>=new Set(['action_not_allowed','naviga
 const controls=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const webFrontend=/^(?:next(?:\.js)?|vite|nuxt|react|sveltekit|astro|remix)$/i;
 const originOf=(value:string)=>{try{return new URL(value).origin;}catch{return null;}};
+const canonicalHost=(host:string)=>['localhost','127.0.0.1','[::1]','host.docker.internal'].includes(host)?'127.0.0.1':host;
+const externalOrigin=(value:string)=>{const url=new URL(value);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('Invalid application origin.');url.hostname=canonicalHost(url.hostname);return url.origin;};
 // An environment's browser-reachable apps. A detected twin names each after its repository service id; a generated one
 // may not, so its directory identifies the service too.
 const applications=(environment:TargetEnvironment|null|undefined)=>(environment?.apps??[]).filter((app):app is {id?:unknown;url:string;directory?:unknown}=>isRecord(app)&&typeof app.url==='string'&&Boolean(originOf(app.url)));
@@ -194,7 +197,7 @@ function authEndpoints(value:unknown,targetUrl:string){
     if(typeof item!=='string'||item.length>2048||!url||!['http:','https:'].includes(url.protocol)||url.username||url.password||/[?#]/.test(item))throw new Error('Auth endpoints must be absolute URLs without credentials or queries.');
     // A bare origin would admit every POST on that port; the runner rejects it too.
     if(url.pathname==='/')throw new Error('Auth endpoints need a path such as /auth/v1/token.');
-    if(targetUrl&&url.hostname!==new URL(targetUrl).hostname)throw new Error('Auth endpoints must be on the application host.');
+    if(targetUrl&&canonicalHost(url.hostname)!==canonicalHost(new URL(targetUrl).hostname))throw new Error('Auth endpoints must be on the application host.');
     return url.href;
   }))];
 }
@@ -277,16 +280,26 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const videoRoot=join(root,'videos');await mkdir(videoRoot,{recursive:true,mode:0o700});
   // Pruning deletes inside this folder, so it must be the controller's own.
   const videoInfo=await lstat(videoRoot);if(videoInfo.isSymbolicLink()||!videoInfo.isDirectory())throw new Error('Browser recording storage must not be a symbolic link.');
-  // <uuid>/ per code generation, removed when it ends; none survives a restart.
+  // <uuid>/ per code generation; unconfirmed external browser ownership keeps its workspace across a restart.
   const generationRoot=join(root,'generations');await mkdir(generationRoot,{recursive:true,mode:0o700});
   const generationInfo=await lstat(generationRoot);if(generationInfo.isSymbolicLink()||!generationInfo.isDirectory())throw new Error('Code generation storage must not be a symbolic link.');
-  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   const modelSettings=await createBrowserModelSettings({dataDir});
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
-  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{}};
+  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{}};
   {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
   for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
+  const external:unknown=state.externalOperations??{};
+  if(!isRecord(external)||Object.entries(external).some(([origin,item])=>{
+    if(!isRecord(item)||typeof item.id!=='string'||typeof item.scope!=='string'||typeof item.startedAt!=='string'||typeof item.operation!=='string'||!['run','discover','generate'].includes(item.operation)||item.cleanupIncomplete!==undefined&&item.cleanupIncomplete!==true)return true;
+    try{if(externalOrigin(origin)!==origin)return true;}catch{return true;}
+    return item.workspace!==undefined&&(typeof item.workspace!=='string'||!runFolder.test(item.workspace));
+  }))throw new Error('Unsupported external browser ownership state.');
+  state.externalOperations=external as Record<string,ExternalOperation>;
+  // A restart cannot prove that the previous controller's processes exited. Preserve their hold and workspace.
+  for(const operation of Object.values(state.externalOperations))operation.cleanupIncomplete=true;
+  const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
+  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   // Add current draft defaults without rewriting immutable historical approvals.
   for(const [scope,cases] of Object.entries(state.cases))state.cases[scope]=validateBrowserCases(cases,{draft:true});
   // A case's journey code is its approved spec beside a draft. Code approved without a verification, as a stored single
@@ -337,10 +350,37 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(()=>{});}));
   }
   function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const content=JSON.stringify(project());if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();});}
+  const externalLeases=new Set<string>();
+  const externalCleanup='Browser cleanup for this application is unconfirmed. Stop the remaining browser processes and confirm cleanup before using this URL again.';
+  function takeTarget(context:BrowserStageContext,url:string,environmentId:string|null|undefined,operation:string){
+    const origin=externalOrigin(url);
+    // An earlier external operation may still be acting on an origin that a newly owned twin now uses.
+    const retained=state.externalOperations[origin];
+    if(retained&&(retained.cleanupIncomplete||!externalLeases.has(origin)))throw conflict(externalCleanup);
+    if(externalLeases.has(origin))throw conflict('This application has a browser operation in progress.');
+    const release=usage.acquire(context,{environmentId,operation});
+    if(environmentId)return release;
+    externalLeases.add(origin);
+    let released=false;
+    return ()=>{if(released)return;released=true;externalLeases.delete(origin);release();};
+  }
+  async function beginExternal(context:BrowserStageContext,url:string,environment:TargetEnvironment|null|undefined,operation:ExternalOperation['operation'],workspace?:string){
+    if(environment)return null;
+    const origin=externalOrigin(url),entry:ExternalOperation={id:randomUUID(),scope:scopeId(context),operation,startedAt:now(),...(workspace?{workspace:basename(workspace)}:{})};
+    await persist(()=>({...state,externalOperations:{...state.externalOperations,[origin]:entry}}),()=>{state.externalOperations[origin]=entry;});
+    return {origin,entry};
+  }
+  async function finishExternal(owned:Awaited<ReturnType<typeof beginExternal>>,uncertain=false){
+    if(!owned||state.externalOperations[owned.origin]?.id!==owned.entry.id)return;
+    if(uncertain){owned.entry.cleanupIncomplete=true;await persist();return;}
+    try{await persist(()=>({...state,externalOperations:Object.fromEntries(Object.entries(state.externalOperations).filter(([origin])=>origin!==owned.origin))}),()=>{delete state.externalOperations[owned.origin];});}
+    catch(error){owned.entry.cleanupIncomplete=true;throw error;}
+  }
   // Journeys that never started are cancelled, not failed; interrupted milestones stay unconfirmed. A restart ends a
   // verification, so its interrupted attempt is cancelled rather than judged.
   const interrupted:Partial<Record<string,'cancelled'|'failed'|'skipped'>>={pending:'cancelled',queued:'cancelled',running:'failed',skipping:'skipped',cancelling:'cancelled'};
   for(const run of state.runs)if(active(run)){
+    if(!run.environmentId)state.externalOperations[externalOrigin(run.targetUrl)]??={id:run.id,scope:run.scope,operation:run.mode,startedAt:run.createdAt,cleanupIncomplete:true};
     const attempt=Boolean(run.verification);
     Object.assign(run,{status:attempt?'cancelled':'failed',error:attempt?'The controller stopped during this verification.':'The controller stopped during this operation.',completedAt:now(),...(run.environmentId?{environmentUseUncertain:true}:{})});
     for(const item of run.progress?.cases||[])if(interrupted[item.status]){
@@ -464,6 +504,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const scope=scopeId(context),item=(state.cases[scope]||[]).find(value=>value.id===input?.caseId);
     if(!item)throw Object.assign(new Error('Test not found in this stage.'),{statusCode:404});
     if(item.needsReview)throw new Error('Review this test before verifying its code.');
+    if(!hasJourneyChecks(item))throw new Error('Add at least one milestone check or final assertion before verifying code.');
     const key=generationKey(scope,item.id),draft=state.specs[scope]?.[item.id]?.draft;
     if(generations.get(key)?.status==='running')throw conflict('Code for this test is being generated. Stop it first.');
     // A generation holds the twin the attempts need.
@@ -479,7 +520,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     // The verification holds that twin from its start to its end: it takes it here, and each attempt's lease passes to the
     // next, so nothing else, such as a health check, takes it while the verification records its start or an attempt, or
     // waits for the stage. A twin in use refuses the verification.
-    const take=()=>usage.acquire(context,{environmentId:target.environmentId,operation:'verify journey code'});
+    const take=()=>takeTarget(context,config.targetUrl,target.environmentId,'verify journey code');
     // A run of the stage that just finished may still be releasing its twin; the verification takes it as that run lets go.
     const finishing=state.runs.filter(run=>run.scope===scope&&jobs.has(run.id)).map(run=>jobs.get(run.id)!.promise);
     let held:(()=>void)|null=null;
@@ -534,11 +575,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const job=entry.run&&jobs.get(entry.run);if(job){job.cancelled=true;job.cancel();}
     return {specs:specView(scope)};
   }
-  // Generates a reviewed case's spec with Playwright's generator agent against the stage's ready twin; the code is a
-  // draft until a person approves it after a passing run. Only this request starts it: never a view, a restart or a gate.
-  async function generateSpec(context:BrowserStageContext,caseId:unknown){
+  // Generates against the selected application URL, reserving its twin when Perpetual owns one. Only this request
+  // starts it: never a view, a restart or a gate. The code remains a draft until verified and approved by a person.
+  async function generateSpec(context:BrowserStageContext,input:{caseId?:unknown;credentials?:unknown;accountId?:unknown}){
     requireIdle(context,{duringRun:true});
-    const scope=scopeId(context),item=(state.cases[scope]||[]).find(value=>value.id===caseId);
+    const scope=scopeId(context),item=(state.cases[scope]||[]).find(value=>value.id===input?.caseId);
     if(!item)throw Object.assign(new Error('Test not found in this stage.'),{statusCode:404});
     if(item.needsReview)throw new Error('Review this test before generating its code.');
     const key=generationKey(scope,item.id);
@@ -547,35 +588,41 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     if(verifying(scope))throw conflict('Code is being verified in this stage. Wait or stop it first.');
     const [snapshot]=validateBrowserCases([item],{draft:false});
     if(!snapshot.steps.length)throw new Error('Add journey steps before generating code.');
+    if(!hasJourneyChecks(snapshot))throw new Error('Add at least one milestone check or final assertion before generating code.');
+    let credentials=validateRunCredentials(input.credentials);
+    const accountId=input.accountId;
+    if(accountId!==undefined&&(credentials||(accountId!==null&&typeof accountId!=='string')))throw new Error('Choose one test account.');
     const configuration=modelSettings.configuration();
     if(!configuration.modelConfigured||!isOpenRouterEndpoint(configuration.baseUrl))throw new Error('Add your OpenRouter API key in Settings first.');
     const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
     const environment=resolveEnvironment(config.targetUrl);
-    if(environment?.status!=='ready'||(environment.stageId&&environment.stageId!==context.stageId))throw conflict('Set the application URL to this stage’s ready twin first.');
-    if(state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
-    // The generator drives the twin as a journey does, so it holds the environment like a run.
-    const release=usage.acquire(context,{environmentId:environment.id,operation:'generate journey code'});
+    if(environment&&(environment.status!=='ready'||(environment.stageId&&environment.stageId!==context.stageId)))throw conflict('Set the application URL to this stage’s ready twin first.');
+    if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
+    // An existing URL needs no twin. An owned environment keeps the same reservation as a run.
+    const release=takeTarget(context,config.targetUrl,environment?.id,'generate journey code');
     const entry:Generation={scope,status:'running',step:'preparing',cancelled:false,cancel(){entry.cancelled=true;}};
     generations.set(key,entry);
-    let credentials:RunCredentials|undefined;
     try{
       if(!(await playwright.capabilities()).browserInstalled)throw new Error('Install Chromium for Playwright: npx playwright install chromium.');
-      // The twin's first test account, as a run uses by default; its password reaches only the harness environment.
-      const accounts=environment.accounts||[];
-      if(accounts.length){
-        const account=await twinAccount(environment,accounts[0].id);
+      // The entered account, chosen twin account or its first by default; values are never saved.
+      const accounts=environment?.accounts||[];
+      if(typeof accountId==='string'&&!accounts.some(account=>account.id===accountId))throw new Error('Choose a test account of this environment.');
+      if(!credentials&&accountId!==null&&accounts.length){
+        const account=await twinAccount(environment!,(accountId as string|undefined)??accounts[0].id);
         credentials=account?validateRunCredentials({username:account.username,password:account.password}):undefined;
         if(!credentials)throw new Error('The environment test account is unavailable. Recreate the environment.');
       }
       if(closed||entry.cancelled)throw conflict('Code generation cancelled.');
     }catch(error){generations.delete(key);release();throw error;}
-    const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!),...config.externalOrigins];
+    const origins=[new URL(config.targetUrl).origin,...(environment?applications(environment):[]).map(app=>originOf(app.url)!),...config.externalOrigins];
     const promise=(async()=>{
       let workspace:Awaited<ReturnType<typeof privateWorkspace>>|null=null;
+      let external:Awaited<ReturnType<typeof beginExternal>>=null,uncertain=false;
       // The generation stays running until the twin is released, so a verification started next can hold it.
       let failure:unknown=null;
       try{
         workspace=await privateWorkspace(generationRoot);
+        external=await beginExternal(context,config.targetUrl,environment,'generate',workspace.path);
         // The seed signs in first with the runtime that runs journeys, on the stage's sign-in page when one is set.
         const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
         entry.cancel=()=>{entry.cancelled=true;entry.step='cancelling';job.cancel();};
@@ -586,11 +633,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         // Generated code is a draft beside the approved code, which it never replaces by itself.
         await storeSpec(scope,item.id,({approved})=>({approved,draft:drafted(snapshot,code,{provenance})}));
       }catch(error){
-        if(!entry.cancelled)failure=error;
-        if((error as WorkerError|undefined)?.cleanupIncomplete)await onEnvironmentUncertain(environment.id,browserError(error)).catch(()=>{});
+        uncertain=(error as WorkerError|undefined)?.cleanupIncomplete===true;
+        if(!entry.cancelled||uncertain&&external)failure=uncertain&&external?new Error(externalCleanup):error;
+        if(environment&&(error as WorkerError|undefined)?.cleanupIncomplete)await onEnvironmentUncertain(environment.id,browserError(error)).catch(()=>{});
       }finally{
-        await workspace?.remove();
-        release();
+        try{if(workspace&&(!uncertain||!external))await rm(workspace.path,{recursive:true,force:true});}
+        catch(error){uncertain=true;failure??=error;}
+        finally{try{await finishExternal(external,uncertain);}catch(error){failure??=error;}finally{release();}}
         // A saved or cancelled generation leaves no state; a failed one says why until the next attempt.
         if(!failure)generations.delete(key);
         else{const rejected=(failure as {rejected?:unknown}).rejected;Object.assign(entry,{status:'failed',error:browserError(failure),...(typeof rejected==='string'?{rejected}:{})});delete entry.step;}
@@ -692,7 +741,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     // Checked for a run, the only mode that uses it: set exactly when the mode is run.
     const concurrency=mode==='run'?runConcurrency(input.concurrency??2):undefined;
     requireIdle(context,{verification:Boolean(options.verification)});const scope=scopeId(context);busy.add(scope);
-    let release:(()=>void)|undefined,handedOff=false;
+    let release:(()=>void)|undefined,handedOff=false,external:Awaited<ReturnType<typeof beginExternal>>=null;
     let replaceIds:string[]=[];
     try{
       if(mode==='discover'&&input.replaceCaseIds!==undefined){
@@ -706,7 +755,15 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(options.target&&((environment?.id??null)!==options.target.environmentId||environment&&environment.status!=='ready'))throw conflict(TWIN_CHANGED);
       if(environment&&environment.status!=='ready')throw conflict('The selected application environment is not ready. Choose an available application URL.');
       if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
-      release=usage.acquire(context,{environmentId:environment?.id,operation:`browser ${mode}`});
+      try{release=takeTarget(context,config.targetUrl,environment?.id,`browser ${mode}`);}
+      catch(error){
+        // A terminal row may already be visible while its final save releases the target. Join only this stage's
+        // finishing work, then take the reservation again; running work and unconfirmed cleanup still refuse it.
+        const finishing=state.runs.filter(run=>run.scope===scope&&!active(run)&&jobs.has(run.id)).map(run=>jobs.get(run.id)!.promise);
+        if(!finishing.length)throw error;
+        await Promise.allSettled(finishing);
+        release=takeTarget(context,config.targetUrl,environment?.id,`browser ${mode}`);
+      }
       // A journey runs its Playwright code, which needs no model; discovery needs the browser agent.
       if(mode==='run'){if(!(await playwright.capabilities()).browserInstalled)throw new Error('Install Chromium for Playwright: npx playwright install chromium.');}
       else{const capabilities=await runtime!.capabilities();if(!capabilities.runtimeInstalled)throw new Error('Install the local Browser Use runtime first.');if(capabilities.browserInstalled===false)throw new Error('Install Chromium for the local browser runtime.');if(!capabilities.modelConfigured)throw new Error(capabilities.modelError||'Configure a model API key to use the browser agent.');}
@@ -721,6 +778,10 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         // The twin says where its sign-in posts, so read-only discovery can let exactly that request through.
         accountEndpoints=account.authEndpoints||[];
       }
+      // An entered account authorizes using its credentials, not arbitrary POSTs. Discover only
+      // with configured endpoints or the selected twin account's own reviewed sign-in endpoints.
+      const discoveryEndpoints=mode==='discover'&&credentials?authEndpoints([...new Set([...config.authEndpoints,...accountEndpoints])],config.targetUrl):undefined;
+      if(discoveryEndpoints&&!discoveryEndpoints.length)throw new Error('Add a sign-in API endpoint in Test settings before exploring with a test account.');
       let cases:BrowserCase[]=[];
       if(mode==='run'){
         const available=state.cases[scope]||[],ids=input.caseIds??available.filter(c=>c.selected&&!c.needsReview).map(c=>c.id);
@@ -735,6 +796,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const sourceContext=mode==='discover'?await browserDiscoveryContext({repoPath:context.scan.repo.path,scope:config.scope,requirements:config.requirements}):'';
       if(closed)throw conflict('The controller is shutting down.');
       if(options.isCurrent&&!options.isCurrent())throw conflict('The active source changed. Open this source and discover cases to continue.');
+      external=await beginExternal(context,config.targetUrl,environment,mode);
       const progressCases:CaseProgress[]=mode==='discover'?[{id:'discovery',caseId:'discovery',name:'Explore application',status:'pending',actions:[],actionCount:0}]:cases.map(c=>({id:c.id,caseId:c.id,name:c.name,status:'queued',actions:[],actionCount:0,steps:c.steps.map(({id,title})=>({id,title,status:'pending'}))}));
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
@@ -749,12 +811,6 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown;
         // Registered before execution starts.
         const entry=jobs.get(run.id)!;
-        // Runs may reach reviewed external origins (such as Stripe test checkout); discovery stays on
-        // the target environment's apps and receives auth endpoints only with a supplied test account.
-        // Scope, requirements, source and the action budget are discovery's; unavailable twin services block runs.
-        const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)],unavailable=unavailableServices(environment);
-        const workerInput={mode,targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
-          ...(mode==='discover'?{scope:config.scope,requirements:config.requirements,sourceContext,maxSteps:config.maxSteps,...(credentials&&(config.authEndpoints.length||accountEndpoints.length)?{authEndpoints:authEndpoints([...new Set([...config.authEndpoints,...accountEndpoints])],config.targetUrl)}:{})}:{})};
         const assertCurrent=()=>{if(options.isCurrent&&!options.isCurrent())throw new Error('The active source changed. Open this source and discover cases to continue.');};
         function progressEvent(event:WorkerEvent,caseId:string){
           if(event.caseId!==undefined&&event.caseId!==caseId)throw new Error('Browser progress referenced another journey.');
@@ -780,6 +836,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           touch(run);
         }
         try{
+          // Runs may reach reviewed external origins (such as Stripe test checkout); discovery stays on
+          // the target environment's apps and receives auth endpoints only with a supplied test account.
+          // Validate worker input inside the terminal handler so refusal also settles the run and its lease.
+          const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)],unavailable=unavailableServices(environment);
+          const workerInput={mode,targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
+            ...(mode==='discover'?{scope:config.scope,requirements:config.requirements,sourceContext,maxSteps:config.maxSteps,...(discoveryEndpoints?{authEndpoints:discoveryEndpoints}:{})}:{})};
           run.status='running';run.startedAt=now();await persist();
           if(closed||entry?.cancelled)throw new Error('Browser operation cancelled.');
           assertCurrent();
@@ -904,6 +966,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           run.status=entry?.cancelled?'cancelled':'failed';run.error=browserError(messageOf(error)||String(error));
           for(const item of run.progress.cases)if(['pending','queued','running','skipping','cancelling'].includes(item.status)){item.status=run.status;settleSteps(item,run.status);}
           touch(run);
+          if((error as WorkerError|undefined)?.cleanupIncomplete===true&&external)external.entry.cleanupIncomplete=true;
           if((error as WorkerError|undefined)?.cleanupIncomplete===true&&run.environmentId){
             run.status='failed';run.environmentUseUncertain=true;
             try{await persist();}finally{await onEnvironmentUncertain(run.environmentId,run.error);}
@@ -915,13 +978,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             Object.assign(preparation,{status:empty?'needs_setup':run.status==='completed'?'completed':'failed',completedAt:run.completedAt,...(empty?{error:'No integration cases were discovered. Set a scope or add a case.'}:run.error?{error:run.error}:{})});
           }
           try{await pruneVideos();}catch{}
-          try{await persist();}finally{jobs.delete(run.id);if(options.keepLease)options.keepLease(release!);else release!();resumePreparations();}
+          try{await persist();await finishExternal(external,external?.entry.cleanupIncomplete);}finally{jobs.delete(run.id);if(options.keepLease)options.keepLease(release!);else release!();resumePreparations();}
         }
       };
       const entry:RunJob={cancelled:false,cancel:()=>{},promise:null,skips:new Set()};jobs.set(run.id,entry);entry.promise=Promise.resolve().then(execution);entry.promise.catch(()=>{});
       handedOff=true;
       return {run:publicRun(run)};
-    }finally{free(scope);if(!handedOff)release?.();}
+    }finally{free(scope);if(!handedOff)try{await finishExternal(external);}finally{release?.();}}
   }
   function start(...args:Parameters<typeof startWork>){
     // startWork runs synchronously to its first await, reserving the target
@@ -932,6 +995,22 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   // The target twin's test accounts for the account choice, without passwords.
   function targetAccounts(url:string|undefined){const environment=url?resolveEnvironment(url):null;return environment?.status==='ready'?(environment.accounts||[]).map(({id,label,username})=>({id,label,username})):[];}
+  function publicConfig(scope:string):BrowserConfig{
+    const config=structuredClone({...defaults,...state.configs[scope]});
+    const environment=config.targetUrl?resolveEnvironment(config.targetUrl):null;
+    if(!environment||environment.sandboxId!==environment.id)return config;
+    try{
+      const target=new URL(config.targetUrl);
+      if(target.protocol!=='http:'||target.hostname!=='host.docker.internal')return config;
+      const app=applications(environment).find(app=>externalOrigin(app.url)===externalOrigin(target.href));
+      if(!app)return config;
+      // The inspector opens this URL in an ordinary host browser. Preserve its route and the stored config.
+      const origin=externalOrigin(app.url);
+      config.targetUrl=`${origin}${signInPath(target.href)}`;
+      if(config.signInUrl&&originOf(config.signInUrl)===target.origin)config.signInUrl=`${origin}${signInPath(config.signInUrl)}`;
+    }catch{/* An invalid saved URL remains available for the person to edit. */}
+    return config;
+  }
   function summary(context:{key:string;stageId:string}){
     const scope=scopeId(context),cases=state.cases[scope]||[],runs=state.runs.filter(r=>r.scope===scope).slice(0,30);
     // A control run never counts as a journey's current status.
@@ -1003,10 +1082,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     interruptedEnvironmentIds:()=>[...new Set(state.runs.filter((run):run is BrowserRun&{environmentId:string}=>Boolean(run.environmentUseUncertain&&run.environmentId)).map(run=>run.environmentId))],
     draft:(...args:Parameters<typeof draft>)=>admit(()=>draft(...args)),transcribe:(...args:Parameters<typeof transcribe>)=>admit(()=>transcribe(...args)),
     hasPendingInput:()=>inputJobs.size>0,
-    async view(context:BrowserStageContext){const scope=scopeId(context);return {config:structuredClone({...defaults,...state.configs[scope]}),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
+    async view(context:BrowserStageContext){const scope=scopeId(context);return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
     saveModel(context:BrowserStageContext,input:unknown){return admit(()=>{requireIdle(context);return updateModel(()=>modelSettings.save(input));});},
     async saveConfig(context:BrowserStageContext,config:unknown){
-      requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context);state.configs[scope]=normalized;if(state.configTargets[scope]?.url!==normalized.targetUrl)delete state.configTargets[scope];
+      requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context),target=state.configTargets[scope];
+      const sameTarget=target?.url===state.configs[scope]?.targetUrl&&publicConfig(scope).targetUrl===normalized.targetUrl;
+      state.configs[scope]=normalized;
+      if(target?.url!==normalized.targetUrl){if(target&&sameTarget)target.url=normalized.targetUrl;else delete state.configTargets[scope];}
       // A saved target settles the setup an automatic preparation asked for; Generate stays the person's to start.
       if(normalized.targetUrl&&state.preparations[scope]?.status==='needs_setup')delete state.preparations[scope];
       await persist();return {config:normalized};
@@ -1070,7 +1152,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     },
     verifySpec:(context:BrowserStageContext,input:Parameters<typeof verifySpec>[1])=>admit(()=>verifySpec(context,input)),
     cancelSpecVerification:async(context:BrowserStageContext,input:{caseId?:unknown})=>cancelVerification(context,input?.caseId),
-    generateSpec:(context:BrowserStageContext,input:{caseId?:unknown})=>admit(()=>generateSpec(context,input?.caseId)),
+    generateSpec:(context:BrowserStageContext,input:Parameters<typeof generateSpec>[1])=>admit(()=>generateSpec(context,input)),
     cancelSpecGeneration:async(context:BrowserStageContext,input:{caseId?:unknown})=>cancelGeneration(context,input?.caseId),
     // options.manual: a person started the run, so a journey without current approved code may run its current draft.
     run:(context:BrowserStageContext,input?:StartInput,options?:StartOptions)=>start(context,'run',input,options),discover:(context:BrowserStageContext,input?:StartInput)=>start(context,'discover',input),

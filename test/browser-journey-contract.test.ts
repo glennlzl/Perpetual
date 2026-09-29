@@ -29,14 +29,16 @@ async function fixture(t:TestContext,cases=[journey('one'),journey('two')],confi
   const workers:Worker[]=[];
   // One fake serves discovery (the browser agent) and runs (Playwright code).
   const runtime={capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(input:JourneyRunInput,event:(event:WorkerEvent)=>void){const gate=deferred(),worker={input,event,gate,cancelled:false};workers.push(worker);return {promise:gate.promise,cancel(){worker.cancelled=true;}};}};
-  const manager=await createBrowserManager({dataDir,runtime,playwright:runtime});
+  const manager=await createBrowserManager({dataDir,runtime,playwright:runtime}),managers=[manager];
   const context={key:'repo',stageId:'beta',scan:{repo:{path:repo,sha:'abc'}}};
   await manager.saveConfig(context,{targetUrl:'http://localhost:3000/login',...config});await manager.saveCases(context,cases);await draftCode(manager,context,cases);
-  t.after(async()=>{const closing=manager.close();for(const worker of workers)worker.gate.resolve();await closing;await rm(dataDir,{recursive:true,force:true});});
+  t.after(async()=>{const closing=Promise.all(managers.map(manager=>manager.close()));for(const worker of workers)worker.gate.resolve();await closing;await rm(dataDir,{recursive:true,force:true});});
+  // A reopened manager can still be saving a terminal discovery. Join every owner before removing their shared state.
+  const reopen=async()=>{const reopened=await createBrowserManager({dataDir,runtime});managers.push(reopened);return reopened;};
   const report=(id:string)=>manager.runProgress(context,id);
   const terminal=async(id:string)=>{await until(async()=>!['queued','running'].includes((await report(id)).run.status));return report(id);};
   const complete=(index:number,id:string)=>{for(const item of credits)reach(workers[index],id,item.id,'completed',passedChecks[item.id]?{checks:passedChecks[item.id]}:{});};
-  return {dataDir,manager,context,workers,runtime,report,terminal,complete};
+  return {dataDir,manager,context,workers,runtime,report,terminal,complete,reopen};
 }
 
 test('stage settings bound journey time, reviewed external HTTPS origins and target-host auth endpoints',async t=>{
@@ -57,7 +59,7 @@ test('stage settings bound journey time, reviewed external HTTPS origins and tar
   const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8'));
   for(const config of Object.values<Record<string,unknown>>(state.configs)){delete config.journeyTimeoutSeconds;delete config.externalOrigins;delete config.authEndpoints;}
   await writeFile(file,JSON.stringify(state));
-  const reopened=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime});t.after(()=>reopened.close());
+  const reopened=await f.reopen();
   const view=(await reopened.view(f.context)).config;
   assert.equal(view.journeyTimeoutSeconds,900,'A stored config without a time limit uses the default.');assert.deepEqual(view.externalOrigins,[]);
 });
@@ -149,7 +151,7 @@ test('authenticated discovery takes a run-only account and auth endpoints, stays
 
 test('discovery keeps where its account signed in as the sign-in page while the stage has none, as a path on the application’s origin',async t=>{
   const account={username:'discovery-fixture@example.test',password:'discovery-fixture-password'};
-  const f=await fixture(t,[journey('one')]);
+  const authEndpoints=['http://localhost:3000/signin'],f=await fixture(t,[journey('one')],{authEndpoints});
   const signInUrl=async()=>(await f.manager.view(f.context)).config.signInUrl;
   const discover=async(input:Record<string,unknown>,events:WorkerEvent[])=>{
     const {run}=await f.manager.discover(f.context,input),count=f.workers.length;await until(()=>f.workers.length===count+1);
@@ -172,12 +174,12 @@ test('discovery keeps where its account signed in as the sign-in page while the 
   assert.ok(stored.includes('"signInUrl":"http://localhost:3000/account/login"')&&!stored.includes('token=abc')&&!stored.includes('0123ABCD')&&!stored.includes(account.password));
   // A session id dropped from the first segment leaves one leading slash, never a // path.
   for(const url of ['http://localhost:3000/;jsessionid=0123ABCD/login','http://localhost:3000//login']){
-    await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:3000/login',signInUrl:''});
+    await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:3000/login',authEndpoints,signInUrl:''});
     await discover({credentials:account},[page(url)]);
     assert.equal(await signInUrl(),'http://localhost:3000/login',url);
   }
   // A person's value is never replaced.
-  await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:3000/login',signInUrl:'http://localhost:3000/sign-in'});
+  await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:3000/login',authEndpoints,signInUrl:'http://localhost:3000/sign-in'});
   await discover({credentials:account},[page('http://localhost:3000/account/login')]);
   assert.equal(await signInUrl(),'http://localhost:3000/sign-in');
 });
@@ -309,7 +311,7 @@ test('discovery keeps valid journeys, drops unsupplied citations and names omitt
 
 test('a discovery without an acceptable journey fails, retains every test and keeps its summary and omissions',async t=>{
   const account={username:'omission-fixture@example.test',password:'omission-fixture-password'};
-  const f=await fixture(t,[journey('one')]);
+  const f=await fixture(t,[journey('one')],{authEndpoints:['http://localhost:3000/signin']});
   const before=(await f.manager.view(f.context)).cases,error='No acceptable journeys were discovered. Existing tests were retained.';
   const draft=(changes:Record<string,unknown>={})=>journey('found',{selected:false,needsReview:true,isolation:undefined,steps:credits.map(({id,title})=>({id,title})),...changes});
   const summary=`Signed in as ${account.username}. Billing needs a paid plan.\nOmitted “Short ${account.password}”: Generated journeys need at least two ordered business steps.\nOmitted “Journey found”: Unsupported browser case field: note-${account.password}`;
@@ -331,7 +333,7 @@ test('a discovery without an acceptable journey fails, retains every test and ke
     assert.equal(view.runs.find(item=>item.id===run.id)!.discovery!.summary,summary);
   }
   await f.manager.close();
-  const reopened=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime});t.after(()=>reopened.close());
+  const reopened=await f.reopen();
   assert.equal((await reopened.runProgress(f.context,runs[1])).discovery!.summary,summary,'The failed discovery keeps its summary across restarts.');
   assert.equal((await reopened.view(f.context)).analysis!.error,error);
   const {run}=await reopened.discover(f.context,{});await until(()=>f.workers.length===3);
@@ -453,7 +455,7 @@ test('restart recovery cancels unstarted journeys, fails interrupted ones, finis
   Object.assign(queued,{status:'queued',queueReason:'browser'});for(const item of queued.steps)item.status='pending';
   Object.assign(skipping,{status:'skipping'});skipping.steps[1].status='running';skipping.steps[2].status='pending';
   const revision=saved.progress.revision;await writeFile(file,JSON.stringify(state));
-  const reopened=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime});t.after(()=>reopened.close());
+  const reopened=await f.reopen();
   const recovered=await reopened.runProgress(f.context,run.id);
   assert.equal(recovered.run.status,'failed');
   assert.deepEqual(recovered.progress.cases.map(item=>item.status),['failed','cancelled','skipped','passed']);

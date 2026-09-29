@@ -65,7 +65,7 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.equal(web.healthcheck?.test[0], 'CMD');
   assert.match(web.healthcheck!.test.at(-1)!, /127\.0\.0\.1:3000\//);
   assert.deepEqual(web.depends_on, { database: { condition: 'service_healthy' }, mail: { condition: 'service_healthy' }, 'payments-listener': { condition: 'service_started' } });
-  assert.deepEqual(apps, [{ id: 'web', url: 'http://host.docker.internal:43100', directory: 'web' }, { id: 'api', url: 'http://host.docker.internal:43101', directory: 'api' }]);
+  assert.deepEqual(apps, [{ id: 'web', url: 'http://127.0.0.1:43100', directory: 'web' }, { id: 'api', url: 'http://127.0.0.1:43101', directory: 'api' }]);
 });
 
 test('A shared install is a one-shot service that a plain up never starts', () => {

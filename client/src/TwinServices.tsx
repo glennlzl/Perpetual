@@ -5,10 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from '@/components/ui/item';
+import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from '@/components/ui/item';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
+import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
 import { twinInputsChanges, twinInputsRequest, twinKeyFields, twinProvisionRequest, twinServiceRows, type TwinService } from '@/lib/twin-services';
 import type { Environment } from '@/lib/test-workspace';
 
@@ -45,14 +46,17 @@ export default function TwinServices({ repoPath, scannedAt, stageId, environment
     </Button></CollapsibleTrigger>
     <CollapsibleContent className="pt-1">
       {current.error ? <p role="alert" className="break-words px-1 text-xs text-destructive">{current.error}</p>
-        : <ItemGroup aria-label="Services">{rows.map(row => <Item key={row.id} role="listitem" size="sm" className="flex-nowrap gap-2 px-1 py-1.5">
+        : <ItemGroup aria-label="Services">{rows.map(row => {
+          const asset = providerAsset(row.provider || row.id) || 'service';
+          return <Item key={row.id} role="listitem" size="sm" className="flex-nowrap gap-2 px-1 py-1.5">
+          <ItemMedia><img className="provider-logo size-5 object-contain" data-monochrome={monochromeAsset(asset)} src={`/assets/providers/${asset}.svg`} alt="" width={20} height={20} /></ItemMedia>
           <ItemContent className="min-w-0"><ItemTitle className="flex-wrap gap-1.5 break-words">{row.title}<Badge variant="outline" className="text-[10px]">{row.fidelityLabel}</Badge>{row.sourceLabel && <Badge variant="outline" className="text-[10px]">{row.sourceLabel}</Badge>}{row.expiresLabel && <Badge variant="outline" className="text-[10px]">{row.expiresLabel}</Badge>}
             {row.claimUrl && <Button asChild variant="link" size="sm" className="h-5 gap-1 px-0 text-xs has-[>svg]:px-0"><a href={row.claimUrl} target="_blank" rel="noopener noreferrer">Claim<ExternalLink className="size-3" /></a></Button>}</ItemTitle></ItemContent>
           <ItemActions className="shrink-0 gap-1.5">
             {row.connectable && <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setConnecting(row)}>Connect</Button>}
             <Badge variant="secondary">{row.statusLabel}</Badge>
           </ItemActions>
-        </Item>)}</ItemGroup>}
+        </Item>; })}</ItemGroup>}
     </CollapsibleContent>
     {connecting && <ConnectDialog service={connecting} onClose={() => setConnecting(null)} onSaved={() => { setConnecting(null); twinInputsChanges.notify(); }} />}
   </Collapsible>;

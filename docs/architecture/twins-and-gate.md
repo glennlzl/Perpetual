@@ -18,7 +18,7 @@ A twin is a generated Docker Compose project plus a `.env` file. It runs the pro
   - Package managers keep downloads in one machine-wide external volume, `perpetual-package-cache`, which Perpetual owns and which deleting a twin keeps. pnpm's store is named there explicitly.
   - Each twin records how long every preparation step took, so a slow or failed twin shows where its time went.
 - Ports are allocated upward from a base in a block per twin and published on 127.0.0.1.
-- Every address inside the twin is `http://host.docker.internal:<port>`. Perpetual's Chromium maps that name to 127.0.0.1, so the browser and the containers see the same URLs.
+- Internal `url` placeholders use `http://host.docker.internal:<port>`. Browser-consumed URLs explicitly use `publicUrl`, which selects `http://127.0.0.1:<port>` for either an app or a service's named port. App links use loopback too. Perpetual's Chromium keeps its Docker-host mapping for older plans, but ordinary host browsers need public addresses; saved plans and service outputs are never rewritten from variable-name prefixes.
 
 ## Services
 
@@ -82,13 +82,13 @@ services:
 install: { directory: ., command: pnpm install --frozen-lockfile }
 apps:
   web: { directory: web, build: pnpm build, start: pnpm start, port: 3000,
-         env: { NEXT_PUBLIC_API_URL: "{{apps.api.url}}" } }
+         env: { NEXT_PUBLIC_API_URL: "{{apps.api.publicUrl}}" } }
   api: { directory: api, start: pnpm start, port: 8080 }
 fixtures:
   - { service: supabase, sql: seed/twin.sql }
 ```
 
-- An app variable that has the same name as a service's standard variable, such as `STRIPE_SECRET_KEY`, is filled automatically. Only other names need an explicit `{{service.VAR}}` or `{{apps.<id>.url}}` mapping.
+- An app variable that has the same name as a service's standard variable, such as `STRIPE_SECRET_KEY`, is filled automatically. Other names map explicitly to service variables or addresses. Use `{{apps.<id>.publicUrl}}` and `{{services.<id>.publicUrl.<port>}}` for browser requests, and the existing `url` forms for container requests, based on the source that consumes the value.
 - `{{services.<id>.url.<port>}}` is a service's address on one of its named ports, such as Supabase's `api`. Ports are allocated before any setup, so an address adds no setup order and is kept whether or not its service is blocked. An address on a port the service never uses fails the twin's preparation.
 - Setup runs in the order that `{{service.VAR}}` placeholders imply. Circular references are rejected when the config is saved.
 - A service option named `env` is an environment, like an app's: a variable that references a blocked service is left out. Any other option that references a blocked service blocks its service too.
@@ -117,7 +117,7 @@ services:
 Detection alone does not give a new user a working twin: it finds services and apps but not the wiring, such as app variables mapped to service variables, test accounts, seed data, required secrets, or an edge function's variables and webhook route. An agent writes that wiring as data, and the controller verifies it by building the twin. This is the split of [ADR 0001](../adr/0001-gate-runs-approved-playwright-code.md): AI authors, and a deterministic runtime executes.
 
 - When: a person's Create on a stage whose config is still detected, with an OpenRouter model in App Settings. Without a model, creation builds the detected config. Opening a page, restarting the controller and a gate never generate; a gate uses the saved config, else the detected one.
-- The loop is the controller's, at most four attempts:
+- The loop is the controller's, at most four attempts; attempts 1–2 use the Settings model and attempts 3–4 use its saved Escalation model, falling back to the Settings model when none is saved:
   1. The agent writes `twin.json` in its workspace.
   2. `validateTwinConfig`, then each service's `validate` and its described option names. An invalid config is the next attempt's feedback.
   3. The environment's own twin is prepared from it, with the usual ownership, cleanup and steps (`Writing twin config (attempt n of 4)`, `Preparing twin`, …). A failed preparation is feedback: the failed step, its error and the last 150 lines of the failed containers' logs, redacted of the model key and every secret input. The twin is torn down before the next attempt.

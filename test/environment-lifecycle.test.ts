@@ -67,6 +67,58 @@ test('close waits for an allocated create to clean up and persists cleanup owner
   assert.ok(saved.environments[0].cleanedAt);
 });
 
+test('Stop keeps creation busy until the running operation and its sandbox cleanup finish', async t => {
+  const entered = deferred(), stopped = deferred(), cleaning = deferred(), cleaned = deferred();
+  let signal: AbortSignal | undefined;
+  const { manager, usage } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate, signal: input }) => {
+      signal = input;
+      await onUpdate({ sandboxId: environment.id, status: 'preparing', step: 'Setting up dependency' }); entered.resolve();
+      await stopped.promise;
+      throw new Error('Environment creation cancelled.');
+    },
+    destroySandbox: async () => { cleaning.resolve(); await cleaned.promise; },
+  });
+  t.after(() => { stopped.resolve(); cleaned.resolve(); });
+  const { environment } = await manager.create(context); await entered.promise;
+  try {
+    const reply = await manager.cancel(context, environment.id);
+    assert.equal(reply.environment.step, 'Stopping');
+    assert.ok(reply.environment.cancellationRequestedAt);
+    assert.equal(signal?.aborted, true);
+    assert.equal(usage.isBusy(environment.id), true);
+    const settled = manager.awaitIdle(environment.id);
+    await remainsPending(settled);
+    stopped.resolve(); await cleaning.promise;
+    assert.equal((await manager.view(context)).environments[0].step, 'Stopping');
+    assert.equal(usage.isBusy(environment.id), true);
+    await remainsPending(settled);
+    cleaned.resolve();
+    const final = await settled;
+    assert.equal(final.status, 'failed'); assert.equal(final.step, 'Stopped'); assert.ok(final.cleanedAt);
+    assert.equal(usage.isBusy(environment.id), false);
+  } finally { stopped.resolve(); cleaned.resolve(); }
+});
+
+test('Stop preserves the source and ownership when sandbox cleanup fails', async t => {
+  const entered = deferred(), stopped = deferred();
+  let snapshot = '';
+  const { manager } = await fixture(t, {
+    prepareEnvironment: async ({ environment, directory, onUpdate }) => {
+      snapshot = join(directory, 'source'); await mkdir(snapshot); await writeFile(join(snapshot, 'app.mjs'), 'app');
+      await onUpdate({ sandboxId: environment.id, status: 'preparing' }); entered.resolve();
+      await stopped.promise; throw new Error('Environment creation cancelled.');
+    },
+    destroySandbox: async () => { throw new Error('Docker cleanup unavailable'); },
+  });
+  const { environment } = await manager.create(context); await entered.promise;
+  try { await manager.cancel(context, environment.id); } finally { stopped.resolve(); }
+  const final = await manager.awaitIdle(environment.id);
+  assert.equal(final.status, 'cleanup_failed'); assert.equal(final.sandboxId, environment.id);
+  assert.match(final.cleanupError!, /Docker cleanup unavailable/);
+  assert.equal(await exists(join(snapshot, 'app.mjs')), true);
+});
+
 test('close owns create admission even before its background job has been queued', async t => {
   let preparations = 0;
   const { manager, usage, dataDir } = await fixture(t, {
@@ -165,13 +217,41 @@ test('failed admission persistence releases ownership and close reports an unwri
   await assert.rejects(manager.close(), /EISDIR|ENOTEMPTY|rename/);
 });
 
+test('restarted owned twins expose host-browser app links without rewriting stored URLs', async t => {
+  const legacy = 'http://host.docker.internal:50123/workspace?tab=billing#plan', external = 'https://preview.example/workspace';
+  const { manager, dataDir } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => {
+      await onUpdate({ sandboxId: environment.id });
+      return { ...ready, apps: [{ id: 'app', url: legacy }, { id: 'preview', url: external }] };
+    },
+  });
+  const created = await createReady(manager);
+  await manager.close();
+  const reopened = await createEnvironmentManager({ dataDir, runtime: only({ prepareEnvironment: unexpected, destroySandbox: unexpected, environmentHealth: unexpected, environmentLogs: unexpected }), onReady: unexpected });
+  try {
+    const expected = [{ id: 'app', url: 'http://127.0.0.1:50123/workspace?tab=billing#plan' }, { id: 'preview', url: external }];
+    assert.deepEqual((await reopened.view(context)).environments[0].apps, expected);
+    assert.deepEqual(reopened.summaries(context.key)[0].apps, expected);
+    assert.deepEqual(reopened.resolveTarget(legacy)?.apps, expected);
+    assert.equal(reopened.resolveTarget(expected[0].url)?.id, created.id);
+    const stored = JSON.parse(await readFile(join(dataDir, 'environments/state.json'), 'utf8'));
+    assert.equal(stored.environments[0].apps[0].url, legacy);
+  } finally { await reopened.close(); }
+});
+
+test('environments without twin ownership preserve their application URLs', async t => {
+  const { manager } = await fixture(t, { prepareEnvironment: async () => structuredClone(ready) });
+  const environment = await createReady(manager);
+  assert.equal(environment.apps[0].url, ready.apps[0].url);
+});
+
 test('owned-target resolution canonicalizes loopback aliases and retains stale ownership after deletion', async t => {
   const { manager } = await fixture(t);
   const environment = await createReady(manager);
   assert.equal(manager.resolveTarget('http://localhost:50123/workspace')?.id, environment.id);
   assert.equal(manager.resolveTarget('http://[::1]:50123/workspace')?.id, environment.id);
   assert.equal(manager.resolveTarget('http://host.docker.internal:50123/')?.id, environment.id);
-  assert.equal(environment.apps[0].url, 'http://host.docker.internal:50123');
+  assert.equal(environment.apps[0].url, 'http://127.0.0.1:50123/');
   assert.equal(manager.resolveTarget('https://preview.example/workspace'), null);
   assert.equal(manager.resolveTarget('http://127.0.0.1:50124/'), null);
   await manager.destroy(context, environment.id); await manager.awaitIdle(environment.id);

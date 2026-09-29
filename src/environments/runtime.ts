@@ -82,7 +82,7 @@ export interface EnvironmentTwin {
   destroy(options: TwinCall & { inputs?: Record<string, InputValues> }): Promise<unknown>;
 }
 /** The OpenRouter model an agent writes a twin config with; the key stays in memory. */
-export interface AuthoringModel { apiKey: string; model: string }
+export interface AuthoringModel { apiKey: string; model: string; escalationModel?: string }
 /**
  * Creation writes the twin config first: from the stage's draft, or the detected plan, and the feedback it failed with.
  * `packages` are the scan's, which the repository's evidence describes.
@@ -97,10 +97,10 @@ export interface GeneratedPlan { packages?: EvidencePackage[] }
 // The controller reaches an app where the twin publishes it, on the host's loopback.
 const APP_TIMEOUT_MS = 20000;
 /** The HTTP status an app answers on its twin address with; a redirect is an answer. */
-export async function appStatus(url: string) {
+export async function appStatus(url: string, signal?: AbortSignal) {
   const target = new URL(url);
   if (target.hostname === HOST) target.hostname = LOOPBACK;
-  const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(APP_TIMEOUT_MS) });
+  const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.any([AbortSignal.timeout(APP_TIMEOUT_MS), ...(signal ? [signal] : [])]) });
   await response.body?.cancel().catch(() => {});
   return response.status;
 }
@@ -115,7 +115,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
   author?: typeof authorTwinConfig;
   /** What runs the author: OpenCode, or the loop when PERPETUAL_TWIN_AUTHOR=loop. */
   authorHarness?: AuthorHarness;
-  answers?: (url: string) => Promise<number>;
+  answers?: (url: string, signal?: AbortSignal) => Promise<number>;
 } = {}) {
   const twinInputs = (dataDir: string, config: Environment['plan'], refresh: boolean) => inputs({ dataDir, config, services, refresh });
   const secretInputs = (values: Record<string, InputValues>) => Object.entries(values)
@@ -168,10 +168,10 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
 
   // A twin that is up counts as ready once every app answers below 500 on its address and, when a
   // ready service of the config can create test accounts, one exists.
-  async function verify(config: TwinConfig, result: Awaited<ReturnType<EnvironmentTwin['prepare']>>): Promise<Pick<StagedFailure, 'stage' | 'subject' | 'error'> | null> {
+  async function verify(config: TwinConfig, result: Awaited<ReturnType<EnvironmentTwin['prepare']>>, signal?: AbortSignal): Promise<Pick<StagedFailure, 'stage' | 'subject' | 'error'> | null> {
     for (const app of result.apps) {
       let status: number;
-      try { status = await answers(app.url); } catch (error) { return { stage: 'answers', subject: appSubject(config, app.id), error: `apps.${app.id} did not answer at ${app.url}: ${(error as Error).message}` }; }
+      try { status = await answers(app.url, signal); } catch (error) { return { stage: 'answers', subject: appSubject(config, app.id), error: `apps.${app.id} did not answer at ${app.url}: ${(error as Error).message}` }; }
       if (status >= 500) return { stage: 'answers', subject: appSubject(config, app.id), error: `apps.${app.id} answered ${status} at ${app.url}.` };
     }
     const offering = Object.keys(config.services).filter(id => services[id]?.accounts && result.services.some(item => item.id === id && item.status === 'ready'));
@@ -179,9 +179,9 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     return null;
   }
 
-  async function prepareEnvironment({ dataDir, environment, repoPath, directory, onUpdate, cancelled, generate, generated }: {
+  async function prepareEnvironment({ dataDir, environment, repoPath, directory, onUpdate, onDraft, cancelled, signal, generate, generated }: {
     dataDir: string; environment: Environment; repoPath: string; directory: string; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; cancelled: () => boolean;
-    generate?: TwinGeneration; generated?: GeneratedPlan;
+    signal?: AbortSignal; generate?: TwinGeneration; generated?: GeneratedPlan; onDraft?: (draft: GenerationDraft) => Promise<void>;
   }): Promise<PreparedEnvironment> {
     const check = () => { if (cancelled()) throw new Error('Environment creation cancelled.'); };
     // How long each step took, kept as it goes, so a slow or failed twin shows where its time went.
@@ -200,7 +200,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     const prepareTwin = async (config: Environment['plan']) => {
       values = await twinInputs(dataDir, config, true);
       check();
-      return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, onStep: async step => { check(); await onUpdate(next(step)); } });
+      return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, signal, onStep: async step => { check(); await onUpdate(next(step)); } });
     };
     const ready = (result: Awaited<ReturnType<EnvironmentTwin['prepare']>>): PreparedEnvironment => ({ status: 'ready', ...next('Ready'), readyAt: new Date().toISOString(), apps: result.apps,
       services: result.services.map(({ id, fidelity, status, missing = [] }) => ({ id, title: services[id]?.title ?? id, fidelity, status, missing })),
@@ -241,7 +241,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       // A saved config's twin counts as ready as a generated one's does, on every rebuild: each app answers and, where a
       // service can create them, a test account exists. A gate's twin that is not ready gives no verdict.
       check(); await onUpdate(next('Checking apps'));
-      const problem = await verify(checked.config, result);
+      const problem = await verify(checked.config, result, signal);
       if (problem === null) return ready(result);
       const error = new Error(problem.error);
       if (!generated || cancelled()) throw error;
@@ -253,33 +253,35 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     await mkdir(workspaces, { recursive: true, mode: 0o700 });
     // The repository's facts, once, from the snapshot the apps run from; example env files' names come from the checkout.
     // Each attempt's evidence leads with the unwired variables of the twin.json it starts from.
-    let facts: RepositoryFacts | undefined;
+    let facts: RepositoryFacts | undefined, authoredModel = model.model;
     const attempts: AttemptOutcome[] = [];
     try {
       const outcome = await generateTwinConfig({
         draft: generate.draft, feedback: generate.feedback, services, cancelled,
         step: async step => { check(); await onUpdate({ ...owned, ...next(step) }); },
-        async author({ draft, feedback }) {
+        async author({ draft, feedback, attempt }) {
           facts ??= await repositoryFacts({ source, checkout: repoPath, packages: generate.packages, draft: generate.draft, services });
           check();
           const evidence = evidenceText(facts, draft), workspace = await privateWorkspace(workspaces);
-          const job = author({ workspace: workspace.path, source, draft, evidence, facts, feedback, apiKey: model.apiKey, model: model.model, harness: authorHarness.harness, services });
+          authoredModel = attempt > 2 ? model.escalationModel || model.model : model.model;
+          const job = author({ workspace: workspace.path, source, draft, evidence, facts, feedback, apiKey: model.apiKey, model: authoredModel, harness: authorHarness.harness, services });
           // Controller shutdown cancels the agent as it would a twin between steps.
           const watch = setInterval(() => { if (cancelled()) job.cancel(); }, CANCEL_POLL_MS);
           try { return await job.promise; } finally { clearInterval(watch); await workspace.remove(); }
         },
         // The environment keeps the config it is building, so its cleanup sees the same services.
         prepare: async config => { check(); await onUpdate({ plan: config, ...next('Preparing twin') }); return prepareTwin(config); },
-        verify: async (config, result) => { check(); await onUpdate(next('Checking apps')); return verify(config, result); },
+        verify: async (config, result) => { check(); await onUpdate(next('Checking apps')); return verify(config, result, signal); },
         diagnose: (config, error) => diagnose({ dataDir, id: environment.id, config, step: current.step, error }),
         logs: () => failureLogs(dataDir, environment.id),
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
+        checkpoint: onDraft,
         teardown: async config => { await twin.destroy({ dataDir, id: environment.id, inputs: await twinInputs(dataDir, config, false) }); },
         hide: text => redact(redactor([model.apiKey, ...secretInputs(values)])(text)),
       });
       return { ...ready(outcome.result), plan: outcome.config, ...(outcome.logs ? { authoringLogs: outcome.logs } : {}),
-        generated: { generatedAt: new Date().toISOString(), harness: authorHarness.name, model: `openrouter/${model.model}`, attempts: outcome.attempts } };
+        generated: { generatedAt: new Date().toISOString(), harness: authorHarness.name, model: `openrouter/${authoredModel}`, attempts: outcome.attempts } };
     } finally { await rm(workspaces, { recursive: true, force: true }); }
   }
 

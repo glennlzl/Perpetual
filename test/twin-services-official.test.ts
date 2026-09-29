@@ -7,7 +7,7 @@ import supabase, { CLI as SUPABASE_CLI, setToml } from '../src/twin/services/sup
 import stripe, { CLI as STRIPE_CLI, EVENTS, SANDBOX_FAILED } from '../src/twin/services/stripe.ts';
 import { detectTwinConfig } from '../src/twin/detect.ts';
 import type { CommandOutput, DockerCommand, EnvInput, ServiceContext } from '../src/twin/registry.ts';
-import type { Json, JsonObject } from '../src/twin/config.ts';
+import { serviceOptionErrors, type Json, type JsonObject } from '../src/twin/config.ts';
 
 const HOST = 'host.docker.internal';
 const SOCKET = /docker\.sock/;
@@ -297,6 +297,23 @@ test('Stripe runs an inline fixtures document when the repository has none, and 
     [{ fixtures: [{ name: 'x', path: '/v1/x' }], run: 'rm -rf /' }, /unsupported field run/],
   ];
   for (const [fixtures, error] of refused) assert.throws(() => stripe.validate({ fixtures }), error);
+});
+
+for (const [name, events] of [
+  ['an empty subscription', []],
+  ['an empty event name', ['']],
+  ['a wildcard subscription', ['*']],
+  ['snapshot and thin events at one webhook', ['checkout.session.completed', 'v1.billing.meter.no_meter_found']],
+] as const) test(`Stripe configuration rejects ${name} before setup`, () => {
+  const errors = serviceOptionErrors({ services: { stripe: { webhook: 'http://host.docker.internal:43150/hooks/stripe', events: [...events] } } });
+  assert.match(errors.join('\n'), /stripe\.events/);
+});
+
+test('Stripe configuration accepts default events or one webhook payload style', () => {
+  const subscriptions: JsonObject[] = [{}, { events: ['invoice.paid'] }, { events: ['v1.billing.meter.no_meter_found', 'v2.core.account.created'] }];
+  for (const options of subscriptions) {
+    assert.deepEqual(serviceOptionErrors({ services: { stripe: { ...options, webhook: 'http://host.docker.internal:43150/hooks/stripe' } } }), []);
+  }
 });
 
 test('Stripe listen forwards explicit events to the configured webhook', async () => {

@@ -23,6 +23,19 @@
       "sha256": "1e386a6d03360dd84cd858bc69b3ac9452afc212846a197f7a890898439a7f1d"
     },
     {
+      "name": "stripe",
+      "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/stripe.svg",
+      "bytes": 604,
+      "ok": true,
+      "sha256": "b438df715658d163d26defaa075113619ad70553bbcc629a68653ec490e43754",
+      "sourceBytes": 588,
+      "sourceSha256": "130c6d957b8977f5eda2928267b9df531ca038a400a801765d263801bb1bd870",
+      "brandColor": "#635BFF",
+      "colorMetadataUrl": "https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/data/simple-icons.json",
+      "brandSourceUrl": "https://stripe.com/newsroom/information",
+      "transformation": "Added root fill=\"#635BFF\" from the brand hex field in the same pinned Simple Icons revision and a final newline; original path, title and viewBox unchanged."
+    },
+    {
       "name": "supabase",
       "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/supabase.svg",
       "bytes": 319,

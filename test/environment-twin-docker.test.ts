@@ -48,8 +48,8 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
   assert.deepEqual(ready.services, [{ id: 'mailpit', title: 'Mailpit', fidelity: 'actual', status: 'ready', missing: [] }]);
   assert.deepEqual(steps, ['Copying source', 'Preparing twin', 'Setting up Mailpit', 'Loading source', 'Starting twin', 'Checking apps']);
   const url = new URL(ready.apps[0].url);
-  assert.equal(url.hostname, 'host.docker.internal');
-  const reply = await (await fetch(`http://127.0.0.1:${url.port}/journey`)).json();
+  assert.equal(url.hostname, '127.0.0.1');
+  const reply = await (await fetch(new URL('/journey', url))).json();
   assert.match(reply.smtp, /^host\.docker\.internal:\d+$/);
   assert.equal(reply.mail, 200, 'The app reached Mailpit through its twin address.');
   assert.deepEqual(await runtime.environmentHealth({ dataDir, environment }), { status: 'ready' });
@@ -109,7 +109,7 @@ test('apps sharing a workspace lockfile start after one shared install in a Comp
   const file = YAML.parse(await readFile(join(dataDir, 'environments', id, 'twin', 'compose.yaml'), 'utf8'));
   assert.deepEqual(file.services.install.profiles, ['install']);
   for (const app of Object.keys(environment.plan.apps)) assert.equal(file.services[app].command.join(' ').includes('npm ci'), false, app);
-  const replies = await Promise.all(ready.apps.map(async app => (await fetch(`http://127.0.0.1:${new URL(app.url).port}/`)).json()));
+  const replies = await Promise.all(ready.apps.map(async app => (await fetch(app.url)).json()));
   assert.deepEqual(replies, [{ app: 'api', installed: true, linked: true }, { app: 'web', installed: true, linked: true }]);
   assert.deepEqual(await runtime.environmentHealth({ dataDir, environment }), { status: 'ready' });
 

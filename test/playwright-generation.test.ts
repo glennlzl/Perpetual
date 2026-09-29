@@ -1,14 +1,14 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp,rm,mkdir,readFile,readdir,access,realpath} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,readFile,readdir,access,realpath,writeFile} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {homedir,tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import type {AddressInfo} from 'node:net';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
-import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,seedSpec} from '../src/journeys/playwright/generation.ts';
+import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,repairPrompt,seedSpec} from '../src/journeys/playwright/generation.ts';
 import {specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
@@ -62,6 +62,21 @@ test('the default harness is OpenCode running Playwright’s generator agent aga
   assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
 });
 
+test('generation and repair identify the configured seed project for the setup tool',()=>{
+  assert.match(generationPlan(journey,{signIn:true}),/\*\*Seed project:\*\* `seed`/);
+  for(const prompt of [generatePrompt,repairPrompt('No test file was written.','tests/journey.spec.mjs',[])]){
+    assert.match(prompt,/generator_setup_page.*`project: "seed"`.*`seedFile: "seed\.spec\.mjs"`/);
+  }
+});
+
+test('the generation rules keep navigation on the current run’s records',()=>{
+  const rule="An entity or record URL observed during exploration belongs to that exploration, not to a future run. Reopen data created by this run through its visible links, using journey.run only where the rules allow it. Use `await page.reload();` to check persistence on the current record; never hard-code an explored record's URL in `page.goto`.";
+  const rules=generationRules(journey,{signIn:true});
+  assert.ok(rules.includes(rule));
+  assert.ok(generationPlan(journey,{signIn:true}).includes(rule));
+  assert.ok(repairPrompt('Invalid code','tests/journey.spec.mjs',rules).includes(rule));
+});
+
 test('a reviewed journey’s code is generated in a private workspace and saved as a draft',async t=>{
   const f=await setup(t);
   const started=await f.manager.generateSpec(f.context,{caseId:journey.id});
@@ -97,7 +112,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   // The test MCP server runs the seed with the user's HOME and without the model key.
   assert.deepEqual(call.mcpEnvironment,{HOME:userHome,OPENROUTER_API_KEY:''});
   assert.match(call.seed,/test\('seed', async \(\{ page, journey \}\) => \{\n  await journey\.signIn\(\);\n\}\);/);
-  assert.match(call.plan,/^# Rename the display name\n\n\*\*Seed:\*\* `seed\.spec\.mjs`\n\nGoal: Change my display name and see it kept after a reload\.\n/);
+  assert.match(call.plan,/^# Rename the display name\n\n\*\*Seed:\*\* `seed\.spec\.mjs`\n\n\*\*Seed project:\*\* `seed`\n\nGoal: Change my display name and see it kept after a reload\.\n/);
   assert.match(call.plan,/\*\*Steps:\*\*\n1\. Sign in and open Settings \(milestone id: open-settings\)\n2\. Save the display name \(milestone id: save-name\)\n/);
   for(const rule of ["`import { test } from 'perpetual';`",'exactly one `test("Rename the display name", async ({ page, journey }) => { … });`',"`await journey.milestone('<milestone id>', async () => { … });`",'Start the first milestone with `await journey.signIn();`','No variables, `expect` or other assertions',
     'When a step creates or changes data that a later check reads, type a value that includes `journey.run`, such as `` `QA ${journey.run}` ``, never a fixed literal that an earlier run may already have stored.',
@@ -215,6 +230,19 @@ test('a harness that stops reports its redacted output; the key and password app
   assert.ok(secretFree(await f.manager.view(f.context))&&secretFree(await readFile(join(f.dataDir,'browser','state.json'),'utf8')));
 });
 
+test('a harness that exits successfully without a spec keeps redacted diagnostics from both attempts',async t=>{
+  const f=await setup(t,{mode:'missing'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const {generation}=(await settled(f))!;
+  assert.equal(generation?.status,'failed');
+  assert.match(generation?.error??'',/No test file was written/);
+  assert.match(generation?.error??'',/generator_setup_page: The seed could not pause/);
+  assert.match(generation?.error??'',/generator_write_test: No test runner found/);
+  assert.ok(secretFree(await f.manager.view(f.context)));
+  assert.equal((await lines(f.log)).length,2,'Diagnostics do not add another generation attempt.');
+  assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[],'A cleaned worker leaves no credential-bearing workspace.');
+});
+
 test('cancelling or timing out kills the harness’s whole process tree',async t=>{
   const f=await setup(t,{mode:'hang',timeoutMs:60000});
   const pidsOf=async(count:number)=>{for(let i=0;i<200;i++){const found=(await lines(f.log)).filter(line=>line.pids);if(found.length>=count)return found.at(-1)!.pids!;await wait(50);}throw new Error('The harness did not start.');};
@@ -237,7 +265,7 @@ test('cancelling or timing out kills the harness’s whole process tree',async t
   await assert.rejects(short.cancelSpecGeneration(f.context,{caseId:journey.id}),{statusCode:404});
 });
 
-test('only a reviewed case with a model and this stage’s ready twin generates code',async t=>{
+test('code generation requires review and a model, and an owned twin must be ready and belong to the stage',async t=>{
   const f=await setup(t);
   await assert.rejects(f.manager.generateSpec(f.context,{caseId:'missing'}),{statusCode:404});
   await f.manager.saveCases(f.context,[{...journey,needsReview:true,selected:false}]);
@@ -248,8 +276,6 @@ test('only a reviewed case with a model and this stage’s ready twin generates 
     await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),{statusCode:409,message:'Set the application URL to this stage’s ready twin first.'},JSON.stringify(overrides));
   }
   Object.assign(f.environment,{status:'ready',stageId:'beta'});
-  await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:4000/'});
-  await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/ready twin/,'A URL that is no twin.');
   assert.equal((await lines(f.log)).length,0,'No harness ran.');
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-playwright-generation-nomodel-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const bare=await createBrowserManager({...f.options(),dataDir});t.after(()=>bare.close());
@@ -262,6 +288,43 @@ test('only a reviewed case with a model and this stage’s ready twin generates 
   await f.manager.saveCases(f.context,[]);
   for(let i=0;i<200&&f.manager.isActive(f.context);i++)await wait(50);
   assert.equal(f.manager.isActive(f.context),false);
+});
+
+test('code generation for an existing URL accepts a temporary test account without a twin',async t=>{
+  const f=await setup(t);
+  await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:4000/',signInUrl:'http://localhost:4000/login'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id,credentials:{username:'manual@example.test',password:'manual-fixture-password'}});
+  assert.equal((await settled(f))?.draft?.stale,false);
+  assert.deepEqual(f.launches.map(input=>({targetUrl:input.targetUrl,signInUrl:input.signInUrl,credentials:input.credentials})),[
+    {targetUrl:'http://localhost:4000/',signInUrl:'http://localhost:4000/login',credentials:{username:'manual@example.test',password:'manual-fixture-password'}},
+  ]);
+  assert.doesNotMatch(await readFile(join(f.dataDir,'browser','state.json'),'utf8'),/manual@example\.test|manual-fixture-password/);
+});
+
+test('code generation validates explicit account choices and can opt out of a twin account',async t=>{
+  const f=await setup(t);
+  for(const input of [{accountId:'missing'},{accountId:1},{credentials:{username:'u',password:'p'},accountId:'owner'}]) {
+    await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id,...input}),/account/i);
+    assert.equal(f.manager.isActive(f.context),false,'Invalid account input must release its reservation.');
+  }
+  await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
+  assert.equal((await settled(f))?.draft?.stale,false);
+  assert.equal(f.launches.length,0,'No sign-in seed is run when the person chooses no account.');
+});
+
+test('stored journeys without checks refuse code generation and verification before starting work',async t=>{
+  const f=await setup(t);
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8'));
+  const cases=Object.values(stored.cases)[0] as BrowserCase[];
+  cases[0].steps=cases[0].steps.map(({checks,...step})=>step);
+  await writeFile(file,JSON.stringify(stored));
+  const manager=await createBrowserManager(f.options());t.after(()=>manager.close());
+  assert.equal((await manager.view(f.context)).cases[0].needsReview,false,'Historical cases are preserved.');
+  await assert.rejects(manager.generateSpec(f.context,{caseId:journey.id}),/check/i);
+  await assert.rejects(manager.verifySpec(f.context,{caseId:journey.id,hash:'0'.repeat(64)}),/check/i);
+  assert.equal(manager.isActive(f.context),false);
+  assert.equal((await lines(f.log)).length,0);
 });
 
 test('a seed that cannot sign in stops the generation before the generator runs, and saves nothing',async t=>{

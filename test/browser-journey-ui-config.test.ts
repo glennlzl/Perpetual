@@ -75,6 +75,20 @@ test('auth endpoints must name a specific path without a query', () => {
   assert.deepEqual(errors.authEndpoints, Array(3).fill('Use a specific endpoint path.'));
   assert.deepEqual(settings({ authEndpoints:endpoints.slice(3) }).errors.authEndpoints, Array(3).fill('Remove the query.'));
 });
+test('auth endpoint settings accept loopback host aliases and keep parent-path restrictions on their shared origin', () => {
+  for (const host of ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal']) {
+    const endpoint = `http://${host}:55888/auth/v1/token`;
+    const current = settings({ authEndpoints: [endpoint] });
+    assert.equal(current.valid, true, endpoint);
+    assert.deepEqual(current.values.authEndpoints, [endpoint]);
+    const parents = settings({ targetUrl: 'http://127.0.0.1:55887/app/workspace', authEndpoints: [`http://${host}:55887/app`, `http://${host}:55888/app`, `https://${host}:55887/app`] });
+    assert.deepEqual(parents.errors.authEndpoints, ['Use a specific endpoint path.', '', '']);
+  }
+  for (const host of ['other.example', 'host.docker.internal.other.example', '127.0.0.2']) {
+    assert.deepEqual(settings({ authEndpoints: [`http://${host}:55888/auth/v1/token`] }).errors.authEndpoints, ['Use the target host.']);
+  }
+});
+
 test('auth endpoints cannot cover the target page or its parents', () => {
   const errors = settings({ authEndpoints:['http://127.0.0.1:55887/log', 'http://127.0.0.1:55887/login', 'http://127.0.0.1:55888/log'] }).errors.authEndpoints;
   assert.deepEqual(errors, ['Use a specific endpoint path.', '', '']);
@@ -248,12 +262,12 @@ test('unsaved forms offer Cancel and Save; read-only surfaces offer Close', asyn
   assert.doesNotMatch(inspector, /Close sandbox/);
   // One clear close: the view-only inspector has no second "Close" in a footer.
   assert.doesNotMatch(inspector, />Close<\/Button>|SheetFooter/);
-  assert.match(inspector, /\(current \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{current\?\.status\} \/>/);
+  assert.match(inspector, /\(current \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{current\?\.status\} step=\{current\?\.step\} \/>/);
   // The header status reads like the stage card: outline + icon when absent or idle, secondary when ready or working, destructive when failed.
   const status = inspector.slice(inspector.indexOf('export function environmentTone'), inspector.indexOf('export function safeLink'));
   assert.match(status, /variant=\{tone === 'failed' \? 'destructive' : quiet \? 'outline' : 'secondary'\}/);
   assert.match(status, /const quiet = \['idle', 'unconfigured'\]\.includes\(tone\);/);
-  assert.match(status, /<Icon aria-hidden="true"[^\n]*\/>\{environmentStatusLabel\(status\)\}/);
+  assert.match(status, /<Icon aria-hidden="true"[^\n]*\/>\{stopped \? 'Stopped' : environmentStatusLabel\(status\)\}/);
   assert.match(status, /if \(!status\) return 'unconfigured';/);
   assert.match(inspector, /<TabsContent[^>]*focus-visible:ring/);
 });

@@ -77,7 +77,7 @@ test('new ready environments prepare scoped drafts once without turning setup fa
     await browser.prepareEnvironment(context, {...environment, status: 'ready'});
     assert.equal(started, 1);
     assert.equal(browser.summary({...context, key: 'other-source'}).cases.length, 0);
-    const reviewed = {...first.cases[0], name: 'Reviewed workspace journey', selected: true, needsReview: false};
+    const reviewed = {...first.cases[0], name: 'Reviewed workspace journey', assertions: [{type: 'text-visible', value: 'Workspace saved'}], selected: true, needsReview: false};
     await browser.saveCases(context, [reviewed]);
     await browser.saveConfig(context, {targetUrl: 'https://preview.example/product', scope: 'Workspaces', requirements: 'Retain this requirement', maxSteps: 42});
     await browser.prepareEnvironment(context, {id: 'second-environment', stageId: 'beta', status: 'ready', services: []});

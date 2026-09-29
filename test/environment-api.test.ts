@@ -7,17 +7,20 @@ import {tmpdir} from 'node:os';
 import {createHash, randomUUID} from 'node:crypto';
 import {request as httpRequest} from 'node:http';
 import {startServer} from '../src/server.ts';
+import type {ManagedRuntime} from '../src/environments/manager.ts';
+import {createEnvironmentRuntime} from '../src/environments/runtime.ts';
+import {createTwinRuntime} from '../src/twin/runtime.ts';
 
 type Plan = {services: Record<string, Record<string, unknown>>; apps: Record<string, {directory: string; start: string; port: number; env: Record<string, string>}>; fixtures: unknown[]};
 // The fields these routes answer with.
-type Body = {token: string; error?: string; logs?: string; plan: Plan; environments: Record<string, unknown>[]; pipeline: {stages: {id: string; name: string}[]};
+type Body = {token: string; error?: string; logs?: string; environment: Record<string, unknown>; plan: Plan; environments: Record<string, unknown>[]; pipeline: {stages: {id: string; name: string}[]};
   scan: {repo: {path: string}}; capabilities: object; generated?: boolean};
 const plan = (): Plan => ({services: {mailpit: {}}, apps: {web: {directory: '.', start: 'node app.mjs', port: 3000, env: {MODE: 'test'}}}, fixtures: []});
 const legacyPlan = () => ({version: 1, services: [{id: 'web', name: 'Fixture app', directory: '.', installCommand: '', startCommand: 'node app.mjs', port: 3000, readyPath: '/health', env: {MODE: 'test'}}]});
 // Detected from each fixture repository's Express package and its dev script.
 const detected = {services: {}, apps: {service: {directory: '.', build: 'npm install', start: 'npm run dev', port: 3000}}};
 
-async function controller(t: TestContext) {
+async function controller(t: TestContext, runtime?: ManagedRuntime) {
   const directory = await mkdtemp(join(tmpdir(), 'perpetual-environment-api-'));
   const dataDir = join(directory, 'controller-data');
   const repos = [join(directory, 'source-a'), join(directory, 'source-b')];
@@ -38,7 +41,7 @@ async function controller(t: TestContext) {
     return {status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null};
   }
   async function start() {
-    app = await startServer({port: 0, repo: repos[0], dataDir});
+    app = await startServer({port: 0, repo: repos[0], dataDir, ...(runtime ? {environments: {runtime}} : {})});
     assert.ok(![4317, 4318].includes(Number(new URL(app!.url).port)));
     token = (await request('/api/session')).body.token;
   }
@@ -77,7 +80,7 @@ async function controller(t: TestContext) {
 test('environment API enforces same-origin session tokens before every mutation', async t => {
   const f = await controller(t);
   const initial = await f.view(f.beta);
-  for (const operation of ['plan', 'create', 'destroy', 'logs']) {
+  for (const operation of ['plan', 'create', 'cancel', 'destroy', 'logs']) {
     for (const token of [undefined, 'wrong-token']) {
       const denied = await f.request(`/api/environments/${operation}`, {method: 'POST', session: false, headers: token ? {'X-Perpetual-Token': token} : {}, body: {repoPath: f.repos[0], stageId: f.beta}});
       assert.equal(denied.status, 403, operation);
@@ -120,6 +123,79 @@ test('environment plans are isolated by active source and Sandbox stage', async 
   assert.deepEqual((await f.view(f.beta)).body.plan, edited);
 });
 
+test('Stop is scoped and accepted before its owned cleanup completes', async t => {
+  let entered!: () => void, releaseCleanup!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }), cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+  const runtime: ManagedRuntime = {
+    async prepareEnvironment({environment, signal, onUpdate}) {
+      await onUpdate({status: 'preparing', step: 'Setting up dependency', sandboxId: environment.id}); entered();
+      await new Promise<void>((_resolve, reject) => {
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
+      });
+      throw new Error('Unreachable');
+    },
+    async destroySandbox() { await cleanup; }, environmentHealth: async () => ({status: 'ready'}), environmentLogs: async () => 'Preparing dependency\n',
+  };
+  const f = await controller(t, runtime);
+  await f.post('plan', f.beta, {plan: plan()});
+  const created = await f.post('create', f.beta); await started;
+  const id = created.body.environment.id;
+  try {
+    assert.equal((await f.request('/api/environments/cancel', {method: 'POST', session: false, body: {repoPath: f.repos[0], stageId: f.beta, id}})).status, 403);
+    assert.equal((await f.post('cancel', f.gamma, {id})).status, 400);
+    assert.equal((await f.post('cancel', f.beta, {id}, f.repos[1])).status, 409);
+    assert.equal((await f.view(f.beta)).body.environments[0].cancellationRequestedAt, undefined);
+    const stopped = await f.post('cancel', f.beta, {id});
+    assert.equal(stopped.status, 202); assert.ok(stopped.body.environment.cancellationRequestedAt);
+    assert.equal(stopped.body.environment.step, 'Stopping'); assert.equal(stopped.body.environment.cleanedAt, undefined);
+    assert.equal((await f.post('cancel', f.beta, {id})).status, 202, 'A repeated Stop is idempotent.');
+    assert.equal((await f.post('destroy', f.beta, {id})).status, 409, 'The accepted stop still owns its cleanup.');
+  } finally { releaseCleanup(); }
+  let final: Record<string, unknown> = {};
+  for (let i = 0; i < 100; i++) {
+    final = (await f.view(f.beta)).body.environments[0];
+    if (final.status === 'failed') break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(final.step, 'Stopped'); assert.equal(final.status, 'failed'); assert.ok(final.cleanedAt);
+});
+
+test('live and persisted setup diagnostics redact a vendor secret printed before setup returns', {timeout: 10000}, async t => {
+  const secret = 'whsec_fixture_generated_before_setup_return_123';
+  let entered!: () => void, releaseSetup!: () => void, cleaning!: () => void, releaseCleanup!: () => void;
+  const printed = new Promise<void>(resolve => { entered = resolve; }), setup = new Promise<void>(resolve => { releaseSetup = resolve; });
+  const cleanupStarted = new Promise<void>(resolve => { cleaning = resolve; }), cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+  t.after(() => { releaseSetup(); releaseCleanup(); });
+  // Keep the real Stripe service, twin runtime, files, manager and HTTP routes; only Docker's CLI is controlled.
+  const twin = createTwinRuntime({isFree: async () => true, exec: async (_file, args, options) => {
+    if (args.includes('--print-secret')) {
+      options?.onOutput?.(secret.slice(0, 12), 'stdout'); options?.onOutput?.(secret.slice(12) + '\n', 'stdout'); entered();
+      await setup; throw Object.assign(new Error('Listener setup failed.'), {stdout: secret + '\n'});
+    }
+    if (args[0] === 'ps') { cleaning(); await cleanup; }
+    return {stdout: '', stderr: ''};
+  }});
+  const runtime = createEnvironmentRuntime({twin, inputs: async () => ({stripe: {secretKey: 'sk_test_neutral_fixture_key'}})});
+  const f = await controller(t, runtime), configured = plan();
+  configured.services = {stripe: {webhook: '{{apps.web.url}}/webhook'}};
+  await f.post('plan', f.beta, {plan: configured});
+  const created = await f.post('create', f.beta), id = String(created.body.environment.id); await printed;
+  const live = (await f.post('logs', f.beta, {id})).body.logs!;
+  assert.doesNotMatch(live, /whsec_fixture/); assert.match(live, /\[REDACTED\]/);
+  releaseSetup(); await cleanupStarted;
+  const persisted = await readFile(join(f.dataDir, 'environments', id, 'twin', 'setup.log'), 'utf8');
+  assert.doesNotMatch(persisted, /whsec_fixture/); assert.match(persisted, /\[REDACTED\]/);
+  releaseCleanup();
+  let final: Record<string, unknown> = {};
+  for (let i = 0; i < 100; i++) {
+    final = (await f.view(f.beta)).body.environments[0]; if (final.status === 'failed') break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(final.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(final) + (await f.post('logs', f.beta, {id})).body.logs, /whsec_fixture/);
+});
+
 test('saved plans survive controller restart and the environment view exposes only environments and plan', async t => {
   const f = await controller(t);
   const edited = plan(); edited.apps.web.env.MODE = 'restart';
@@ -152,7 +228,7 @@ test('invalid plans and environment requests are rejected before any environment
     assert.equal((await f.post('plan', f.beta, {plan: invalid})).status, 400);
   }
   assert.deepEqual((await f.view(f.beta)).body.plan, initial.plan);
-  for (const operation of ['destroy', 'logs']) assert.equal((await f.post(operation, f.beta, {id: randomUUID()})).status, 400, operation);
+  for (const operation of ['cancel', 'destroy', 'logs']) assert.equal((await f.post(operation, f.beta, {id: randomUUID()})).status, 400, operation);
   // Scripted scenarios, fixture Twins, run evidence and the desktop view no longer exist.
   for (const operation of ['analyze', 'cases', 'run', 'schedule', 'schedule/stop', 'reset', 'snapshot', 'state', 'not-an-operation']) {
     assert.equal((await f.post(operation, f.beta, {id: randomUUID()})).status, 404, operation);

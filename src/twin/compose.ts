@@ -56,6 +56,8 @@ export function addressKey(ref: Exclude<Placeholder, { service: string }>): stri
 export function addressKey(ref: Placeholder): string | null;
 export function addressKey(ref: Placeholder) { return ref.app ? portKey(APPS, ref.app) : ref.addressOf ? portKey(ref.addressOf, ref.port) : null; }
 export const hostUrl = (port: number, path = '') => `http://${HOST}:${port}${path}`;
+/** An allocated address has explicit browser or container reachability; variable names do not choose it. */
+export const addressUrl = (ref: Exclude<Placeholder, { service: string }>, port: number) => `http://${ref.public ? LOOPBACK : HOST}:${port}`;
 /** Shell command run in the app image, with the repository's package manager available. */
 export const appCommand = (...steps: (string | undefined)[]) => [PACKAGE_MANAGERS, ...steps].filter(Boolean).join(' && ');
 const literal = (value: string) => String(value).replaceAll('$', () => '$$');
@@ -150,7 +152,7 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       const where = `apps.${appId}.env.${variable}`;
       if (placeholders(value, where).some(ref => blocked.has(ref.service))) continue;
       // A placeholder is an address, which has a port key, or a service variable.
-      explicit[variable] = resolvePlaceholders(value, ref => ref.service === undefined ? hostUrl(hostPort(addressKey(ref)))
+      explicit[variable] = resolvePlaceholders(value, ref => ref.service === undefined ? addressUrl(ref, hostPort(addressKey(ref)))
         : provided[ref.service]?.[ref.variable] ?? fail(`${where}: ${ref.service} does not provide ${ref.variable}.`), where);
     }
     const port = hostPort(portKey(APPS, appId));
@@ -164,7 +166,8 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       healthcheck: { test: ['CMD', 'node', '-e', `fetch('http://${LOOPBACK}:${app.port}/').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))`], ...APP_HEALTH },
       ...(Object.keys(dependsOn).length ? { depends_on: { ...dependsOn } } : {}),
     };
-    apps.push({ id: appId, url: hostUrl(port), directory: app.directory });
+    // App links are opened on the host; each env placeholder explicitly chooses browser or container reachability.
+    apps.push({ id: appId, url: `http://${LOOPBACK}:${port}`, directory: app.directory });
   }
 
   // The workspace volume is the twin's own; the cache is external, so tearing a twin down (down --volumes) keeps it.

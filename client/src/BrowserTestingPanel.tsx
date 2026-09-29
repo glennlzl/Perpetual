@@ -17,7 +17,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
 import { useTestStage } from '@/lib/use-test-workspace';
-import { verificationAttempt, watchedRun, browserCaseRun, browserCaseState, browserConcurrencyLabel, browserReadiness, browserRunLabel, browserRunTitle, browserUnavailable, codeLines, generateRequestDialog, journeyCode, journeyRequest, runReady, runnableCode, testToolbar, type BrowserCase, type BrowserRun, type ReadinessItem } from '@/lib/browser-test-ui';
+import { verificationAttempt, watchedRun, browserCaseRun, browserCaseState, browserConcurrencyLabel, browserReadiness, browserRunLabel, browserRunTitle, browserUnavailable, codeLines, generateRequestDialog, journeyCode, journeyNeedsChecks, journeyRequest, runReady, runnableCode, testToolbar, type BrowserCase, type BrowserRun, type ReadinessItem } from '@/lib/browser-test-ui';
 import { useReturnFocus } from '@/lib/journey-focus';
 import { MAX_CASES, branchMismatchNote, defaultReplaceIds, generateError, journeyTimeoutMinutes, sameUrl, validUrl, validateTestSettings, type TargetSuggestion } from '@/lib/journey-config';
 import { buildJourneySteps, reviewedStepError, stepRow } from '@/lib/journey-steps';
@@ -39,12 +39,13 @@ type AccountFields = AccountRequest | Record<string, never>;
 /** A run the viewer shows: a listed run, or a discovery that has not started yet. */
 type Watching = Omit<Partial<BrowserRun>, 'id' | 'mode'> & { id?: string | null; mode: BrowserRun['mode']; focusCaseId?: string; error?: string; live?: boolean };
 type RunRequest = { caseIds: string[] | null; title: string };
+type CodeRequest = { action: 'generate' | 'verify'; caseId: string; hash?: string };
 type CodeReview = { draft?: { code: string; hash: string } | null; approved?: { code: string } | null };
 const ACTIVE = new Set(['queued', 'running']);
 const CHECKS: Record<string, string> = { 'text-visible': 'Text visible', 'text-absent': 'Text absent', 'url-contains': 'URL contains' };
 const DEFINITION = ['name', 'goal', 'preconditions', 'expectedOutcomes', 'assertions', 'steps'] as const;
 const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean);
-const reviewed = (item: BrowserCase) => !item.needsReview && Boolean(item.name?.trim()) && Boolean(item.goal?.trim()) && item.expectedOutcomes?.some(value => value.trim());
+const reviewed = (item: BrowserCase) => !item.needsReview && !journeyNeedsChecks(item) && Boolean(item.name?.trim()) && Boolean(item.goal?.trim()) && item.expectedOutcomes?.some(value => value.trim());
 const dateLabel = (value: string | undefined) => { const date = new Date(value ?? NaN); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(); };
 let rowKeys = 0;
 const rowsOf = (values: string[]): Row[] => values.map(value => ({ key: `entry-${++rowKeys}`, value }));
@@ -249,7 +250,7 @@ function GenerateTestsDialog({ config, cases, analysis, accounts, onGenerate, on
   </DialogContent></Dialog>;
 }
 
-function RunTestsDialog({ title, count, accounts, ready = true, disabled, notice = '', onRun, onClose, focusFallback }: { title: string; count: number; accounts: TestAccount[]; ready?: boolean; disabled: boolean; notice?: string; onRun: (account: AccountRequest | undefined, concurrency: number) => void; onClose: () => void; focusFallback: FocusFallback }) {
+function RunTestsDialog({ title, count, accounts, action = 'run', ready = true, disabled, notice = '', onRun, onClose, focusFallback }: { title: string; count: number; accounts: TestAccount[]; action?: 'run' | 'generate' | 'verify'; ready?: boolean; disabled: boolean; notice?: string; onRun: (account: AccountRequest | undefined, concurrency: number) => void; onClose: () => void; focusFallback: FocusFallback }) {
   const returnFocus = useReturnFocus(focusFallback);
   const [concurrency, setConcurrency] = useState('2');
   const blocked = disabled || !ready;
@@ -274,7 +275,7 @@ function RunTestsDialog({ title, count, accounts, ready = true, disabled, notice
         <TestAccountFields id="run" accounts={accounts} account={account} onChange={next => { setAccount(next); setError(''); }} />
       </fieldset>
       <ErrorText>{error || notice}</ErrorText>
-      <DialogFooter><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button type="submit" disabled={blocked}><Play />Run</Button></DialogFooter>
+      <DialogFooter><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button type="submit" disabled={blocked}>{action === 'generate' ? <Code /> : action === 'verify' ? <ListChecks /> : <Play />}{action === 'generate' ? 'Generate' : action === 'verify' ? 'Verify' : 'Run'}</Button></DialogFooter>
     </form>
   </DialogContent></Dialog>;
 }
@@ -306,6 +307,7 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
     const legacyUnchanged = !item.needsReview && !item.steps?.length && DEFINITION.every(key => JSON.stringify(next[key] ?? []) === JSON.stringify(item[key] ?? [])) && next.isolation === (item.isolation || 'shared');
     const countError = reviewedStepError(steps, { legacyUnchanged });
     if (countError) return setError(countError);
+    if (journeyNeedsChecks(next)) return setError('Add at least one milestone check or final assertion.');
     setSaving(true);
     try {
       await onSave(next);
@@ -324,7 +326,7 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
           <div className="flex items-center justify-between gap-3"><Label htmlFor="browser-case-isolation">Independent test data</Label><Switch id="browser-case-isolation" checked={draft.isolation === 'isolated'} onCheckedChange={checked => change('isolation', checked ? 'isolated' : 'shared')} /></div>
           <Field id="browser-case-preconditions" label="Preconditions"><Textarea id="browser-case-preconditions" rows={3} maxLength={8000} value={draft.preconditions} onChange={event => change('preconditions', event.target.value)} /></Field>
           <Field id="browser-case-outcomes" label="Expected outcomes"><Textarea id="browser-case-outcomes" required rows={4} maxLength={8000} value={draft.expectedOutcomes} onChange={event => change('expectedOutcomes', event.target.value)} /></Field>
-          <Collapsible>
+          <Collapsible defaultOpen={journeyNeedsChecks(item)}>
             <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="w-full justify-between px-0 [&[data-state=open]>svg]:rotate-180">Final checks<ChevronDown /></Button></CollapsibleTrigger>
             <CollapsibleContent className="space-y-3 pt-2">
               {draft.assertions.map((check, index) => <div key={index} className="flex flex-wrap items-center gap-2">
@@ -432,6 +434,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const [creatingCase, setCreatingCase] = useState(false);
   const [configDialog, setConfigDialog] = useState<'settings' | 'generate' | null>(null);
   const [runDialog, setRunDialog] = useState<RunRequest | null>(null);
+  const [codeDialog, setCodeDialog] = useState<CodeRequest | null>(null);
   const [focusedCase, setFocusedCase] = useState<{ id: string; request: string } | null>(null);
   const [watching, setWatching] = useState<Watching | null>(() => initialRunId ? { id: initialRunId, mode: 'run' } : null);
   const mounted = useRef(true);
@@ -448,14 +451,14 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const focusSettings = () => editTarget.current || sheet();
   const refresh = useCallback(() => stage.refresh('browser'), [stage]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useEffect(() => { setRunDialog(null); }, [repoPath, stageId, config.targetUrl, visible, view]);
+  useEffect(() => { setRunDialog(null); setCodeDialog(null); }, [repoPath, stageId, config.targetUrl, visible, view]);
   useEffect(() => { setApprovingCase(null); }, [repoPath, stageId]);
   useEffect(() => { onBusyChange?.(Boolean(pending)); return () => onBusyChange?.(false); }, [pending, onBusyChange]);
   const activeRun = data.runs.find(run => ACTIVE.has(run.status));
   const cases = data.cases;
-  const visibleCases = cases.filter(item => caseFilter === 'all' || caseFilter === 'review' && item.needsReview || caseFilter === 'selected' && item.selected || caseFilter === 'failed' && browserCaseState(item, data.runs).status === 'failed');
+  const visibleCases = cases.filter(item => caseFilter === 'all' || caseFilter === 'review' && (item.needsReview || journeyNeedsChecks(item)) || caseFilter === 'selected' && item.selected || caseFilter === 'failed' && browserCaseState(item, data.runs).status === 'failed');
   const selected = cases.filter(item => item.selected && reviewed(item));
-  const reviewCount = cases.filter(item => item.needsReview).length;
+  const reviewCount = cases.filter(item => item.needsReview || journeyNeedsChecks(item)).length;
   const capabilities = data.capabilities;
   const accounts = data.accounts || [];
   const openRouterConfigured = Boolean(capabilities?.modelConfigured && capabilities.provider === 'openrouter');
@@ -473,6 +476,8 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const emphasis = (action: string) => toolbar.primary === action ? 'default' : 'outline';
   const runCases = runDialog?.caseIds ? cases.filter(item => runDialog.caseIds!.includes(item.id) && reviewed(item)) : selected;
   const runBlocked = runDialog?.caseIds ? oneOffSelection(cases, runCases.map(item => item.id)).error || '' : '';
+  const codeItem = codeDialog && cases.find(item => item.id === codeDialog.caseId);
+  const codeBlocked = !codeItem || !reviewed(codeItem) ? 'Review the journey and add checks first.' : !validTarget ? 'Set a target URL.' : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : codeDialog?.action === 'generate' && !openRouterConfigured ? 'Add an OpenRouter API Key in Settings.' : '';
   const concurrencyLabel = browserConcurrencyLabel(activeRun);
   useEffect(() => { if (!loading) pruneCaseDrafts(repoPath, stageId, cases); }, [loading, repoPath, stageId, cases]);
   useEffect(() => {
@@ -610,12 +615,12 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
           const run = browserCaseRun(item, data.runs);
           const code = journeyCode(data.specs?.[item.id]);
           return <JourneyCard key={item.id} item={item} run={run} status={status.status} label={status.label} repoPath={repoPath} stageId={stageId} focused={focusedCase?.id === item.id}
-            selection={<Checkbox className="mt-0.5" checked={Boolean(item.selected)} disabled={disabled || !reviewed(item) || (!item.selected && selected.length >= 30)} aria-label={`Select ${item.name}`} onCheckedChange={checked => updateCases(cases.map(current => current.id === item.id ? { ...current, selected: checked === true } : current))} />}
+            selection={<Checkbox className="mt-0.5" checked={Boolean(item.selected)} disabled={disabled || (!item.selected && (!reviewed(item) || selected.length >= 30))} aria-label={`Select ${item.name}`} onCheckedChange={checked => updateCases(cases.map(current => current.id === item.id ? { ...current, selected: checked === true } : current))} />}
             spec={data.specs?.[item.id]}
-            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled} onSelect={() => setEditingCase(item)}>{item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
-              {reviewed(item) && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
-              {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => codeAction('generate-code', 'specs/generate', { caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
-                onVerify={() => codeAction('verify-code', 'specs/verify', { caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
+            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled} onSelect={() => setEditingCase(item)}>{journeyNeedsChecks(item) ? 'Add checks' : item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
+              {!item.needsReview && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
+              {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => setCodeDialog({ action: 'generate', caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
+                onVerify={() => setCodeDialog({ action: 'verify', caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
                 onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
               <DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
@@ -638,12 +643,18 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
     }} />}
     {editingCase && <BusinessCaseEditor key={editingCase.id} draftKey={caseDraftKey(repoPath, stageId, editingCase.id)} item={editingCase} focusFallback={focusCase(editingCase.id)} onClose={() => setEditingCase(null)} onSave={saveCase} />}
     {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runBlocked} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
+    {codeDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${codeDialog.caseId}:${codeDialog.action}`} title={codeDialog.action === 'generate' ? 'Generate code' : 'Verify code'} action={codeDialog.action} count={1} accounts={accounts} disabled={disabled || Boolean(codeBlocked)} notice={codeBlocked} focusFallback={focusCase(codeDialog.caseId)} onClose={() => setCodeDialog(null)} onRun={account => {
+      if (disabled || codeBlocked) return;
+      const { action, caseId, hash } = codeDialog;
+      setCodeDialog(null);
+      void perform(`${action}-code`, async tx => { if (dirty) await persistConfig(tx); return tx.post(`specs/${action}`, { caseId, ...(hash ? { hash } : {}), ...account }); });
+    }} />}
     {approvingCase && <ApproveCodeDialog key={approvingCase.id} repoPath={repoPath} stageId={stageId} item={approvingCase} focusFallback={focusCase(approvingCase.id)} onClose={() => setApprovingCase(null)} onApprove={async hash => {
       await stage.perform('browser', 'approve-code', tx => tx.post('specs/approve', { caseId: approvingCase.id, hash }));
       if (mounted.current && stage.isCurrent()) setApprovingCase(null);
     }} />}
     {creatingCase && <NewTestDialog draftKey={newTestDraftKey(repoPath, stageId)} focusFallback={sheet} onClose={() => setCreatingCase(false)} onCreate={createCase} onTranscribe={transcribeDescription} onAppSettings={onAppSettings} modelChecked={Boolean(capabilities)} modelConfigured={openRouterConfigured} voiceConfigured={openRouterConfigured} />}
-    {watching && <BrowserAgentViewer key={watching.id || `pending-${watching.mode}`} repoPath={repoPath} stageId={stageId} runId={watching.id} mode={watching.mode} cases={cases} focusCaseId={watching.focusCaseId} startingError={watching.error} focusFallback={watching.focusCaseId ? focusCase(watching.focusCaseId) : sheet} onClose={() => setWatching(null)} onFinished={finished} />}
+    {watching && <BrowserAgentViewer key={watching.id || `pending-${watching.mode}`} repoPath={repoPath} stageId={stageId} runId={watching.id} mode={watching.mode} cases={cases} focusCaseId={watching.focusCaseId} startingError={watching.error} focusFallback={watching.focusCaseId ? focusCase(watching.focusCaseId) : sheet} onClose={() => setWatching(null)} onFinished={finished} onTestSettings={() => { setWatching(null); setConfigDialog('settings'); }} />}
     {configDialog === 'settings' && <TestSettingsDialog config={config} suggestions={targetSuggestions} focusFallback={focusSettings} onClose={() => setConfigDialog(null)} onSave={async nextConfig => {
       await stage.perform('browser', 'config', tx => persistConfig(tx, nextConfig));
       if (mounted.current && stage.isCurrent()) setConfigDialog(null);

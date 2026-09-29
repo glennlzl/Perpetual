@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
+import { createBrowserModelSettings } from '../src/browser/model.ts';
 import { detectEnvironmentConfig } from '../src/environments/plans.ts';
 import { AUTHOR_HARNESSES, AUTHOR_PERMISSION, LOOP, OUT_OF_TIME, TIME_LIMIT_MS, UNWRITTEN, authorTwinConfig, authoringPrompt, opencodeHarness, twinInstructions } from '../src/twin/authoring.ts';
 import { openrouterRefusal } from '../src/agents/opencode.ts';
@@ -64,7 +65,7 @@ const attempt = (number: number) => `Attempt ${number} of 4`;
  * `loop` runs the author loop's harness with a scripted model instead of the fake OpenCode: its steps are the model's,
  * and each call the model receives is logged to `loopLog`.
  */
-async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[] } = {}) {
+async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop, settings }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[]; settings?: { escalationModel?: string } } = {}) {
   const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-generation-')));
   const repo = join(dataDir, 'repo'), home = join(dataDir, 'home'), scriptFile = join(dataDir, 'script.json'), log = join(dataDir, 'author.jsonl');
   const loopScript = join(dataDir, 'loop.json'), loopLog = join(dataDir, 'loop.jsonl');
@@ -103,7 +104,8 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     authorHarness: loop ? { name: LOOP, harness: scriptedLoopHarness(loopScript, loopLog) } : AUTHOR_HARNESSES.opencode,
     author: options => authorTwinConfig({ ...options, env: { PATH: process.env.PATH, HOME: home }, timeoutMs, cleanupGraceMs: 1000,
       ...(loop ? {} : { harness: ({ model: requested, prompt }: { model: string; prompt: string }) => ({ command: process.execPath, args: [fake, scriptFile, log, prompt, requested] }) }) }) });
-  const start = () => createEnvironmentManager({ dataDir, runtime, authoringModel: async () => model ? { apiKey: KEY, model: MODEL } : null });
+  if (settings) await (await createBrowserModelSettings({ dataDir, env: {} })).saveOpenRouter({ apiKey: KEY, model: MODEL, ...settings });
+  const start = () => createEnvironmentManager({ dataDir, runtime, ...(settings ? {} : { authoringModel: async () => model ? { apiKey: KEY, model: MODEL } : null }) });
   const managers: EnvironmentManager[] = [await start()];
   t.after(async () => { for (const manager of managers) await manager.close(); server.closeAllConnections(); server.close(); await rm(dataDir, { recursive: true, force: true }); });
   const context = { key: 'local:fixture', stageId: 'beta', scan: { repo: { path: repo, sha: 'a'.repeat(40), branch: 'main' }, scannedAt: '1', services: [{ id: 'web', path: '.', framework: 'express' }] } };
@@ -206,6 +208,42 @@ test('a config that builds a ready twin on its first attempt becomes the stage p
   // A restart keeps the generated plan and its provenance.
   await f.restart();
   assert.deepEqual(provenance((await f.manager.view(f.context)).plan), generated);
+});
+
+test('twin authoring uses the saved escalation model from its third attempt and records the model that succeeds', async t => {
+  const escalationModel = 'openai/fixture-escalation';
+  const f = await fixture(t, { settings: { escalationModel }, script: [{ raw: '{' }, { write: { services: {} } }, { write: good }] });
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  const calls = await lines(f.log);
+  assert.deepEqual(calls.map(call => call.model), [`openrouter/${MODEL}`, `openrouter/${MODEL}`, `openrouter/${escalationModel}`]);
+  assert.match(calls[2].feedback!, /^# Attempt 2 of 4: twin\.json is not a valid twin config/);
+  const generated = provenance((await f.manager.view(f.context)).plan);
+  assert.equal(generated?.model, `openrouter/${escalationModel}`);
+  assert.equal(generated?.attempts, 3);
+  await f.restart();
+  assert.deepEqual(provenance((await f.manager.view(f.context)).plan), generated);
+  assert.equal((await lines(f.log)).length, 3, 'Restarting does not start paid authoring.');
+});
+
+test('twin authoring keeps the primary model when no escalation model is saved', async t => {
+  const f = await fixture(t, { settings: {}, script: [{ raw: '{' }, { raw: '{' }, { raw: '{' }, { write: good }] });
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  assert.deepEqual((await lines(f.log)).map(call => call.model), Array(4).fill(`openrouter/${MODEL}`));
+  const generated = provenance((await f.manager.view(f.context)).plan);
+  assert.equal(generated?.model, `openrouter/${MODEL}`);
+  assert.equal(generated?.attempts, 4);
+});
+
+test('the escalation model shares the four-attempt limit', async t => {
+  const escalationModel = 'openai/fixture-escalation';
+  const f = await fixture(t, { settings: { escalationModel }, script: [{ raw: '{' }, { raw: '{' }, { raw: '{' }, { raw: '{' }, { write: good }] });
+  const failed = await f.create();
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error ?? '', /^Writing the twin config failed after 4 attempts:/);
+  assert.deepEqual((await lines(f.log)).map(call => call.model), [`openrouter/${MODEL}`, `openrouter/${MODEL}`, `openrouter/${escalationModel}`, `openrouter/${escalationModel}`]);
+  assert.equal(f.calls.prepare.length, 0);
 });
 
 test('an invalid config is the next attempt’s feedback, which starts from what was written', async t => {
@@ -591,6 +629,34 @@ test('four attempts that run out of time fail with a short error and keep the au
   for (const text of [JSON.stringify(state), logs]) assert.ok(!text.includes(KEY));
 });
 
+test('a completed attempt is saved before the next author starts and survives Stop and restart without becoming a plan', async t => {
+  const f = await fixture(t, { script: [{ write: good }, { raw: '{ "unfinished":', stall: true }, { write: good }] });
+  f.twinState.fail = prepared => prepared === 1 ? 'Web: container web exited (1)' : null;
+  const { environment } = await f.manager.create(f.context, { generate: true });
+  let calls: AuthorCall[] = [];
+  for (let tries = 0; calls.length < 2 && tries < 200; tries += 1) { calls = await lines(f.log); if (calls.length < 2) await wait(50); }
+  assert.equal(calls.length, 2, 'The second author is still running.');
+  const state = await f.saved(), scope = Object.keys(state.detected)[0], checkpoint = state.drafts[scope];
+  assert.ok(checkpoint, 'The completed first attempt is already durable.');
+  assert.deepEqual(JSON.parse(checkpoint.text), good);
+  assert.match(checkpoint.feedback, /^# Attempt 1 of 4: preparing the twin failed at "Starting twin"/);
+  assert.deepEqual((await f.manager.view(f.context)).plan, detected, 'A failed build does not promote its config to a plan.');
+
+  await f.manager.cancel(f.context, environment.id);
+  const stopped = await f.manager.awaitIdle(environment.id);
+  assert.equal(stopped.step, 'Stopped');
+  assert.deepEqual((await f.saved()).drafts[scope], checkpoint, 'An unfinished edit cannot replace the completed attempt.');
+  assert.equal(await exists(join(f.dataDir, 'environments', environment.id, 'authoring')), false);
+  await f.restart();
+  assert.equal((await lines(f.log)).length, 2, 'Restart does not start paid authoring.');
+  assert.deepEqual((await f.saved()).drafts[scope], checkpoint);
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  const resumed = (await lines(f.log))[2];
+  assert.deepEqual([resumed.draft, resumed.feedback], [checkpoint.text, checkpoint.feedback]);
+  assert.deepEqual((await f.saved()).drafts, {}, 'A successful creation clears the checkpoint.');
+});
+
 test('controller shutdown cancels generation and kills the author’s process tree', async t => {
   const f = await fixture(t, { script: [{ hang: true }] });
   const { environment } = await f.manager.create(f.context, { generate: true });
@@ -605,6 +671,15 @@ test('controller shutdown cancels generation and kills the author’s process tr
   assert.deepEqual(state.drafts, {});
   assert.equal(Object.keys(state.detected).length, 1, 'The plan stays detected.');
   assert.equal(await exists(join(f.dataDir, 'environments', environment.id)), false);
+});
+
+test('a twin command with unconfirmed process cleanup ends generation without another paid attempt', async t => {
+  const f = await fixture(t, { script: [{ write: good }] });
+  f.twinState.fail = () => { throw Object.assign(new Error('Setup command cleanup could not be confirmed.'), { cleanupIncomplete: true }); };
+  const final = await f.create();
+  assert.equal(final.status, 'cleanup_failed');
+  assert.equal((await lines(f.log)).length, 1, 'No new author runs while owned work may remain.');
+  assert.equal(final.cleanedAt, undefined);
 });
 
 test('an author whose processes could not be confirmed stopped leaves its environment’s cleanup unfinished until it is deleted', async t => {

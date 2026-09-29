@@ -1,19 +1,19 @@
-import { execFile } from 'node:child_process';
 import type { ExecFileException } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, posix, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import YAML from 'yaml';
-import { APPS, ID, INSTALL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, setupOrder, validateTwinConfig } from './config.ts';
-import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, SOURCE, WORKSPACE, WORKSPACE_VOLUME, addressKey, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
+import { APPS, ID, INSTALL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
+import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, SOURCE, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
 import { missingInputs } from './inputs.ts';
 import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
 import type { HostPorts, ResolvedService } from './compose.ts';
 import type { CommandOutput, InputValues, ServiceContext, ServiceOutputs, TwinServices } from './registry.ts';
-import { hide } from '../redaction.ts';
+import { hide, redact as redactSecrets } from '../redaction.ts';
+import { superviseWorker } from '../browser/runtime.ts';
 
 // A twin is <dataDir>/environments/<id>/twin/{compose.yaml,.env,twin.json}: service setup in
 // placeholder order; once services are up, their test accounts, the shared install and fixtures;
@@ -39,11 +39,32 @@ const REDACTED = '[redacted]';
 const ERROR_OUTPUT = 30;
 const tail = (text: string) => text.trim().split('\n').slice(-ERROR_OUTPUT).join('\n');
 
-const execFileAsync = promisify(execFile);
 /** exec(file, args, { env, cwd }) -> { stdout, stderr }; rejects on a non-zero exit. */
-export type Exec = (file: string, args: string[], options?: { env?: Record<string, string>; cwd?: string }) => Promise<CommandOutput>;
+export type ExecOptions = { env?: Record<string, string>; cwd?: string; signal?: AbortSignal; timeoutMs?: number; onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void };
+export type Exec = (file: string, args: string[], options?: ExecOptions) => Promise<CommandOutput>;
 export type IsFree = (port: number) => Promise<boolean>;
-export const execCommand: Exec = (file, args, { env, cwd } = {}) => execFileAsync(file, args, { cwd, env: { ...process.env, ...env }, maxBuffer: 64 * 1024 * 1024 });
+const COMMAND_TIMEOUT_MS = 15 * 60_000, CLEANUP_TIMEOUT_MS = 120_000, READ_TIMEOUT_MS = 20_000, LOG_LIMIT = 32_000;
+/** Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown. */
+export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutMs = COMMAND_TIMEOUT_MS, onOutput } = {}) => {
+  signal?.throwIfAborted();
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('A twin command needs a positive time limit.');
+  const output = { stdout: '', stderr: '' };
+  const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000,
+    unavailable: `${file} could not start.`, onOutput(chunk, stream) {
+      output[stream] += chunk;
+      if (Buffer.byteLength(output.stdout) + Buffer.byteLength(output.stderr) > 64 * 1024 * 1024) throw new Error('Twin command output exceeded its size limit.');
+      onOutput?.(chunk, stream);
+    } });
+  const stop = () => job.cancel();
+  signal?.addEventListener('abort', stop, { once: true });
+  if (signal?.aborted) stop();
+  try { await job.promise; return output; }
+  catch (error) {
+    const detail = error as Error & { timedOut?: true; cleanupIncomplete?: true };
+    const message = signal?.aborted ? String(signal.reason?.message || 'Twin command stopped.') : detail.timedOut ? `Twin command exceeded its ${timeoutMs / 1000}-second limit.` : detail.message.replaceAll('Browser runtime', 'Twin command').replaceAll('Browser operation', 'Twin command');
+    throw Object.assign(new Error(message), output, ...(detail.timedOut ? [{ timedOut: true }] : []), ...(detail.cleanupIncomplete ? [{ cleanupIncomplete: true }] : []));
+  } finally { signal?.removeEventListener('abort', stop); }
+};
 
 const listens = (port: number, host: string) => new Promise<boolean>(done => {
   const server = createServer();
@@ -158,18 +179,37 @@ const overall = (containers: ContainerStatus[]): TwinHealth['status'] => !contai
 export function createTwinRuntime({ exec = execCommand, services = registry, isFree = portFree, portBase = PORT_BASE, appImage = APP_IMAGE, owner }: {
   exec?: Exec; services?: TwinServices; isFree?: IsFree; portBase?: number; appImage?: string; owner?: string;
 } = {}) {
+  const operations = new AsyncLocalStorage<{ signal?: AbortSignal; timeoutMs?: number; output?: (text: string) => void }>();
+  const setupLogs = new Map<string, string>();
   const locate = (dataDir: string, id: unknown) => {
     if (typeof id !== 'string' || !TWIN_ID.test(id)) fail('A twin id must use lowercase letters, digits, hyphens or underscores.');
     const dir = join(resolve(dataDir), ENVIRONMENTS, id, TWIN);
     return { id, dir, root: resolve(dataDir), shared: join(resolve(dataDir), SHARED), project: `perpetual-${id}`, owner: owner ?? createHash('sha256').update(resolve(dataDir)).digest('hex').slice(0, 16),
-      state: join(dir, 'twin.json'), compose: join(dir, 'compose.yaml'), env: join(dir, '.env') };
+      state: join(dir, 'twin.json'), compose: join(dir, 'compose.yaml'), env: join(dir, '.env'), log: join(dir, 'setup.log') };
   };
   type Twin = ReturnType<typeof locate>;
   const composeArgs = (twin: Twin, ...args: string[]) => ['compose', '--project-name', twin.project, '--project-directory', twin.dir, '--file', twin.compose, '--env-file', twin.env, ...args];
 
   async function host(file: string, args: string[], { env, cwd, redact = String }: { env?: Record<string, string>; cwd?: string; redact?: Redact } = {}) {
-    try { return await exec(file, args, { ...(env && { env }), ...(cwd && { cwd }) }); }
-    catch (error) { throw new Error(redact(errorText(error))); }
+    const operation = operations.getStore(), lines = { stdout: '', stderr: '' };
+    operation?.signal?.throwIfAborted();
+    const output = operation?.output;
+    try { return await exec(file, args, { ...(env && { env }), ...(cwd && { cwd }), signal: operation?.signal, timeoutMs: operation?.timeoutMs,
+      ...(output ? { onOutput(chunk: string, stream: 'stdout' | 'stderr') {
+        lines[stream] += chunk;
+        const end = lines[stream].lastIndexOf('\n');
+        if (end >= 0) { output(redactSecrets(redact(lines[stream].slice(0, end + 1)))); lines[stream] = lines[stream].slice(end + 1); }
+        // A CLI without newlines cannot retain unlimited memory or reveal partial secrets.
+        if (lines[stream].length > LOG_LIMIT) lines[stream] = '';
+      } } : {}) }); }
+    catch (error) {
+      const failed = error as Error & { cleanupIncomplete?: true; timedOut?: true; code?: unknown; stdout?: string; stderr?: string };
+      const message = failed.timedOut || operation?.signal?.aborted ? [failed.message, errorText(error)].filter((text, index, all) => all.indexOf(text) === index).join('\n') : errorText(error);
+      throw Object.assign(new Error(redactSecrets(redact(message))), {
+        ...(failed.cleanupIncomplete ? { cleanupIncomplete: true } : {}), ...(failed.timedOut ? { timedOut: true } : {}),
+        ...(failed.code !== undefined ? { code: failed.code } : {}), stdout: redactSecrets(redact(failed.stdout ?? '')), stderr: redactSecrets(redact(failed.stderr ?? '')),
+      });
+    } finally { if (output) for (const line of Object.values(lines)) if (line) output(`${redactSecrets(redact(line))}\n`); }
   }
   const docker = (args: string[], options?: { env?: Record<string, string>; redact?: Redact }) => host('docker', args, options);
 
@@ -194,6 +234,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       run: (image, args, { env } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`), volumes: [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.
       exec: (file, args, { cwd = dir } = {}) => host(file, args, { cwd, redact }),
+      fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([AbortSignal.timeout(READ_TIMEOUT_MS), ...(operations.getStore()?.signal ? [operations.getStore()!.signal!] : []), ...(init?.signal ? [init.signal] : [])]) }),
     };
   }
 
@@ -206,10 +247,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     : dockerRun(twin, image, ['sh', '-c', appCommand(fixture.command)], { env: { ...PACKAGE_CACHE_ENV, ...env }, volumes: [workspace ? `${twin.project}_${WORKSPACE_VOLUME}:${WORKSPACE}` : `${source}:${WORKSPACE}`, PACKAGE_CACHE_MOUNT], workdir: WORKSPACE, redact });
 
   /** inputs: { <service id>: { <input name>: value } }, e.g. from createTwinInputs().values(). */
-  async function prepare({ dataDir, id, config: input, source, inputs = {}, onStep = () => {} }: {
-    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; onStep?: (step: string) => unknown;
+  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, onStep = () => {} }: {
+    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; onStep?: (step: string) => unknown; signal?: AbortSignal;
   }) {
     const config = validateTwinConfig(input, { services });
+    const invalid = serviceOptionErrors(config, { services });
+    if (invalid.length) fail(invalid.join('\n'));
     const twin = locate(dataDir, id);
     if (typeof source !== 'string' || !await exists(source)) fail('A source snapshot directory is required.');
     source = resolve(source);
@@ -243,7 +286,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await onStep(`Setting up ${definition.title}`);
       const where = `services.${serviceId}`;
       // An address has a port key; a service a placeholder names was set up first and, as this one is not blocked, is ready.
-      const options = resolvePlaceholders(declared, ref => ref.service === undefined ? hostUrl(state.ports[addressKey(ref)])
+      const options = resolvePlaceholders(declared, ref => ref.service === undefined ? addressUrl(ref, state.ports[addressKey(ref)])
         : (resolved[ref.service] as Ready).env[ref.variable] ?? fail(`${where}: ${ref.service} does not provide ${ref.variable}.`), where);
       const ctx = context(twin, { service: serviceId, options, inputs: values, outputs: {}, ports: state.ports, take: key => { own.add(key); return take(key); }, source, redact });
       const record: ServiceRecord = { id: serviceId, options, outputs: {} };
@@ -258,7 +301,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         for (const container of containers) for (const name of Object.keys(container.ports ?? {})) ctx.port(name);
         [env, ...containers.map(container => container.env)].flatMap(secretValues).forEach(value => secrets.add(value));
         resolved[serviceId] = { ...base, status: 'ready', env, containers };
-      } catch (error) { throw new Error(`${definition.title}: ${redact((error as Error).message)}`); }
+      } catch (error) { throw Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {}); }
       finally { await save(); }
       for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
     }
@@ -298,19 +341,19 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
           if (state.accounts.some(item => item.id === account.id)) fail(`Test account "${account.id}" is defined twice.`);
           state.accounts.push({ service: record.id, ...account });
         }
-      } catch (error) { throw new Error(`${definition.title}: ${redact((error as Error).message)}`); }
+      } catch (error) { throw Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {}); }
       finally { await save(); }
     }
     // Command fixtures, such as seed scripts, run with the workspace dependencies the install provides.
     if (config.install) {
       const { directory, command } = config.install;
       await onStep('Installing dependencies');
-      try { await exec('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL)); }
+      try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL), { redact }); }
       catch (error) {
         // Package managers report on stdout or stderr, so keep the end of both.
         const failed = error as Partial<ExecFileException>;
         const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`) || errorText(error);
-        fail(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${output}`));
+        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${output}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
       }
     }
     for (const [index, fixture] of fixtures.entries()) {
@@ -326,6 +369,20 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     return { status: result.services.some(service => service.status === 'blocked') ? 'blocked' : 'ready', services: result.services, apps: result.apps, ...(accounts.length ? { accounts } : {}) };
   }
 
+  async function prepare(options: Parameters<typeof prepareTwin>[0]) {
+    const twin = locate(options.dataDir, options.id);
+    setupLogs.set(twin.dir, '');
+    return operations.run({ signal: options.signal, output: text => setupLogs.set(twin.dir, ((setupLogs.get(twin.dir) ?? '') + text).slice(-LOG_LIMIT)) }, async () => {
+      let failed = false;
+      try { return await prepareTwin(options); }
+      catch (error) { failed = true; throw error; }
+      finally {
+        try { if (await exists(twin.dir)) await writePrivate(twin.log, setupLogs.get(twin.dir) ?? ''); }
+        catch (error) { if (!failed) throw error; } // A log write must not replace an owned-process cleanup failure.
+      }
+    });
+  }
+
   /** One test account's username, password and sign-in endpoints, for the controller's own runs; null when the twin has no such account. */
   async function account({ dataDir, id, accountId }: { dataDir: string; id: string; accountId: string }) {
     const found = (await readState(locate(dataDir, id).state))?.accounts?.find(item => item.id === accountId);
@@ -336,7 +393,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const twin = locate(dataDir, id);
     if (!await exists(twin.compose)) return { status: 'stopped', containers: [] };
     const state = await readState(twin.state);
-    const { stdout } = await docker(composeArgs(twin, 'ps', '--all', '--format', 'json'), { redact: redactor(state?.secrets ?? []) });
+    const { stdout } = await operations.run({ timeoutMs: READ_TIMEOUT_MS }, () => docker(composeArgs(twin, 'ps', '--all', '--format', 'json'), { redact: redactor(state?.secrets ?? []) }));
     const containers = parsePs(stdout).map(item => ({ name: String(item.Service), state: String(item.State), health: typeof item.Health === 'string' && item.Health ? item.Health : null, exitCode: typeof item.ExitCode === 'number' ? item.ExitCode : null }));
     return { status: overall(containers), containers };
   }
@@ -345,14 +402,15 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const twin = locate(dataDir, id);
     if (!Number.isInteger(tail) || tail < 1) fail('tail must be a positive whole number.');
     if (service != null && !ID.test(service)) fail('Choose a service or app of this twin.');
-    if (!await exists(twin.compose)) return '';
+    const setup = setupLogs.get(twin.dir) ?? await readFile(twin.log, 'utf8').catch(() => '');
     const redact = redactor((await readState(twin.state))?.secrets ?? []);
-    const { stdout = '', stderr = '' } = await docker(composeArgs(twin, 'logs', '--no-color', '--tail', String(tail), ...(service ? [service] : [])), { redact });
-    return redact(`${stdout}${stderr}`);
+    if (!await exists(twin.compose)) return redactSecrets(redact(setup));
+    const { stdout = '', stderr = '' } = await operations.run({ timeoutMs: READ_TIMEOUT_MS }, () => docker(composeArgs(twin, 'logs', '--no-color', '--tail', String(tail), ...(service ? [service] : [])), { redact }));
+    return redactSecrets(redact([setup, `${stdout}${stderr}`].filter(Boolean).join('\n')));
   }
 
   /** Compose down --volumes, then each service's teardown in reverse setup order. Failures keep the files. */
-  async function destroy({ dataDir, id, inputs = {} }: { dataDir: string; id: string; inputs?: Record<string, InputValues> }) {
+  async function destroyTwin({ dataDir, id, inputs = {} }: { dataDir: string; id: string; inputs?: Record<string, InputValues> }) {
     const twin = locate(dataDir, id);
     const state = await readState(twin.state);
     const redact = redactor(state?.secrets ?? []), failures: string[] = [];
@@ -369,10 +427,30 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       try { await definition.teardown(ctx); }
       catch (error) { failures.push(`${definition.title}: ${redact((error as Error).message)}`); }
     }
+    // Stopping a docker CLI does not stop a `docker run` guest. One-shot fixtures and
+    // service CLIs carry both labels; remove only this twin's remaining containers.
+    if (state) {
+      try {
+        const remaining = async () => {
+          const { stdout } = await docker(['ps', '--all', '--quiet', '--filter', `label=${LABELS.environment}=${twin.id}`, '--filter', `label=${LABELS.owner}=${twin.owner}`], { redact });
+          const ids = stdout.trim().split(/\s+/).filter(Boolean);
+          if (ids.some(id => !/^[a-f0-9]{12,64}$/.test(id))) fail('Docker returned invalid owned container ids.');
+          return ids;
+        };
+        const ids = await remaining();
+        if (ids.length) {
+          await docker(['rm', '--force', ...ids], { redact });
+          if ((await remaining()).length) fail('Owned containers are still present.');
+        }
+      } catch (error) { failures.push(`Owned containers: ${redact((error as Error).message)}`); }
+    }
     if (failures.length) fail(`Twin cleanup failed; its files are kept for another attempt. ${failures.join(' ')}`);
     await rm(twin.dir, { recursive: true, force: true });
+    setupLogs.delete(twin.dir);
     return { status: 'destroyed' };
   }
+
+  const destroy = (options: Parameters<typeof destroyTwin>[0]) => operations.run({ timeoutMs: CLEANUP_TIMEOUT_MS }, () => destroyTwin(options));
 
   return { prepare, health, logs, destroy, account };
 }

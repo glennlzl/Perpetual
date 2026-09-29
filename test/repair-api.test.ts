@@ -11,6 +11,8 @@ import type { GitHubSession } from '../src/github-source.ts';
 import type { WorkflowRun } from '../src/github-runs.ts';
 import type { RunInput } from '../src/repair/github.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
+import { defaultPipeline } from '../src/pipeline.ts';
+import type { Repair } from '../src/repair/manager.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281', NEWER = 'd'.repeat(40);
 type AutopilotResponse = AutopilotView & { error?: string };
@@ -47,7 +49,7 @@ function github() {
 const MODEL = { apiKey: 'sk-or-v1-0123456789abcdef', model: 'openai/gpt-6-luna', baseUrl: 'https://openrouter.ai/api/v1' };
 
 // before() sets GitHub up as the controller will first read it.
-async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {} }: { connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void } = {}) {
+async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {}, beforeStart = async () => {} }: { connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void; beforeStart?: (dataDir: string, repoPath: string) => Promise<void> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-repair-api-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
@@ -57,6 +59,7 @@ async function start(t: TestContext, { connection = { login: 'glennlzl', connect
   await writeFile(join(dataDir, 'browser-model.json'), JSON.stringify(model));
   const seams = github();
   before(seams);
+  await beforeStart(dataDir, dir);
   // The repair box answers from a fixture: no Docker runs, and no repair reaches a model.
   const boxes = { async available() { return docker; }, async create(): Promise<never> { throw new Error('unused'); }, async removeLeftovers() {} };
   const app = await startServer({ port: 0, repo: dir, dataDir, github: seams, repair: { boxes } });
@@ -88,6 +91,28 @@ test('the Autopilot view names the active source, carries Build alone, starts em
   const other = await f.get(`/api/autopilot?${new URLSearchParams({ repoPath: '/another/checkout' })}`);
   assert.equal(other.status, 409);
   assert.deepEqual((await f.get('/api/state')).body.autopilot, await f.view(), 'The state carries the same view.');
+});
+
+test('the Autopilot APIs show actual Sandbox names for repair gates, follow renames and retain unknown stage IDs', async t => {
+  const stageId = 'cb8898f6-2d0a-4d47-8f7a-d910035fe318', missingId = '0115e590-cc2e-4f39-b4d2-476775e2095a';
+  const f = await start(t, { connection: null, async beforeStart(dataDir, repoPath) {
+    const pipeline = defaultPipeline(repoPath);
+    pipeline.stages.splice(2, 0, { id: stageId, name: 'Acceptance', kind: 'sandbox', collapsed: false });
+    const saved = JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf8'));
+    saved.state.pipelines['github:owner/app:/'] = pipeline;
+    await writeFile(join(dataDir, 'state.json'), JSON.stringify(saved));
+    const repair: Repair = { id: 'finished-repair', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'glennlzl', checkoutPath: repoPath, rootDirectory: '/', trigger: 'person', status: 'ready', runs: [],
+      gates: [{ gateId: 'known-gate', stageId, sha: NEWER, status: 'passed' }, { gateId: 'unknown-gate', stageId: missingId, sha: NEWER, status: 'passed' }], createdAt: '2026-09-25T10:00:00.000Z', updatedAt: '2026-09-25T10:01:00.000Z' };
+    await mkdir(join(dataDir, 'repairs'));
+    await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [repair] }));
+  } });
+  const expected = (name: string) => [{ text: name }, ' passed at ', { text: 'ddddddd' }, ', ', { text: missingId }, ' passed at ', { text: 'ddddddd' }];
+  assert.deepEqual(change(await f.view())?.steps[3].detail, expected('Acceptance'));
+  assert.deepEqual(change((await f.get('/api/state')).body.autopilot)?.steps[3].detail, expected('Acceptance'));
+  const renamed = await f.post('/api/pipeline/action', { repoPath: f.dir, action: 'rename-stage', stageId, name: 'Release check' });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(change(await f.view())?.steps[3].detail, expected('Release check'));
+  assert.deepEqual(change((await f.get('/api/state')).body.autopilot)?.steps[3].detail, expected('Release check'));
 });
 
 test('a person\'s Repair triages the failed head and, without an OpenRouter API key, stops at Change waiting for a person', async t => {

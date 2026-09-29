@@ -5,7 +5,7 @@
 export interface TwinInput { name: string; label?: string; secret?: boolean; value?: string }
 /** A stage's twin service as GET /api/twin/services reports it. */
 export interface TwinService {
-  id: string; title?: string; fidelity: string; source?: string; blocked?: boolean; missing?: TwinInput[]; keys?: TwinInput[];
+  id: string; provider?: string; title?: string; fidelity: string; source?: string; blocked?: boolean; missing?: TwinInput[]; keys?: TwinInput[];
   provision?: { inputs: TwinInput[] } | null; provisioned?: { expiresAt?: string; claimUrl?: string } | null;
 }
 export type TwinStatus = 'ready' | 'blocked' | 'not-started';

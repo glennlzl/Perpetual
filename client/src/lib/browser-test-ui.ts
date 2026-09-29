@@ -167,11 +167,13 @@ export function browserCaseRun(item: BrowserCase, runs: BrowserRun[] = [], { con
 
 // A draft awaiting approval and a finished run awaiting judgement share a status, not a label.
 export interface CaseState { status: string; label: string; variant: BadgeTone }
+/** No code can prove this journey until a person supplies an independent check. */
+export const journeyNeedsChecks = (item: Pick<BrowserCase, 'steps' | 'assertions'>) => !item.assertions?.length && !item.steps?.some(step => step.checks?.length);
 export function browserCaseState(item: BrowserCase, runs: BrowserRun[] = [], options: { control?: boolean } = {}): CaseState {
   const state = (status: string, label = browserRunLabel(status)): CaseState => ({ status, label, variant: status === 'failed' ? 'destructive' : ['running', 'passed'].includes(status) ? 'secondary' : 'outline' });
-  if (item.needsReview) return state('needs_review');
+  if (item.needsReview) return state('needs_review', journeyNeedsChecks(item) ? 'Needs checks' : undefined);
   const run = browserCaseRun(item, runs, options);
-  if (!run) return state('not_run');
+  if (!run) return journeyNeedsChecks(item) ? state('needs_review', 'Needs checks') : state('not_run');
   const result = run.results?.find(value => value.caseId === item.id);
   const progress = journeyProgress(run, item.id);
   let status = result?.status || progress?.status || (['queued', 'running'].includes(run.status) ? 'queued' : 'not_run');

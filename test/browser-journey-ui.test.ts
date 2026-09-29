@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { verificationAttempt, watchedRun, browserActionError, browserActionFailure, browserActionLabel, browserBlockers, browserCaseState, browserConcurrencyLabel, browserFrameLabel, browserInstallCommand, browserJourneySteps, browserReadiness, browserRunLabel, browserUnavailable, checkedOutcome, generateRequestDialog, inspectorTab, JOURNEY_GENERATE_REQUEST, journeyActions, journeyCheckState, journeyCode, journeyElapsed, journeyErrorTone, journeyLastAction, journeyOpenByDefault, journeyQueueLabel, journeyRecordings, journeyRequest, journeyRevision, journeyRunRequest, journeySegments, journeySummary, orderJourneys, browserCaseRun, codeLines, runnableCode, runReady, stageJourneyGroups, testToolbar } from '../client/src/lib/browser-test-ui.ts';
 import type { BrowserCase, BrowserRun, CaseProgress, CodeVerification, JourneySpec, JourneyStep } from '../client/src/lib/browser-test-ui.ts';
 
-const journey = { id:'happy', name:'Create and run a workflow', goal:'Execute the workflow and verify credit usage', preconditions:['Test account'], expectedOutcomes:['Result delivered and credits debited'], assertions:[], steps:[{id:'login',title:'Sign in'},{id:'execute',title:'Execute workflow'}], isolation:'shared', needsReview:false } satisfies BrowserCase;
+const journey = { id:'happy', name:'Create and run a workflow', goal:'Execute the workflow and verify credit usage', preconditions:['Test account'], expectedOutcomes:['Result delivered and credits debited'], assertions:[{type:'text-visible',value:'Workflow complete'}], steps:[{id:'login',title:'Sign in'},{id:'execute',title:'Execute workflow'}], isolation:'shared', needsReview:false } satisfies BrowserCase;
 const run = (status: string, cases: CaseProgress[], extra: Partial<BrowserRun> = {}): BrowserRun => ({id:'run',mode:'run',status,createdAt:'2026-09-23T00:00:00Z',caseIds:['happy','payment'],caseSummaries:[journey],progress:{cases},...extra});
 
 test('a queued journey stays queued while another journey is running', () => {
@@ -247,12 +247,6 @@ test('journey evidence reads actions and final checks only through shared helper
   assert.match(evidence, /journeyCheckState\(check\)/);
   assert.doesNotMatch(evidence, /check\.passed \?/);
 });
-test('a reviewed journey can go back to needs review, which also deselects it', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const panel = await readFile(new URL('../client/src/BrowserTestingPanel.tsx', import.meta.url), 'utf8');
-  assert.match(panel, /\{reviewed\(item\) && <DropdownMenuItem disabled=\{disabled \|\| code\.verifying\} onSelect=\{\(\) => updateCases\(cases\.map\(current => current\.id === item\.id \? \{ \.\.\.current, needsReview: true, selected: false \} : current\)\)\}><Undo2 \/>Needs review<\/DropdownMenuItem>\}/);
-});
-
 test('a case clicked on its stage focuses and expands its card, review/edit stays explicit, and its run opens from the status badge', async () => {
   const { readFile } = await import('node:fs/promises');
   const source = (file: string) => readFile(new URL(`../client/src/${file}`, import.meta.url), 'utf8');

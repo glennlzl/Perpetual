@@ -75,15 +75,17 @@ function originError(value: string) {
   if (url.username || url.password) return 'Remove the credentials.';
   return url.pathname !== '/' || url.search || url.hash || /[?#]/.test(value) ? 'Remove the path and query.' : '';
 }
+const authHost = (hostname: string) => ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(hostname) ? '127.0.0.1' : hostname;
 function endpointError(value: string, target: URL | null) {
   const url = /^[a-z][a-z0-9+.-]*:/i.test(value) ? parse(value) : null;
   if (!url) return 'Enter an absolute URL.';
   if (!['http:', 'https:'].includes(url.protocol)) return 'Use HTTP or HTTPS.';
   if (url.username || url.password) return 'Remove the credentials.';
-  if (!target || url.hostname !== target.hostname) return 'Use the target host.';
+  if (!target || authHost(url.hostname) !== authHost(target.hostname)) return 'Use the target host.';
   if (url.search || url.hash || /[?#]/.test(value)) return 'Remove the query.';
   // Discovery allows any POST that starts with this URL, so it must not cover an origin or the target page's parents.
-  const covers = url.origin === target.origin && target.pathname.startsWith(url.pathname) && (url.pathname.endsWith('/') || url.pathname !== target.pathname);
+  const sameOrigin = url.protocol === target.protocol && url.port === target.port && authHost(url.hostname) === authHost(target.hostname);
+  const covers = sameOrigin && target.pathname.startsWith(url.pathname) && (url.pathname.endsWith('/') || url.pathname !== target.pathname);
   return url.pathname === '/' || covers ? 'Use a specific endpoint path.' : '';
 }
 // The sign-in page is on the target URL's origin, and at most 2048 characters as it is sent, as the controller requires.

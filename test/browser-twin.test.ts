@@ -75,6 +75,20 @@ test('a twin with several apps and no web frontend asks for the application URL'
   assert.equal(f.requests.length,0);
 });
 
+test('saving the public view of an owned legacy target keeps automatic retargeting after a rebuild',async t=>{
+  const owned={...twin,sandboxId:twin.id};
+  const next={...owned,id:'rebuilt-beta',sandboxId:'rebuilt-beta',apps:[{id:'service-web',url:'http://127.0.0.1:43300'}]};
+  const f=await fixture(t,{environments:[owned,next],events:discovered}),beta=f.context('beta');
+  await f.manager.prepareEnvironment(beta,owned);await prepared(f,beta);
+  const {config}=await f.manager.view(beta);
+  assert.equal(config.targetUrl,'http://127.0.0.1:43100/');
+  await f.manager.saveConfig(beta,{...config,scope:'Billing outcomes'});
+  await f.manager.prepareEnvironment(beta,next);await prepared(f,beta);
+  const current=await f.manager.view(beta);
+  assert.equal(current.config.targetUrl,'http://127.0.0.1:43300/');
+  assert.equal(current.config.scope,'Billing outcomes');
+});
+
 test('a twin run allows its apps and blocks a journey that does not pass on an unavailable service',async t=>{
   const events=(input:JourneyRunInput)=>input.mode!=='run'?[]:[
     {type:'journey-step',caseId:journey.id,stepId:'open',status:'running'},

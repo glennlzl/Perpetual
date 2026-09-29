@@ -121,11 +121,26 @@ test('A service address names a port of a configured service and adds no setup o
   const cases = [
     [{ services: { payments: { webhook: '{{services.jobs.url.api}}' } } }, /services\.payments\.webhook references \{\{services\.jobs\.url\.api\}\}, but service "jobs" is not configured\./],
     [{ services: { mail: {} }, apps: { web: { start: 'x', port: 1, env: { A: '{{services.jobs.url.api}}' } } } }, /apps\.web\.env\.A references \{\{services\.jobs\.url\.api\}\}/],
-    [{ services: { jobs: {}, payments: { webhook: '{{services.jobs.url.API}}' } } }, /\{\{services\.jobs\.url\.API\}\} is not a placeholder; use \{\{<service>\.<VARIABLE>\}\}, \{\{apps\.<id>\.url\}\} or \{\{services\.<id>\.url\.<port>\}\}\./],
+    [{ services: { jobs: {}, payments: { webhook: '{{services.jobs.url.API}}' } } }, /\{\{services\.jobs\.url\.API\}\} is not a placeholder; use .*\{\{apps\.<id>\.publicUrl\}\}.*\{\{services\.<id>\.publicUrl\.<port>\}\}\./],
     [{ services: { jobs: {}, payments: { webhook: '{{services.jobs.api}}' } } }, /is not a placeholder/],
     [{ services: { jobs: {}, payments: { webhook: '{{services.jobs.url}}' } } }, /is not a placeholder/],
   ];
   for (const [input, error] of cases) assert.throws(() => validate(input), error);
+});
+
+test('Explicit public addresses preserve their configured meaning and reject missing apps, services and malformed addresses', () => {
+  const input = { services: { mail: {}, payments: { webhook: '{{apps.web.publicUrl}}/return' } },
+    apps: { web: { start: 'npm start', port: 3000, env: { PUBLIC_MAIL: '{{services.mail.publicUrl.web}}', SERVER_MAIL: '{{services.mail.url.web}}' } } } };
+  const result = validate(input);
+  assert.deepEqual(result.apps.web.env, input.apps.web.env, 'Saving never rewrites existing internal mappings.');
+  assert.deepEqual(setupOrder(result), ['mail', 'payments']);
+  for (const [value, error] of [
+    ['{{apps.missing.publicUrl}}', /\{\{apps\.missing\.publicUrl\}\}.*no app "missing"/],
+    ['{{services.missing.publicUrl.web}}', /\{\{services\.missing\.publicUrl\.web\}\}.*service "missing" is not configured/],
+    ['{{apps.web.publicUrl.path}}', /is not a placeholder/],
+    ['{{services.mail.publicUrl}}', /is not a placeholder/],
+    ['{{services.mail.publicUrl.WEB}}', /is not a placeholder/],
+  ] as const) assert.throws(() => validate({ ...input, apps: { web: { ...input.apps.web, env: { URL: value } } } }), error);
 });
 
 test('Env options leave out variables of a blocked service; other options keep them', () => {

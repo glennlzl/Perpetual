@@ -89,7 +89,7 @@ def model_failure_kind(error):
         error = error.__cause__ or error.__context__
     if any(isinstance(item, TimeoutError) or type(item).__name__ == "APITimeoutError" for item in chain):
         return "timeout"
-    if any(type(item).__name__ in {"ValidationError", "ModelOutputTruncatedError"} for item in chain):
+    if any(type(item).__name__ in {"ValidationError", "ModelOutputTruncatedError", "DecisionProtocolError"} for item in chain):
         return "invalid_output"
     if any(type(item).__name__ in {"ModelProviderError", "ModelRateLimitError", "APIConnectionError", "APIStatusError", "AuthenticationError", "RateLimitError"} for item in chain):
         return "provider"
@@ -116,6 +116,10 @@ class InputError(ValueError):
 def emit(event):
     STDOUT.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
     STDOUT.flush()
+
+
+def canonical_host(hostname):
+    return "127.0.0.1" if hostname in {"localhost", "127.0.0.1", "::1", TWIN_HOST} else hostname
 
 
 def origin(url):
@@ -162,10 +166,20 @@ def endpoint_url(url):
     return origin(url) + (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
 
 
+def endpoint_key(url):
+    """Compare local auth aliases without changing navigation origins or endpoint addresses."""
+    parsed = urlsplit(endpoint_url(url))
+    hostname = canonical_host(parsed.hostname)
+    if hostname != parsed.hostname:
+        parsed = parsed._replace(netloc=hostname + (f":{parsed.port}" if parsed.port is not None else ""))
+    return parsed.geturl()
+
+
 def endpoint_allowed(url, endpoints):
     """An endpoint admits itself, its sub-paths and query variants, never a sibling path such as /token-revoke."""
     try:
-        request = endpoint_url(url)
+        request = endpoint_key(url)
+        endpoints = [endpoint_key(item) for item in endpoints]
     except (ValueError, TypeError, UnicodeError):
         return False
     # Normalized paths always start with "/", so a prefix cannot extend another port.
@@ -241,7 +255,7 @@ def validate_payload(raw):
         raise InputError("Provide at most 3 sign-in endpoints.")
     for index, value in enumerate(endpoints):
         # A bare origin would admit every POST on that port.
-        if not isinstance(value, str) or len(value) > 4000 or urlsplit(value).fragment or urlsplit(value).path in {"", "/"} or urlsplit(origin(value)).hostname != urlsplit(target_origin).hostname:
+        if not isinstance(value, str) or len(value) > 4000 or urlsplit(value).fragment or urlsplit(value).path in {"", "/"} or canonical_host(urlsplit(origin(value)).hostname) != canonical_host(urlsplit(target_origin).hostname):
             raise InputError("Sign-in endpoints must be absolute URLs with a path on the target host.")
         endpoints[index] = endpoint_url(value)
     payload["authEndpoints"] = list(dict.fromkeys(endpoints))
@@ -692,13 +706,14 @@ def safe_tools(output_model, allowed_origins=(), credentials=None, credential_or
 
 
 def create_agent(payload, owned, task, schema, case_id=None, actions=None, source_context=""):
-    from browser_use import Agent, ChatOpenAI
+    from browser_use import Agent
     from browser_use.llm.messages import UserMessage
+    from decision_model import DecisionChatOpenAI
     credentials = payload.get("credentials")
     config = model_config()
     if not config["key"] or not config["model"]:
         raise InputError("Configure OPENROUTER_API_KEY, or PERPETUAL_MODEL_API_KEY and PERPETUAL_MODEL.")
-    class ObservedChatOpenAI(ChatOpenAI):
+    class ObservedChatOpenAI(DecisionChatOpenAI):
         async def ainvoke(self, messages, output_format=None, **kwargs):
             try:
                 if source_context:

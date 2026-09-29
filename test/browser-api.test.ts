@@ -79,5 +79,62 @@ test('journey specs are saved and approved through the stage API',async t=>{
   assert.equal((await request('/api/browser/specs/generate',{...context,caseId:'missing'})).status,404);
   const noModel=await request('/api/browser/specs/generate',{...context,caseId:item.id});
   assert.equal(noModel.status,400);assert.match(noModel.body.error,/OpenRouter API key/);
+  const invalidGenerationAccount=await request('/api/browser/specs/generate',{...context,caseId:item.id,credentials:{username:'tester@example.test'}});
+  assert.equal(invalidGenerationAccount.status,400);assert.match(invalidGenerationAccount.body.error,/test account/i);
+  const mixedGenerationAccounts=await request('/api/browser/specs/generate',{...context,caseId:item.id,credentials:{username:'tester@example.test',password:'fixture-only'},accountId:null});
+  assert.equal(mixedGenerationAccounts.status,400);assert.match(mixedGenerationAccounts.body.error,/Choose one test account/);
   assert.equal((await request('/api/browser/specs/generate/cancel',{...context,caseId:item.id})).status,404);
+});
+
+test('HTTP verification carries the temporary account through three real browser runs and a caught control',async t=>{
+  const {createServer}=await import('node:http');
+  const {createPlaywrightRuntime}=await import('../src/journeys/playwright/runtime.ts');
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-verify-account-')),repo=join(dataDir,'repo');
+  await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');
+  let notes=0;
+  const application=createServer((req,res)=>{
+    let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      const redirect=(location:string,headers:Record<string,string>={})=>{res.writeHead(303,{location,...headers});res.end();};
+      const html=(value:string)=>{res.writeHead(200,{'content-type':'text/html'});res.end(value);};
+      if(req.url==='/login'&&req.method==='POST'){
+        const form=new URLSearchParams(body);
+        return form.get('email')==='tester@example.test'&&form.get('password')==='account-fixture-only'
+          ?redirect('/notes',{'set-cookie':'session=1; Path=/'}) :redirect('/login');
+      }
+      if(req.url==='/login')return html('<form method="post" action="/login"><label>Email<input name="email" type="email" autocomplete="username"></label><label>Password<input name="password" type="password"></label><button>Sign in</button></form>');
+      if(!/session=1/.test(req.headers.cookie??''))return redirect('/login');
+      if(req.url==='/notes'&&req.method==='POST'){notes++;return redirect('/notes');}
+      html(`<p>Notes ${notes}</p><form method="post" action="/notes"><button>Add note</button></form>`);
+    });
+  });
+  await new Promise<void>(resolve=>application.listen(0,'127.0.0.1',resolve));
+  const address=application.address();assert.ok(address&&typeof address==='object');
+  const app=await startServer({port:0,repo,dataDir,browser:{playwright:createPlaywrightRuntime({checkTimeoutMs:1000})}});
+  t.after(async()=>{await app.close();application.closeAllConnections();await new Promise<void>(resolve=>application.close(()=>resolve()));await rm(dataDir,{recursive:true,force:true});});
+  const {token}=await(await fetch(app.url+'/api/session')).json();
+  const post=async(path:string,body:unknown)=>{const response=await fetch(app.url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':token},body:JSON.stringify(body)});return{status:response.status,body:await response.json()};};
+  await post('/api/scan',{path:repo});
+  const added=await post('/api/pipeline/action',{repoPath:repo,action:'add-stage',name:'Beta'});
+  const context={repoPath:repo,stageId:added.body.pipeline.stages.find((stage:{name:string})=>stage.name==='Beta').id};
+  const item={id:'notes',name:'Create a note',goal:'Save a note and see its count increase after reload',isolation:'shared',needsReview:false,selected:true,expectedOutcomes:['A saved note'],steps:[{id:'open',title:'Sign in',checks:[{type:'read-number',label:'Notes',name:'before'}]},{id:'save',title:'Save and reload',checks:[{type:'compare-number',label:'Notes',name:'after',op:'>',than:'before'}]}]};
+  await post('/api/browser/config',{...context,config:{targetUrl:`http://127.0.0.1:${address.port}/notes`,journeyTimeoutSeconds:60}});
+  assert.equal((await post('/api/browser/cases',{...context,cases:[item]})).status,200);
+  const code="import { test } from 'perpetual'; test('Create a note', async ({ page, journey }) => { await journey.milestone('open', async () => { await journey.signIn(); }); await journey.milestone('save', async () => { await page.getByRole('button', { name: 'Add note' }).click(); await page.reload(); }); });";
+  const saved=await post('/api/browser/specs',{...context,caseId:item.id,code}),hash=saved.body.spec.draft.hash;
+  const credentials={username:'tester@example.test',password:'account-fixture-only'};
+  const accepted=await post('/api/browser/specs/verify',{...context,caseId:item.id,hash,credentials});assert.equal(accepted.status,202);
+  let view;
+  for(let attempt=0;attempt<900;attempt++){
+    view=await(await fetch(app.url+'/api/browser?'+new URLSearchParams(context))).json();
+    const status=view.specs[item.id].draft.verification.status;
+    if(!['queued','running'].includes(status))break;
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  const verification=view.specs[item.id].draft.verification;
+  assert.equal(verification.status,'passed',JSON.stringify(verification));
+  assert.equal(verification.passes,3);assert.equal(verification.control,'caught');
+  assert.equal((await post('/api/browser/specs/approve',{...context,caseId:item.id,hash})).status,200);
+  assert.doesNotMatch(JSON.stringify(view),/account-fixture-only/,'Temporary credentials never enter the response');
+  const {readFile}=await import('node:fs/promises');
+  assert.doesNotMatch(await readFile(join(dataDir,'browser','state.json'),'utf8'),/account-fixture-only/,'Temporary credentials never enter saved browser state');
 });

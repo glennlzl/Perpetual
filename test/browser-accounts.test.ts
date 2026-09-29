@@ -22,7 +22,7 @@ type Users={users?:Json};
 type Request=JourneyRunInput&{credentials?:RunCredentials;authEndpoints?:string[]};
 const auth={id:'auth',title:'Auth',fidelity:'actual' as const,containers:()=>[{name:'auth',image:'auth/server:1.0',ports:{api:9999}}],env:(ctx:ServiceContext<Users>)=>({AUTH_URL:ctx.url('api')}),
   accounts:async(ctx:ServiceContext<Users>)=>(Array.isArray(ctx.options.users)?ctx.options.users.map(String):[]).map(id=>({id,label:`${id[0].toUpperCase()}${id.slice(1)}`,username:`${id}@example.test`,password:`pw-${id}-${Math.random().toString(36).slice(2)}`}))};
-const journey=(id:string,name:string)=>({id,name,goal:`${name} and see it saved`,steps:[{id:'sign-in',title:'Sign in'},{id:'save',title:name}],expectedOutcomes:['It is saved'],assertions:[],selected:true,needsReview:false,isolation:'isolated'});
+const journey=(id:string,name:string)=>({id,name,goal:`${name} and see it saved`,steps:[{id:'sign-in',title:'Sign in'},{id:'save',title:name}],expectedOutcomes:['It is saved'],assertions:[{type:'text-visible',value:'It is saved'}],selected:true,needsReview:false,isolation:'isolated'});
 const journeys=[journey('create','Create a workspace'),journey('invite','Invite a teammate')];
 
 async function fixture(t:TestContext,{authEndpoints=[],service=auth}:{authEndpoints?:string[];service?:TwinService<Users>}={}){
@@ -120,6 +120,30 @@ test('discovery explores signed in with the same twin account',async t=>{
   hidesPasswords(f,await f.manager.view(f.context),'view');
 });
 
+test('discovery with an entered or twin account requires a sign-in endpoint before starting any work',async t=>{
+  const f=await fixture(t),credentials={username:'entered@example.test',password:'fixture-only-password'};
+  for(const input of [{credentials},{},{accountId:'viewer'}]){
+    await assert.rejects(f.manager.discover(f.context,input),/Add a sign-in API endpoint in Test settings/);
+    assert.equal(f.requests.length,0,'Missing endpoint never starts a browser or model.');
+    assert.equal((await f.manager.view(f.context)).runs.length,0,'Rejected discovery creates no run.');
+  }
+  // The refusal releases its reservation and does not block explicitly signed-out discovery.
+  const {run}=await f.manager.discover(f.context,{accountId:null});await f.finished(run.id);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].credentials,undefined);
+  await f.manager.saveConfig(f.context,{targetUrl:`${f.web}/`,authEndpoints:[`${f.web}/signin`]});
+  const signedIn=await f.manager.discover(f.context,{credentials});await f.finished(signedIn.run.id);
+  assert.deepEqual(f.requests.at(-1)!.authEndpoints,[`${f.web}/signin`]);
+});
+
+test('a manually entered account does not borrow an unselected twin account sign-in endpoint',async t=>{
+  const signingIn={...auth,accounts:async(ctx:ServiceContext<Users>)=>(await auth.accounts(ctx)).map(account=>({...account,authEndpoints:[ctx.url('api','/auth/v1/token')]}))};
+  const f=await fixture(t,{service:signingIn});
+  await assert.rejects(f.manager.discover(f.context,{credentials:{username:'entered@example.test',password:'fixture-only-password'}}),/Add a sign-in API endpoint in Test settings/);
+  assert.equal(f.requests.length,0);
+  const {run}=await f.manager.discover(f.context,{accountId:'viewer'});await f.finished(run.id);
+  assert.equal(f.requests[0].credentials!.username,'viewer@example.test');
+});
+
 test('discovery lets through the sign-in endpoint the twin publishes for its test account',async t=>{
   // A service whose accounts sign in against its own API, as Supabase does with /auth/v1/token.
   const signingIn={...auth,accounts:async(ctx:ServiceContext<Users>)=>(await auth.accounts(ctx)).map(account=>({...account,authEndpoints:[ctx.url('api','/auth/v1/token')]}))};
@@ -134,6 +158,15 @@ test('discovery lets through the sign-in endpoint the twin publishes for its tes
   // Runs may submit anyway, so they get no auth endpoint allowance.
   const {request:runRequest}=await f.run({caseIds:['create']});
   assert.equal(runRequest.authEndpoints,undefined);
+});
+
+test('an invalid twin sign-in endpoint fails discovery and releases its environment before another run',async t=>{
+  const invalid={...auth,accounts:async(ctx:ServiceContext<Users>)=>(await auth.accounts(ctx)).map(account=>({...account,authEndpoints:['https://other.example/auth/v1/token']}))};
+  const f=await fixture(t,{service:invalid});
+  await assert.rejects(f.manager.discover(f.context,{}),/Auth endpoints must be on the application host/);
+  assert.equal((await f.manager.view(f.context)).runs.length,0);
+  assert.equal(f.requests.length,0,'No browser worker starts with invalid sign-in endpoints.');
+  await f.run({caseIds:['create']});
 });
 
 test('outside a twin with accounts nothing is injected, and a listed account missing from the twin is an error',async t=>{
