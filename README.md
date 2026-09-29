@@ -26,7 +26,7 @@
 
 **Watch the walkthrough · 2 min 56 sec**
 
-https://github.com/user-attachments/assets/5e1a36fe-610b-4d3b-aeed-2ceaea4ebaa9
+https://github.com/user-attachments/assets/5e7a7941-2b9f-48b0-8aa1-dc7676b38960
 
 Recorded in a simulated demo environment. Production deployment is a preview; see [Status](#status) for what is available today.
 
