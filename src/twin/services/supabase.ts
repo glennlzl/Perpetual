@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { relative } from '../paths.ts';
+import { bridgeSupabaseImportMaps } from '../supabase-import-maps.ts';
 import type { Json } from '../config.ts';
 import { idError } from '../options.ts';
 import type { ServiceContext, TwinService } from '../registry.ts';
@@ -14,10 +15,9 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 // process through `ctx.exec` (`npx supabase@<pin>`), with the Docker access the controller already uses
 // for `docker compose`. No installed host binary is used.
 //
-// The CLI fixes the local database password to `postgres` (supabase/cli v2.117.0 never reads
-// `Db.Password` from config.toml or the environment for the local stack), so a generated password
-// cannot be applied through the official CLI. DATABASE_URL carries what `supabase status` reports.
-export const CLI = 'supabase@2.117.0';
+// DATABASE_URL preserves the local credentials reported by `supabase status`.
+// 2.118.0 includes supabase/cli#6505: prune overlapping Edge Runtime binds before its docker cp bootstrap.
+export const CLI = 'supabase@2.118.0';
 /** directory: the repository's supabase directory; functions and users are checked where they are used. */
 type Options = { directory?: Json; functions?: Json; users?: Json };
 type Outputs = { url: string; anonKey: string; serviceRoleKey: string; jwtSecret: string; dbUrl: string };
@@ -201,7 +201,9 @@ export default {
     await rm(workdir(ctx), { recursive: true, force: true });
     await cp(join(ctx.source, relative(ctx.options.directory ?? DIRECTORY, 'supabase directory')), target, { recursive: true, filter: path => !STATE.has(basename(path)) });
     const toml = twinConfig(await readFile(config, 'utf8'), ctx);
-    await writeFile(config, ctx.options.functions == null ? toml : await edgeFunctions(ctx, target, toml));
+    const prepared = ctx.options.functions == null ? toml : await edgeFunctions(ctx, target, toml);
+    await bridgeSupabaseImportMaps(target, prepared);
+    await writeFile(config, prepared);
     await cli(ctx, 'start', '--workdir', workdir(ctx));
     const status = parseEnv((await cli(ctx, 'status', '--output', 'env', '--workdir', workdir(ctx))).stdout);
     if (!status.ANON_KEY || !status.SERVICE_ROLE_KEY || !status.DB_URL) throw new Error('Supabase status did not report its keys and database URL');

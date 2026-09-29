@@ -15,23 +15,25 @@ Rights remain with the Perpetual project; they are not third-party stock logos. 
 
 ## Provider logos
 
-These SVG geometries come from the official [Simple Icons repository](https://github.com/simple-icons/simple-icons), pinned at commit `b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76`. GitHub, Vercel, Railway, Next.js and OpenRouter are exact, unmodified downloads. Supabase, Hono and LangGraph keep their original paths, titles and viewBoxes, with a root `fill` taken from the brand's `hex` field in the [same revision's metadata](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/data/simple-icons.json) and a final newline.
+These SVG geometries come from the official [Simple Icons repository](https://github.com/simple-icons/simple-icons), pinned at commit `b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76`. GitHub, Vercel, Railway, Next.js and OpenRouter are exact, unmodified downloads. Stripe, Supabase, Hono and LangGraph keep their original paths, titles and viewBoxes, with a root `fill` taken from the brand's `hex` field in the [same revision's metadata](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/data/simple-icons.json) and a final newline.
 
 | Local file in `public/assets/providers/` | Pinned source |
 | --- | --- |
 | `github.svg` | [GitHub](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/github.svg) |
 | `vercel.svg` | [Vercel](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/vercel.svg) |
 | `railway.svg` | [Railway](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/railway.svg) |
+| `stripe.svg` | [Stripe](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/stripe.svg) |
 | `supabase.svg` | [Supabase](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/supabase.svg) |
 | `langgraph.svg` | [LangGraph](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/langgraph.svg) |
 | `nextdotjs.svg` | [Next.js](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/nextdotjs.svg) |
 | `hono.svg` | [Hono](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/hono.svg) |
 | `openrouter.svg` | [OpenRouter](https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/openrouter.svg) |
 
-Brand colors of the three recolored marks:
+Brand colors of the four recolored marks:
 
 | Mark | Fill | Brand source recorded by the pinned metadata |
 | --- | --- | --- |
+| Stripe | `#635BFF` | [Official Stripe newsroom](https://stripe.com/newsroom/information) |
 | Supabase | `#3FCF8E` | [Official Supabase artwork](https://github.com/supabase/supabase/blob/4031a7549f5d46da7bc79c01d56be4177dc7c114/packages/common/assets/images/supabase-logo-wordmark--light.svg) |
 | Hono | `#E36002` | [Official Hono artwork](https://github.com/honojs/hono/blob/76dbc74407329c46870af6aa4fab0c04036d8ae2/docs/images/hono-logo.svg) |
 | LangGraph | `#7FC8FF` | [Official LangGraph site](https://www.langchain.com/langgraph) |
@@ -47,11 +49,11 @@ Two logos absent from that Simple Icons revision come directly from their provid
 | `composio.svg` | [Composio Logo.svg](https://raw.githubusercontent.com/ComposioHQ/composio/cd9ee743abdb12b682dde60415a1eecba505fee0/docs/public/Composio%20Logo.svg), commit `cd9ee743abdb12b682dde60415a1eecba505fee0`. The complete original mark group and its clip definition, with the viewBox fitted to the original clip dimensions. All mark paths and strokes are unchanged. The wordmark is omitted for compact integration cards. | MIT, copyright 2025 Sampark Inc.; full notice in `public/assets/licenses/Composio-LICENSE.txt`. |
 | `triggerdotdev.svg` | [Trigger.dev LogoIcon.tsx](https://raw.githubusercontent.com/triggerdotdev/trigger.dev/9d7a60bc144d3ac03820bfe6b01cd4ba37349db1/apps/webapp/app/components/LogoIcon.tsx), commit `9d7a60bc144d3ac03820bfe6b01cd4ba37349db1`. The official component converted to standalone SVG, keeping its exact path, viewBox and gradient. JSX attribute spelling (`fillRule`, `clipRule`, `stopColor`) became standard SVG spelling, and the React-only class expression was removed. | Apache 2.0; full notice in `public/assets/licenses/Trigger-LICENSE.txt`. |
 
-Source URLs, transformations, file sizes and SHA-256 digests are also recorded in `public/assets/providers/provenance.json`. The three recolored marks also keep the original download's size and digest as `sourceBytes` and `sourceSha256`; `bytes` and `sha256` identify the local files.
+Source URLs, transformations, file sizes and SHA-256 digests are also recorded in `public/assets/providers/provenance.json`. The four recolored marks also keep the original download's size and digest as `sourceBytes` and `sourceSha256`; `bytes` and `sha256` identify the local files.
 
 `service.svg` is the Lucide **Box** icon, a generic service fallback, never a fabricated provider brand.
 
-On dark surfaces the interface applies `filter: invert(1)` only to marks with `data-monochrome="true"`, which keeps their internal black and white contrast, including Composio's artwork. Supabase, Hono, LangGraph and Trigger.dev have `data-monochrome="false"` and keep their source colors in both themes. The OpenRouter mark in Settings inverts in the dark theme.
+On dark surfaces the interface applies `filter: invert(1)` only to marks with `data-monochrome="true"`, which keeps their internal black and white contrast, including Composio's artwork. Stripe, Supabase, Hono, LangGraph and Trigger.dev have `data-monochrome="false"` and keep their source colors in both themes. The OpenRouter mark in Settings inverts in the dark theme.
 
 ## Interface icons
 

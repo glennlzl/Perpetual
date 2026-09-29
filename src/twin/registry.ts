@@ -70,6 +70,8 @@ export interface ServiceDescription {
   options: Record<string, string>;
   /** The standard variables it provides whatever its options: an app variable of the same name gets the value without a mapping. */
   provides: string[];
+  /** Variables this service owns even when an option or missing input keeps it from supplying them. */
+  owns?: readonly string[];
   /**
    * The standard variables its options add, such as names an option lists or one only an option turns on. Options are
    * unchecked, so it never throws.

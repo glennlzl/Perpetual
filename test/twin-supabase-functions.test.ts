@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
@@ -9,6 +9,7 @@ import supabase, { CLI as SUPABASE_CLI } from '../src/twin/services/supabase.ts'
 import { CLI as STRIPE_CLI } from '../src/twin/services/stripe.ts';
 import type { Json } from '../src/twin/config.ts';
 import type { InputValues } from '../src/twin/registry.ts';
+import { supabaseEdgeFiles } from './fixtures/twin/supabase-edge.ts';
 
 type SupabaseContext = Parameters<typeof supabase.setup>[0];
 type Fake = SupabaseContext & { root: string; calls: string[][] };
@@ -75,6 +76,186 @@ test('Supabase takes functions from their own repository directory in place of t
   await assert.rejects(stat(join(project(ctx), 'functions/hello')));
   assert.equal(await readFile(join(project(ctx), 'functions/.env'), 'utf8'), '');
   assert.match(section(await readFile(join(project(ctx), 'config.toml'), 'utf8'), 'functions.stripe-webhook'), /^verify_jwt = false$/m);
+});
+
+test('Supabase preserves an edge function import-map directory and its local package files in the isolated project', async t => {
+  const ctx = await context({ functions: { noVerifyJwt: ['hello'] } });
+  t.after(() => rm(ctx.root, { recursive: true, force: true }));
+  await files(ctx.source, supabaseEdgeFiles);
+  await supabase.setup(ctx);
+  for (const path of ['functions/hello/deno.json', 'functions/hello/index.ts', 'packages/shared/index.ts', 'packages/shared/detail.ts']) {
+    assert.equal(await readFile(join(project(ctx), path), 'utf8'), supabaseEdgeFiles[`supabase/${path}`]);
+  }
+  assert.match(section(await readFile(join(project(ctx), 'config.toml'), 'utf8'), 'edge_runtime'), /^enabled = true$/m);
+});
+
+test('Supabase makes an explicit legacy import map discoverable beside its entrypoint in the isolated project', async t => {
+  const ctx = await context({ functions: {} });
+  t.after(() => rm(ctx.root, { recursive: true, force: true }));
+  const config = `${CONFIG}\n[functions."hello"]\nimport_map = "./functions/import_map.json"\nentrypoint = "./functions/hello/handlers/run.ts"\n`;
+  const map = '{\n  "imports": {"shared/": "../packages/shared/"},\n  "scopes": {"./hello/": {"shared/": "../packages/override/"}}\n}\n';
+  await files(ctx.source, {
+    'supabase/config.toml': config,
+    'supabase/functions/import_map.json': map,
+    'supabase/functions/hello/handlers/run.ts': HANDLER,
+  });
+  await supabase.setup(ctx);
+  assert.deepEqual(JSON.parse(await readFile(join(project(ctx), 'functions/hello/handlers/deno.json'), 'utf8')), { importMap: '../../import_map.json' });
+  assert.equal(await readFile(join(project(ctx), 'functions/import_map.json'), 'utf8'), map);
+  assert.match(await readFile(join(project(ctx), 'config.toml'), 'utf8'), /import_map = "\.\/functions\/import_map.json"/);
+  assert.equal(await readFile(join(ctx.source, 'supabase/config.toml'), 'utf8'), config);
+  await assert.rejects(stat(join(ctx.source, 'supabase/functions/hello/handlers/deno.json')), { code: 'ENOENT' });
+});
+
+test('Supabase uses the official function-local and global legacy map fallbacks without overwriting Deno configs', async t => {
+  const ctx = await context({ functions: {} });
+  t.after(() => rm(ctx.root, { recursive: true, force: true }));
+  const deno = '{"imports":{"chosen":"./chosen.ts"}}\n', denoc = '{\n// chosen by the repository\n"imports": {"chosen": "./chosen.ts"}\n}\n';
+  await files(ctx.source, {
+    'supabase/config.toml': `${CONFIG}\n[functions.existing]\nimport_map = "./functions/import_map.json"\n[functions.comments]\nimport_map = "./functions/import_map.json"\n[functions.hello]\nentrypoint = ""\n`,
+    'supabase/functions/import_map.json': '{"imports": {"shared/": "../packages/shared/"}}',
+    'supabase/functions/private/import_map.json': '{"imports": {"shared/": "../../packages/private/"}}',
+    'supabase/functions/existing/index.ts': HANDLER, 'supabase/functions/existing/deno.json': deno,
+    'supabase/functions/comments/index.ts': HANDLER, 'supabase/functions/comments/deno.jsonc': denoc,
+    'supabase/functions/_shared/index.ts': HANDLER,
+    'supabase/functions/.cache/metadata.json': '{}', 'supabase/functions/test.fixtures/note.txt': 'fixture data',
+    'supabase/functions/9fixture/index.ts': HANDLER,
+  });
+  await supabase.setup(ctx);
+  assert.deepEqual(JSON.parse(await readFile(join(project(ctx), 'functions/hello/deno.json'), 'utf8')), { importMap: '../import_map.json' });
+  assert.deepEqual(JSON.parse(await readFile(join(project(ctx), 'functions/private/deno.json'), 'utf8')), { importMap: './import_map.json' });
+  assert.equal(await readFile(join(project(ctx), 'functions/existing/deno.json'), 'utf8'), deno);
+  assert.equal(await readFile(join(project(ctx), 'functions/comments/deno.jsonc'), 'utf8'), denoc);
+  await assert.rejects(stat(join(project(ctx), 'functions/comments/deno.json')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(project(ctx), 'functions/_shared/deno.json')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(project(ctx), 'functions/9fixture/deno.json')), { code: 'ENOENT' });
+});
+
+test('Supabase rejects malformed legacy map settings and paths outside its copy before starting the stack', async t => {
+  const cases = [
+    ['[functions.hello', /valid TOML/],
+    ['functions = 3', /functions must be a table/],
+    ['[functions]\nhello = []', /function names to tables/],
+    ['[functions.hello]\nimport_map = 42', /import_map must be text/],
+    ['[functions.hello]\nentrypoint = false', /entrypoint must be a relative path/],
+    ['[functions.hello]\nentrypoint = 0', /entrypoint must be a relative path/],
+    ['[functions.hello]\nenabled = "true"', /enabled must be a boolean/],
+    ['[functions.hello]\nimport_map = "../outside.json"', /inside the copied project/],
+    ['[functions.hello]\nimport_map = "/tmp/outside.json"', /inside the copied project/],
+    ['[functions.hello]\nimport_map = "file:///tmp/outside.json"', /inside the copied project/],
+    ['[functions.hello]\nimport_map = "https://example.test/map.json"', /inside the copied project/],
+    ['[functions.hello]\nentrypoint = "../outside.ts"', /inside the copied project/],
+    ['[functions."../outside"]\nimport_map = "./functions/import_map.json"', /function names to tables/],
+  ] as const;
+  for (const [settings, expected] of cases) {
+    const ctx = await context({ functions: {} });
+    t.after(() => rm(ctx.root, { recursive: true, force: true }));
+    await files(ctx.source, { 'supabase/config.toml': settings, 'supabase/functions/import_map.json': '{"imports":{}}' });
+    await assert.rejects(supabase.setup(ctx), expected, settings);
+    assert.equal(starts(ctx), 0, settings);
+  }
+});
+
+test('Supabase refuses legacy map, entrypoint and Deno config symlinks instead of writing outside its copy', async t => {
+  for (const linked of ['functions/import_map.json', 'functions/maps', 'functions/hello/handlers', 'functions/hello/deno.json']) {
+    const ctx = await context({ functions: {} });
+    t.after(() => rm(ctx.root, { recursive: true, force: true }));
+    const outside = join(ctx.root, 'outside');
+    await files(outside, { 'map.json': '{"imports":{}}', 'index.ts': HANDLER });
+    const settings = linked === 'functions/hello/handlers'
+      ? 'entrypoint = "./functions/hello/handlers/index.ts"'
+      : `import_map = "./${linked === 'functions/maps' ? 'functions/maps/map.json' : 'functions/import_map.json'}"`;
+    await files(ctx.source, { 'supabase/config.toml': `${CONFIG}\n[functions.hello]\n${settings}\n` });
+    await symlink(linked.endsWith('.json') ? join(outside, 'map.json') : outside, join(ctx.source, 'supabase', linked));
+    await assert.rejects(supabase.setup(ctx), /cannot follow a symbolic link/, linked);
+    assert.equal(starts(ctx), 0);
+    assert.equal(await readFile(join(outside, 'map.json'), 'utf8'), '{"imports":{}}');
+    await assert.rejects(stat(join(outside, 'deno.json')), { code: 'ENOENT' });
+  }
+});
+
+test('Supabase keeps ancestor Deno configuration active for nested function entrypoints', async t => {
+  for (const path of ['functions/hello/deno.json', 'functions/deno.jsonc']) {
+    const ctx = await context({ functions: {} });
+    t.after(() => rm(ctx.root, { recursive: true, force: true }));
+    const deno = '{"compilerOptions":{"strict":true},"imports":{"chosen":"./chosen.ts"}}\n';
+    await files(ctx.source, {
+      'supabase/config.toml': `${CONFIG}\n[functions.hello]\nentrypoint = "./functions/hello/handlers/run.ts"\nimport_map = "./functions/import_map.json"\n`,
+      'supabase/functions/hello/handlers/run.ts': HANDLER,
+      'supabase/functions/import_map.json': '{"imports":{}}', [`supabase/${path}`]: deno,
+    });
+    await supabase.setup(ctx);
+    assert.equal(await readFile(join(project(ctx), path), 'utf8'), deno);
+    await assert.rejects(stat(join(project(ctx), 'functions/hello/handlers/deno.json')), { code: 'ENOENT' });
+  }
+});
+
+test('Supabase does not treat an unmounted project-level Deno file as the function config', async t => {
+  const ctx = await context({ functions: {} });
+  t.after(() => rm(ctx.root, { recursive: true, force: true }));
+  const deno = '{"imports":{"chosen":"./chosen.ts"}}';
+  await files(ctx.source, {
+    'supabase/deno.json': deno,
+    'supabase/functions/import_map.json': '{"imports":{}}',
+  });
+  await supabase.setup(ctx);
+  assert.deepEqual(JSON.parse(await readFile(join(project(ctx), 'functions/hello/deno.json'), 'utf8')), { importMap: '../import_map.json' });
+  assert.equal(await readFile(join(project(ctx), 'deno.json'), 'utf8'), deno);
+});
+
+test('Supabase cannot bridge conflicting import maps for entrypoints in the same directory', async t => {
+  for (const sameMap of [false, true]) {
+    const ctx = await context({ functions: {} });
+    t.after(() => rm(ctx.root, { recursive: true, force: true }));
+    await files(ctx.source, {
+      'supabase/config.toml': `${CONFIG}\n[functions.one]\nentrypoint = "./functions/shared/one.ts"\nimport_map = "./functions/first.json"\n[functions.two]\nentrypoint = "./functions/shared/two.ts"\nimport_map = "./functions/${sameMap ? 'first' : 'second'}.json"\n`,
+      'supabase/functions/shared/one.ts': HANDLER, 'supabase/functions/shared/two.ts': HANDLER,
+      'supabase/functions/first.json': '{"imports":{"chosen":"./first.ts"}}', 'supabase/functions/second.json': '{"imports":{"chosen":"./second.ts"}}',
+    });
+    if (sameMap) {
+      await supabase.setup(ctx);
+      assert.deepEqual(JSON.parse(await readFile(join(project(ctx), 'functions/shared/deno.json'), 'utf8')), { importMap: '../first.json' });
+    } else {
+      await assert.rejects(supabase.setup(ctx), /share an entrypoint directory but use different import maps/);
+      assert.equal(starts(ctx), 0);
+      await assert.rejects(stat(join(project(ctx), 'functions/shared/deno.json')), { code: 'ENOENT' });
+    }
+  }
+});
+
+test('Supabase does not introduce an ancestor map for a function that had no legacy map', async t => {
+  const ctx = await context({ functions: {} });
+  t.after(() => rm(ctx.root, { recursive: true, force: true }));
+  await files(ctx.source, {
+    'supabase/config.toml': `${CONFIG}\n[functions.one]\nentrypoint = "./functions/shared/one.ts"\nimport_map = "./functions/first.json"\n[functions.two]\nentrypoint = "./functions/shared/nested/two.ts"\n`,
+    'supabase/functions/shared/one.ts': HANDLER, 'supabase/functions/shared/nested/two.ts': HANDLER,
+    'supabase/functions/first.json': '{"imports":{"chosen":"./first.ts"}}',
+  });
+  await assert.rejects(supabase.setup(ctx), /would change another function without a legacy import map/);
+  assert.equal(starts(ctx), 0);
+  await assert.rejects(stat(join(project(ctx), 'functions/shared/deno.json')), { code: 'ENOENT' });
+});
+
+test('Supabase only bridges a legacy map beside an entrypoint in the mounted functions tree', async t => {
+  for (const mode of ['legacy', 'native', 'no-map']) {
+    const ctx = await context({ functions: {} });
+    t.after(() => rm(ctx.root, { recursive: true, force: true }));
+    await files(ctx.source, {
+      'supabase/config.toml': `${CONFIG}\n[functions.hello]\nentrypoint = "./edge/index.ts"\n${mode === 'no-map' ? '' : 'import_map = "./functions/import_map.json"\n'}`,
+      'supabase/edge/index.ts': HANDLER,
+      ...(mode === 'no-map' ? {} : { 'supabase/functions/import_map.json': '{"imports":{}}' }),
+      ...(mode === 'native' ? { 'supabase/edge/deno.json': '{"imports":{}}' } : {}),
+    });
+    if (mode === 'legacy') {
+      await assert.rejects(supabase.setup(ctx), /cannot be bridged for an entrypoint outside functions/);
+      assert.equal(starts(ctx), 0);
+      await assert.rejects(stat(join(project(ctx), 'edge/deno.json')), { code: 'ENOENT' });
+    } else {
+      await supabase.setup(ctx);
+      if (mode === 'native') assert.equal(await readFile(join(project(ctx), 'edge/deno.json'), 'utf8'), '{"imports":{}}');
+      else await assert.rejects(stat(join(project(ctx), 'edge/deno.json')), { code: 'ENOENT' });
+    }
+  }
 });
 
 test('Without the functions option the project config and its functions are copied as they are', async t => {
@@ -155,7 +336,7 @@ test('Supabase failures never reveal the secrets its functions receive', async t
     if (file === 'npx' && args.includes('start')) throw Object.assign(new Error('Command failed'), { stderr: 'edge runtime exited: STRIPE_WEBHOOK_SECRET=whsec_twin_1 STRIPE_SECRET_KEY=sk_test_twin_key\n' });
   });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  await assert.rejects(prepare(KEYS), (error: Error) => error.message === 'Supabase: edge runtime exited: STRIPE_WEBHOOK_SECRET=[redacted] STRIPE_SECRET_KEY=[redacted]');
+  await assert.rejects(prepare(KEYS), (error: Error) => error.message === 'Supabase: edge runtime exited: STRIPE_WEBHOOK_SECRET=[REDACTED] STRIPE_SECRET_KEY=[REDACTED]');
 });
 
 test('Without a Stripe key Stripe is blocked, while Supabase still serves its functions without the Stripe variables', async t => {

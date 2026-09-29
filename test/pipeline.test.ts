@@ -261,7 +261,7 @@ test('transition controls follow their source stage in keyboard order', async ()
   assert.doesNotMatch(app, /EdgeLabelRenderer/, 'Edge labels render before every node, so Tab reached all transitions first.');
   assert.match(stageNode(app), /\{next && <StageTransition /, 'The source card renders its outgoing transition last.');
   const transition = app.slice(app.indexOf('function StageTransition('), app.indexOf('function StageNode('));
-  for (const label of ['Add stage between ${stageName} and ${nextName}', '${blocked ? \'Resume\' : \'Pause\'} deployment from ${stageName} to ${nextName}']) assert.ok(transition.includes(label), label);
+  for (const label of ['Add stage between ${stageName} and ${nextName}', '${blocked ? \'Resume\' : \'Pause\'} transition from ${stageName} to ${nextName}']) assert.ok(transition.includes(label), label);
 });
 
 test('Build & Deploy shows no status Badge while its runs load, rather than Not run', async () => {
@@ -396,7 +396,7 @@ test('Production shows only its header until a deployment is bound or Autopilot 
 
 test('collapsing a stage applies at once without the global busy lock', async () => {
   const app = await source('App.tsx');
-  const toggle = /const toggleStage = useCallback\(async \(?stageId(?:: string\))? => \{[\s\S]*?\n  \}, \[state\.scan\]\);/.exec(app)?.[0] || '';
+  const toggle = /const toggleStage = useCallback\(async \(?stageId(?:: string\))? => \{[\s\S]*?\n  \}, \[state\.scan, workspace\]\);/.exec(app)?.[0] || '';
   assert.ok(toggle, 'toggleStage');
   assert.doesNotMatch(toggle, /setBusy|mutation\.current = true/);
   assert.ok(toggle.indexOf('setPipeline(flip)') < toggle.search(/await api(?:<\w+>)?\('\/api\/pipeline\/action'/), 'The card collapses before the save returns.');

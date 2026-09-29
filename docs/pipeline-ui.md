@@ -10,7 +10,7 @@ The first frame shows the pipeline from its first stage at a readable zoom. When
 
 Select Source, a service action or a gate to open its configuration in a non-modal Sheet on the right; there is no separate edit mode. On a wide window the Sheet narrows the canvas, and the selected stage is panned into view without zooming. Closing the Sheet restores your previous frame unless you moved the canvas meanwhile. Below 901px the Sheet covers the canvas.
 
-Stages, transition controls and collapse state persist separately for each repository.
+Stages, transition controls and collapse state persist separately for each repository. Open tabs receive saved graph changes through polling; a pending local edit is kept until its request settles.
 
 ## Stage cards
 
@@ -30,7 +30,7 @@ A Sandbox card lists the stage's twin **Services** and its integration tests. A 
 
 ## Transition controls
 
-The pause control beneath each arrow opens a shadcn Alert Dialog with **Cancel** and **Pause deployment** (or **Resume deployment**). Confirming saves the open or paused state of that transition and keeps any previously saved reason. It does not resize or move the canvas.
+The pause control beneath each arrow opens a shadcn Alert Dialog with **Cancel** and **Pause transition** (or **Resume transition**). Confirming saves the open or paused state of that transition and keeps any previously saved reason. It does not resize or move the canvas.
 
 These controls describe the pipeline only: they do not block GitHub, Vercel or Railway deployments. The [journey gate](gate.md) is what reports a commit status that branch protection can require. Rollback is not available.
 

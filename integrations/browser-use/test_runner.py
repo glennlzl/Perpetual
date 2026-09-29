@@ -43,7 +43,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_navigation_origin_is_exact_not_a_prefix_or_another_port(self):
         allowed = {"http://127.0.0.1:3010", "https://example.com"}
         self.assertTrue(self.runner.navigation_allowed("https://example.com/other", allowed))
-        for url in ["http://127.0.0.1:30100/", "https://example.com.evil.test/", "https://example.com:8443/", "file:///tmp/private", "data:text/html,hi"]:
+        for url in ["http://127.0.0.1:30100/", "http://localhost:3010/", "http://host.docker.internal:3010/", "http://[::1]:3010/", "https://example.com.evil.test/", "https://example.com:8443/", "file:///tmp/private", "data:text/html,hi"]:
             self.assertFalse(self.runner.navigation_allowed(url, allowed))
 
     def test_the_agent_never_runs_a_journey(self):
@@ -91,12 +91,36 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(allowed("http://127.0.0.1:55887/login?next=/workflows", validated["authEndpoints"]))
         self.assertTrue(allowed("http://127.0.0.1:55888/auth/v1/token/refresh", validated["authEndpoints"]))
         # Endpoints match whole path segments, never a sibling path that shares a prefix.
-        for url in ["http://127.0.0.1:558880/auth/v1/token", "http://127.0.0.1:55888/auth/v1/user", "http://127.0.0.1:55888/auth/v1/token-revoke", "http://127.0.0.1:55888/auth/v1/tokens?grant_type=password", "http://localhost:55888/auth/v1/token", "https://127.0.0.1:55888/auth/v1/token", "http://127.0.0.1:55887/login", "http://127.0.0.1:55887/login-admin?next=/", "not a url"]:
+        for url in ["http://127.0.0.1:558880/auth/v1/token", "http://127.0.0.1:55888/auth/v1/user", "http://127.0.0.1:55888/auth/v1/token-revoke", "http://127.0.0.1:55888/auth/v1/tokens?grant_type=password", "https://127.0.0.1:55888/auth/v1/token", "http://127.0.0.1:55887/login", "http://127.0.0.1:55887/login-admin?next=/", "not a url"]:
             self.assertFalse(allowed(url, validated["authEndpoints"]), url)
         # A bare origin would admit every POST on that port.
         for endpoints in ["http://127.0.0.1:55888/auth", ["http://127.0.0.1:55888"], ["http://127.0.0.1:55888/"], ["http://127.0.0.1:55888/?next=/"], ["http://127.0.0.1:55888/a"] * 4, ["http://example.com/auth"], ["http://user:pass@127.0.0.1:55888/auth"], ["/auth/v1/token"], ["ftp://127.0.0.1/auth"], ["http://127.0.0.1:55888/auth#token"], [1]]:
             with self.subTest(endpoints=endpoints), self.assertRaises(ValueError):
                 self.runner.validate_payload({**payload, "authEndpoints": endpoints})
+
+    def test_twin_sign_in_accepts_loopback_host_aliases_without_expanding_endpoint_access(self):
+        account = {"username": "ephemeral@example.invalid", "password": "fixture-only-password"}
+        for hostname in ["localhost", "127.0.0.1", "[::1]", "host.docker.internal"]:
+            with self.subTest(hostname=hostname):
+                endpoint = f"http://{hostname}:55888/auth/v1/token"
+                payload = self.runner.validate_payload({**self.payload(), "credentials": account, "authEndpoints": [endpoint]})
+                self.assertEqual(payload["authEndpoints"], [endpoint])
+                self.assertEqual(payload["allowedOrigins"], ["http://127.0.0.1:3010"])
+                browser = self.runner.OwnedBrowser(payload)
+                self.assertFalse(browser.mutation_blocked("POST", endpoint + "?grant_type=password"))
+                for request_host in ["localhost", "127.0.0.1", "[::1]", "host.docker.internal"]:
+                    request = f"http://{request_host}:55888/auth/v1/token"
+                    self.assertFalse(browser.mutation_blocked("POST", request + "?grant_type=password"), request)
+                    self.assertTrue(self.runner.endpoint_allowed(request + "?grant_type=password&scope=read", [endpoint + "?grant_type=password"]))
+                    self.assertFalse(self.runner.endpoint_allowed(request + "?grant_type=refresh_token", [endpoint + "?grant_type=password"]))
+                    for refused in [f"https://{request_host}:55888/auth/v1/token", f"http://{request_host}:55889/auth/v1/token", f"http://{request_host}:55888/auth/v1/token-revoke"]:
+                        self.assertTrue(browser.mutation_blocked("POST", refused), refused)
+                for url in [f"http://{hostname}:55889/auth/v1/token", f"http://{hostname}:55888/auth/v1/users", "http://other.example:55888/auth/v1/token"]:
+                    self.assertTrue(browser.mutation_blocked("POST", url), url)
+                self.assertFalse(self.runner.navigation_allowed(endpoint, set(payload["allowedOrigins"])))
+        for hostname in ["other.example", "host.docker.internal.other.example", "127.0.0.2"]:
+            with self.subTest(hostname=hostname), self.assertRaises(ValueError):
+                self.runner.validate_payload({**self.payload(), "credentials": account, "authEndpoints": [f"http://{hostname}:55888/auth/v1/token"]})
 
     def test_discovery_permits_only_the_configured_sign_in_post_with_an_account(self):
         import asyncio
@@ -289,7 +313,7 @@ class LargeDiscoveryContextTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [{"type": "text-visible", "value": "Workspace"}], "evidence": [{"path": "frontend/app/page.tsx", "line": 2}, {"path": "frontend/app/page.tsx", "line": 3}]}], "summary": "Workspace observed"}}}
                 content = {"evaluation_previous_goal": "Observed fixture", "memory": "Retain source reference", "next_goal": "Complete discovery", "action": [action]}
-                response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": json.dumps(content)}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+                response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
                 body = json.dumps(response).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

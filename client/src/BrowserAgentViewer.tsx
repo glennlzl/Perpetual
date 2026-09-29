@@ -21,7 +21,7 @@ export type RunSnapshot = { run: BrowserRun; results: CaseResult[]; progress: Ru
 type ViewerCase = { id?: string; caseId?: string; name?: string; status: string; error?: string; actions?: BrowserAction[]; steps?: BrowserAction[] };
 type BrowserAgentViewerProps = {
   repoPath: string; stageId: string; runId?: string | null; mode?: 'run' | 'discover'; cases?: BrowserCase[]; focusCaseId?: string; startingError?: string;
-  focusFallback?: Parameters<typeof useReturnFocus>[0]; onClose: () => void; onFinished?: (snapshot: RunSnapshot) => void;
+  focusFallback?: Parameters<typeof useReturnFocus>[0]; onClose: () => void; onFinished?: (snapshot: RunSnapshot) => void; onTestSettings?: () => void;
 };
 
 const ACTIVE = new Set(['queued', 'running']);
@@ -30,7 +30,7 @@ function Mark({ status }: { status: string | undefined }) {
   return <Icon aria-hidden="true" className={`size-4 shrink-0 ${status === 'running' ? 'motion-safe:animate-spin' : ''} ${status === 'failed' ? 'text-destructive' : ''}`} />;
 }
 
-export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'run', cases = [], focusCaseId = '', startingError = '', focusFallback, onClose, onFinished }: BrowserAgentViewerProps) {
+export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'run', cases = [], focusCaseId = '', startingError = '', focusFallback, onClose, onFinished, onTestSettings }: BrowserAgentViewerProps) {
   const returnFocus = useReturnFocus(focusFallback);
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [error, setError] = useState('');
@@ -134,6 +134,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         {run?.verification?.control && <Badge variant="outline">Control</Badge>}
         {browserConcurrencyLabel(run) && <Badge variant="outline">{browserConcurrencyLabel(run)}</Badge>}
         <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>
+        {startingError && mode === 'discover' && onTestSettings && <Button size="sm" variant="outline" onClick={onTestSettings}>Test settings</Button>}
         {/* Cancelling stops every journey in the run, so it is confirmed with Keep running focused first. */}
         {!finished && !startingError && <AlertDialog open={confirmingStop} onOpenChange={setConfirmingStop}>
           <AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={!runId || stopping}><Square />{stopping ? 'Cancelling…' : 'Cancel run'}</Button></AlertDialogTrigger>

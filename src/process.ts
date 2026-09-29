@@ -3,8 +3,8 @@
 // edit links); the Git graph keeps its stricter reader in src/git-history.ts on purpose. A docker
 // CLI pinned to a local engine by `--host` runs with the ambient endpoint removed. The twin runtime's
 // docker and service CLIs (src/twin/runtime.ts) inherit the whole environment on purpose: they reach
-// the user's engine through DOCKER_HOST, credential helpers and the Docker config, and their commands
-// run for as long as an image pull or an install takes, so they carry no timeout here. The repair box's docker
+// the user's engine through DOCKER_HOST, credential helpers and the Docker config. Their bounded command
+// lifecycle, cancellation and owned-resource cleanup are handled in the twin runtime. The repair box's docker
 // (src/repair/box.ts) reaches the user's engine with the engine variables and the shell basics only, since the box
 // must see nothing else of the host's.
 import { execFile } from 'node:child_process';

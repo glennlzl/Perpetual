@@ -331,7 +331,7 @@ test('an interrupted verification keeps its own verdict after its attempts leave
 test('another stage\'s runs never push a running verification\'s attempts out of the history',async t=>{
   const f=await setup(t);
   const gamma={...f.context,stageId:'gamma'};
-  await f.manager.saveConfig(gamma,{targetUrl:'http://localhost:3000'});await f.manager.saveCases(gamma,[{...journey,selected:true}]);await f.manager.saveSpec(gamma,{caseId:journey.id,code});
+  await f.manager.saveConfig(gamma,{targetUrl:'http://localhost:3001'});await f.manager.saveCases(gamma,[{...journey,selected:true}]);await f.manager.saveSpec(gamma,{caseId:journey.id,code});
   await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
   for(let attempt=1;attempt<=3;attempt++)(await f.worker(attempt)).finish(passing);
   const control=await f.worker(4);

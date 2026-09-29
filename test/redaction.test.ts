@@ -55,3 +55,10 @@ test('no module keeps a redaction of its own', async () => {
     assert.doesNotMatch(text, /'\[REDACTED\]'/, `${file} spells the marker itself`);
   }
 });
+
+test('vendor-generated webhook and restricted keys are redacted before their values are registered',()=>{
+  for(const token of ['whsec_fixture_signing_value','rkcs_test_fixture_sandbox_value','rk_test_fixture_restricted_value','rk_live_fixture_restricted_value']){
+    assert.equal(redact(`generated\n${token}\n`),`generated\n${REDACTED}\n`);
+    assert.ok(!failureText(new Error(`failed ${token}`),100).includes(token));
+  }
+});

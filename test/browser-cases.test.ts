@@ -29,6 +29,21 @@ test('review gates selection; unverified goals can exist without falsely acquiri
   assert.throws(() => validateBrowserCases([scenario({ goal: 'x'.repeat(5000) })]), /goal/i);
 });
 
+test('review refuses a journey without independent checks while keeping its incomplete draft', async () => {
+  const { validateBrowserCases, assertReviewedJourneys } = await import('../src/business/browser-cases.ts');
+  const draft = validateBrowserCases([scenario({ steps, assertions: [] })]);
+  assert.doesNotThrow(() => assertReviewedJourneys(draft));
+  assert.deepEqual(draft[0].assertions, []);
+  const reviewed = [{ ...draft[0], needsReview: false }];
+  assert.throws(() => assertReviewedJourneys(reviewed, draft), /check/i);
+  assert.doesNotThrow(() => assertReviewedJourneys(reviewed, reviewed), 'Old cases stay readable without inventing checks.');
+  assert.throws(() => assertReviewedJourneys([{ ...reviewed[0], goal: 'A changed goal' }], reviewed), /check/i);
+  for (const checked of [
+    { ...reviewed[0], assertions: [{ type: 'text-visible' as const, value: 'Saved workflow' }] },
+    { ...reviewed[0], steps: [steps[0], { ...steps[1], checks: [{ type: 'text-visible' as const, value: 'Saved workflow' }] }] },
+  ]) assert.doesNotThrow(() => assertReviewedJourneys([checked], draft));
+});
+
 test('discovery context uses bounded redacted source and skips instructions, secrets and symlinks', async t => {
   const { browserDiscoveryContext } = await import('../src/business/browser-cases.ts');
   const root = await mkdtemp(join(tmpdir(), 'browser-goals-'));

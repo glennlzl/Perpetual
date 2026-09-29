@@ -154,7 +154,13 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
    command in its directory; take them from the repository's manifests and scripts.
 2. Wire each variable an app's code reads (process.env, import.meta.env, os.environ, its config files) to a service
    variable or an address. A variable with a service's standard name gets its value without a mapping; map any other
-   name in the app's \`env\`, such as \`"VITE_API_URL": "{{apps.api.url}}"\` or \`"DB_URL": "{{postgres.DATABASE_URL}}"\`.
+   name in the app's \`env\`, such as \`"VITE_API_URL": "{{apps.api.publicUrl}}"\` or \`"DB_URL": "{{postgres.DATABASE_URL}}"\`.
+   Read the source to determine where each URL is consumed: browser code (including values compiled into a front-end
+   bundle) needs \`{{apps.<id>.publicUrl}}\` or \`{{services.<id>.publicUrl.<port>}}\`; container-side requests need the
+   existing \`url\` form. For example, a browser's Supabase URL uses \`{{services.supabase.publicUrl.api}}\`.
+   Do not choose or rewrite addresses from variable prefixes alone. Preserve real external vendor URLs and service
+   outputs; map browser aliases explicitly. A service callback or allowed origin consumed by a browser also needs
+   its public address, while a webhook listener forwarding from a container needs the internal address.
    The work list also names each Supabase edge function, whether the twin serves it and what it reads that nothing
    provides. An app may call functions kept in another folder than the database's project: serve them with the
    \`supabase\` service's \`functions\` option and wire what they read in its \`env\`.
@@ -164,8 +170,18 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
    account; read the migrations for the tables involved. Fixtures run after the test accounts exist, so inline SQL can
    find an account by its email, for example in Supabase's \`auth.users\`.
 4. Add fixtures that put the data the app's main flows need in place: SQL files from the repository, inline SQL, or a
-   repository command such as its seed script.
+   repository command such as its seed script. Read that script before selecting it: check its required arguments,
+   account identifiers, database variable names and prerequisites. A command fixture receives only its selected
+   service's variables, not an app's env. Map aliases explicitly in the command, for example
+   \`SEED_DB_URL="$DATABASE_URL" npm run seed -- --email owner@example.test\`, using the account configured above.
+   A script's localhost fallback points at the fixture container itself; it cannot reach another service there.
+   If a script needs unavailable prerequisites or a different database schema, use suitable repository SQL or a
+   minimal fixture based on the actual migrations instead of repeating that script unchanged.
 5. List the secrets the app itself requires, such as a session secret, under the \`secrets\` service.
+   Never generate third-party credentials, auth-service keys or signing keys that another service owns. Keep the
+   real provider in the config when its credentials are missing: it must remain blocked. An API key from a service
+   can map to the app's differently named variable; a random value cannot replace it. Do not enable an auth bypass
+   or remove an application's dependency to make readiness pass.
 6. Use only the services in the catalog below, with the options each lists. Never write a stand-in for a vendor: when no
    service fits a dependency, leave it out. An app's commands run the repository's own code, never an inline server.
 7. Keep the config minimal: nothing the apps do not use.
@@ -190,8 +206,10 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
 - \`install\` is optional: one install that several apps share, such as a workspace's; it runs once before fixtures and
   apps start, and those apps' builds then leave it out.
 - Placeholders in service options and app env: \`{{<service id>.<VARIABLE>}}\` is a variable that service provides,
-  \`{{apps.<id>.url}}\` an app's address, \`{{services.<id>.url.<port>}}\` a service's address on one of its named ports.
-  Every address is http://host.docker.internal:<port>, the same for the browser and the containers. Commands (\`build\`,
+  \`{{apps.<id>.url}}\` an app's container-reachable address, \`{{services.<id>.url.<port>}}\` a service's container-reachable
+  address on one of its named ports. Replace \`url\` with \`publicUrl\` for the host browser's loopback address.
+  Address placeholders are HTTP URLs. For a database connection use the service's DATABASE_URL variable, including
+  its protocol and credentials, never its HTTP address placeholder. Commands (\`build\`,
   \`start\`, \`install\`, fixtures) hold none: they read the variables env fills as $VARIABLE.
 - A service option named \`env\` is an environment, like an app's.
 - Fixtures run once services are ready, after their test accounts and the install, before the apps start. A \`sql\` or

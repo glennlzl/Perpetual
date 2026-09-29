@@ -6,7 +6,7 @@ Export credentials into the server process environment. `.env.example` lists the
 
 ## GitHub
 
-GitHub uses the GitHub CLI session (`gh auth login`) or `GH_TOKEN`/`GITHUB_TOKEN`, with access to the repository and read permission for Actions. Perpetual never pushes to a repository or reruns a workflow. With the connected account it reads branch heads and reports commit statuses for the [journey gate](gate.md).
+GitHub uses the GitHub CLI session (`gh auth login`) or `GH_TOKEN`/`GITHUB_TOKEN`, with access to the repository and read permission for Actions. With the connected account it reads branch heads and reports commit statuses for the [journey gate](gate.md). [Build repair](repair.md) may rerun a transient failure once or push a fix to its own repair branch through a pull request. Its merge follows CI, the exact-head journey gates and the Build Autopilot mode.
 
 For an existing local project with a GitHub remote and no previous connection choice, Perpetual reuses the machine's GitHub CLI session after a successful account check. A remote URL alone never counts as authentication. The branch selector and Source settings share this connection state. An explicit **Disconnect** stays in effect, and an explicitly connected account is not silently replaced by a different CLI account.
 

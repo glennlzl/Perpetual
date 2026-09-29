@@ -21,7 +21,9 @@ test('The service catalog lists every registered service with its options, varia
     assert.equal(entry.includes('Creates test accounts'), Boolean(service.accounts), service.id);
   }
   assert.match(catalog, /Runs `postgres` itself: never add it beside this service\./);
-  assert.match(catalog, /### `stripe`: Stripe \(official sandbox\)[\s\S]*Perpetual can create its inputs when the user asks\./);
+  const stripe = entries.find(entry => entry.startsWith('`stripe`:'))!;
+  assert.match(stripe, /Inputs created on request or supplied once by the user/);
+  assert.match(stripe, /Perpetual can create its inputs when the user asks\./);
 });
 
 test('A catalog comes from whichever registry it is given, described or not', () => {
@@ -90,4 +92,23 @@ test('A variable a service provides only with an option is refused without that 
   assert.deepEqual(hook({ fixtures: inline }), ['apps.web.env.HOOK: stripe does not provide STRIPE_WEBHOOK_SECRET.']);
   assert.deepEqual(hook({ fixtures: 'stripe/fixtures.json', webhook: '{{apps.web.url}}/hooks/stripe' }), []);
   assert.deepEqual(hook({ fixtures: inline, webhook: '{{apps.web.url}}/hooks/stripe' }), []);
+});
+
+test('generated internal secrets cannot stand in for catalogued vendor credentials',()=>{
+  const config=validateTwinConfig({services:{secrets:{names:['STRIPE_SECRET_KEY','SUPABASE_SERVICE_ROLE_KEY','SESSION_SECRET']}},apps:{web:{start:'npm start',port:3000}}});
+  const errors=serviceOptionErrors(config);
+  assert.ok(errors.some(error=>error.includes('STRIPE_SECRET_KEY')&&error.includes('stripe')),errors.join('\n'));
+  assert.ok(errors.some(error=>error.includes('SUPABASE_SERVICE_ROLE_KEY')&&error.includes('supabase')),errors.join('\n'));
+  assert.ok(errors.every(error=>!error.includes('SESSION_SECRET')),'An application-owned session key is still generated');
+  assert.deepEqual(serviceOptionErrors(validateTwinConfig({services:{stripe:{},supabase:{},secrets:{names:['SESSION_SECRET']}},apps:{web:{start:'npm start',port:3000,env:{PAYMENTS_KEY:'{{stripe.STRIPE_SECRET_KEY}}',ADMIN_KEY:'{{supabase.SUPABASE_SERVICE_ROLE_KEY}}'}}}})),[]);
+});
+
+test('generated secrets cannot replace credentials an enabled service option supplies',()=>{
+  const config=validateTwinConfig({services:{stripe:{webhook:'{{apps.web.url}}/hook'},secrets:{names:['STRIPE_WEBHOOK_SECRET']}},apps:{web:{start:'npm start',port:3000,env:{STRIPE_WEBHOOK_SECRET:'{{secrets.STRIPE_WEBHOOK_SECRET}}'}}}});
+  assert.ok(serviceOptionErrors(config).some(error=>error.includes('STRIPE_WEBHOOK_SECRET')&&error.includes('stripe')));
+});
+
+test('omitting a service cannot make its conditional signing key an internal secret',()=>{
+  const config=validateTwinConfig({services:{secrets:{names:['STRIPE_WEBHOOK_SECRET']}},apps:{web:{start:'npm start',port:3000,env:{STRIPE_WEBHOOK_SECRET:'{{secrets.STRIPE_WEBHOOK_SECRET}}'}}}});
+  assert.ok(serviceOptionErrors(config).some(error=>error.includes('STRIPE_WEBHOOK_SECRET')&&error.includes('stripe')));
 });

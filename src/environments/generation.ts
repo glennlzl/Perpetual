@@ -11,6 +11,7 @@ import { services as registry } from '../twin/registry.ts';
 import type { Authored } from '../twin/authoring.ts';
 import type { TwinConfig } from '../twin/config.ts';
 import type { TwinServices } from '../twin/registry.ts';
+import type { EnvironmentAttempt } from '../../contract/environment.ts';
 
 export const ATTEMPTS = 4;
 /** The folder under an environment's directory that holds its generation's agent workspaces while it runs. */
@@ -38,7 +39,7 @@ export type Stage = 'valid' | 'build' | 'healthy' | 'answers' | 'account';
  */
 export interface StagedFailure { stage: Stage; heading: string; subject?: string; error: string; reason?: string; logs?: string }
 /** A failed attempt as a person sees it: where it failed and one redacted line on why. */
-export interface AttemptOutcome { attempt: number; stage: Stage; summary: string }
+export type AttemptOutcome = EnvironmentAttempt;
 /** Generation that failed: the environment fails with its message and keeps `logs`, and the stage keeps the draft. */
 export type GenerationFailure = Error & { draft: GenerationDraft; logs?: string };
 export const isGenerationFailure = (error: unknown): error is GenerationFailure => error instanceof Error && 'draft' in error;
@@ -99,6 +100,8 @@ export interface GenerationSteps<Result> {
   unwired?(text: string): string[];
   /** Records a failed attempt's outcome before the next attempt starts. */
   failed?(outcome: AttemptOutcome): Promise<void>;
+  /** Keeps a completed author's config and failure as a draft before another paid attempt starts. */
+  checkpoint?(draft: GenerationDraft): Promise<void>;
   /** Tears the failed twin down before the next attempt. */
   teardown(config: TwinConfig): Promise<void>;
   /** Redacts the secrets the controller knows: the model key and the twin's secret inputs. */
@@ -113,7 +116,7 @@ export interface GenerationSteps<Result> {
  * not. Its log, in `logs` of the result and of each rejection, holds every attempt's output and each failed attempt's
  * feedback, all redacted.
  */
-export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, teardown, hide, cancelled }: GenerationSteps<Result>) {
+export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, hide, cancelled }: GenerationSteps<Result>) {
   let text = draft, notes = feedback;
   const output: string[] = [];
   const record = (attempt: number, what: string, tail: unknown) => { if (typeof tail === 'string' && tail.trim()) output.push(`${writingStep(attempt)}: ${hide(what)}\n${hide(tail).trim()}`); };
@@ -142,7 +145,7 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
           if (problem === null) return { config: built, result, attempts: attempt, logs: output.join('\n\n') };
           failure = { ...problem, heading: 'the twin started, but does not count as ready', logs: await logs() };
         } catch (error) {
-          if (cancelled()) throw error;
+          if (cancelled() || error instanceof Error && 'cleanupIncomplete' in error && error.cleanupIncomplete === true) throw error instanceof Error ? withLogs(error) : error;
           const { step: at, ...found } = await diagnose(built, error);
           failure = { ...found, heading: `preparing the twin failed at "${at}"`, error: String((error as Error).message ?? error) };
         }
@@ -150,6 +153,7 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
     }
     // The unwired variables of the config the next attempt starts from.
     notes = feedbackText({ title: attemptTitle(attempt), failure, unwired: unwired(text), hide });
+    if (written.error === undefined) await checkpoint({ text, feedback: notes });
     const said = firstLine(hide(summary(failure)));
     await failed({ attempt, stage: failure.stage, summary: said });
     record(attempt, `Failed at ${failure.stage}.`, notes);

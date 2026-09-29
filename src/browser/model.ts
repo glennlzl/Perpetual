@@ -16,7 +16,7 @@ export async function createBrowserModelSettings({dataDir,env=process.env}:{data
   const file=join(dataDir,'browser-model.json');let saved:BrowserModelInput|null=null;
   {const parsed=await readStateFile(file,{limit:16384,invalid:'Invalid browser model settings.'});if(parsed!==undefined)saved=parsed===null?null:isRecord(parsed)?parsed:{};}
   const configuration=()=>resolveBrowserModel({saved,env});
-  /** The model a build repair escalates to after two failed attempts; null until one is saved. */
+  /** The model build repairs and twin config authoring escalate to after two failed attempts; null until one is saved. */
   const escalationModel=()=>modelId(saved?.escalationModel)?saved.escalationModel:null;
   const view=()=>({...browserModelView(configuration()),escalationModel:escalationModel()??''});
   const saves=createSaveQueue();

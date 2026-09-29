@@ -33,6 +33,7 @@ type AttemptSpec = { file: string; code: string; error?: undefined; rejected?: u
 
 export const GENERATOR_AGENT = 'playwright-test-generator';
 export const SEED = 'seed.spec.mjs', PLAN = 'specs/plan.md', TESTS = 'tests', TARGET = `${TESTS}/journey.spec.mjs`;
+const SEED_PROJECT = 'seed';
 // The test MCP server exits before its Playwright worker finishes teardown, so OpenCode can exit first.
 const MAX_SPEC = 256 * 1024, SETTLE_MS = 10000;
 export const CANCELLED = 'Code generation cancelled.';
@@ -94,6 +95,7 @@ export function generationRules(item: Pick<ApprovedCase, 'name' | 'steps' | 'ass
     "Every run uses the same application data. When a step creates or changes data that a later check reads, type a value that includes `journey.run`, such as `` `QA ${journey.run}` ``, never a fixed literal that an earlier run may already have stored. `journey.run` is the run's token and the only value an argument may read, alone or in a template literal.",
     'A check never reads a form field the journey typed into or chose on the current page, nor the fields of a page reached with `goBack` or `goForward`: to see a saved value in a field, reload or open the page again.',
     ...runRules(item),
+    "An entity or record URL observed during exploration belongs to that exploration, not to a future run. Reopen data created by this run through its visible links, using journey.run only where the rules allow it. Use `await page.reload();` to check persistence on the current record; never hard-code an explored record's URL in `page.goto`.",
     "Locate controls by names that stay the same across runs, apart from this run's own data where `journey.run` may name it: never by a fixed text this journey types or saves, nor by text an earlier run may have saved, such as a name shown in an account menu; when a control's name holds such text, use its stable part, such as a label, an email or a test id.",
     'Prefer role, label or id locators from the log.',
   ];
@@ -102,15 +104,16 @@ export function generationRules(item: Pick<ApprovedCase, 'name' | 'steps' | 'ass
 /** specs/plan.md in the generator's test plan format: goal, numbered steps with their milestone ids, and the code rules. */
 export function generationPlan(item: Pick<GenerationCase, 'name' | 'goal' | 'steps' | 'assertions'>, { signIn }: { signIn: boolean }) {
   const name = line(item.name);
-  return [`# ${name}`, '', `**Seed:** \`${SEED}\``, '', `Goal: ${line(item.goal)}`, '', `### 1. ${name}`, '', `#### 1.1 ${name}`, '', '**Steps:**',
+  return [`# ${name}`, '', `**Seed:** \`${SEED}\``, '', `**Seed project:** \`${SEED_PROJECT}\``, '', `Goal: ${line(item.goal)}`, '', `### 1. ${name}`, '', `#### 1.1 ${name}`, '', '**Steps:**',
     ...item.steps.map((step, index) => `${index + 1}. ${line(step.title)} (milestone id: ${step.id})`), '',
     '**Code rules (required):**', ...generationRules(item, { signIn }).map(rule => `- ${rule}`), ''].join('\n');
 }
 
-export const generatePrompt = `Generate the test for the scenario in \`${PLAN}\` with the seed \`${SEED}\`, and write it with generator_write_test to \`${TARGET}\`. Follow the plan's code rules exactly.`;
+const setupPrompt = `Set up the page with generator_setup_page using \`project: "${SEED_PROJECT}"\` and \`seedFile: "${SEED}"\` for the scenario in \`${PLAN}\`.`;
+export const generatePrompt = `${setupPrompt} Generate the test and write it with generator_write_test to \`${TARGET}\`. Follow the plan's code rules exactly.`;
 /** A repair names only what validation rejected and the rules; the harness starts a new session for it. */
 export const repairPrompt = (error: string, file: string, rules: string[]) => [`The test in \`${file}\` is invalid: ${error}`, '', 'Rules:', ...rules.map(rule => `- ${rule}`), '',
-  `Set up the page with generator_setup_page for \`${PLAN}\` and \`${SEED}\`, then write the corrected test with generator_write_test to \`${file}\`.`].join('\n');
+  `${setupPrompt} Then write the corrected test with generator_write_test to \`${file}\`.`].join('\n');
 
 // The project is its own git root, so neither instructions nor files above it belong to it.
 async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, model, signIn, values, userHome, signal }: {
@@ -120,7 +123,7 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
   const seedDir = join(run, 'seed');
   for (const dir of [join(project, 'specs'), join(project, TESTS), seedDir, home]) await mkdir(dir, { recursive: true, mode: 0o700 });
   const config = await writeJourneyWorkspace(run, { item, targetUrl, timeoutSeconds, video: false, projects: [
-    { name: 'seed', testDir: seedDir, testMatch: SEED },
+    { name: SEED_PROJECT, testDir: seedDir, testMatch: SEED },
     { name: TESTS, testDir: join(project, TESTS), testIgnore: '**' },
   ] });
   const seed = seedSpec(signIn);
@@ -233,17 +236,22 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
     const agent = runner = createOpencodeRunner({ harness, model, cwd: project, env: childEnv, secrets, timeoutMs, cleanupGraceMs, settleMs: SETTLE_MS, messages: MESSAGES });
     onStep('generating');
     let since = Date.now();
-    await agent.run(generatePrompt);
+    const first = await agent.run(generatePrompt);
     await intact();
     let result = await readSpec(project, item, since);
     if (result.error) {
       onStep('repairing');
       since = Date.now();
-      await agent.run(repairPrompt(result.error, result.file, generationRules(item, { signIn })));
+      const repair = await agent.run(repairPrompt(result.error, result.file, generationRules(item, { signIn })));
       await intact();
       result = await readSpec(project, item, since);
       // The rejected code stays with the failure, so a person can see what the generator wrote.
-      if (result.error) throw Object.assign(new Error(agent.hide(`The generated code is invalid: ${result.error}`).slice(0, 800)), result.rejected ? { rejected: agent.hide(result.rejected).slice(0, MAX_REJECTED) } : {});
+      if (result.error) {
+        // A harness may exit successfully after reporting a tool/provider failure without writing a file.
+        // Its output was already redacted by the runner; keep both bounded tails before removing the workspace.
+        const diagnostics = !result.rejected ? [first, repair].map(({ output }, index) => output ? `${index ? 'Repair' : 'Generation'}: ${line(output).slice(-300)}` : '').filter(Boolean).join(' ') : '';
+        throw Object.assign(new Error(agent.hide(`The generated code is invalid: ${result.error}${diagnostics ? ` ${diagnostics}` : ''}`).slice(0, 800)), result.rejected ? { rejected: agent.hide(result.rejected).slice(0, MAX_REJECTED) } : {});
+      }
     }
     // A spec without an error is the validated code.
     return { code: result.code!, provenance: { harness: OPENCODE, generator: `${GENERATOR_AGENT}@${PLAYWRIGHT_VERSION}`, model: `openrouter/${model}` } };

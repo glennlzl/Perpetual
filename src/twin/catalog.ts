@@ -24,7 +24,7 @@ export function catalogEntry(service: TwinService) {
   if (describe?.ports?.length) lines.push(`- Addresses: ${list(describe.ports.map(port => code(`{{services.${service.id}.url.${port}}}`)))}.`);
   if (service.accounts) lines.push('- Creates test accounts from its options.');
   if (service.includes?.length) lines.push(`- Runs ${list(service.includes.map(code))} itself: never add ${service.includes.length > 1 ? 'them' : 'it'} beside this service.`);
-  if (service.inputs?.length) lines.push(`- Inputs the user supplies once; a required one that is missing blocks the service: ${list(service.inputs.map(input => `${code(input.name)} (${input.label ?? input.name}${input.optional ? ', optional' : ''})`))}.`);
+  if (service.inputs?.length) lines.push(`- Inputs ${service.provision ? 'created on request or supplied once by the user' : 'the user supplies once'}; a required one that is missing blocks the service: ${list(service.inputs.map(input => `${code(input.name)} (${input.label ?? input.name}${input.optional ? ', optional' : ''})`))}.`);
   if (service.provision) lines.push('- Perpetual can create its inputs when the user asks.');
   const found = evidence(service);
   if (found.length) lines.push(`- A repository that needs it has ${found.join('; ')}.`);

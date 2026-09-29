@@ -312,7 +312,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs.
   async function connectedAccount(){
     if(state.githubConnection===null||githubAuth.isPending())return null;
+    const scan=state.scan,source=state.source;
     const connection=await githubConnection(await githubRuns.session());
+    if(state.scan!==scan||state.source!==source)return null;
     return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
   }
   // The watcher moves a managed source whose pipeline has no Sandbox stage to its branch head, never during a stage's
@@ -399,7 +401,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   onCleanup(()=>repairs.close());
   // Autopilot as the pipeline reads it: the Build stage carries the repairs, and its mode is the pipeline's auto-merge switch.
   const buildStage=()=>state.scan?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
-  const autopilotView=(scan: Scan)=>autopilotOf(repairs.view(),{repoPath:scan.repo.path,stageId:buildStage()?.id??null});
+  const autopilotView=(scan: Scan)=>autopilotOf(repairs.view(),{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
   function autopilotStage(stageId: unknown){const build=buildStage();if(!build||build.id!==stageId)throw new Error('Autopilot is available for Build.');return build;}
   const removals=await createStageRemovalManager({dataDir,usage,environments,browser,removeStage:context=>save(current=>{
     // Deletion belongs to the confirmed source, even after the user changes
@@ -498,13 +500,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         // The view names the active source, so a page on an older commit reloads it.
         if(req.method==='GET'&&path==='/api/gate')return reply(res,200,{repoPath:scan.repo.path,sha:scan.repo.sha||null,...gates.view()});
         if(req.method!=='POST')return reply(res,404,{error:'Gate operation not found.'});
+        requireSourceIdle();
         const input=await body(req);
-        if(input.repoPath!==scan.repo.path)throw conflict('The active source changed. Reload the pipeline.');
-        if(path==='/api/gate/run')return reply(res,202,{repoPath:scan.repo.path,sha:scan.repo.sha||null,...await gates.run({stageId:input.stageId})});
+        requireSourceIdle();
+        if(state.scan!==scan||input.repoPath!==scan.repo.path)throw conflict(SOURCE_CHANGED);
+        if(path==='/api/gate/run')return reply(res,202,await withActiveScan(input.repoPath,async current=>({repoPath:current.repo.path,sha:current.repo.sha||null,...await gates.run({stageId:input.stageId})})));
         if(path==='/api/gate/release') {
-          const connection=state.githubConnection===null?null:await githubConnection(await githubRuns.session());
-          if(!connection?.connected)throw new Error('Connect GitHub to release.');
-          return reply(res,200,{repoPath:scan.repo.path,sha:scan.repo.sha||null,...await gates.release({stageId:input.stageId,sha:input.sha,login:connection.account.login})});
+          return reply(res,200,await withActiveScan(input.repoPath,async current=>{
+            const connection=state.githubConnection===null?null:await githubConnection(await githubRuns.session());
+            requireSourceIdle();
+            if(state.scan!==current)throw conflict(SOURCE_CHANGED);
+            if(!connection?.connected)throw new Error('Connect GitHub to release.');
+            return {repoPath:current.repo.path,sha:current.repo.sha||null,...await gates.release({stageId:input.stageId,sha:input.sha,login:connection.account.login})};
+          }));
         }
         return reply(res,404,{error:'Gate operation not found.'});
       }
@@ -547,9 +555,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(operation==='specs/approve')return reply(res,200,await browser.approveSpec(context,{caseId:input.caseId,hash:input.hash}));
           if(operation==='specs/discard')return reply(res,200,await browser.discardSpec(context,{caseId:input.caseId,hash:input.hash}));
           if(operation==='specs/reuse')return reply(res,200,await browser.reuseSpec(context,{caseId:input.caseId}));
-          if(operation==='specs/verify')return reply(res,202,await browser.verifySpec(context,{caseId:input.caseId,hash:input.hash}));
+          if(operation==='specs/verify')return reply(res,202,await browser.verifySpec(context,{caseId:input.caseId,hash:input.hash,credentials:input.credentials,accountId:input.accountId}));
           if(operation==='specs/verify/cancel')return reply(res,200,await browser.cancelSpecVerification(context,{caseId:input.caseId}));
-          if(operation==='specs/generate')return reply(res,202,await browser.generateSpec(context,{caseId:input.caseId}));
+          if(operation==='specs/generate')return reply(res,202,await browser.generateSpec(context,{caseId:input.caseId,credentials:input.credentials,accountId:input.accountId}));
           if(operation==='specs/generate/cancel')return reply(res,200,await browser.cancelSpecGeneration(context,{caseId:input.caseId}));
           if(operation==='draft'||operation==='transcribe'){
             const controller=new AbortController();
@@ -579,6 +587,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(operation==='plan')return reply(res,200,await environments.savePlan(context,input.plan));
           // A person's creation may have an agent write a detected stage's twin config first; a gate's never does.
           if(operation==='create')return reply(res,202,await environments.create(context,{generate:true}));
+          if(operation==='cancel')return reply(res,202,await environments.cancel(context,text(input.id)));
           if(operation==='destroy')return reply(res,202,await environments.destroy(context,text(input.id)));
           if(operation==='logs')return reply(res,200,await environments.logs(context,text(input.id)));
         }

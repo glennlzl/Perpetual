@@ -200,6 +200,7 @@ function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, 
     if (!services.length) return { kind: 'unconfigured', text: 'Not connected', hint: 'No deployment target found in the repository or in its GitHub deployments.' };
     return { kind: 'idle', text: 'Unverified', hint: gated ? 'No commit has passed every Sandbox gate yet.' : 'No Sandbox stage gates commits before Production. Add Beta with the + after Build.' };
   }
+  if (stage.kind === 'sandbox' && environment?.status === 'failed' && environment.step === 'Stopped') return { kind: 'idle', text: 'Stopped' };
   if (stage.kind === 'sandbox') return environment ? {
     kind: environment.status === 'ready' ? 'ready' : ['failed', 'cleanup_failed'].includes(environment.status) ? 'failed' : environmentWorking(environment.status) ? 'working' : 'idle',
     text: environmentStatusLabel(environment.status),
@@ -250,7 +251,7 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
   return <div className="stage-transition nodrag nopan" style={TRANSITION_STYLE}>
     {canInsert && <span className="stage-transition-insert"><Hint text={atStageLimit ? 'Stage limit reached' : 'Add stage'}><Button variant="outline" size="icon" className="stage-insert-button" disabled={busy} aria-disabled={atStageLimit || undefined} aria-label={`Add stage between ${stageName} and ${nextName}${atStageLimit ? ', stage limit reached' : ''}`} onClick={atStageLimit ? undefined : () => openDialog({ type: 'stage', afterStageId: stageId })}><Plus /></Button></Hint></span>}
     <span className="stage-transition-state">
-      <Hint text={blocked ? 'Resume deployment' : 'Pause deployment'}><Button variant="ghost" size="icon" className="transition-control" aria-label={`${blocked ? 'Resume' : 'Pause'} deployment from ${stageName} to ${nextName}`} aria-haspopup="dialog" data-paused={blocked || undefined} disabled={busy} onClick={() => openDialog({ type: 'transition', sourceStageId: stageId, targetStageId: next })}>{blocked ? <Play /> : <Pause />}</Button></Hint>
+      <Hint text={blocked ? 'Resume transition' : 'Pause transition'}><Button variant="ghost" size="icon" className="transition-control" aria-label={`${blocked ? 'Resume' : 'Pause'} transition from ${stageName} to ${nextName}`} aria-haspopup="dialog" data-paused={blocked || undefined} disabled={busy} onClick={() => openDialog({ type: 'transition', sourceStageId: stageId, targetStageId: next })}>{blocked ? <Play /> : <Pause />}</Button></Hint>
       {blocked && <span className="transition-label">Paused</span>}
     </span>
   </div>;
@@ -652,6 +653,9 @@ function PipelineApp() {
   useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Pipeline'}`; }, [page]);
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
   const [pipeline, setPipeline] = useState<PipelineView | null | undefined>(null);
+  useEffect(() => {
+    if (tests.pipeline?.repoPath === state.scan?.repo.path && tests.branch === (state.scan?.repo.branch || '')) setPipeline(tests.pipeline);
+  }, [tests.pipeline, tests.branch, state.scan?.repo.path, state.scan?.repo.branch]);
   const [loading, setLoading] = useState(true);
   // A failure the canvas reports, with the operation that can repeat it, if any.
   const [error, setFailure] = useState<CanvasFailure | null>(null);
@@ -770,13 +774,18 @@ function PipelineApp() {
   // A gate moved the managed source to another commit in place; the workspace and its drafts stay.
   const refreshScan = useCallback(async () => {
     if (mutation.current) return;
-    const revision = pipelineRevision.current;
+    const source = workspace.stage('source');
+    const revision = pipelineRevision.current, toggled = toggleRevision.current;
     try {
       const fresh = await api<PipelineState>('/api/state');
-      if (mutation.current || revision !== pipelineRevision.current || fresh.scan?.repo?.path !== state.scan?.repo?.path) return;
-      setState(fresh); setPipeline(fresh.pipeline);
+      if (!source.isCurrent() || mutation.current || revision !== pipelineRevision.current || fresh.scan?.repo?.path !== state.scan?.repo?.path || fresh.scan?.repo?.branch !== state.scan?.repo?.branch) return;
+      setState(fresh);
+      if (toggled === toggleRevision.current && !toggles.current) {
+        if (fresh.pipeline) workspace.updatePipeline(fresh.pipeline);
+        setPipeline(fresh.pipeline);
+      }
     } catch (failure) { setError((failure as Error).message); }
-  }, [state.scan]);
+  }, [state.scan, workspace]);
   const gates = useStageGates(state.scan?.repo, refreshScan);
   const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
   useEffect(() => {
@@ -805,9 +814,10 @@ function PipelineApp() {
   const onAction = useCallback(async (input: PipelineAction) => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
     mutation.current = true; pipelineRevision.current++; setBusy(true); setError('');
-    try { const result = await api<PipelineActionResult>('/api/pipeline/action', { repoPath: state.scan!.repo.path, ...input }); setPipeline(result.pipeline); return result; }
-    finally { mutation.current = false; setBusy(false); }
-  }, [state.scan]);
+    const release = workspace.holdPipeline();
+    try { const result = await api<PipelineActionResult>('/api/pipeline/action', { repoPath: state.scan!.repo.path, ...input }); workspace.updatePipeline(result.pipeline); setPipeline(result.pipeline); return result; }
+    finally { release(); mutation.current = false; setBusy(false); }
+  }, [state.scan, workspace]);
   // Collapsing is a saved view preference, not a release change: it applies at
   // once without the global busy lock and rolls back only if saving fails.
   const toggleStage = useCallback(async (stageId: string) => {
@@ -816,19 +826,20 @@ function PipelineApp() {
     const base = pipelineRevision.current, request = ++toggleRevision.current;
     const flip = (current: PipelineView | null | undefined) => current?.repoPath === repoPath ? { ...current, stages: current.stages.map(stage => stage.id === stageId ? { ...stage, collapsed: !stage.collapsed } : stage) } : current;
     toggles.current++;
+    const release = workspace.holdPipeline();
     setError('');
     setPipeline(flip);
     try {
       const result = await api<PipelineActionResult>('/api/pipeline/action', { repoPath, action: 'toggle-stage', stageId });
       // The server applies toggles in order, so the latest response includes earlier ones.
-      if (request === toggleRevision.current && base === pipelineRevision.current) setPipeline(result.pipeline);
+      if (request === toggleRevision.current && base === pipelineRevision.current) { workspace.updatePipeline(result.pipeline); setPipeline(result.pipeline); }
     } catch (failure) {
       // Only a rolled-back toggle can be repeated as it was.
       const rolledBack = base === pipelineRevision.current;
       if (rolledBack) setPipeline(flip);
       setError((failure as Error).message, rolledBack ? () => toggleStage(stageId) : null);
-    } finally { toggles.current--; }
-  }, [state.scan]);
+    } finally { release(); toggles.current--; }
+  }, [state.scan, workspace]);
   const onSourceSave = useCallback(async (selection: SourceSelection) => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
     mutation.current = true; pipelineRevision.current++; setBusy(true);

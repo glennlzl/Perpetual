@@ -83,3 +83,29 @@ test('gate writes refuse another source, a non-Sandbox stage and a release witho
   const release = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
   assert.deepEqual([release.status, release.body.error], [400, 'Connect GitHub to release.']);
 });
+
+test('release refuses a source change while verifying the account, before releasing any gate', async t => {
+  const seams = github();
+  const f = await start(t, { seams });
+  await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' });
+  await f.until(view => view.stages.beta?.status === 'needs-release' && f.calls.statuses.length);
+  let verified!: () => void, resume!: () => void;
+  const reading = new Promise<void>(resolve => { verified = resolve; });
+  const waiting = new Promise<void>(resolve => { resume = resolve; });
+  seams.runs.session = async () => { verified(); await waiting; return session('glennlzl'); };
+  const releasing = f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
+  await reading;
+  // The source action is a read-only scan of a disposable local directory, never a real repository selection.
+  const another = join(f.dir, 'other-repository');
+  await mkdir(another);
+  await writeFile(join(another, 'package.json'), '{"name":"other-app"}');
+  const switched = await f.post('/api/scan', { path: another });
+  resume();
+  assert.equal(switched.status, 200);
+  const result = await releasing;
+  assert.equal(result.status, 409);
+  assert.match(result.body.error || '', /source changed|repository changed/i);
+  const saved = JSON.parse(await readFile(join(f.dataDir, 'gates', 'state.json'), 'utf8'));
+  assert.equal(saved.gates[0].status, 'needs-release');
+  assert.equal(f.calls.statuses.some(status => status.state === 'success'), false);
+});

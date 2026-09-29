@@ -2,6 +2,7 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { failureText } from '../redaction.ts';
+import { isEnvironmentBusy } from '../environments/usage.ts';
 import type { GateView, StageGate } from '../../contract/gate.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from './github.ts';
 import { ACTIVE, SHA, commitStatus, nextGate, productionReady, sameStatus, short, stageGate, verdict, type CommitState, type CommitStatus, type Gate, type GateRef, type GateStatus, type RunRollup } from './rules.ts';
@@ -101,6 +102,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   await persist();
 
   const active = () => { const current = source(); return current?.key ? current : null; };
+  const sourceIdentity = (current: GateSource | null) => current ? JSON.stringify([current.key, current.branch, current.repository ?? null]) : null;
   const sandboxes = (current: GateSource) => current.stages.filter(stage => stage.kind === 'sandbox');
   // The target branch's gates; repair gates are never among them.
   const scoped = (current: GateSource) => state.gates.filter(gate => gate.key === current.key && gate.branch === current.branch && !gate.repair);
@@ -177,6 +179,13 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     } catch (error) {
       // Interrupted work is recorded at the next start, never as a verdict.
       if (closed) return false;
+      // Health checks and finishing browser work can take an old twin after prepare admitted the gate.
+      // No journey has started during rebuilding: retry admission, never a journey execution or its result.
+      if (gate.status === 'rebuilding' && isEnvironmentBusy(error)) {
+        delete gate.startedAt;
+        await transition(gate, 'queued');
+        return false;
+      }
       await settle(gate, 'needs-release', text(error));
     }
     return true;
@@ -237,6 +246,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         syncAgain = false;
         const current = active();
         if (!current || closed) break;
+        const identity = sourceIdentity(current);
         // Every gate whose status changed since it was reported, wherever it is stored: a commit run again or released
         // keeps its place. The most recently updated go first, and only the latest are retried after a failed report.
         const due = state.gates.filter(gate => gate.key === current.key && commitStatus(gate) && !sameStatus(commitStatus(gate), gate.posted))
@@ -245,6 +255,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         let connection: GateConnection | null = null;
         try { connection = await github.connection(); } catch { connection = null; }
         for (const gate of due) {
+          // Account verification and every preceding post may outlive a source switch. Leave these reports pending
+          // for their own source instead of applying a newly connected repository to the old commits.
+          if (closed || sourceIdentity(active()) !== identity) break;
+          if (connection && current.repository && connection.repository.toLowerCase() !== current.repository.toLowerCase()) break;
           const status = commitStatus(gate);
           // A gate queued again while the connection was read reports nothing.
           if (!status) continue;
@@ -306,10 +320,11 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       let current = active();
       if (!current) throw new Error('Scan a repository first.');
       if (!sandboxes(current).some(stage => stage.id === stageId)) throw new Error('Choose a Sandbox stage.');
+      const identity = sourceIdentity(current);
       await watch();
       current = active();
       const stage = current && sandboxes(current).find(item => item.id === stageId);
-      if (!current || !stage) throw conflict('The active source changed. Reload the pipeline.');
+      if (!current || !stage || sourceIdentity(current) !== identity) throw conflict('The active source changed. Reload the pipeline.');
       const head = state.heads[current.key];
       const sha = current.repository && head?.branch === current.branch ? head.sha : current.sha;
       if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error('Scan a repository with a commit first.');

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createEnvironmentUsage } from '../src/environments/usage.ts';
 import { createGateSteps, createReadiness, reviewedJourneys, type GateEnvironment, type GateBrowser, type GateEnvironments, type GateStepsOptions, type IdleEnvironment, type JourneySelection } from '../src/gate/steps.ts';
 
 const context = { key: 'github:owner/app:/', stageId: 'beta', scan: { repo: { path: '/sources/app', sha: 'a'.repeat(40) } } };
@@ -117,6 +119,43 @@ test('the run targets the rebuilt twin with the default reviewed selection and w
   const run = await steps(f).run(context, { id: 'new', status: 'ready' });
   assert.deepEqual(run, { id: 'run-1', status: 'passed' });
   assert.deepEqual(f.calls, ['run {}', 'progress run-1', 'progress run-1', 'progress run-1']);
+});
+
+test('a health lease on the rebuilt twin delays browser admission and starts the journey only once', async () => {
+  const f = fakes(), usage = createEnvironmentUsage();
+  const releaseHealth = usage.acquire(context, { environmentId: 'new', operation: 'health' });
+  let started = 0;
+  f.browser.run = async () => {
+    const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
+    started++; release();
+    return { run: { id: 'run-1' } };
+  };
+  const running = steps(f).run(context, { id: 'new', status: 'ready' });
+  const state = running.then(() => 'completed', () => 'failed');
+  try {
+    assert.equal(await Promise.race([state, delay(10).then(() => 'pending')]), 'pending');
+    assert.equal(started, 0);
+    releaseHealth();
+    assert.equal((await running).status, 'passed');
+    assert.equal(started, 1);
+  } finally { releaseHealth(); }
+});
+
+test('a gate waiting for a health lease refuses a target changed before browser admission', async () => {
+  const f = fakes(), usage = createEnvironmentUsage();
+  const releaseHealth = usage.acquire(context, { environmentId: 'new', operation: 'health' });
+  let started = 0;
+  f.browser.run = async () => {
+    const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
+    started++; release(); return { run: { id: 'run-1' } };
+  };
+  const running = steps(f).run(context, { id: 'new', status: 'ready' });
+  const rejected = assert.rejects(running, /application URL to the rebuilt twin/);
+  await delay(5);
+  f.browser.view = async () => ({ config: { targetUrl: 'https://another.example.test/' } });
+  releaseHealth();
+  await rejected;
+  assert.equal(started, 0);
 });
 
 test('a run is refused when the application URL does not point at the rebuilt twin', async () => {

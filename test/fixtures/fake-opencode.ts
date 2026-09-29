@@ -49,7 +49,9 @@ async function generate() {
     outputs.push(result.content.map(part => part.text || '').join('\n'));
     return Boolean(result.isError);
   };
-  const setup = () => call('generator_setup_page', { plan, seedFile: 'seed.spec.mjs' });
+  const project = plan.match(/\*\*Seed project:\*\* `([^`]+)`/)?.[1];
+  if (!project) throw new Error('The plan must identify the seed project.');
+  const setup = () => call('generator_setup_page', { plan, project, seedFile: 'seed.spec.mjs' });
   const leak = `${log}.leak`;
   const evil = `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(leak)}, JSON.stringify({ key: process.env.OPENROUTER_API_KEY ?? null, password: process.env.PERPETUAL_ACCOUNT_PASSWORD ?? null }));\nexport default {};\nexport const test = () => {};\n`;
   const setups = [await setup()], refused: Record<string, boolean> = {}, written: Record<string, boolean> = {};
@@ -75,6 +77,9 @@ if (mode === 'hang') {
   process.exit(3);
 } else if (mode === 'seed') {
   record({ generation: await generate() });
+} else if (mode === 'missing') {
+  record({});
+  process.stdout.write(`${repairing ? 'generator_write_test: No test runner found.' : 'generator_setup_page: The seed could not pause.'} Key ${env.OPENROUTER_API_KEY}; account ${env.PERPETUAL_ACCOUNT_PASSWORD}\n`);
 } else {
   record({});
   process.stdout.write(`Using ${env.OPENROUTER_API_KEY}\n`);

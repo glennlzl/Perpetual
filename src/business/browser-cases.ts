@@ -92,13 +92,17 @@ function journeySteps(value: unknown): JourneyStep[] {
   });
 }
 
-/** New or edited reviewed cases are journeys; a byte-identical stored legacy case stays runnable. */
+/** A reviewed journey needs an observation independent of its generated actions. */
+export const hasJourneyChecks = (item: Pick<BrowserCase, 'steps' | 'assertions'>): boolean => item.assertions.length > 0 || item.steps.some(step => Boolean(step.checks?.length));
+
+/** New or edited reviewed cases need milestones and checks; stored legacy cases stay readable. */
 export function assertReviewedJourneys(cases: readonly BrowserCase[], stored: readonly BrowserCase[] = []): void {
   const unchanged = (item: BrowserCase) => JSON.stringify({ ...item, selected: false });
   const previous = new Map(stored.map(item => [item.id, unchanged(item)]));
   for (const item of cases) {
-    if (item.needsReview || (item.steps.length >= 2 && item.steps.length <= 12) || previous.get(item.id) === unchanged(item)) continue;
-    throw new Error(`Add 2–12 milestones before approving “${item.name}”.`);
+    if (item.needsReview || previous.get(item.id) === unchanged(item)) continue;
+    if (item.steps.length < 2 || item.steps.length > 12) throw new Error(`Add 2–12 milestones before approving “${item.name}”.`);
+    if (!hasJourneyChecks(item)) throw new Error(`Add at least one milestone check or final assertion before reviewing “${item.name}”.`);
   }
 }
 

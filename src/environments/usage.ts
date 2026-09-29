@@ -12,6 +12,9 @@ export type UsageOptions={environmentId?:string|null;removalToken?:symbol|null;o
 type Lease={stage:string;environmentId:string|null;operation:string};
 type Removal={stage:string;environmentIds:Set<string|null>};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
+/** A temporary reservation conflict, before an environment operation has started. */
+export const environmentBusy=()=>Object.assign(conflict('This environment has an operation in progress.'),{code:'ENVIRONMENT_BUSY' as const});
+export const isEnvironmentBusy=(error:unknown)=>error instanceof Error&&'code' in error&&error.code==='ENVIRONMENT_BUSY';
 const stageKey=({key,stageId}:StageRef)=>JSON.stringify([key,stageId]);
 
 // Leases last until execution and its durable result have settled. Stage
@@ -32,7 +35,7 @@ export function createEnvironmentUsage(){
     acquire(context:StageRef,options:UsageOptions={}){
       assertAvailable(context,options);
       const {environmentId=null,operation='operation'}=options;
-      if(environmentId&&[...leases].some(item=>item.environmentId===environmentId))throw conflict('This environment has an operation in progress.');
+      if(environmentId&&[...leases].some(item=>item.environmentId===environmentId))throw environmentBusy();
       const lease:Lease={stage:stageKey(context),environmentId,operation};leases.add(lease);
       return ()=>leases.delete(lease);
     },

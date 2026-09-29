@@ -4,6 +4,9 @@ import type { ApiError, ApiOptions, Controller } from './api.ts';
 import type { BrowserCapabilities, BrowserCase, BrowserRun, JourneySpecs, RunProgress } from './browser-test-ui.ts';
 import type { TestAccount } from './test-accounts.ts';
 import type { PageVisibility } from './utils.ts';
+import type { PipelineView } from './pipeline-nodes.ts';
+import type { Environment } from '../../../contract/environment.ts';
+export type { Environment, EnvironmentHealth, EnvironmentService } from '../../../contract/environment.ts';
 
 export type Resource = 'browser' | 'environment';
 /** A stage's test settings; signInUrl is the sign-in page, where the test account signs in when the target URL shows no sign-in form. */
@@ -14,14 +17,6 @@ export interface BrowserPreparation { status: string; environmentId?: string; ta
 export interface BrowserAnalysis { summary?: string; authenticated?: boolean; createdAt?: string; sourceRevision?: string | null; error?: string }
 /** A Sandbox stage's browser tests. The source summary carries cases, runs and preparation; the inspector's read carries the rest. */
 export interface BrowserView { cases: BrowserCase[]; runs: BrowserRun[]; capabilities: BrowserCapabilities | null; preparation: BrowserPreparation | null; config: BrowserConfig; specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[] }
-/** A monitor check is reachability only, never a business result. */
-export interface EnvironmentHealth { checkedAt?: string; ok?: boolean; consecutiveFailures?: number; skippedInUseAt?: string }
-export interface EnvironmentService { id: string; name?: string; url?: string; status?: string }
-/** A stage's sandbox as the controller reports it; repair names the repair whose journey gate built it from its pull request. */
-export interface Environment {
-  id: string; stageId: string; status: string; step?: string; repoPath?: string; sourceBranch?: string | null; sourceRevision?: string | null; repair?: string; error?: string;
-  services?: EnvironmentService[]; accounts?: TestAccount[]; sandboxId?: string; createdAt?: string; updatedAt?: string; cleanedAt?: string; health?: EnvironmentHealth;
-}
 /** A stage's sandboxes and its twin config, which this UI passes through to the controller unread. */
 export interface EnvironmentView { environments: Environment[]; plan: unknown }
 /** A confirmed stage removal and the sandbox cleanup it owns. */
@@ -30,7 +25,7 @@ export interface StageRemoval { id?: string; stageId: string; status: string; en
 export interface PipelineStages { repoPath?: string; stages?: { id: string }[] }
 /** The source summary GET /api/state returns, as far as the workspace reads it; an activation seed has the same fields. */
 export interface SourceState {
-  scan?: { repo?: { path?: string; branch?: string | null } | null; nodes?: (PreviewNode | null)[] } | null; pipeline?: PipelineStages | null;
+  scan?: { repo?: { path?: string; branch?: string | null } | null; nodes?: (PreviewNode | null)[] } | null; pipeline?: PipelineView | null;
   browserTests?: Record<string, Partial<BrowserView>>; environments?: Environment[]; stageRemovals?: StageRemoval[];
 }
 /** The fields of a stage action's reply that update the stage's views. */
@@ -42,7 +37,7 @@ export type StageView = {
   pending: string; error: string; pollErrors: Record<Resource, string>; pollError: string;
 };
 /** The source-scoped state every view subscribes to. */
-export type WorkspaceSnapshot = { browserTests: Record<string, BrowserView>; environments: Environment[]; stageRemovals: StageRemoval[]; busyStages: string[]; previews: PreviewTarget[]; branch: string; error: string };
+export type WorkspaceSnapshot = { pipeline: PipelineView | null; browserTests: Record<string, BrowserView>; environments: Environment[]; stageRemovals: StageRemoval[]; busyStages: string[]; previews: PreviewTarget[]; branch: string; error: string };
 /** A stage action's requests: post sends one; save also clears the draft it saved unless it was edited meanwhile. */
 export interface StageTransaction {
   post(action: string, input?: Record<string, unknown>, options?: ApiOptions): Promise<ActionReply>;
@@ -96,12 +91,13 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
   let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [];
+  let pipeline: PipelineView | null = null, pipelineRevision = 0, pipelineWrites = 0;
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
   // their failures, such as a poll that raced the deletion, are not the page's errors.
   let listed: Set<string> | null = null;
   const gone = (entry: StageEntry) => listed !== null && !listed.has(entry.id);
   const entries = new Map<string, StageEntry>(), listeners = new Set<() => void>();
-  let snapshot: WorkspaceSnapshot = { browserTests: {}, environments: [], stageRemovals: [], busyStages: [], previews: [], branch: '', error: '' };
+  let snapshot: WorkspaceSnapshot = { pipeline: null, browserTests: {}, environments: [], stageRemovals: [], busyStages: [], previews: [], branch: '', error: '' };
   const current = (entry: StageEntry) => !disposed && entry.generation === generation;
   // Drafts of stages the source's pipeline no longer lists are dropped; an unknown pipeline prunes nothing.
   function prunePipeline(pipeline: PipelineStages | null | undefined) {
@@ -112,6 +108,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   function publish(entry?: StageEntry) {
     if (disposed) return;
     const next: WorkspaceSnapshot = {
+      pipeline,
       browserTests: Object.fromEntries([...entries].map(([id, value]) => [id, value.view.browser])),
       environments: [...entries.values()].flatMap(value => value.view.environment.environments),
       stageRemovals,
@@ -167,7 +164,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   // T is the full /api/state reply a caller reads beyond the fields the workspace reads.
   async function refreshSource<T extends SourceState = SourceState>(): Promise<T | undefined> {
     if (disposed || !source?.path) return;
-    const ownGeneration = generation, request = ++summaryRevision;
+    const ownGeneration = generation, request = ++summaryRevision, graphRevision = pipelineRevision, graphIdle = pipelineWrites === 0;
     const revisions = new Map([...entries].map(([id, entry]) => [id, { ...entry.revisions }]));
     try {
       const next = await controller('/api/state') as T;
@@ -175,7 +172,10 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       sourceError = '';
       stageRemovals = share(stageRemovals, next.stageRemovals || []);
       previews = share(previews, previewTargets(next.scan));
-      prunePipeline(next.pipeline);
+      if (graphIdle && !pipelineWrites && graphRevision === pipelineRevision && next.pipeline?.repoPath === source?.path) {
+        pipeline = share(pipeline, next.pipeline);
+        prunePipeline(pipeline);
+      }
       const ids = new Set([...entries.keys(), ...Object.keys(next.browserTests || {}), ...(next.environments || []).map(item => item.stageId).filter(Boolean)]);
       for (const id of ids) {
         const entry = ensure(id);
@@ -291,10 +291,27 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     stage,
     refreshSource,
+    // Pipeline edits retain their optimistic view until the request settles. Reads already in flight must not undo
+    // the saved result; other workspace resources continue to refresh while only the graph is held.
+    holdPipeline() {
+      const ownGeneration = generation;
+      pipelineWrites++; pipelineRevision++;
+      let released = false;
+      return () => { if (released) return; released = true; if (ownGeneration === generation) { pipelineWrites--; pipelineRevision++; } };
+    },
+    updatePipeline(next: PipelineView) {
+      if (disposed || next.repoPath !== source?.path) return;
+      pipelineRevision++;
+      pipeline = share(pipeline, next);
+      prunePipeline(pipeline);
+      publish();
+    },
     activate(nextSource: { path?: string; branch?: string | null } | null | undefined, seed: SourceState = {}) {
       if (disposed) throw new Error('The test workspace is closed.');
       const nextIdentity = sourceKey(nextSource);
       generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; listed = null;
+      pipelineWrites = 0; pipelineRevision++;
+      pipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? share(pipeline, seed.pipeline) : null;
       stageRemovals = seed.stageRemovals || [];
       previews = share(previews, previewTargets(seed.scan));
       prunePipeline(seed.pipeline);

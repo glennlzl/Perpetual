@@ -18,6 +18,8 @@ import type { EnvironmentUsage, StageRef } from './usage.ts';
 import type { TwinConfig } from '../twin/config.ts';
 import type { DetectedConfig } from '../twin/detect.ts';
 import type { Fidelity } from '../twin/registry.ts';
+import type { Environment as EnvironmentReply, EnvironmentAccount, EnvironmentHealth as HealthBeat, EnvironmentLogs, StepTiming } from '../../contract/environment.ts';
+export type { EnvironmentAccount, StepTiming } from '../../contract/environment.ts';
 
 export type EnvironmentStatus = 'queued' | 'creating' | 'preparing' | 'ready' | 'failed' | 'cleanup_failed' | 'destroying' | 'destroyed';
 /** A twin service as its environment shows it. */
@@ -25,14 +27,12 @@ export interface EnvironmentService { id: string; title: string; fidelity: Fidel
 /** A running app: its browser URL and, for a twin, its directory in the repository. */
 export interface EnvironmentApp { id: string; url: string; directory?: string }
 /** A twin test account without its password, which only the twin's private state keeps. */
-export interface EnvironmentAccount { id: string; label: string; username: string }
-export interface StepTiming { step: string; ms: number }
 /** A saved twin config: a person's, or one an agent wrote, which carries its provenance. */
 export type SavedPlan = TwinConfig & { provenance?: PlanProvenance };
 /** A stage's twin plan: detected from the repository, or saved. */
 export type EnvironmentPlan = DetectedConfig | SavedPlan;
 /** One environment as the controller keeps it; `plan` is the validated config it was created from. */
-export interface EnvironmentRecord {
+export interface EnvironmentRecord extends EnvironmentReply {
   id: string; scope: string; pipelineKey: string; stageId: string; repoPath: string; sourceBranch: string | null; sourceRevision: string | null;
   plan?: TwinConfig; status: EnvironmentStatus; step: string; services: EnvironmentService[]; apps: EnvironmentApp[]; createdAt: string; updatedAt?: string;
   error?: string | null; sandboxId?: string; snapshot?: { hash: string; files: number; bytes: number }; timings?: StepTiming[]; readyAt?: string;
@@ -46,9 +46,9 @@ export interface EnvironmentRecord {
   /** The repair whose journey gate built this twin from its pull request checkout, which repoPath names. */
   repair?: string;
 }
-export type PublicEnvironment = Omit<EnvironmentRecord, 'scope' | 'plan' | 'logs' | 'origins' | 'authoringLogs'>;
+export type PublicEnvironment = EnvironmentReply & Omit<EnvironmentRecord, 'scope' | 'plan' | 'logs' | 'origins' | 'authoringLogs'>;
 /** The monitor's last check, kept in memory only: when it ran, whether it passed and its consecutive failures, or when a due check was skipped as in use. */
-export type HealthBeat = { checkedAt?: string; ok?: boolean; consecutiveFailures?: number; skippedInUseAt?: string };
+export type { EnvironmentHealth as HealthBeat } from '../../contract/environment.ts';
 /** An environment as stage views list it. */
 export type EnvironmentSummary = PublicEnvironment & { health?: HealthBeat };
 /**
@@ -60,7 +60,7 @@ type RuntimeCall = { dataDir: string; environment: EnvironmentRecord };
 /** What the manager calls on its runtime (./runtime.ts): a ready result is merged into its environment as it is, but
  * for `generated`, the provenance of a config an agent wrote, which becomes the stage's plan. */
 export interface ManagedRuntime {
-  prepareEnvironment(options: RuntimeCall & { repoPath: string; directory: string; cancelled: () => boolean; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; generate?: TwinGeneration; generated?: GeneratedPlan }): Promise<Partial<EnvironmentRecord> & { generated?: PlanProvenance }>;
+  prepareEnvironment(options: RuntimeCall & { repoPath: string; directory: string; cancelled: () => boolean; signal?: AbortSignal; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; onDraft?: (draft: GenerationDraft) => Promise<void>; generate?: TwinGeneration; generated?: GeneratedPlan }): Promise<Partial<EnvironmentRecord> & { generated?: PlanProvenance }>;
   environmentHealth(options: RuntimeCall): Promise<{ status: string; error?: string; final?: boolean }>;
   environmentLogs(options: RuntimeCall): Promise<string>;
   destroySandbox(options: RuntimeCall): Promise<unknown>;
@@ -77,7 +77,18 @@ const failure = (error: unknown) => {
   const text = redact(String((error as Error).message || error));
   return text.length <= FAILURE_TEXT ? text : `${text.slice(0, FAILURE_HEAD)}${OMITTED}${text.slice(-(FAILURE_TEXT - FAILURE_HEAD - OMITTED.length))}`;
 };
-const publicEnvironment = ({ scope, plan, logs, origins, authoringLogs, ...item }: EnvironmentRecord): PublicEnvironment => item;
+function publicEnvironment({ scope, plan, logs, origins, authoringLogs, ...item }: EnvironmentRecord): PublicEnvironment {
+  // Older twins saved their container address as the app link. Convert only the owned twin's public view.
+  if (item.sandboxId !== item.id) return item;
+  return { ...item, apps: item.apps.map(app => {
+    try {
+      const url = new URL(app.url);
+      if (url.protocol !== 'http:' || url.hostname !== HOST || url.username || url.password) return app;
+      url.hostname = '127.0.0.1';
+      return { ...app, url: url.href };
+    } catch { return app; }
+  }) };
+}
 /** A failure's own logs, such as a generation's author output (GenerationFailure's logs), redacted; '' without any. */
 const errorLogs = (error: unknown) => error instanceof Error && 'logs' in error && typeof error.logs === 'string' ? redact(error.logs) : '';
 /** Whether a failure says an owned process may remain (WorkerError's cleanupIncomplete). */
@@ -116,8 +127,9 @@ const savedDraft = (value: unknown): value is GenerationDraft => value !== null 
   && typeof (value as Partial<GenerationDraft>).text === 'string' && typeof (value as Partial<GenerationDraft>).feedback === 'string';
 /** The App Settings model when it is an OpenRouter one, which the twin config author runs on; null without one. */
 async function appSettingsModel(dataDir: string): Promise<AuthoringModel | null> {
-  const configuration = (await createBrowserModelSettings({ dataDir })).configuration();
-  return configuration.modelConfigured && isOpenRouterEndpoint(configuration.baseUrl) ? { apiKey: configuration.apiKey, model: configuration.model } : null;
+  const settings = await createBrowserModelSettings({ dataDir }), configuration = settings.configuration();
+  return configuration.modelConfigured && isOpenRouterEndpoint(configuration.baseUrl)
+    ? { apiKey: configuration.apiKey, model: configuration.model, escalationModel: settings.escalationModel() ?? undefined } : null;
 }
 // Saved state may hold keys of removed features: top-level cases, analyses, runs and
 // schedules, and environment twinsToken, activeOperation and desktopUrl. Loading drops them.
@@ -165,6 +177,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   let closed = false, closing: Promise<void> | undefined, ticking = false;
   // admitted: creates per pipeline key between their admission and their environment's record.
   const admitted = new Map<string, number>();
+  const creations = new Map<string, AbortController>();
   const jobs = new Map<string, Promise<void>>(), pending = new Set<Promise<unknown>>(), scopesBusy = new Set<string>(), healthChecks = new Map<string, number>(), healthFailures = new Map<string, number>(), healthResults = new Map<string, { at: number; ok: boolean }>(), healthSkips = new Map<string, number>();
   // The monitor heartbeat is in-memory observation only; it is never persisted.
   const iso = (time: number) => new Date(time).toISOString();
@@ -346,18 +359,29 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         record();
         try { budget(); } catch (error) { state.environments.shift(); throw error; }
         await persist();
+        const controller = new AbortController();
+        creations.set(environment.id, controller);
+        if (closed) controller.abort(new Error('Environment creation cancelled.'));
         enqueue(environment.id, async release => {
           let ready: Awaited<ReturnType<ManagedRuntime['prepareEnvironment']>> | undefined;
           try {
-            ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath: environment.repoPath, directory, cancelled: () => closed, onUpdate: async update => { Object.assign(environment, update, { updatedAt: now() }); await persist(); },
-              ...(generation ? { generate: generation } : {}), ...(builtGenerated ? { generated: builtGenerated } : {}) });
+            ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath: environment.repoPath, directory, signal: controller.signal, cancelled: () => closed || controller.signal.aborted, onUpdate: async update => {
+              Object.assign(environment, update, { updatedAt: now() });
+              if (environment.cancellationRequestedAt) Object.assign(environment, { status: 'preparing', step: 'Stopping' });
+              await persist();
+            },
+              ...(generation ? { generate: generation, onDraft: async (draft: GenerationDraft) => { keepGenerated(scope, { draft }); await persist(); } } : {}), ...(builtGenerated ? { generated: builtGenerated } : {}) });
+            if (controller.signal.aborted) { ready = undefined; throw controller.signal.reason; }
           } catch (error) {
             // A failed generation leaves its last config and feedback as the stage's draft, and so does a generated config
-            // that failed to build, while it is still the stage's plan; a cancelled one leaves the draft it had.
+            // that failed to build, while it is still the stage's plan; cancellation keeps the last completed attempt.
             if (isGenerationFailure(error) && (generation || builtGenerated && state.plans[scope] === saved)) { try { keepGenerated(scope, { draft: error.draft }); } catch { /* Storage is full: the draft is not kept. */ } }
             // A process the preparation owned, such as the twin config author's, that could not be confirmed stopped.
             const uncertain = cleanupIncomplete(error);
-            Object.assign(environment, { status: 'failed', step: 'Failed', updatedAt: now(), error: failure(error) });
+            const stopping = Boolean(environment.cancellationRequestedAt);
+            if (!stopping) environment.failedStep = environment.step;
+            Object.assign(environment, { status: 'preparing', step: stopping ? 'Stopping' : 'Cleaning up', updatedAt: now(), error: failure(error) });
+            await persist();
             // The logs keep what the error leaves out, such as the end of the twin config author's output.
             const logs = [errorLogs(error)];
             if (environment.sandboxId) {
@@ -366,9 +390,13 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
               catch (cleanup) { environment.status = 'cleanup_failed'; environment.cleanupError = failure(cleanup); }
             }
             if (logs.some(Boolean)) environment.logs = logs.filter(Boolean).join('\n\n');
-            try { await removeSnapshot(environment); } catch (error) { environment.cleanupError = failure(error); }
+            if (!uncertain && environment.status !== 'cleanup_failed') {
+              try { await removeSnapshot(environment); }
+              catch (error) { environment.status = 'cleanup_failed'; environment.cleanupError = failure(error); }
+            }
             // Its cleanup stays unfinished, as a browser run's does, until a person deletes the environment.
             if (uncertain) Object.assign(environment, { status: 'cleanup_failed', cleanupError: environment.cleanupError ?? UNCONFIRMED });
+            if (environment.status !== 'cleanup_failed') Object.assign(environment, { status: 'failed', step: stopping ? 'Stopped' : 'Failed' });
           }
           // Report "ready" and release together, so the first action on a ready environment is not refused.
           // Environment state holds a twin's test accounts without passwords; the twin's own state keeps those.
@@ -383,6 +411,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           if (environment.status === 'failed') delete environment.plan;
           delete environment.readsCheckout;
           await persist();
+          creations.delete(environment.id);
         }, { release, onSettled: async () => {
           if (environment.status === 'ready' && onReady) {
             try { await onReady(context, structuredClone(publicEnvironment(environment))); }
@@ -400,6 +429,15 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         }
         throw error;
       } finally { scopesBusy.delete(scope); record(); if (!queued) release(); }
+    },
+    async cancel(context: StageRef, id: string) {
+      const environment = findEnvironment(context, id), controller = creations.get(id);
+      if (environment.cancellationRequestedAt) return { environment: publicEnvironment(environment) };
+      if (!controller || !['queued', 'creating', 'preparing'].includes(environment.status)) throw conflict('This environment is no longer being created.');
+      environment.cancellationRequestedAt = now(); environment.step = 'Stopping'; environment.updatedAt = now();
+      controller.abort(new Error('Environment creation cancelled.'));
+      await persist();
+      return { environment: publicEnvironment(environment) };
     },
     async destroy(context: StageRef, id: string, { removalToken = null }: { removalToken?: symbol | null } = {}) {
       const environment = findEnvironment(context, id, { idle: true });
@@ -423,7 +461,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       return { environment: publicEnvironment(environment) };
       } finally { if (!queued) release(); }
     },
-    async logs(context: StageRef, id: string) {
+    async logs(context: StageRef, id: string): Promise<EnvironmentLogs> {
       const environment = findEnvironment(context, id);
       if (environment.logs) return { logs: environment.logs };
       // A generated twin's log leads with how its config was written.
@@ -477,6 +515,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     close() {
       if (!closing) {
         closed = true;
+        for (const controller of creations.values()) controller.abort(new Error('Environment creation cancelled.'));
         closing = (async () => {
           // Do not kill a Docker client and pretend its guest work stopped.
           // Accepted operations retain responsibility through their bounded

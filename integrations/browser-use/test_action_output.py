@@ -40,7 +40,7 @@ class ProtocolModel(BaseHTTPRequestHandler):
         else:
             action = [{"done": {"data": {"cases": [{"name": "Observe workspace", "goal": "Open and observe the workspace", "steps": [{"id": "open", "title": "Open the workspace"}, {"id": "observe", "title": "See the workspace"}], "preconditions": [], "expectedOutcomes": ["Observed workspace is visible"], "assertions": [{"type": "text-visible", "value": "Observed workspace"}], "evidence": []}], "summary": "Observed workspace"}}}]
         content = json.dumps({"evaluation_previous_goal": "Observe the actual page", "memory": "No prior action is assumed complete", "next_goal": "Observe workspace", "action": action})
-        response = {"id": "fixture", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        response = {"id": "fixture", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": content}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
         body = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -72,7 +72,7 @@ class SingleActionContract(unittest.IsolatedAsyncioTestCase):
             progress = [event for line in output.getvalue().splitlines() if (event := json.loads(line)).get("type") == "case"]
             self.assertEqual(progress[-1]["actions"], [{"type": "done", "status": "passed"}])
             for request in model.requests:
-                action_schema = request["response_format"]["json_schema"]["schema"]["properties"]["action"]
+                action_schema = request["tools"][0]["function"]["parameters"]["properties"]["action"]
                 self.assertEqual(action_schema["maxItems"], 1)
         finally:
             for server in [application, model]:

@@ -6,7 +6,8 @@ import type { TwinServices } from './registry.ts';
 // A twin config is data: { services: { <id>: options }, install?: { directory, command }, apps: { <id>: app }, fixtures: [...],
 // node?: <major> }, node naming the Node.js major its install, apps and command fixtures run on.
 // Strings may reference {{<service>.<VARIABLE>}} (a variable a service provides), {{apps.<id>.url}} or
-// {{services.<id>.url.<port>}} (a service's address on one of its named ports). Variable placeholders in service
+// {{services.<id>.url.<port>}} (a service's address on one of its named ports). publicUrl in place of url selects
+// the host browser's loopback address; url keeps the container address. Variable placeholders in service
 // options decide the setup order; addresses come from port allocation before any setup, so they order nothing.
 
 export const APPS = 'apps';
@@ -16,6 +17,7 @@ const ENV = 'env';
 /** The optional install step apps share, e.g. one workspace install; no app may take its name. */
 export const INSTALL = 'install';
 const APP_URL = 'url';
+const PUBLIC_URL = 'publicUrl';
 export const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g, HAS_PLACEHOLDER = new RegExp(PLACEHOLDER.source);
@@ -32,9 +34,9 @@ export type TwinFixture = { service: string; sql: string; query?: never; command
 /** A validated twin config. */
 export interface TwinConfig { services: Record<string, JsonObject>; install?: TwinInstall; apps: Record<string, TwinApp>; fixtures: TwinFixture[]; node?: number }
 /** A parsed placeholder: an app's URL, a service's address on a named port, or a variable a service provides. */
-export type Placeholder = { app: string; addressOf?: never; port?: never; service?: never; variable?: never }
-  | { addressOf: string; port: string; app?: never; service?: never; variable?: never }
-  | { service: string; variable: string; app?: never; addressOf?: never; port?: never };
+export type Placeholder = { app: string; public?: true; addressOf?: never; port?: never; service?: never; variable?: never }
+  | { addressOf: string; port: string; public?: true; app?: never; service?: never; variable?: never }
+  | { service: string; variable: string; public?: never; app?: never; addressOf?: never; port?: never };
 export type PlaceholderAt = Placeholder & { where: string };
 
 export const plain = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -66,17 +68,18 @@ function command(value: unknown, where: string) {
 
 function parse(expression: string, where: string): Placeholder {
   const parts = expression.split('.');
-  if (parts[0] === APPS && parts.length === 3 && ID.test(parts[1]) && parts[2] === APP_URL) return { app: parts[1] };
-  if (parts[0] === SERVICES && parts.length === 4 && ID.test(parts[1]) && parts[2] === APP_URL && ID.test(parts[3])) return { addressOf: parts[1], port: parts[3] };
+  const address = parts[2] === APP_URL || parts[2] === PUBLIC_URL, publicAddress = parts[2] === PUBLIC_URL ? { public: true as const } : {};
+  if (parts[0] === APPS && parts.length === 3 && ID.test(parts[1]) && address) return { app: parts[1], ...publicAddress };
+  if (parts[0] === SERVICES && parts.length === 4 && ID.test(parts[1]) && address && ID.test(parts[3])) return { addressOf: parts[1], port: parts[3], ...publicAddress };
   if (parts[0] !== APPS && parts.length === 2 && ID.test(parts[0]) && VARIABLE.test(parts[1])) return { service: parts[0], variable: parts[1] };
   // {{services.<service>.<VARIABLE>}} names the same variable, as an author may write by analogy with a service's address;
   // only an upper-case name, since a lower-case one is more likely a port missing its url.
   if (parts[0] === SERVICES && parts.length === 3 && ID.test(parts[1]) && /^[A-Z_][A-Z0-9_]*$/.test(parts[2])) return { service: parts[1], variable: parts[2] };
-  return fail(`${where}: {{${expression}}} is not a placeholder; use {{<service>.<VARIABLE>}}, {{${APPS}.<id>.${APP_URL}}} or {{${SERVICES}.<id>.${APP_URL}.<port>}}.`);
+  return fail(`${where}: {{${expression}}} is not a placeholder; use {{<service>.<VARIABLE>}}, {{${APPS}.<id>.${APP_URL}}}, {{${APPS}.<id>.${PUBLIC_URL}}}, {{${SERVICES}.<id>.${APP_URL}.<port>}} or {{${SERVICES}.<id>.${PUBLIC_URL}.<port>}}.`);
 }
 
 /** The placeholder text of a service address reference, for messages. */
-export const addressText = (ref: { addressOf?: string; port?: string }) => `{{${SERVICES}.${ref.addressOf}.${APP_URL}.${ref.port}}}`;
+export const addressText = (ref: { addressOf?: string; port?: string; public?: true }) => `{{${SERVICES}.${ref.addressOf}.${ref.public ? PUBLIC_URL : APP_URL}.${ref.port}}}`;
 
 /** Every placeholder referenced anywhere inside a JSON value, with where it appears. */
 export function placeholders(value: unknown, where = 'value'): PlaceholderAt[] {
@@ -147,7 +150,13 @@ export function serviceOptionErrors(config: Pick<TwinConfig, 'services'> & Parti
     }
     return ref.port === undefined || !describe.ports || describe.ports.includes(ref.port) ? [] : [`${ref.where} references ${addressText(ref)}, but ${service.title} has no port ${ref.port}.`];
   });
-  return [...options, ...references];
+  // Generated values are only for the application's own secrets. A credential the catalog's
+  // service supplies must come from that service, even when the author omitted it from the config.
+  const generated = services.secrets?.describe?.optionProvides?.(config.services.secrets ?? {}) ?? [];
+  const credentials = generated.flatMap(name => Object.values(services).filter(service => service.id !== 'secrets'
+    && [...(service.describe?.owns ?? []), ...(service.describe?.provides ?? []), ...(service.describe?.optionProvides?.(config.services[service.id] ?? {}) ?? [])].includes(name)).map(service =>
+    `Generated secret ${name} belongs to ${service.title}; use {{${service.id}.${name}}} from that service instead of a random value.`));
+  return [...options, ...references, ...credentials];
 }
 
 export function validateTwinConfig(input: unknown, { services = registry }: { services?: TwinServices } = {}): TwinConfig {
@@ -205,7 +214,7 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
   });
   const check = (value: unknown, where: string) => {
     for (const ref of placeholders(value, where)) {
-      if (ref.app && !Object.hasOwn(config.apps, ref.app)) fail(`${ref.where} references {{${APPS}.${ref.app}.${APP_URL}}}, but no app "${ref.app}" is configured.`);
+      if (ref.app && !Object.hasOwn(config.apps, ref.app)) fail(`${ref.where} references {{${APPS}.${ref.app}.${ref.public ? PUBLIC_URL : APP_URL}}}, but no app "${ref.app}" is configured.`);
       if (ref.service && !Object.hasOwn(config.services, ref.service)) fail(`${ref.where} references {{${ref.service}.${ref.variable}}}, but service "${ref.service}" is not configured.`);
       if (ref.addressOf && !Object.hasOwn(config.services, ref.addressOf)) fail(`${ref.where} references ${addressText(ref)}, but service "${ref.addressOf}" is not configured.`);
     }
