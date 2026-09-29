@@ -1170,7 +1170,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     },
     async skip(context:BrowserStageContext,id:unknown,caseId:unknown){const run=find(context,id);if(run.mode!=='run'||!includes(run.caseIds,caseId))throw Object.assign(new Error('Journey not found in this run.'),{statusCode:404});const journey=caseId,entry=jobs.get(run.id);if(entry){entry.skips.add(journey);if(entry.scheduler)entry.scheduler.skip(journey);else if(!run.results?.some(result=>result.caseId===journey)){/* A journey settled before the scheduler started keeps its verdict. */const item=run.progress.cases.find(item=>item.id===journey)!;item.status='skipped';item.completedAt=now();touch(run);}}return report(run);},
     async stop(context:BrowserStageContext,id:unknown){const run=find(context,id),entry=jobs.get(run.id);if(entry){entry.cancelled=true;entry.cancel();}return {run:publicRun(run)};},
-    isActive(context:{key:string;stageId:string}){const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&active(r));},
+    // A terminal verdict can still be saving results and releasing its target.
+    isActive(context:{key:string;stageId:string}){const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&(active(r)||jobs.has(r.id)));},
     close(){
       if(closing)return closing;closed=true;
       const cancel=()=>{for(const entry of verifications.values())entry.cancelled=true;for(const entry of jobs.values()){entry.cancelled=true;entry.cancel();}for(const controller of inputJobs.keys())controller.abort();for(const entry of generations.values())if(entry.status==='running')entry.cancel();};cancel();
