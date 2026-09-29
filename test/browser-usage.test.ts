@@ -88,7 +88,10 @@ test('uncertain cleanup durably quarantines the target before releasing its envi
   assert.equal(f.usage.isBusy('owned-app'),true,'Quarantine must finish before another manager can mutate the target.');
   const saved=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8'));
   assert.equal(saved.runs.find((item:{id:string})=>item.id===run.id).environmentUseUncertain,true);
-  gate.resolve();await f.manager.close();
+  try { assert.equal(f.manager.isActive(f.context),true,'A terminal result stays active until resource finalization completes.'); }
+  finally { gate.resolve(); }
+  await f.manager.close();
+  assert.equal(f.manager.isActive(f.context),false);
   assert.equal(f.usage.isBusy('owned-app'),false,'Explicit cleanup may proceed after quarantine.');
   assert.deepEqual(f.manager.interruptedEnvironmentIds(),['owned-app']);
   const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime,resolveEnvironment:()=>({id:'owned-app',status:'ready'})});

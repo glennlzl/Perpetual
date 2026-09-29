@@ -434,10 +434,11 @@ test('a verification started as the stage\'s last run lets its twin go takes the
   f=await setup(t,{usage:leases,resolveEnvironment:url=>new URL(url).port==='3000'?twin:null});
   await f.manager.saveCases(f.context,[{...journey,selected:true}]);
   for(let i=0;i<100&&usage.isBusy(twin.id);i++)await wait(5);
-  await f.manager.run(f.context,{caseIds:[journey.id]},{manual:true});
+  const {run}=await f.manager.run(f.context,{caseIds:[journey.id]},{manual:true});
   (await f.worker(1)).finish(passing);
   // Verify is clicked as soon as the run has ended, while it still records its end on the twin it holds.
-  while(f.manager.isActive(f.context))await new Promise(resolve=>setImmediate(resolve));
+  // The verdict is terminal before cleanup ends; isActive correctly stays true through that cleanup.
+  while(['queued','running'].includes((await f.manager.runProgress(f.context,run.id)).run.status))await new Promise(resolve=>setImmediate(resolve));
   assert.equal(usage.isBusy(twin.id),true,'The run still holds its twin.');
   await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
   for(let attempt=2;attempt<=5;attempt++){
