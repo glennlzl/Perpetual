@@ -26,12 +26,13 @@
 
 **Watch the walkthrough · 2 min 56 sec**
 
+https://github.com/user-attachments/assets/5e1a36fe-610b-4d3b-aeed-2ceaea4ebaa9
+
 Recorded in a simulated demo environment. Production deployment is a preview; see [Status](#status) for what is available today.
 
 ## How it works
 
 Unit tests pass, CI is green, and sign-up or checkout is still broken. Perpetual catches that before the merge: it runs your real app with its real dependencies and walks through complete user journeys, then reports the result as a commit status your branch protection can require.
-
 
 ```mermaid
 flowchart LR
