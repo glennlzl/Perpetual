@@ -74,6 +74,8 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const branchRequest = useRef(0);
   const savedSource = useRef<GitHubSource | null>(null);
   const focusOrigin = useRef<Element | null>(null);
+  const connectionButton = useRef<HTMLButtonElement>(null);
+  const repositoryTrigger = useRef<HTMLButtonElement>(null);
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionAction, setConnectionAction] = useState('');
@@ -245,7 +247,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const repositoryItem = (item: GitHubRepository, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
 
   return <>
-    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} />}
+    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} focusTarget={() => connected && repositoryTrigger.current && !repositoryTrigger.current.disabled ? repositoryTrigger.current : connectionButton.current} />}
     <AlertDialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
       <AlertDialogContent
         onOpenAutoFocus={() => { focusOrigin.current = document.activeElement; }}
@@ -271,7 +273,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
             <p className="text-sm font-medium">GitHub</p>
             <p className="truncate text-sm text-muted-foreground">{connectionLoading ? 'Checking…' : connected ? connection!.account?.login ? `${connection!.account.login} · Connected` : 'Connected' : 'Not connected'}</p>
           </div>
-          <Button type="button" variant="outline" disabled={busy || connectionLoading || Boolean(connectionAction)} onClick={() => connected ? setConfirmDisconnect(true) : setConnectOpen(true)}>
+          <Button ref={connectionButton} type="button" variant="outline" disabled={busy || connectionLoading || Boolean(connectionAction)} onClick={() => connected ? setConfirmDisconnect(true) : setConnectOpen(true)}>
             {connectionAction && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}
             {connectionAction ? connectionAction === 'connect' ? 'Connecting…' : 'Disconnecting…' : connected ? 'Disconnect' : 'Connect'}
           </Button>
@@ -294,7 +296,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           setBranchesError('');
           setBranchesLoading(true);
         }}>
-          <SelectTrigger id="source-repository" className={`min-w-0 w-full${scanned ? ' data-[placeholder]:text-foreground' : ''}`} title={repository || scanned?.repository || undefined}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.repository || (repositoriesLoading ? 'Loading repositories…' : 'Select repository')}>{repository || undefined}</SelectValue></span></SelectTrigger>
+          <SelectTrigger ref={repositoryTrigger} id="source-repository" className={`min-w-0 w-full${scanned ? ' data-[placeholder]:text-foreground' : ''}`} title={repository || scanned?.repository || undefined}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.repository || (repositoriesLoading ? 'Loading repositories…' : 'Select repository')}>{repository || undefined}</SelectValue></span></SelectTrigger>
           <SelectContent position="popper" align="start" collisionPadding={16} className={selectListClass}>
             {pinnedRepositories.length > 0 && <SelectGroup>{pinnedRepositories.map(item => repositoryItem(item, item.fullName))}</SelectGroup>}
             {owners.length > 1 ? owners.map(group => <Fragment key={group.owner}>{(pinnedRepositories.length > 0 || group !== owners[0]) && <SelectSeparator />}<SelectGroup><SelectLabel>{group.owner}</SelectLabel>{group.repositories.map(item => repositoryItem(item, item.name || item.fullName.split('/')[1]))}</SelectGroup></Fragment>)

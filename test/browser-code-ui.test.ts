@@ -14,8 +14,9 @@ const hash = 'a'.repeat(64);
 
 test('journey authoring offers account choices and an actionable missing-check state in Chromium', { timeout: 60000 }, async t => {
   let item = structuredClone(journey);
+  let reviewMode: 'none' | 'ready' | 'unavailable' = 'none';
   const requests: { path: string; input: Record<string, unknown> }[] = [];
-  const state = () => ({ cases: [item], runs: [], accounts: [], specs: { save: { draft: { hash, stale: false } } },
+  const state = () => ({ cases: [item], runs: [], accounts: [], specs: { save: { draft: { hash, stale: false, ...(reviewMode !== 'none' ? { verification: { status: 'passed', passes: 3 } } : {}) } } },
     config: { targetUrl: 'http://127.0.0.1:3000/', signInUrl: '', scope: '', requirements: '', maxSteps: 60, journeyTimeoutSeconds: 60, externalOrigins: [], authEndpoints: [] },
     capabilities: { provider: 'openrouter', modelConfigured: true, runtimeInstalled: true, browserInstalled: true, playwright: { browserInstalled: true } } });
   const entry = `
@@ -27,7 +28,12 @@ test('journey authoring offers account choices and an actionable missing-check s
     import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
     import '/src/index.css';
     import '/src/workspace.css';
-    const controller = async (path, input) => (await fetch('/build/__controller' + path, input === undefined ? {} : {method:'POST', body:JSON.stringify(input)})).json();
+    const controller = async (path, input) => {
+      const response = await fetch('/build/__controller' + path, input === undefined ? {} : {method:'POST', body:JSON.stringify(input)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      return data;
+    };
     const workspace = createTestWorkspace({controller, pollInterval:0});
     workspace.activate({path:'/acme/app', branch:'main'}, {browserTests:{beta: await controller('/api/browser')}});
     createRoot(document.getElementById('root')).render(React.createElement(TestWorkspaceContext.Provider, {value:workspace}, React.createElement(TooltipProvider, {}, React.createElement(BrowserTestingPanel, {repoPath:'/acme/app', stageId:'beta'}))));
@@ -38,11 +44,23 @@ test('journey authoring offers account choices and an actionable missing-check s
     load(id) { if (id === '\0journey-ui.tsx') return entry; },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
+        if (req.url?.startsWith('/api/browser/specs/code?')) {
+          res.setHeader('Content-Type', 'application/json');
+          if (reviewMode === 'unavailable') {
+            res.statusCode = 503; res.end(JSON.stringify({ error: 'Could not read the draft. Try again.' })); return;
+          }
+          const code = Array.from({ length: 60 }, (_, index) => `  await page.getByRole('button', { name: 'Workflow milestone ${index + 1}' }).click();`).join('\n');
+          res.end(JSON.stringify({ draft: { hash, code: `${code}\n  await page.getByText('Workflow saved').waitFor();` }, approved: { code } })); return;
+        }
         if (req.url?.includes('/__controller')) {
           const path = req.url.split('/__controller')[1];
           if (req.method === 'POST') {
             let body = ''; for await (const chunk of req) body += chunk;
             const input = JSON.parse(body); requests.push({ path, input });
+            if (path === '/api/browser/specs/approve') {
+              res.statusCode = 409; res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'This draft changed. Close this review and approve the latest verified code.' })); return;
+            }
             if (path === '/api/browser/cases') item = input.cases[0];
           }
           res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(state())); return;
@@ -122,6 +140,47 @@ test('journey authoring offers account choices and an actionable missing-check s
     await expect(dialog).toBeHidden();
     await expect(opener).toBeFocused();
     assert.ok(item.steps?.[0].title, 'Discarding the local edit keeps the saved milestone.');
+  });
+  await t.test('a rejected approval keeps the code review title, error and controls visible', async t => {
+    requests.length = 0; item = structuredClone(journey); reviewMode = 'ready';
+    t.after(() => { reviewMode = 'none'; });
+    const page = await browser.newPage({ viewport: { width: 320, height: 800 } }); t.after(() => page.close());
+    await page.goto(url);
+    const opener = page.getByRole('button', { name: `Actions for ${journey.name}`, exact: true });
+    await opener.click();
+    await page.getByRole('menuitem', { name: 'Approve code', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Approve', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toContainText('This draft changed.');
+    await expect(dialog.getByRole('heading', { name: 'Approve code', exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole('alert')).toBeInViewport({ ratio: 1 });
+    for (const name of ['Approve', 'Cancel', 'Close']) await expect(dialog.getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
+    assert.equal(requests.length, 1, 'A failed approval is never retried automatically.');
+    assert.equal(requests[0].input.hash, hash, 'Approval still names the exact reviewed code.');
+    const code = dialog.locator('pre');
+    await code.focus();
+    for (let pageDown = 0; pageDown < 6; pageDown++) {
+      const before = await code.evaluate(element => ({ top: element.scrollTop, end: element.scrollHeight - element.clientHeight }));
+      if (before.top >= before.end - 1) break;
+      await page.keyboard.press('PageDown');
+      await expect.poll(() => code.evaluate(element => element.scrollTop)).toBeGreaterThan(before.top);
+    }
+    await expect(dialog.locator('pre').getByText("await page.getByText('Workflow saved').waitFor();", { exact: false })).toBeInViewport();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(opener).toBeFocused();
+  });
+  await t.test('a draft read failure cannot be approved and can be closed with the keyboard', async t => {
+    requests.length = 0; item = structuredClone(journey); reviewMode = 'unavailable';
+    t.after(() => { reviewMode = 'none'; });
+    const page = await browser.newPage({ viewport: { width: 320, height: 800 } }); t.after(() => page.close());
+    await page.goto(url);
+    const opener = page.getByRole('button', { name: `Actions for ${journey.name}`, exact: true });
+    await opener.click(); await page.getByRole('menuitem', { name: 'Approve code', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('alert')).toHaveText('Could not read the draft. Try again.');
+    await expect(dialog.getByRole('button', { name: 'Approve', exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape'); await expect(dialog).toBeHidden(); await expect(opener).toBeFocused();
+    assert.equal(requests.length, 0);
   });
   await t.test('a selected legacy journey without checks can be deselected but cannot be selected again', async t => {
     requests.length = 0; item = { ...structuredClone(journey), assertions: [] };
