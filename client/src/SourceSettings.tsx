@@ -247,7 +247,11 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const repositoryItem = (item: GitHubRepository, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
 
   return <>
-    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} focusTarget={() => connected && repositoryTrigger.current && !repositoryTrigger.current.disabled ? repositoryTrigger.current : connectionButton.current} />}
+    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} focusTargets={() => [
+      connected ? repositoryTrigger.current : null,
+      connectionButton.current,
+      connectionButton.current?.closest<HTMLElement>('[data-slot="sheet-content"]'),
+    ]} />}
     <AlertDialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
       <AlertDialogContent
         onOpenAutoFocus={() => { focusOrigin.current = document.activeElement; }}
