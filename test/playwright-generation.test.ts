@@ -10,6 +10,7 @@ import {createBrowserManager} from '../src/browser/manager.ts';
 import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
 import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,repairPrompt,seedSpec} from '../src/journeys/playwright/generation.ts';
 import {specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
+import {codeFor} from './fixtures/journey-code.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 import type {BrowserCase} from '../src/business/browser-cases.ts';
@@ -32,14 +33,14 @@ const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch(error){ret
 const wait=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 const lines=async(file:string):Promise<HarnessCall[]>=>(await readFile(file,'utf8').catch(()=>'')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
 
-async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/',environment:overrides={},playwright,timeoutMs=20000,events}:{mode?:string;target?:string;environment?:Partial<TargetEnvironment>;playwright?:JourneyRuntime;timeoutMs?:number;events?:Events}={}){
+async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/',environment:overrides={},playwright,runtime:agentRuntime,timeoutMs=20000,events}:{mode?:string;target?:string;environment?:Partial<TargetEnvironment>;playwright?:JourneyRuntime;runtime?:BrowserManagerOptions['runtime'];timeoutMs?:number;events?:Events}={}){
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-playwright-generation-'));await mkdir(join(dataDir,'repo'));
   const log=join(dataDir,'harness.jsonl'),launches:JourneyRunInput[]=[],state={mode},uncertain:string[]=[];
   const environment:TargetEnvironment={id:'twin-1',status:'ready',stageId:'beta',apps:[{id:'web',url:target}],accounts:[{id:'owner',label:'Owner',username:'tester@example.com'}],services:[],...overrides};
   // The seed signs in before the generator starts, as the journey runtime runs it; unless events say otherwise, it does.
   const seeded:Events=input=>[{type:'result',result:{caseId:input.case.id,stopCause:'none',assertions:[]}}];
   playwright??={capabilities:async()=>({runtimeInstalled:true,browserInstalled:true}),start(input,onEvent){launches.push(input);const promise=wait(10).then(()=>{for(const event of (events??seeded)(input))onEvent(event);});return {promise,cancel(){}};}};
-  const runtime={capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('The browser-use runtime must not start.');}};
+  const runtime=agentRuntime??{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('The browser-use runtime must not start.');}};
   const options=():BrowserManagerOptions=>({dataDir,runtime,playwright,onEnvironmentUncertain:async id=>{uncertain.push(id);},resolveEnvironment:url=>new URL(url).origin===new URL(target).origin?environment:null,twinAccount:async(_environment,accountId)=>accountId==='owner'?{username:'tester@example.com',password}:null,
     generation:{harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,state.mode,log,prompt,requested]}),timeoutMs,cleanupGraceMs:1000}});
   const manager=await createBrowserManager(options());
@@ -264,6 +265,142 @@ test('a harness that stops reports its redacted output; the key and password app
   assert.equal(generation?.status,'failed');
   assert.equal(generation?.error,'The code generator stopped. Provider rejected key [REDACTED] for [REDACTED]');
   assert.ok(secretFree(await f.manager.view(f.context))&&secretFree(await readFile(join(f.dataDir,'browser','state.json'),'utf8')));
+});
+
+test('a failed generation stays explained beside its stale draft after restart without running the model again',async t=>{
+  const f=await setup(t,{mode:'fail'});
+  await f.manager.saveSpec(f.context,{caseId:journey.id,code:codeFor(journey)});
+  await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['The changed display name is kept after reopening Settings.']}]);
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const failed=(await settled(f))!;
+  assert.equal(failed.draft?.stale,true);
+  assert.equal(failed.generation?.status,'failed');
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.view(f.context)).specs[journey.id],failed);
+  assert.equal(restarted.isActive(f.context),false);
+  await wait(100);
+  assert.equal((await lines(f.log)).length,1,'A restored failure starts no paid generation.');
+  assert.ok(secretFree(await readFile(join(f.dataDir,'browser','state.json'),'utf8')));
+});
+
+test('an accepted replacement generation clears an older failure even when the replacement is cancelled',async t=>{
+  const f=await setup(t,{mode:'fail'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.equal((await settled(f))?.generation?.status,'failed');
+  f.state.mode='hang';
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  await f.manager.cancelSpecGeneration(f.context,{caseId:journey.id});
+  assert.equal(await settled(f),undefined);
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.equal((await restarted.view(f.context)).specs[journey.id],undefined);
+});
+
+test('saving code or replacing its reviewed case removes an obsolete generation failure across restart',async t=>{
+  for(const change of ['code','case','delete'] as const)await t.test(change,async t=>{
+    const f=await setup(t,{mode:'fail'});
+    await f.manager.generateSpec(f.context,{caseId:journey.id});
+    assert.equal((await settled(f))?.generation?.status,'failed');
+    if(change==='code')await f.manager.saveSpec(f.context,{caseId:journey.id,code:codeFor(journey)});
+    else await f.manager.saveCases(f.context,change==='delete'?[]:[{...journey,expectedOutcomes:['The new reviewed outcome.']}]);
+    assert.equal((await f.manager.view(f.context)).specs[journey.id]?.generation,undefined);
+    await f.manager.close();
+    const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+    if(change==='delete')await restarted.saveCases(f.context,[journey]);
+    assert.equal((await restarted.view(f.context)).specs[journey.id]?.generation,undefined);
+  });
+});
+
+test('an in-flight generation failure cannot attach itself to a replacement case',async t=>{
+  let rejectSeed:((error:Error)=>void)|undefined;
+  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  assert.ok(rejectSeed);
+  await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
+  rejectSeed(new Error('The original seed failed.'));
+  assert.equal(await settled(f),undefined);
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.equal((await restarted.view(f.context)).specs[journey.id],undefined);
+});
+
+test('discovery replacing a case cannot attach its old generation failure to the new journey',async t=>{
+  const f=await setup(t,{mode:'fail',runtime:{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(_input,onEvent){
+    return {promise:Promise.resolve().then(()=>{onEvent({type:'discovery',summary:'A new Settings journey.',cases:[{...journey,expectedOutcomes:['The new reviewed outcome.']}]});}),cancel(){}};
+  }}});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});assert.equal((await settled(f))?.generation?.status,'failed');
+  const {run}=await f.manager.discover(f.context,{accountId:null,replaceCaseIds:[journey.id],baseCases:(await f.manager.view(f.context)).cases});
+  for(let i=0;i<100&&f.manager.isActive(f.context);i++)await wait(10);
+  assert.equal((await f.manager.runProgress(f.context,run.id)).run.status,'completed');
+  const view=await f.manager.view(f.context);
+  assert.equal(view.cases[0].id,journey.id);assert.equal(view.cases[0].needsReview,true);
+  assert.equal(view.specs[journey.id],undefined,'A replaced journey must not inherit the old generation error.');
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.equal((await restarted.view(f.context)).specs[journey.id],undefined);
+});
+
+test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',async t=>{
+  let rejectSeed:((error:Error)=>void)|undefined;
+  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  assert.ok(rejectSeed);
+  const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
+  await rm(file);await mkdir(file);
+  try{
+    rejectSeed(new Error('The seed could not sign in.'));
+    const result=await settled(f);
+    assert.equal(result?.generation?.status,'failed');
+    assert.match(result?.generation?.error??'',/The seed could not sign in\./);
+    assert.match(result?.generation?.error??'',/generation failure could not be saved/i);
+    assert.equal(f.manager.isActive(f.context),false);
+    assert.equal((await lines(f.log)).length,0);
+  }finally{await rm(file,{recursive:true});await writeFile(file,saved);}
+});
+
+test('a refused generation cannot restore an unsaved old failure onto a replacement case',async t=>{
+  let rejectSeed:((error:Error)=>void)|undefined,refuseNext=false,refuse:((value:{browserInstalled:boolean})=>void)|undefined;
+  const f=await setup(t,{playwright:{capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refuse=resolve;}):{browserInstalled:true},start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  assert.ok(rejectSeed);
+  const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
+  await rm(file);await mkdir(file);
+  try{rejectSeed(new Error('The original seed failed.'));assert.match((await settled(f))?.generation?.error??'',/could not be saved/);}
+  finally{await rm(file,{recursive:true});await writeFile(file,saved);}
+  refuseNext=true;
+  const rejected=assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/Install Chromium/);
+  for(let i=0;i<100&&!refuse;i++)await wait(10);
+  assert.ok(refuse);
+  await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
+  refuse({browserInstalled:false});await rejected;
+  assert.equal((await f.manager.view(f.context)).specs[journey.id],undefined);
+  assert.equal(f.manager.isActive(f.context),false);
+});
+
+test('stored generation failures are bounded, redacted before clipping and validated as data',async t=>{
+  const f=await setup(t,{mode:'fail'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8'));
+  const failures=Object.values(stored.generationFailures)[0] as Record<string,{caseHash:string;error:string;rejected?:string}>;
+  failures[journey.id].error=`${'x'.repeat(795)}${key}end`;
+  failures[journey.id].rejected=`${'x'.repeat(19995)}${key}end`;
+  await writeFile(file,JSON.stringify(stored));
+  const restarted=await createBrowserManager(f.options());
+  try{
+    const generation=(await restarted.view(f.context)).specs[journey.id].generation!;
+    assert.equal(generation.status,'failed');
+    assert.equal(generation.error?.length,800);assert.equal(generation.rejected?.length,20000);
+    assert.doesNotMatch(generation.error??'',/or-fi/,'Clip only after hiding the whole configured key.');
+    assert.doesNotMatch(generation.rejected??'',/or-fi/);
+    assert.ok(secretFree(await readFile(file,'utf8')));
+  }finally{await restarted.close();}
+  stored.generationFailures={invalid:{[journey.id]:{caseHash:'not-a-hash',error:12}}};
+  await writeFile(file,JSON.stringify(stored));
+  await assert.rejects(createBrowserManager(f.options()),/Unsupported code generation failure state/);
 });
 
 test('a harness that exits successfully without a spec keeps redacted diagnostics from both attempts',async t=>{

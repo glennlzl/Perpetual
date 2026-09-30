@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {mkdir,lstat,readdir,rm} from 'node:fs/promises';
 import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
+import {hide} from '../redaction.ts';
 import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
@@ -83,9 +84,11 @@ type VerificationRun=BrowserRun&{verification:Verification};
 type Preparation={environmentId:string;status:string;createdAt:string;targetUrl?:string;runId?:string;error?:string;completedAt?:string};
 /** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
 type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
+/** Only a terminal generation failure is durable; a restart never restores a worker. */
+type GenerationFailure={caseHash:string;error:string;rejected?:string};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
-  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,Record<string,CaseSpecs>>;externalOperations:Record<string,ExternalOperation>;
+  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,Record<string,CaseSpecs>>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,Record<string,GenerationFailure>>;
 };
 type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
 /**
@@ -99,7 +102,7 @@ type InputOptions={signal?:AbortSignal;isCurrent?:()=>boolean};
 /** A run's execution while it is active; kept in memory only. */
 type RunJob={cancelled:boolean;cancel:()=>void;promise:Promise<void>|null;skips:Set<string>;scheduler?:{skip(id:string):boolean;cancel():void}};
 /** A case's code generation: running, or why it failed until the next attempt. */
-type Generation={scope:string;status:'running'|'failed';step?:string;error?:string;rejected?:string;cancelled:boolean;cancel():void};
+type Generation={scope:string;caseHash:string;discarded?:true;status:'running'|'failed';step?:string;error?:string;rejected?:string;cancelled:boolean;cancel():void};
 /** A case's verification while it is between or inside attempts, or why it could not go on. */
 type VerificationEntry={id:string;scope:string;caseId:string;hash:string;caseHash:string;checkVersion:number;cancelled:boolean;done:boolean;run:string|null;error?:string};
 type StoredFrames={latest:Buffer|null;cases:Map<string,Buffer>};
@@ -279,9 +282,10 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const generationRoot=join(root,'generations');await mkdir(generationRoot,{recursive:true,mode:0o700});
   const generationInfo=await lstat(generationRoot);if(generationInfo.isSymbolicLink()||!generationInfo.isDirectory())throw new Error('Code generation storage must not be a symbolic link.');
   const modelSettings=await createBrowserModelSettings({dataDir});
+  const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([modelSettings.configuration().apiKey,...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
-  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{}};
+  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{}};
   {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
   for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
   const external:unknown=state.externalOperations??{};
@@ -297,6 +301,16 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   // Add current draft defaults without rewriting immutable historical approvals.
   for(const [scope,cases] of Object.entries(state.cases))state.cases[scope]=validateBrowserCases(cases,{draft:true});
+  const failures:unknown=state.generationFailures??{};
+  if(!isRecord(failures))throw new Error('Unsupported code generation failure state.');
+  state.generationFailures=Object.fromEntries(Object.entries(failures).map(([scope,cases])=>{
+    if(!isRecord(cases))throw new Error('Unsupported code generation failure state.');
+    return [scope,Object.fromEntries(Object.entries(cases).flatMap(([id,failure])=>{
+      if(!isRecord(failure)||typeof failure.caseHash!=='string'||!/^[a-f0-9]{64}$/.test(failure.caseHash)||typeof failure.error!=='string'||failure.rejected!==undefined&&typeof failure.rejected!=='string')throw new Error('Unsupported code generation failure state.');
+      const item=state.cases[scope]?.find(item=>item.id===id);
+      return item&&caseHash(item)===failure.caseHash?[[id,{caseHash:failure.caseHash,error:generationDiagnostic(failure.error),...(failure.rejected?{rejected:generationDiagnostic(failure.rejected,20000)}:{})}]]:[];
+    }))];
+  }));
   // A case's journey code is its approved spec beside a draft. Code approved without a verification, as a stored single
   // spec was after one passing run, is a draft again, so no gate runs it before it is verified and approved; a draft
   // already beside it is newer and stays instead.
@@ -305,7 +319,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     else if(spec.approved&&!verifiedApproval(spec.approved)){const {approvedAt,approvedRunIds,...kept}=spec.approved;specs[caseId]={approved:null,draft:spec.draft??kept};}
   }
   const saves=createSaveQueue();let closed=false,modelSaving=false,closing:Promise<void>|undefined;const jobs=new Map<string,RunJob>(),inputJobs=new Map<AbortController,Promise<unknown>>(),busy=new Set<string>(),frames=new Map<string,StoredFrames>(),admissions=new Set<Promise<unknown>>();
-  // One code generation per case: `${scope}\0${caseId}` → {scope,status,step,error,cancel}; kept in memory only.
+  // Only this controller's jobs and an unsaved failure need live entries. Durable failures contain no worker callbacks.
   const generations=new Map<string,Generation>(),generationJobs=new Set<Promise<void>>(),generationKey=(scope:string,caseId:string)=>`${scope}\0${caseId}`;
   const generating=(scope?:string)=>[...generations.values()].some(entry=>entry.status==='running'&&(scope===undefined||entry.scope===scope));
   // One verification per case, keyed like generations: {id,scope,caseId,hash,cancelled,done,error?,run?}. Its state
@@ -440,8 +454,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   // current, and code goes with its case. generation: code being generated, or why it failed.
   function specView(scope:string){
     const specs=state.specs[scope]||{};
-    return Object.fromEntries((state.cases[scope]||[]).filter(item=>specs[item.id]||generations.has(generationKey(scope,item.id))).map((item):[string,SpecSummary]=>{
-      const {approved,draft}=specs[item.id]||{},generation=generations.get(generationKey(scope,item.id)),verification=draft&&verificationView(scope,item.id,draft);
+    return Object.fromEntries((state.cases[scope]||[]).filter(item=>specs[item.id]||generations.has(generationKey(scope,item.id))||state.generationFailures[scope]?.[item.id]).map((item):[string,SpecSummary]=>{
+      const {approved,draft}=specs[item.id]||{},storedFailure=state.generationFailures[scope]?.[item.id],verification=draft&&verificationView(scope,item.id,draft);
+      const generation:SpecSummary['generation']=generations.get(generationKey(scope,item.id))||(storedFailure?{status:'failed',...storedFailure}:undefined);
       const provenance=(spec:StoredSpec)=>spec.provenance?{provenance:structuredClone(spec.provenance)}:{};
       return [item.id,{
         ...(approved?{approved:{hash:approved.hash,stale:approved.caseHash!==caseHash(item),approvedAt:approved.approvedAt,...provenance(approved)}}:{}),
@@ -463,6 +478,18 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     return {code:spec.code,hash:spec.hash,checkVersion:spec===approved?approved.checkVersion??1:CHECK_VERSION};
   }
   const keptSpecs=(scope:string,cases:readonly BrowserCase[])=>Object.fromEntries(Object.entries(state.specs[scope]||{}).filter(([id])=>cases.some(item=>item.id===id)));
+  const keptGenerationFailures=(scope:string,cases:readonly BrowserCase[],except?:string)=>Object.fromEntries(Object.entries(state.generationFailures[scope]||{}).filter(([id,failure])=>id!==except&&cases.some(item=>item.id===id&&caseHash(item)===failure.caseHash)));
+  function discardObsoleteGenerations(scope:string,cases:readonly BrowserCase[]){
+    for(const [key,entry] of generations)if(entry.scope===scope){
+      const item=cases.find(item=>generationKey(scope,item.id)===key);
+      if(!item||caseHash(item)!==entry.caseHash){entry.discarded=true;if(entry.status==='failed')generations.delete(key);else if(!item)entry.cancel();}
+    }
+  }
+  function clearGenerationFailure(scope:string,caseId:string){
+    if(!state.generationFailures[scope]?.[caseId])return Promise.resolve();
+    const kept=()=>keptGenerationFailures(scope,state.cases[scope]||[],caseId);
+    return persist(()=>({...state,generationFailures:{...state.generationFailures,[scope]:kept()}}),()=>{state.generationFailures[scope]=kept();});
+  }
   // A case deleted while it is saved keeps no code; a case with neither approved nor draft code keeps no entry.
   // next(specs) computes the case's code from the state as the write commits, after every earlier write, so a second
   // writer of the same case judges the first one's code and is refused rather than silently overwriting it.
@@ -474,7 +501,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if((state.cases[scope]||[]).some(item=>item.id===caseId)&&(value.approved||value.draft))kept[caseId]=value;else delete kept[caseId];
       return kept;
     };
-    return persist(()=>({...state,specs:{...state.specs,[scope]:specs()}}),()=>{state.specs[scope]=specs();});
+    const failures=()=>keptGenerationFailures(scope,state.cases[scope]||[],caseId);
+    return persist(()=>({...state,specs:{...state.specs,[scope]:specs()},generationFailures:{...state.generationFailures,[scope]:failures()}}),()=>{state.specs[scope]=specs();state.generationFailures[scope]=failures();});
   }
   // next(item, {approved, draft}) returns the case's new code; it never runs while the case's code is generated or verified.
   function writeSpec(context:BrowserStageContext,caseId:unknown,next:(item:BrowserCase,specs:CaseSpecs)=>CaseSpecs){return admit(async()=>{
@@ -595,7 +623,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
     // An existing URL needs no twin. An owned environment keeps the same reservation as a run.
     const release=takeTarget(context,config.targetUrl,environment?.id,'generate journey code');
-    const entry:Generation={scope,status:'running',step:'preparing',cancelled:false,cancel(){entry.cancelled=true;}};
+    const previous=generations.get(key),entry:Generation={scope,caseHash:caseHash(snapshot),status:'running',step:'preparing',cancelled:false,cancel(){entry.cancelled=true;}};
     generations.set(key,entry);
     try{
       if(!(await playwright.capabilities()).browserInstalled)throw new Error('Install Chromium for Playwright: npx playwright install chromium.');
@@ -608,7 +636,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         if(!credentials)throw new Error('The environment test account is unavailable. Recreate the environment.');
       }
       if(closed||entry.cancelled)throw conflict('Code generation cancelled.');
-    }catch(error){generations.delete(key);release();throw error;}
+      // Only an admitted new attempt replaces the previous terminal failure, before any worker starts.
+      await clearGenerationFailure(scope,item.id);
+    }catch(error){
+      if(previous&&!previous.discarded&&!entry.discarded&&state.cases[scope]?.some(current=>current.id===item.id&&caseHash(current)===previous.caseHash))generations.set(key,previous);
+      else generations.delete(key);
+      release();throw error;
+    }
     const origins=[new URL(config.targetUrl).origin,...(environment?applications(environment):[]).map(app=>originOf(app.url)!),...config.externalOrigins];
     const promise=(async()=>{
       let workspace:Awaited<ReturnType<typeof privateWorkspace>>|null=null;
@@ -635,9 +669,21 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         try{if(workspace&&(!uncertain||!external))await rm(workspace.path,{recursive:true,force:true});}
         catch(error){uncertain=true;failure??=error;}
         finally{try{await finishExternal(external,uncertain);}catch(error){failure??=error;}finally{release();}}
-        // A saved or cancelled generation leaves no state; a failed one says why until the next attempt.
-        if(!failure)generations.delete(key);
-        else{const rejected=(failure as {rejected?:unknown}).rejected;Object.assign(entry,{status:'failed',error:browserError(failure),...(typeof rejected==='string'?{rejected}:{})});delete entry.step;}
+        // A saved or cancelled generation leaves no state. Only a failure for the same case is durable.
+        if(!failure||entry.discarded)generations.delete(key);
+        else{
+          const rejected=(failure as {rejected?:unknown}).rejected;
+          const secrets=[configuration.apiKey,credentials?.password],result:GenerationFailure={caseHash:caseHash(snapshot),error:generationDiagnostic(failure,800,secrets),...(typeof rejected==='string'?{rejected:generationDiagnostic(rejected,20000,secrets)}:{})};
+          try{
+            const failures=()=>{
+              const kept=keptGenerationFailures(scope,state.cases[scope]||[]);
+              if(!entry.discarded&&state.cases[scope]?.some(current=>current.id===item.id&&caseHash(current)===result.caseHash))kept[item.id]=result;
+              return kept;
+            };
+            await persist(()=>({...state,generationFailures:{...state.generationFailures,[scope]:failures()}}),()=>{state.generationFailures[scope]=failures();});
+            generations.delete(key);
+          }catch(error){if(entry.discarded)generations.delete(key);else{Object.assign(entry,{status:'failed',error:`${result.error} The generation failure could not be saved: ${browserError(error)}`,...(result.rejected?{rejected:result.rejected}:{})});delete entry.step;}}
+        }
       }
     })();
     generationJobs.add(promise);promise.finally(()=>generationJobs.delete(promise));
@@ -951,7 +997,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             }
             const current=state.cases[scope]||[],retained=current.filter(item=>!replaceIds.includes(item.id)),known=new Set(retained.map(item=>item.id));
             const nextCases=[...retained,...discovery.cases.filter(item=>!known.has(item.id))].slice(0,60);
-            await persist(()=>({...state,cases:{...state.cases,[scope]:nextCases},specs:{...state.specs,[scope]:keptSpecs(scope,nextCases)},analyses:{...state.analyses,[scope]:analysis}}),()=>{state.specs[scope]=keptSpecs(scope,nextCases);state.cases[scope]=nextCases;state.analyses[scope]=analysis;});
+            await persist(()=>({...state,cases:{...state.cases,[scope]:nextCases},specs:{...state.specs,[scope]:keptSpecs(scope,nextCases)},generationFailures:{...state.generationFailures,[scope]:keptGenerationFailures(scope,nextCases)},analyses:{...state.analyses,[scope]:analysis}}),()=>{state.specs[scope]=keptSpecs(scope,nextCases);state.generationFailures[scope]=keptGenerationFailures(scope,nextCases);state.cases[scope]=nextCases;state.analyses[scope]=analysis;});
+            discardObsoleteGenerations(scope,nextCases);
             run.discovery=discovery;run.status='completed';run.progress.cases[0].status='completed';touch(run);
           }
         }catch(error){
@@ -1095,9 +1142,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       try{
         // Publish only after durable persistence. Other stages keep their own
         // updates, and failed writes never approve a case in memory.
-        await persist(()=>({...state,cases:{...state.cases,[scope]:normalized},specs:{...state.specs,[scope]:keptSpecs(scope,normalized)}}),()=>{state.specs[scope]=keptSpecs(scope,normalized);state.cases[scope]=normalized;});
+        await persist(()=>({...state,cases:{...state.cases,[scope]:normalized},specs:{...state.specs,[scope]:keptSpecs(scope,normalized)},generationFailures:{...state.generationFailures,[scope]:keptGenerationFailures(scope,normalized)}}),()=>{state.specs[scope]=keptSpecs(scope,normalized);state.generationFailures[scope]=keptGenerationFailures(scope,normalized);state.cases[scope]=normalized;});
         // A deleted case's code generation stops with it.
-        for(const [key,entry] of generations)if(entry.scope===scope&&!normalized.some(item=>generationKey(scope,item.id)===key)){if(entry.status==='running')entry.cancel();else generations.delete(key);}
+        discardObsoleteGenerations(scope,normalized);
         // So does its verification.
         for(const entry of verifications.values())if(entry.scope===scope&&!entry.done&&!normalized.some(item=>item.id===entry.caseId))cancelVerification(context,entry.caseId);
         return {cases:structuredClone(normalized)};
