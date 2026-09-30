@@ -50,95 +50,6 @@ function addSection(sections: ConfigSection[], id: string, title: unknown, field
   if (actual.length) sections.push({ id, title: text(title), fields: actual });
 }
 
-function workflowSections(sections: ConfigSection[], file: string, data: unknown) {
-  if (!isRecord(data)) return;
-  const triggers = typeof data.on === 'string' ? [data.on] : Array.isArray(data.on) ? data.on : Object.keys(data.on && typeof data.on === 'object' ? data.on : {});
-  addSection(sections, 'workflow', 'Workflow', [
-    field('file', 'Workflow file', file), field('name', 'Name', data.name), field('triggers', 'Triggers', triggers),
-  ]);
-  const filters: (ConfigField | null)[] = [];
-  if (data.on && !Array.isArray(data.on) && typeof data.on === 'object') {
-    for (const [event, config] of Object.entries(data.on).slice(0, 40)) {
-      if (!config || typeof config !== 'object') continue;
-      for (const key of ['branches', 'branches-ignore', 'tags', 'tags-ignore', 'paths', 'paths-ignore']) {
-        filters.push(field(`${event}.${key}`, `${event} · ${key}`, at(config, key)));
-      }
-    }
-  }
-  addSection(sections, 'triggers', 'Trigger filters', filters);
-  addSection(sections, 'concurrency', 'Concurrency', [
-    field('group', 'Group', typeof data.concurrency === 'string' ? data.concurrency : at(data.concurrency, 'group')),
-    field('cancel-in-progress', 'Cancel in progress', at(data.concurrency, 'cancel-in-progress')),
-  ]);
-  for (const [id, job] of Object.entries(data.jobs && typeof data.jobs === 'object' ? data.jobs : {}).slice(0, 100)) {
-    if (!isRecord(job)) continue;
-    const runner = job['runs-on'];
-    const runnerFields = runner && typeof runner === 'object' && !Array.isArray(runner)
-      ? [field('runner-group', 'Runner group', at(runner, 'group')), field('runner-labels', 'Runner labels', at(runner, 'labels'))]
-      : [field('runs-on', 'Runner', runner)];
-    addSection(sections, `job:${text(id)}`, scalar(job.name) ? job.name : id, [
-      field('id', 'Job', id), ...runnerFields,
-      field('needs', 'Needs', Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []),
-      field('timeout-minutes', 'Timeout (minutes)', job['timeout-minutes']),
-      field('working-directory', 'Working directory', at(at(job.defaults, 'run'), 'working-directory') ?? at(at(data.defaults, 'run'), 'working-directory')),
-    ]);
-  }
-}
-
-// Intentionally accepts only literal scalar values in exact [build] / [deploy] tables.
-// Multiline strings, inline tables and environment overrides are not approximated.
-function literalToml(raw: string) {
-  const result: Record<string, Record<string, Scalar>> = { build: {}, deploy: {} };
-  const seen = new Set<string>();
-  let section = '';
-  let multiline: string | null = null;
-  for (const line of raw.split(/\r?\n/)) {
-    if (multiline) {
-      if (line.includes(multiline)) multiline = null;
-      continue;
-    }
-    const table = line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/);
-    if (table) { section = ['build', 'deploy'].includes(table[1].trim()) ? table[1].trim() : ''; continue; }
-    if (/^\s*\[/.test(line)) { section = ''; continue; }
-    const entry = line.match(/^\s*([A-Za-z][\w-]*)\s*=\s*(.*?)\s*$/);
-    if (!entry) continue;
-    const [, key, literal] = entry;
-    if (literal.startsWith('"""') || literal.startsWith("'''")) {
-      const delimiter = literal.slice(0, 3);
-      if (!literal.slice(3).includes(delimiter)) multiline = delimiter;
-      continue;
-    }
-    if (!section) continue;
-    const qualified = `${section}.${key}`;
-    if (seen.has(qualified)) { delete result[section][key]; continue; }
-    seen.add(qualified);
-    let value: unknown;
-    const quoted = literal.match(/^("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/);
-    if (quoted) {
-      if (quoted[1].startsWith("'")) value = quoted[1].slice(1, -1);
-      else { try { value = JSON.parse(quoted[1]); } catch { continue; } }
-    } else if (/^(true|false)\s*(?:#.*)?$/.test(literal)) value = literal.startsWith('true');
-    else {
-      const number = literal.match(/^([+-]?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(?:#.*)?$/);
-      if (number && Number.isFinite(Number(number[1]))) value = Number(number[1]);
-    }
-    if (scalar(value)) result[section][key] = value;
-  }
-  return result;
-}
-
-const RAILWAY_FIELDS: [string, string, [string, string][]][] = [
-  ['build', 'Build', [['builder', 'Builder'], ['dockerfilePath', 'Dockerfile'], ['buildCommand', 'Build command']]],
-  ['deploy', 'Deploy', [['startCommand', 'Start command'], ['healthcheckPath', 'Healthcheck path'], ['healthcheckTimeout', 'Healthcheck timeout (seconds)'], ['restartPolicyType', 'Restart policy'], ['restartPolicyMaxRetries', 'Maximum retries']]],
-];
-
-function railwaySections(sections: ConfigSection[], data: unknown) {
-  for (const [section, title, entries] of RAILWAY_FIELDS) addSection(sections, section, title, entries.map(([key, label]) => {
-    const value = at(at(data, section), key);
-    return scalar(value) ? field(key, label, value) : null;
-  }));
-}
-
 function vercelProject(raw: string, name: string, expectedAlias: string | undefined) {
   for (const match of raw.matchAll(/\{[^{}]{0,1500}\}/g)) {
     const projectName = match[0].match(/\bname\s*:\s*["']([\w.-]+)["']/)?.[1];
@@ -158,25 +69,9 @@ export async function readServiceConfig(scan: Pick<Scan, 'repo' | 'nodes' | 'ser
   const paths = [...new Set((node.evidence || []).map(item => item.file).filter(safePath))].slice(0, 40);
   const result: ServiceConfiguration = { nodeId, provider: node.provider || null, files: paths.map(file => ({ path: file })), sections: [] };
 
-  if (node.kind === 'workflow' || node.kind === 'job') {
-    const file = paths.find(file => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(file));
-    const raw = file ? await readConfig(root, file) : null;
-    if (raw !== null) {
-      let data: unknown;
-      try { data = parse(raw, { maxAliasCount: 20 }); }
-      catch { throw new Error('Could not read this workflow configuration.'); }
-      workflowSections(result.sections, file!, data);
-    }
-  } else if (node.provider === 'Railway') {
-    const file = paths.find(file => /(?:^|\/)railway\.(toml|json)$/.test(file));
-    const raw = file ? await readConfig(root, file) : null;
-    if (raw !== null) {
-      let data: unknown;
-      try { data = file!.endsWith('.json') ? JSON.parse(raw) : literalToml(raw); }
-      catch { throw new Error('Could not read this Railway configuration.'); }
-      railwaySections(result.sections, data);
-    }
-  } else if (node.provider === 'Vercel') {
+  // These drawers show file links only; unreadable contents must not hide the path a person needs to fix.
+  if (node.kind === 'workflow' || node.kind === 'job' || node.provider === 'Railway') return result;
+  if (node.provider === 'Vercel') {
     let name = typeof node.projectName === 'string' ? node.projectName : '';
     if (!Object.hasOwn(node, 'projectName')) {
       try { if (node.id.startsWith('vercel:')) name = decodeURIComponent(node.id.slice(7)); } catch { /* Legacy node has no project association. */ }
