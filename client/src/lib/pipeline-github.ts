@@ -4,7 +4,8 @@ import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
 
 // The shapes are the controller's contract (contract/github.ts): GET /api/github/runs as the controller replies.
-import type { CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
+import type { BuildReply, CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
+export type { BuildReply };
 export type GitHubStep = WorkflowStep;
 export type GitHubJob = WorkflowJob;
 export type GitHubRun = WorkflowRun;
@@ -14,7 +15,7 @@ export type GitHubMark = 'running' | 'queued' | 'waiting' | 'failed' | 'cancelle
 /** The Build status for the current commit. */
 export interface BuildSummary { status: GitHubMark; sha: string }
 /** Build's status Badge: working, failed, passed or idle. */
-export interface BuildStatus { kind: string; text: string; sha?: string }
+export interface BuildStatus { kind: string; text: string; sha?: string; hint?: string }
 
 const STATUS_MARKS: Record<string, GitHubMark> = { requested: 'queued', pending: 'queued', queued: 'queued', waiting: 'waiting', in_progress: 'running' };
 const CONCLUSION_MARKS: Record<string, GitHubMark> = { success: 'passed', neutral: 'passed', failure: 'failed', timed_out: 'failed', startup_failure: 'failed', cancelled: 'cancelled', stale: 'cancelled', skipped: 'skipped', action_required: 'waiting' };
@@ -97,6 +98,55 @@ export function actionLabel(value: unknown, fallback = ''): { text: string; ref:
   return { text: text || fallback, ref: null, contexts: contexts.length ? contexts : ['expression'] };
 }
 export const actionText = (value: unknown, fallback?: string) => { const { text, ref, contexts } = actionLabel(value, fallback); return [text, ref, contexts.length ? `(${contexts.join(', ')})` : ''].filter(Boolean).join(' '); };
+
+/** Build has its own commit; Source and Production continue to describe the scanned checkout. */
+export function buildForSource(view: BuildReply | null | undefined, source: { repoPath?: string; branch?: string | null; scannedSha?: string | null }): BuildReply | null {
+  return view && view.repoPath === source.repoPath && view.branch === (source.branch ?? null) && view.scannedSha === (source.scannedSha ?? null) ? view : null;
+}
+
+export function watchedBuildSummary(view: BuildReply | null | undefined): BuildSummary | null {
+  const eligible = githubBranchBuild(view, view?.sha, view?.branch);
+  return githubBuildSummary(eligible, view?.sha, eligible?.runs.map(run => workflowPath(run.path)));
+}
+export function watchedBuildStatus(view: BuildReply | null | undefined, error?: string | null): BuildStatus | null {
+  if (error) return { kind: 'idle', text: 'Unverified', hint: error };
+  if (!view) return null;
+  if (!view.sha || !view.branch) return { kind: 'idle', text: 'Unverified', hint: 'Select a GitHub branch to read Build.' };
+  const eligible = githubBranchBuild(view, view.sha, view.branch);
+  const status = githubBuildStatus(eligible, view.sha, eligible?.runs.map(run => workflowPath(run.path)));
+  return status && { ...status, sha: view.sha.slice(0, 7) };
+}
+
+/** Names from the scanned workflow files. These are configuration, never execution evidence. */
+export interface ConfiguredWorkflow { file: string; name: string; jobs: { id: string; name: string; steps: { id: string; name: string }[] }[]; error?: string }
+export interface BuildWorkflowRow extends ConfiguredWorkflow { runs: GitHubRun[] }
+/** Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. */
+export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined): BuildWorkflowRow[] {
+  const rows = new Map<string, BuildWorkflowRow>();
+  if (view?.sha && view.sha === scannedSha) for (const workflow of configured) rows.set(workflow.file, { ...workflow, runs: [] });
+  for (const run of githubBranchBuild(view, view?.sha, view?.branch)?.runs ?? []) {
+    const file = workflowPath(run.path), row = rows.get(file);
+    if (row) { row.runs.push(run); if (run.name) row.name = run.name; }
+    else rows.set(file, { file, name: run.name || file.split('/').at(-1) || file, jobs: [], runs: [run] });
+  }
+  return [...rows.values()];
+}
+
+export interface BuildRead { view: BuildReply | null; error: string | null }
+const buildListeners = new Set<() => void>();
+export const buildChanges = {
+  subscribe(listener: () => void) { buildListeners.add(listener); return () => { buildListeners.delete(listener); }; },
+  notify() { buildListeners.forEach(listener => listener()); },
+};
+export function createGitHubBuildPoller({ repoPath, branch, controller, ...options }: Omit<GitHubPollerOptions<BuildRead>, 'path' | 'active'> & { repoPath: string; branch: string | null }) {
+  return createGitHubPoller<BuildRead>({ ...options, path: `/api/github/build?${new URLSearchParams({ repoPath, ...(branch ? { branch } : {}) })}`,
+    async controller(path) {
+      try { return { view: await controller(path) as BuildReply, error: null }; }
+      catch (error) { return { view: null, error: error instanceof Error ? error.message : 'Could not read Build. Reconnect GitHub and try again.' }; }
+    },
+    active: read => ['running', 'queued'].includes(watchedBuildSummary(read?.view)?.status ?? ''),
+  });
+}
 
 /** Polls one controller route while the page is visible: every `activeDelay` while `active(result)`, else every `idleDelay`, publishing only changed results. */
 export interface GitHubPollerOptions<T> { controller: Controller; path: string; active: (result: T | null) => boolean; onChange: (result: T | null) => void; document?: PageVisibility | null; timers?: Timers; activeDelay?: number; idleDelay?: number }

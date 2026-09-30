@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStageDataCache, stageNodeData, stageServices } from '../client/src/lib/pipeline-nodes.ts';
 import { createHealthBeats } from '../client/src/lib/pipeline-health.ts';
-import type { BuildSummary, GitHubRuns } from '../client/src/lib/pipeline-github.ts';
+import type { BuildSummary, BuildReply } from '../client/src/lib/pipeline-github.ts';
 import type { BrowserView, Environment } from '../client/src/lib/test-workspace.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
@@ -21,7 +21,7 @@ const betaTests: Partial<BrowserView> = { cases: [{ id: 'create-and-run', name: 
 const gammaTests = (progress: number): Partial<BrowserView> => ({ cases: [{ id: 'checkout', name: 'Buy credits and run a workflow' }], runs: [{ id: 'run-gamma', mode: 'run', status: 'running', progress: { revision: progress, cases: [{ id: 'checkout', status: 'running' }] } }], preparation: null });
 
 function context({ scan = scanFixture(), environments = [betaEnvironment], browserTests = { beta: betaTests, gamma: gammaTests(1) }, build = null, github = null, arrivals = {}, healthBeat = createHealthBeats() }: {
-  scan?: Scan; environments?: Environment[]; browserTests?: Record<string, Partial<BrowserView>>; build?: BuildSummary | null; github?: GitHubRuns | null; arrivals?: Record<string, string>; healthBeat?: (environment: Environment | undefined) => string;
+  scan?: Scan; environments?: Environment[]; browserTests?: Record<string, Partial<BrowserView>>; build?: BuildSummary | null; github?: BuildReply | null; arrivals?: Record<string, string>; healthBeat?: (environment: Environment | undefined) => string;
 } = {}) {
   const latest = Object.fromEntries(stages.map(stage => [stage.id, environments.find(item => item.stageId === stage.id)]));
   return { scan, pipeline, sha: SHA, latest, snapshot: { environments, browserTests, stageRemovals: [] }, arrivals, healthBeat, build, github, selection: null, selectedStageId: null, busyStages: [], busy: false, ...callbacks };

@@ -6,14 +6,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
 import { repairOffer, startRepair, type StageAutopilot } from '@/lib/pipeline-autopilot.ts';
-import { GITHUB_MARK_LABELS, actionLabel, actionText, jobMark, jobRuns, stepMark, workflowMark, workflowRuns, type GitHubMark, type GitHubRuns } from '@/lib/pipeline-github.ts';
+import { GITHUB_MARK_LABELS, actionLabel, actionText, buildChanges, buildWorkflowRows, combinedMark, githubMark, type BuildReply, type ConfiguredWorkflow, type GitHubMark, type GitHubRun } from '@/lib/pipeline-github.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import { StepItem, StepList } from './StepList';
-
-// GET /api/github-actions: the scanned workflow files with their jobs and steps, names only.
-type WorkflowStep = { id: string; name: string };
-type WorkflowJob = { id: string; name: string; steps: WorkflowStep[] };
-type Workflow = { file: string; name: string; jobs: WorkflowJob[]; error?: string };
 
 const MARKS: Record<Exclude<GitHubMark, 'running'>, LucideIcon> = { queued: CircleDashed, waiting: CircleDashed, passed: CircleCheck, failed: CircleX, cancelled: CircleSlash, skipped: CircleMinus };
 const withMark = (label: string, mark: GitHubMark | null) => mark ? `${label}, ${GITHUB_MARK_LABELS[mark]}` : label;
@@ -33,12 +28,12 @@ function ActionName({ value, fallback }: { value: string; fallback?: string }) {
   return <>{text}{ref && <>{' '}<span className="font-mono text-muted-foreground">{ref}</span></>}{contexts.map(context => <Fragment key={context}>{' '}<Badge variant="outline" className="px-1.5 py-0 font-mono font-normal">{context}</Badge></Fragment>)}</>;
 }
 
-function ActionGroup({ openKey, name, fallback, label, aside, children }: { openKey: string; name: string; fallback?: string; label: string; aside?: ReactNode; children: ReactNode }) {
+function ActionGroup({ openKey, name, fallback, label, aside, children, literal = false }: { openKey: string; name: string; fallback?: string; label: string; aside?: ReactNode; children: ReactNode; literal?: boolean }) {
   const [open, setOpen] = useRememberedOpen(openKey);
   return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0">
     <CollapsibleTrigger asChild>
       <Button type="button" variant="ghost" size="sm" className="h-auto min-h-6 min-w-0 w-full items-start justify-between gap-2 whitespace-normal px-1 py-0.5 text-left leading-5 [&[data-state=open]>svg]:rotate-180" aria-label={label} title={name}>
-        <span className="min-w-0 max-w-64 flex-1 [overflow-wrap:anywhere]"><ActionName value={name} fallback={fallback} /></span><ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform" />
+        <span className="min-w-0 max-w-64 flex-1 [overflow-wrap:anywhere]">{literal ? name : <ActionName value={name} fallback={fallback} />}</span><ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform" />
       </Button>
     </CollapsibleTrigger>
     {aside}
@@ -77,27 +72,42 @@ function ActionsLoading() {
   </div></div>;
 }
 
-export default function GitHubActionsCard({ repoPath, scannedAt, runs = null, stageId, autopilot = null }: { repoPath?: string; scannedAt?: string; runs?: GitHubRuns | null; stageId?: string; autopilot?: StageAutopilot | null }) {
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
+function ObservedRun({ run, openKey }: { run: GitHubRun; openKey: string }) {
+  if (run.jobs === null) return <p role="status" className="px-2 py-2 text-xs text-muted-foreground">Job details unavailable{run.url && <> · <a className="underline" href={run.url} target="_blank" rel="noreferrer">View run</a></>}</p>;
+  if (!run.jobs.length) return <p className="px-2 py-2 text-xs text-muted-foreground">No jobs reported</p>;
+  return <StepList label={`${run.name || 'Workflow'} jobs`}>
+    {run.jobs.map(job => <StepItem key={job.id} compact icon={<RunMark mark={githubMark(job)} fallback={<ListChecks className="size-3.5" />} />}>
+      <ActionGroup openKey={`${openKey}:${run.id}:${job.id}`} name={job.name} literal label={withMark(`Job: ${job.name}`, githubMark(job))}>
+        {job.steps.length ? <StepList label={`${job.name} steps`}>
+          {job.steps.map((step, index) => <StepItem key={`${step.number}:${index}`} compact icon={<RunMark mark={githubMark(step)} fallback={<Terminal className="size-3.5" />} />}>
+            <p className="min-w-0 max-w-[16.5rem] px-1 text-xs leading-6 text-muted-foreground [overflow-wrap:anywhere]">{step.name}{githubMark(step) && <span className="sr-only">, {GITHUB_MARK_LABELS[githubMark(step)!]}</span>}</p>
+          </StepItem>)}
+        </StepList> : <p className="px-2 py-2 text-xs text-muted-foreground">No steps reported</p>}
+      </ActionGroup>
+    </StepItem>)}
+  </StepList>;
+}
+
+export default function GitHubActionsCard({ repoPath, scannedAt, scannedSha, runs = null, readError, stageId, autopilot = null }: { repoPath?: string; scannedAt?: string; scannedSha?: string | null; runs?: BuildReply | null; readError?: string | null; stageId?: string; autopilot?: StageAutopilot | null }) {
+  const configKey = JSON.stringify([repoPath, scannedAt, scannedSha]);
+  const [config, setConfig] = useState<{ key: string; workflows: ConfiguredWorkflow[]; error: string } | null>(null);
   const [reload, setReload] = useState(0);
   const openKey = `github-actions:${repoPath}`;
   const [open, setOpen] = useRememberedOpen(openKey);
+  const current = config?.key === configKey ? config : null;
+  const workflows = buildWorkflowRows(runs, current?.workflows ?? [], scannedSha);
+  const error = readError || current?.error;
 
   useEffect(() => {
     let active = true;
-    setWorkflows([]);
-    setError('');
-    setLoading(true);
     const params = new URLSearchParams({ repoPath: repoPath! });
-    api<{ workflows: Workflow[] }>(`/api/github-actions?${params}`).then(result => {
-      if (active) setWorkflows(result.workflows);
+    api<{ workflows: ConfiguredWorkflow[] }>(`/api/github-actions?${params}`).then(result => {
+      if (active) setConfig({ key: configKey, workflows: result.workflows, error: '' });
     }).catch(failure => {
-      if (active) setError(failure instanceof Error ? failure.message : 'Could not load actions.');
-    }).finally(() => { if (active) setLoading(false); });
+      if (active) setConfig({ key: configKey, workflows: [], error: failure instanceof Error ? failure.message : 'Could not load actions.' });
+    });
     return () => { active = false; };
-  }, [repoPath, scannedAt, reload]);
+  }, [repoPath, configKey, reload]);
 
   return <Collapsible open={open} onOpenChange={setOpen} className="nodrag nopan min-w-0">
       <CollapsibleTrigger asChild>
@@ -106,25 +116,23 @@ export default function GitHubActionsCard({ repoPath, scannedAt, runs = null, st
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent className="pb-1">
-          {loading ? <ActionsLoading />
-            : error ? <div className="space-y-2 p-2"><p role="alert" className="break-words text-xs text-destructive">{error}</p><Button type="button" variant="outline" size="sm" onClick={() => setReload(value => value + 1)}><RotateCw />Retry</Button></div>
-            : workflows.length ? <StepList label="GitHub workflows">
+          {error && <div className="space-y-2 p-2"><p role="alert" className="break-words text-xs text-destructive">{error}</p><Button type="button" variant="outline" size="sm" onClick={() => { if (readError) buildChanges.notify(); else setReload(value => value + 1); }}><RotateCw />Retry</Button></div>}
+          {workflows.length ? <StepList label="GitHub workflows">
               {workflows.map(workflow => {
-                const matched = workflowRuns(runs, workflow.file), mark = workflowMark(runs, workflow.file), file = workflow.file.split('/').at(-1), workflowName = actionText(workflow.name, file);
+                const mark = combinedMark(workflow.runs.map(githubMark)), file = workflow.file.split('/').at(-1), workflowName = actionText(workflow.name, file);
                 const repair = <WorkflowRepair repoPath={repoPath} stageId={stageId} offer={repairOffer(autopilot, workflow.file, runs?.sha)} />;
                 return <StepItem key={`${scannedAt}:${workflow.file}`} compact icon={<RunMark mark={mark} fallback={<Workflow className="size-3.5" />} />}>
                   <ActionGroup openKey={`${openKey}:${workflow.file}`} name={workflow.name} fallback={file} label={withMark(`Workflow: ${workflowName}`, mark)} aside={repair}>
                     {workflow.error && <p role="alert" className="break-words px-2 py-2 text-xs text-destructive">{workflow.error}</p>}
-                    {workflow.jobs.length ? <StepList label={`${workflowName} jobs`}>
+                    {workflow.runs.length ? workflow.runs.map(run => <ObservedRun key={`${run.id}:${run.attempt}`} run={run} openKey={`${openKey}:${runs?.sha}:${workflow.file}`} />) : workflow.jobs.length ? <StepList label={`${workflowName} jobs`}>
                       {workflow.jobs.map(job => {
-                        const jobs = jobRuns(matched, job), jobState = jobMark(matched, job), jobName = actionText(job.name, job.id);
-                        return <StepItem key={job.id} compact icon={<RunMark mark={jobState} fallback={<ListChecks className="size-3.5" />} />}>
-                          <ActionGroup openKey={`${openKey}:${workflow.file}:${job.id}`} name={job.name} fallback={job.id} label={withMark(`Job: ${jobName}`, jobState)}>
+                        const jobName = actionText(job.name, job.id);
+                        return <StepItem key={job.id} compact icon={<ListChecks className="size-3.5" />}>
+                          <ActionGroup openKey={`${openKey}:${workflow.file}:${job.id}`} name={job.name} fallback={job.id} label={`Job: ${jobName}`}>
                             {job.steps.length ? <StepList label={`${jobName} steps`}>
                               {job.steps.map((step, index) => {
-                                const stepState = stepMark(jobs, step);
-                                return <StepItem key={`${index}:${step.id}`} compact icon={<RunMark mark={stepState} fallback={<Terminal className="size-3.5" />} />}>
-                                  <p className="min-w-0 max-w-[16.5rem] px-1 text-xs leading-6 text-muted-foreground [overflow-wrap:anywhere]" title={step.name}><ActionName value={step.name} fallback="Step" />{stepState && <span className="sr-only">, {GITHUB_MARK_LABELS[stepState]}</span>}</p>
+                                return <StepItem key={`${index}:${step.id}`} compact icon={<Terminal className="size-3.5" />}>
+                                  <p className="min-w-0 max-w-[16.5rem] px-1 text-xs leading-6 text-muted-foreground [overflow-wrap:anywhere]" title={step.name}><ActionName value={step.name} fallback="Step" /></p>
                                 </StepItem>;
                               })}
                             </StepList> : <p className="px-2 py-2 text-xs text-muted-foreground">No steps</p>}
@@ -135,7 +143,7 @@ export default function GitHubActionsCard({ repoPath, scannedAt, runs = null, st
                   </ActionGroup>
                 </StepItem>;
               })}
-            </StepList> : <p className="px-2 py-2 text-xs text-muted-foreground">No actions found</p>}
+            </StepList> : !error && (!runs ? <ActionsLoading /> : <p className="px-2 py-2 text-xs text-muted-foreground">No workflow runs</p>)}
       </CollapsibleContent>
   </Collapsible>;
 }

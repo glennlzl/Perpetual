@@ -269,7 +269,7 @@ test('Build & Deploy shows no status Badge while its runs load, rather than Not 
   const status = app.slice(app.indexOf('function stageStatus('), app.indexOf('function HealthAge('));
   assert.doesNotMatch(app, /'Not run'/, 'Only githubBuildStatus says Not run, once the current commit\'s runs were read.');
   assert.match(status, /return buildStatus \?\? null;/);
-  assert.match(app, /githubBuildStatus\(github, sha, workflows\)/);
+  assert.match(app, /watchedBuildStatus\(github, buildReadError\)/);
   const badge = app.slice(app.indexOf('function StageStatus('), app.indexOf('function StageTransition('));
   assert.match(badge, /status: StageStatusView \| null/);
   assert.ok(badge.indexOf('if (!status) return null;') > badge.indexOf('useState(false)'), 'An unknown status renders no Badge, after its hook ran.');

@@ -15,7 +15,7 @@ import { readGitHubActions, readServiceConfig, type ConfigFile } from './service
 import { withDeliveryGraph } from './delivery.ts';
 import { readGitHistory } from './git-history.ts';
 import { createGitHubAuthManager } from './github-auth.ts';
-import { createGitHubRunsReader } from './github-runs.ts';
+import { createGitHubRunsReader, latestBranchBuildRuns } from './github-runs.ts';
 import { createGitHubDeploymentsReader } from './github-deployments.ts';
 import { createEnvironmentManager } from './environments/manager.ts';
 import { createBrowserManager, type BrowserManagerOptions } from './browser/manager.ts';
@@ -33,6 +33,7 @@ import { readBranchHead, postCommitStatus } from './gate/github.ts';
 import { readBuild } from './gate/build.ts';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub } from './releases/manager.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
+import type { BuildReply } from '../contract/github.ts';
 import { createRepairManager, type Repair } from './repair/manager.ts';
 import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs } from './repair/github.ts';
 import { createRepairAgent, type CI, type ModelFactory, type RepairAgentGitHub } from './repair/agent.ts';
@@ -767,6 +768,29 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         });
       }
       if(req.method==='GET'&&path==='/api/github/runs')return reply(res,200,await connectedRead(githubRuns,'workflow runs'));
+      if(req.method==='GET'&&path==='/api/github/build'){
+        requireSourceIdle();
+        return reply(res,200,await withActiveScan(requestUrl.searchParams.get('repoPath'),async(scan):Promise<BuildReply>=>{
+          const source=state.source,record=state.githubConnection,key=pipelineKey(state),branch=scan.repo.branch||null;
+          if(requestUrl.searchParams.has('branch')&&requestUrl.searchParams.get('branch')!==(branch??''))throw conflict(SOURCE_CHANGED);
+          const unchanged=()=>{requireSourceIdle();if(state.scan!==scan||state.source!==source||state.githubConnection!==record||pipelineKey(state)!==key)throw conflict(SOURCE_CHANGED);};
+          if(record===null)throw new Error('Connect your GitHub account to read Build.');
+          const session=await githubRuns.session();unchanged();
+          const connection=await githubConnection(session);unchanged();
+          if(!connection.connected||!connection.source?.repository)throw new Error(connection.message||'Connect your GitHub account to read Build.');
+          const repository=connection.source.repository,login=connection.account.login;
+          const watched=()=>gates.watchedHead({key,repository,branch,login});
+          const head=watched(),sha=head?.sha??scan.repo.sha??null;
+          const sameHead=()=>{unchanged();if(JSON.stringify(watched())!==JSON.stringify(head))throw conflict('The branch head changed while reading Build. Refresh its status.');};
+          const result=await githubRuns.read({repository,sha,login});sameHead();
+          const verified=await githubRuns.session();sameHead();
+          if(!verified.authenticated||verified.account.login.toLowerCase()!==login.toLowerCase())throw conflict('The GitHub account changed while reading Build. Reconnect it.');
+          if(result.repository.toLowerCase()!==repository.toLowerCase()||result.sha!==sha)throw Object.assign(new Error('GitHub returned Build evidence for another source.'),{statusCode:502});
+          const runs=latestBranchBuildRuns(result.runs,sha,branch);
+          if(runs.some(run=>!run.status||run.status==='completed'&&!run.conclusion))throw Object.assign(new Error('GitHub returned an unreadable Build status. Try again.'),{statusCode:502});
+          return {repoPath:scan.repo.path,repository,branch,sha,scannedSha:scan.repo.sha||null,source:head?'watched':'scanned',runs};
+        }));
+      }
       // The deployments GitHub records for the scanned commit, as the apps that made them reported them.
       if(req.method==='GET'&&path==='/api/github/deployments')return reply(res,200,await connectedRead(githubDeployments,'deployments'));
       const failedRun=path.match(/^\/api\/providers\/github\/runs\/(\d+)\/failure$/);

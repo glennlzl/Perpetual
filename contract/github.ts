@@ -12,6 +12,10 @@ export interface WorkflowRun extends RunState {
 }
 /** GET /api/github/runs: the Actions runs GitHub holds for the scanned commit. */
 export interface CommitRuns { repository: string; sha: string | null; runs: WorkflowRun[] }
+/** GET /api/github/build: one current branch Build, independent of the pinned source scan. */
+export interface BuildReply extends CommitRuns {
+  repoPath: string; branch: string | null; scannedSha: string | null; source: 'watched' | 'scanned';
+}
 
 export interface DeploymentStatus { state: string | null; stateAt: string | null; url: string | null; logUrl: string | null }
 /** One deployment GitHub records for the scanned commit, as the app that created it reported it. */

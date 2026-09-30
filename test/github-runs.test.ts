@@ -27,6 +27,41 @@ const workflowJob = (id: number, runId: number, extra: object = {}) => ({
 });
 const jobsPage = (jobs: object[]) => ({ total_count: jobs.length, jobs });
 
+test('reads all workflow-run pages before reporting a commit', async () => {
+  const seen: string[] = [];
+  const reader = createGitHubRunsReader({ request: async endpoint => {
+    seen.push(endpoint);
+    if (endpoint.includes('/jobs')) return { status: 200, data: jobsPage([]) };
+    return { status: 200, data: { total_count: 51, workflow_runs: endpoint.includes('page=2') ? [workflowRun(51, { workflow_id: 999, conclusion: 'failure' })] : Array.from({ length: 50 }, (_, index) => workflowRun(index + 1)) } };
+  } });
+  const result = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.equal(result.runs.length, 51);
+  assert.equal(result.runs.at(-1)?.conclusion, 'failure');
+  assert.ok(seen.some(endpoint => endpoint.includes('&page=2')));
+});
+
+for (const data of [{ total_count: 2, workflow_runs: [workflowRun(1)] }, { total_count: 1001, workflow_runs: [] }, { workflow_runs: [] }, { total_count: 1, workflow_runs: [{ ...workflowRun(1), workflow_id: null }] }]) test('incomplete workflow-run pages cannot become successful Build evidence', async () => {
+  const reader = createGitHubRunsReader({ request: async () => ({ status: 200, data }) });
+  await assert.rejects(reader.read({ repository: REPO, sha: SHA, login: LOGIN }), /complete|limit/);
+});
+
+test('matrix jobs are read completely for the exact run attempt', async () => {
+  const seen: string[] = [];
+  const reader = createGitHubRunsReader({ request: async endpoint => {
+    seen.push(endpoint);
+    if (!endpoint.includes('/jobs')) return { status: 200, data: runsPage([workflowRun(11, { run_attempt: 2 })]) };
+    return { status: 200, data: { total_count: 101, jobs: endpoint.includes('page=2') ? [workflowJob(101, 11, { name: 'Tests (101)' })] : Array.from({ length: 100 }, (_, index) => workflowJob(index + 1, 11, { name: `Tests (${index + 1})` })) } };
+  } });
+  const result = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.equal(result.runs[0].jobs?.length, 101);
+  assert.ok(seen.some(endpoint => endpoint.includes('/attempts/2/jobs?')));
+});
+
+test('an incomplete jobs response remains unavailable instead of an empty successful list', async () => {
+  const reader = createGitHubRunsReader({ request: async endpoint => ({ status: 200, data: endpoint.includes('/jobs') ? { total_count: 2, jobs: [workflowJob(1, 11)] } : runsPage([workflowRun(11)]) }) });
+  assert.equal((await reader.read({ repository: REPO, sha: SHA, login: LOGIN })).runs[0].jobs, null);
+});
+
 function recorder(routes: Route[]) {
   const calls: { endpoint: string; etag: string | null }[] = [];
   const request = async (endpoint: string, etag: string | null) => {
@@ -75,8 +110,8 @@ test('reads current-commit runs with jobs for active runs and once per completed
   let active = true;
   const { calls, request } = recorder([
     [/actions\/runs\?/, () => ({ status: 200, etag: 'W/"runs"', data: runsPage([workflowRun(11, active ? { status: 'in_progress', conclusion: null } : {}), workflowRun(12)]) })],
-    [/runs\/11\/jobs/, () => ({ status: 200, etag: null, data: jobsPage([workflowJob(21, 11, active ? {} : { status: 'completed', conclusion: 'success' })]) })],
-    [/runs\/12\/jobs/, () => ({ status: 200, etag: null, data: jobsPage([workflowJob(22, 12, { status: 'completed', conclusion: 'success' })]) })],
+    [/runs\/11\/attempts\/1\/jobs/, () => ({ status: 200, etag: null, data: jobsPage([workflowJob(21, 11, active ? {} : { status: 'completed', conclusion: 'success' })]) })],
+    [/runs\/12\/attempts\/1\/jobs/, () => ({ status: 200, etag: null, data: jobsPage([workflowJob(22, 12, { status: 'completed', conclusion: 'success' })]) })],
   ]);
   let time = 0;
   const reader = createGitHubRunsReader({ request, ttl: 4000, now: () => time });
@@ -88,7 +123,7 @@ test('reads current-commit runs with jobs for active runs and once per completed
   time = 1000; await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
   assert.equal(calls.length, 3, 'Concurrent polls within the cache window share one read.');
   time = 5000; active = false; await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
-  assert.deepEqual(calls.slice(3).map(call => call.endpoint.replace(`repos/${REPO}/`, '')), [`actions/runs?head_sha=${SHA}&per_page=50`, 'actions/runs/11/jobs?per_page=100'], 'Completed attempt 12 is not refetched; run 11 gets its final jobs once.');
+  assert.deepEqual(calls.slice(3).map(call => call.endpoint.replace(`repos/${REPO}/`, '')), [`actions/runs?head_sha=${SHA}&per_page=50`, 'actions/runs/11/attempts/1/jobs?per_page=100'], 'Completed attempt 12 is not refetched; run 11 gets its final jobs once.');
   time = 10000; const settled = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
   assert.equal(calls.length, 6, 'Completed attempts reuse their final jobs.');
   assert.equal(settled.runs[0].jobs![0].conclusion, 'success');
@@ -158,7 +193,7 @@ test('reads require the connected login and never share cached data between acco
   await reader.read({ repository: REPO, sha: SHA, login: 'GlennLZL' });
   assert.equal(calls.length, 2, 'Logins compare case-insensitively, as GitHub does.');
   const other = await reader.read({ repository: REPO, sha: SHA, login: 'someone-else' });
-  assert.deepEqual(calls.slice(2).map(call => [call.endpoint.replace(`repos/${REPO}/`, ''), call.etag]), [[`actions/runs?head_sha=${SHA}&per_page=50`, null], ['actions/runs/12/jobs?per_page=100', null]], 'Another account neither reuses the read, its entity tag, nor completed jobs.');
+  assert.deepEqual(calls.slice(2).map(call => [call.endpoint.replace(`repos/${REPO}/`, ''), call.etag]), [[`actions/runs?head_sha=${SHA}&per_page=50`, null], ['actions/runs/12/attempts/1/jobs?per_page=100', null]], 'Another account neither reuses the read, its entity tag, nor completed jobs.');
   assert.equal(other.runs[0].jobs![0].id, '22');
 });
 
