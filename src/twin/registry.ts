@@ -53,7 +53,8 @@ export interface ServiceContext<Options extends ServiceOptions<Options> = JsonOb
   url(name: string, path?: string): string;
   sharedPort(name: string, current?: unknown): Promise<number>;
   app(id: string): { url: string; port: number };
-  run(image: string, args: string[], options?: { env?: EnvInput }): Promise<CommandOutput>;
+  /** service-only mounts just this service's private directory read-only, without the source snapshot. */
+  run(image: string, args: string[], options?: { env?: EnvInput; mounts?: 'service-only' }): Promise<CommandOutput>;
   exec(file: string, args: string[], options?: { cwd?: string }): Promise<CommandOutput>;
   /** Tests supply their own; services otherwise use the global fetch. */
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;

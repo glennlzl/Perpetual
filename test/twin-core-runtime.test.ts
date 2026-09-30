@@ -53,6 +53,44 @@ test('Prepare returns host-browser app URLs while container wiring keeps Docker 
   assert.match(await readFile(join(dir, '.env'), 'utf8'), new RegExp(`^WEB__API_URL="http://host.docker.internal:${PORT_BASE + 2}"$`, 'm'));
 });
 
+test('A service-only one-shot mounts only its private directory read-only and retains cleanup ownership', async t => {
+  const { calls, dataDir, source } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const probe = { id: 'probe', title: 'Probe', fidelity: 'actual', env: () => ({}),
+    setup: ctx => ctx.run(APP_IMAGE, ['node', '-e', 'process.exit(1)'], { mounts: 'service-only' }) } satisfies TwinService;
+  let cleanupFails = true, orphan = true;
+  const runtime = createTwinRuntime({ owner: 'owner-1', services: { probe }, isFree: async () => true, exec: async (file, args, options) => {
+    calls.push({ file, args, env: options?.env });
+    if (args[0] === 'run') throw new Error('Probe failed');
+    if (args[0] === 'ps') return { stdout: orphan ? 'a'.repeat(64) : '' };
+    if (args[0] === 'rm') { if (cleanupFails) throw new Error('Probe still busy'); orphan = false; }
+    return { stdout: '' };
+  } });
+  await assert.rejects(runtime.prepare({ dataDir, source, id: 'beta', config: { services: { probe: {} } } }), /Probe failed/);
+  const run = calls.find(call => call.args[0] === 'run')!;
+  assert.deepEqual(run.args.flatMap((arg, index) => arg === '--volume' ? [run.args[index + 1]] : []), [
+    `${join(dataDir, 'environments/beta/twin/services/probe')}:${join(dataDir, 'environments/beta/twin/services/probe')}:ro`,
+  ]);
+  assert.ok(run.args.includes('perpetual.owner=owner-1') && run.args.includes('perpetual.environment=beta'));
+  assert.ok(!run.args.some(arg => arg.includes(source) || arg.includes('docker.sock')));
+  await assert.rejects(runtime.destroy({ dataDir, id: 'beta' }), /cleanup failed/);
+  await access(join(dataDir, 'environments/beta/twin/twin.json'));
+  cleanupFails = false;
+  await runtime.destroy({ dataDir, id: 'beta' });
+  assert.equal(orphan, false);
+  await assert.rejects(access(join(dataDir, 'environments/beta/twin/twin.json')));
+});
+
+test('Allocated public addresses cannot collide with an app listener inside its container', async t => {
+  const { prepare, dataDir } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const result = await prepare({ config: { apps: {
+    web: { start: 'node server.js', port: PORT_BASE, env: { API_URL: '{{apps.api.publicUrl}}' } },
+    api: { start: 'node server.js', port: PORT_BASE + 2 },
+  } } });
+  assert.deepEqual(result.apps.map(app => new URL(app.url).port), [String(PORT_BASE + 3), String(PORT_BASE + 4)]);
+});
+
 test('Prepare runs setup in placeholder order, then services, fixtures and the whole twin', async t => {
   const { calls, steps, prepare, dir, source, dataDir } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));

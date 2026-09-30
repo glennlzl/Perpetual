@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { APPS, INSTALL, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
 import { relative } from './paths.ts';
+import { loopbackCommand } from './loopback.ts';
 import type { Placeholder, TwinConfig } from './config.ts';
 import type { Fidelity, ServiceContainer } from './registry.ts';
 
@@ -147,19 +148,21 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       if (new Set(sources.values()).size > 1) fail(`${variable} is provided by ${[...sources.keys()].join(' and ')}; map it in apps.${appId}.env.`);
       automatic[variable] = sources.values().next().value!; // every offered variable has a source
     }
-    const explicit: Record<string, string> = {};
+    const explicit: Record<string, string> = {}, publicPorts = new Set<number>();
     for (const [variable, value] of Object.entries(app.env)) {
       const where = `apps.${appId}.env.${variable}`;
-      if (placeholders(value, where).some(ref => blocked.has(ref.service))) continue;
+      const refs = placeholders(value, where);
+      if (refs.some(ref => blocked.has(ref.service) || blocked.has(ref.addressOf))) continue;
       // A placeholder is an address, which has a port key, or a service variable.
       explicit[variable] = resolvePlaceholders(value, ref => ref.service === undefined ? addressUrl(ref, hostPort(addressKey(ref)))
         : provided[ref.service]?.[ref.variable] ?? fail(`${where}: ${ref.service} does not provide ${ref.variable}.`), where);
+      for (const ref of refs) if (ref.public) publicPorts.add(hostPort(addressKey(ref)));
     }
     const port = hostPort(portKey(APPS, appId));
     compose.services[appId] = {
       image: appImage,
       ...workspace(app.directory),
-      command: ['sh', '-c', literal(appCommand(app.build, app.start))],
+      command: loopbackCommand(appCommand(app.build, app.start), publicPorts, app.port).map(literal),
       environment: { ...PACKAGE_CACHE_ENV, ...environment(appId, { ...automatic, [PORT_VARIABLE]: String(app.port), ...explicit }, dotenv) },
       ports: [`${LOOPBACK}:${port}:${app.port}`],
       ...common,

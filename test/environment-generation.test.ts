@@ -296,6 +296,23 @@ test('a failed preparation is feedback with its step, error and redacted log tai
   for (const text of [JSON.stringify(await f.saved()), JSON.stringify(await f.manager.view(f.context)), feedback]) assert.ok(!text.includes(KEY) && !text.includes(SECRET), 'No secret reaches feedback or state.');
 });
 
+test('a failed service exposes its terminal error in the environment and attempt summaries without secrets', async t => {
+  const f = await fixture(t, { script: Array.from({ length: 4 }, () => ({ write: good })) });
+  f.twinState.steps = ['Setting up Database'];
+  f.twinState.fail = () => `Database: Starting database...\nStopping containers...\nError: cannot copy runtime module with key ${SECRET}; ${'diagnostic detail '.repeat(40)}\n`;
+  const environment = await f.create();
+  assert.equal(environment.status, 'failed');
+  assert.match(environment.error ?? '', /cannot copy runtime module/);
+  assert.equal(environment.attempts?.length, 4);
+  for (const attempt of environment.attempts ?? []) {
+    assert.match(attempt.summary, /Setting up Database/);
+    assert.match(attempt.summary, /cannot copy runtime module/);
+    assert.ok(attempt.summary.length <= 300);
+    assert.ok(!attempt.summary.includes(SECRET));
+  }
+  assert.ok(!JSON.stringify(environment).includes(SECRET));
+});
+
 test('staged feedback names the stage an attempt failed at and the app, service, install or fixture there, with its command', async t => {
   const install = { directory: '.', command: 'npm ci' };
   const docker = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
@@ -499,7 +516,9 @@ test('four attempts that fail to start an app say which app and its commands, no
   f.twinState.fail = () => 'Container perpetual-t1-database-1 Creating\nContainer perpetual-t1-web-1 Error\ndependency failed to start: container web exited (1)';
   const failed = await f.create();
   assert.equal(failed.status, 'failed');
-  assert.equal(failed.error, 'Writing the twin config failed after 4 attempts: preparing the twin failed at "Starting twin": App `web` in `.`: build `npm install`, start `npm run start`');
+  assert.match(failed.error ?? '', /App `web` in `\.`: build `npm install`, start `npm run start`/);
+  assert.match(failed.error ?? '', /container web exited \(1\)/);
+  assert.doesNotMatch(failed.error ?? '', /Creating/);
 });
 
 test('the author changing any file but twin.json fails its attempt', async t => {

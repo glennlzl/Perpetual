@@ -18,6 +18,7 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 // DATABASE_URL preserves the local credentials reported by `supabase status`.
 // 2.118.0 includes supabase/cli#6505: prune overlapping Edge Runtime binds before its docker cp bootstrap.
 export const CLI = 'supabase@2.118.0';
+const MOUNT_CHECK_IMAGE = 'node:24-bookworm-slim';
 /** directory: the repository's supabase directory; functions and users are checked where they are used. */
 type Options = { directory?: Json; functions?: Json; users?: Json };
 type Outputs = { url: string; anonKey: string; serviceRoleKey: string; jwtSecret: string; dbUrl: string };
@@ -204,6 +205,9 @@ export default {
     const prepared = ctx.options.functions == null ? toml : await edgeFunctions(ctx, target, toml);
     await bridgeSupabaseImportMaps(target, prepared);
     await writeFile(config, prepared);
+    // Docker Desktop can retain a deleted bind ancestor across rebuilds: the CLI's first `docker cp`
+    // then fails before its Edge Runtime starts. Read the recreated private tree from a running guest first.
+    await ctx.run(MOUNT_CHECK_IMAGE, ['node', '-e', 'require("node:fs").accessSync(process.argv[1])', config], { mounts: 'service-only' });
     await cli(ctx, 'start', '--workdir', workdir(ctx));
     const status = parseEnv((await cli(ctx, 'status', '--output', 'env', '--workdir', workdir(ctx))).stdout);
     if (!status.ANON_KEY || !status.SERVICE_ROLE_KEY || !status.DB_URL) throw new Error('Supabase status did not report its keys and database URL');

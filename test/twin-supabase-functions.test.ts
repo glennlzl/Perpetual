@@ -38,10 +38,13 @@ async function context(options: { directory?: string; functions?: Json }): Promi
   });
   await mkdir(join(root, 'twin'), { recursive: true });
   return {
-    root, calls, project: 'perpetual-beta1', dir: join(root, 'twin'), source: join(root, 'source'), options, inputs: {}, outputs: {},
+    root, calls, project: 'perpetual-beta1', dir: join(root, 'twin'), shared: join(root, 'shared'), source: join(root, 'source'), options, inputs: {},
+    outputs: { url: '', anonKey: '', serviceRoleKey: '', jwtSecret: '', dbUrl: '' },
     host: HOST, port, url: (name: string, path = '') => `http://${HOST}:${port(name)}${path}`,
+    sharedPort: async () => { throw new Error('Unexpected shared port'); }, app: () => { throw new Error('Unexpected app'); },
+    run: async () => ({ stdout: '' }),
     exec: async (command: string, args: string[]) => { calls.push(args); return { stdout: args.includes('status') ? STATUS : '' }; },
-  } as Fake;
+  };
 }
 const project = (ctx: Fake) => join(ctx.dir, 'supabase', 'supabase');
 const starts = (ctx: Fake) => ctx.calls.filter(args => args.includes('start')).length;
