@@ -1,7 +1,7 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEnvironmentRuntime, environmentInputs } from '../src/environments/runtime.ts';
@@ -83,6 +83,16 @@ test('the llm service takes the App Settings model unless its source is the app'
   assert.deepEqual(settings.llm, { OPENAI_BASE_URL: 'https://openrouter.ai/api/v1', OPENAI_API_KEY: 'sk-or-settings-fixture', OPENAI_MODEL: 'fixture/model' });
   const app = await environmentInputs({ dataDir: f.dataDir, config: { services: { llm: { source: 'app' } } } });
   assert.deepEqual(app.llm, { OPENAI_BASE_URL: 'http://model.test/v1', OPENAI_API_KEY: 'app-own-key', OPENAI_MODEL: 'app-model' });
+});
+
+test('environment inputs read existing credentials through a data-directory alias and initialize a fresh directory', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-environment-input-alias-')), actual = join(dir, 'actual'), alias = join(dir, 'alias');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await createTwinInputs({ dataDir: actual }).set('stripe', { secretKey: STRIPE_KEY });
+  await symlink(actual, alias);
+  assert.deepEqual((await environmentInputs({ dataDir: alias, config: plan, refresh: false })).stripe, { secretKey: STRIPE_KEY });
+  const fresh = await environmentInputs({ dataDir: join(dir, 'fresh'), refresh: false });
+  assert.ok(Object.values(fresh).every(values => Object.keys(values).length === 0), 'A fresh directory has no configured inputs.');
 });
 
 test('creating a twin first renews its services’ expiring provisions; a view or a teardown renews nothing', async t => {

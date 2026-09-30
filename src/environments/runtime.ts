@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTwinInputs, createTwinRuntime, services as registry } from '../twin/index.ts';
 import { createBrowserModelSettings } from '../browser/model.ts';
@@ -29,10 +29,15 @@ export const fromAppSettings = (id: string, options: { source?: unknown } | null
  * of the config's services that is about to expire, so every twin creation, a gate's rebuild included, keeps a
  * provisioned sandbox with no user action; a renewal that fails leaves its service blocked. A view or a teardown
  * passes `refresh: false`, since neither may create anything. */
-export async function environmentInputs({ dataDir, config, services = registry, refresh = true, store = createTwinInputs({ dataDir, services }) }: {
+export async function environmentInputs({ dataDir, config, services = registry, refresh = true, store }: {
   dataDir: string; config?: { services?: Record<string, JsonObject> } | null; services?: TwinServices; refresh?: boolean;
   store?: { refresh(ids: string[]): Promise<unknown>; values(): Promise<Record<string, InputValues>> };
 }) {
+  if (!store) {
+    // Storage follows the configured alias; runtime resource identity still uses dataDir unchanged.
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    store = createTwinInputs({ dataDir: await realpath(dataDir), services });
+  }
   const declared = config?.services ?? {};
   if (refresh) await store.refresh(Object.keys(declared));
   const inputs = await store.values();

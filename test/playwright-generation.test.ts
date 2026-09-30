@@ -476,13 +476,28 @@ test('code generation for an existing URL accepts a temporary test account witho
 
 test('code generation validates explicit account choices and can opt out of a twin account',async t=>{
   const f=await setup(t);
-  for(const input of [{accountId:'missing'},{accountId:1},{credentials:{username:'u',password:'p'},accountId:'owner'}]) {
+  for(const input of [{accountId:'missing'},{accountId:1},{credentials:{username:'u',password:'p'},accountId:'owner'},{credentials:{username:'u',password:'p'},accountId:null}]) {
     await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id,...input}),/account/i);
     assert.equal(f.manager.isActive(f.context),false,'Invalid account input must release its reservation.');
   }
   await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
   assert.equal((await settled(f))?.draft?.stale,false);
   assert.equal(f.launches.length,0,'No sign-in seed is run when the person chooses no account.');
+});
+
+test('generation keeps the entered account selected before runtime preflight awaits',async t=>{
+  const f=await setup(t),runtime=f.options().playwright!;
+  let resume!:()=>void;
+  runtime.capabilities=()=>new Promise(resolve=>{resume=()=>resolve({browserInstalled:true});});
+  const credentials={username:'chosen@example.test',password:'chosen-fixture-password'};
+  const input={caseId:journey.id,credentials,accountId:undefined as string|undefined};
+  const pending=f.manager.generateSpec(f.context,input);
+  credentials.username='changed@example.test';credentials.password='changed-fixture-password';input.accountId='owner';
+  resume();await pending;
+  runtime.capabilities=async()=>({browserInstalled:true});
+  assert.equal((await settled(f))?.draft?.stale,false);
+  assert.deepEqual(f.launches.map(input=>input.credentials),[{username:'chosen@example.test',password:'chosen-fixture-password'}]);
+  assert.doesNotMatch(await readFile(join(f.dataDir,'browser','state.json'),'utf8'),/chosen@example\.test|chosen-fixture-password|changed-fixture-password/);
 });
 
 test('stored journeys without checks refuse code generation and verification before starting work',async t=>{

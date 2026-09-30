@@ -2,6 +2,7 @@
 // from the controller's gate records only; nothing here infers a result.
 import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
+import { createVisiblePoller } from './visible-poller.ts';
 
 // The shapes are the controller's contract (contract/gate.ts); GateView here is the whole GET /api/gate reply.
 import type { GateReply, GateStatus, ProductionGate, StageGate } from '../../../contract/gate.ts';
@@ -49,25 +50,8 @@ export const gateChanges = {
 
 /** Polls the gate view while the page is visible; a failed read shows no gates rather than stale ones. */
 export function createGatePoller({ controller, onChange, interval = 3000, document = globalThis.document, timers = globalThis }: { controller: Controller; onChange: (view: GateView | null) => void; interval?: number; document?: PageVisibility | null; timers?: Timers }) {
-  let timer: unknown, stopped = false, loading = false, again = false;
-  const schedule = () => { timers.clearTimeout(timer); if (!stopped && !document?.hidden) timer = timers.setTimeout(poll, interval); };
-  async function poll() {
-    if (stopped || document?.hidden) return;
-    if (loading) { again = true; return; }
-    loading = true;
-    let next: GateView | null = null;
-    try { next = await controller('/api/gate') as GateView; } catch { next = null; }
-    loading = false;
-    if (stopped) return;
-    onChange(next);
-    if (again) { again = false; void poll(); return; }
-    schedule();
-  }
-  const visibility = () => { if (!document?.hidden && !stopped) { timers.clearTimeout(timer); void poll(); } };
-  document?.addEventListener?.('visibilitychange', visibility);
-  void poll();
-  return {
-    refresh() { timers.clearTimeout(timer); void poll(); },
-    stop() { stopped = true; timers.clearTimeout(timer); document?.removeEventListener?.('visibilitychange', visibility); },
-  };
+  return createVisiblePoller({ document, timers, interval: () => interval,
+    read: () => controller('/api/gate') as Promise<GateView>,
+    onResult: result => onChange(result.ok ? result.value : null),
+  });
 }

@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, rm, symlink, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, rm, symlink, writeFile, stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
@@ -53,6 +53,32 @@ test('data-directory aliases cannot bypass controller ownership',async t=>{
   t.after(async()=>{await Promise.all([first?.close(),second?.close()]);await rm(dir,{recursive:true,force:true});});
   first=await startServer({port:0,dataDir:join(dir,'actual')});
   await assert.rejects(async()=>{second=await startServer({port:0,dataDir:join(dir,'alias')});},/already.*(using|owns)|controller.*running/i);
+});
+
+for(const viaAlias of [false,true])test(`controller keeps the configured runtime ownership path${viaAlias?' through a data-directory alias':''}`,{timeout:10000},async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'perpetual-controller-runtime-owner-')),actual=join(dir,'actual'),repo=join(dir,'repo');
+  await mkdir(actual);await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');
+  const dataDir=viaAlias?join(dir,'alias'):actual;
+  if(viaAlias)await symlink(actual,dataDir);
+  const prepared=Promise.withResolvers<string>();let app:Controller|undefined;
+  t.after(async()=>{await app?.close();await rm(dir,{recursive:true,force:true});});
+  app=await startServer({port:0,dataDir,repo,twin:{gitEmail:async()=>''},environments:{runtime:{
+    async prepareEnvironment({dataDir}){prepared.resolve(dataDir);return {status:'ready',services:[],apps:[]};},
+    environmentHealth:async()=>({status:'ready'}),environmentLogs:async()=>'',destroySandbox:async()=>{},
+  }}});
+  assert.equal((await stat(actual)).mode&0o777,0o700);
+  assert.equal((await fetch(app.url+'/api/twin/inputs')).status,200,'A supported controller data alias can read its saved inputs.');
+  const {token}=await(await fetch(app.url+'/api/session')).json();
+  const post=async(path:string,body:unknown,status=200)=>{
+    const response=await fetch(app!.url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':token},body:JSON.stringify(body)});
+    const value=await response.json();assert.equal(response.status,status,JSON.stringify(value));return value;
+  };
+  await post('/api/scan',{path:repo});
+  const {pipeline}=await post('/api/pipeline/action',{repoPath:repo,action:'add-stage',name:'Beta'});
+  const stageId=pipeline.stages.find((stage:{name:string})=>stage.name==='Beta').id;
+  await post('/api/environments/plan',{repoPath:repo,stageId,plan:{services:{},apps:{web:{start:'node app.mjs',port:3000}},fixtures:[]}});
+  await post('/api/environments/create',{repoPath:repo,stageId},202);
+  assert.equal(await prepared.promise,dataDir,'Existing resource ownership was derived from the configured path, not its realpath.');
 });
 
 test('an abrupt owner exit permits recovery of its persisted pipeline',async t=>{

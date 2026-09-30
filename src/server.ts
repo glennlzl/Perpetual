@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile, writeFile, mkdir, rename, readdir, realpath } from 'node:fs/promises';
+import { readFile, readdir, realpath } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
@@ -9,6 +9,7 @@ import { scanRepository, createPreviewPlan, DISCOVERY_VERSION } from './scanner.
 import { getProviderStatus, parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
+import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
 import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
 import { readGitHubActions, readServiceConfig, type ConfigFile } from './service-config.ts';
@@ -100,6 +101,9 @@ const text=(value: unknown)=>typeof value==='string'?value:'';
 
 const defaultPublicDir=resolve(dirname(fileURLToPath(import.meta.url)),'../public');
 const staticFiles: Record<string, [string, string]>={'/':['build/index.html','text/html']};
+// A controller snapshot includes repository discovery and saved pipeline definitions.
+const CONTROLLER_STATE_LIMIT=32*1024*1024;
+const INVALID_STATE='Cannot load saved state; preserve it and use a different --data directory.';
 // Exact style-block hash from the embedded preview's reported CSP violation.
 // Its injection source is unverified; this grants no other inline CSS or script access.
 const reportedPreviewStyleHash="'sha256-UjmwW5hqkbmZat2z0a4MIudqMdHHunQ57o+t2nldQPQ='";
@@ -169,6 +173,8 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   const dataDir=resolve(options.dataDir??'.perpetual');
   const release=await acquireControllerOwnership(dataDir),cleanup: (() => unknown)[]=[];
   try {
+    // Secure the owned directory without changing the configured path that existing runtime resource labels use.
+    await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
     const app=await createController({...options,dataDir},dispose=>cleanup.push(dispose));
     let closing;
     return {...app,close(){return closing??=(async()=>{await app.close();await release();})();}};
@@ -181,7 +187,6 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
 }
 
 async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
-  await mkdir(dataDir,{recursive:true,mode:0o700});
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
@@ -189,7 +194,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const stateFile=join(dataDir,'state.json');
   let state: ControllerState={scan:null,providers:[],pipelines:{}};
   // The controller's own state file: a JSON null or a schema 1 file without a state object cannot be read; any other file without schema 1 starts afresh.
-  try {const saved: unknown=JSON.parse(await readFile(stateFile,'utf8'));if(saved===null)throw new Error('Invalid state.');if(typeof saved==='object'&&'schema' in saved&&saved.schema===1){const stored='state' in saved?saved.state:undefined;if(!stored||typeof stored!=='object')throw new Error('Invalid state.');state=stored as ControllerState;}}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw new Error('Cannot load saved state; preserve it and use a different --data directory.');}
+  try {
+    const saved=await readStateFile(stateFile,{limit:CONTROLLER_STATE_LIMIT,invalid:INVALID_STATE});
+    if(saved===null)throw new Error(INVALID_STATE);
+    if(typeof saved==='object'&&'schema' in saved&&saved.schema===1) {
+      const stored='state' in saved?saved.state:undefined;
+      if(!stored||typeof stored!=='object'||Array.isArray(stored))throw new Error(INVALID_STATE);
+      state=stored as ControllerState;
+    }
+  }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
   // Retired repair reports, HTTP checks and their stage drafts; the next save omits them.
   delete state.runs;delete state.checks;
@@ -203,11 +216,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const browser=await createBrowserManager({dataDir,usage,...journeys,resolveEnvironment:url=>environments?.resolveTarget(url),onEnvironmentUncertain:(id,error)=>environments!.markUsageUncertain(id,error)});
   onCleanup(()=>browser.close());
   // `twin` lets tests supply provisioning's docker and git email; no container runs for them.
-  const twinInputs=createTwinInputs({dataDir,...twin});
+  const twinInputs=createTwinInputs({dataDir:await realpath(dataDir),...twin});
   const twinsReady=createReadiness();
   environments=await createEnvironmentManager<StageContext>({dataDir,usage,...runtimes,interruptedEnvironmentIds:browser.interruptedEnvironmentIds(),onReady:(context,environment)=>browser.prepareEnvironment(context,environment,{isCurrent:()=>isPreparationSourceCurrent(context)}).finally(()=>twinsReady.done(environment.id))});
   onCleanup(()=>environments.close());
-  let saving: Promise<unknown>=Promise.resolve(),tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
+  const saves=createSaveQueue();
+  let tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
   // A fresh checkout must not reset stage definitions for the same repository/root.
   const sourceKey=(source: {repository: string; rootDirectory: string})=>`github:${source.repository.toLowerCase()}:${source.rootDirectory}`;
   // Every caller has a scanned repository, so a key always exists.
@@ -269,15 +283,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return connection;
   }
   function save<R>(prepare?: (current: ControllerState) => Transaction<R>): Promise<R | undefined> {
-    const operation=saving.then(async()=>{
+    return saves.run(async()=>{
       const transaction=prepare?.(state);
       const content=JSON.stringify({schema:1,state:transaction?.state ?? state},null,2);
-      const temp=stateFile+'.tmp';await writeFile(temp,content,{mode:0o600});await rename(temp,stateFile);
+      if(Buffer.byteLength(content)>CONTROLLER_STATE_LIMIT)throw new Error('Controller state exceeds the 32 MiB storage limit.');
+      await writeStateFile(stateFile,content,{removeTemporary:true});
       transaction?.commit?.();
       return transaction?.result;
     });
-    saving=operation.catch(()=>{});
-    return operation;
   }
   // Refresh older discovery snapshots without resetting the user's stages or source.
   if (state.scan && (state.scan.discoveryVersion ?? 0) < DISCOVERY_VERSION) {
@@ -823,6 +836,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
-    closing=(async()=>{const results=await Promise.allSettled(draining);await saving;const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
+    closing=(async()=>{const results=await Promise.allSettled(draining);await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }

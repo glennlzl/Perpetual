@@ -78,3 +78,26 @@ test('Build polling clears a prior success on read failure and discards a comple
   pending.stop(); release!(reply()); await new Promise(resolve => setImmediate(resolve));
   assert.equal(reads.length, 2);
 });
+
+test('a refresh during an unfinished Build read rereads once before waiting for the idle interval', async t => {
+  const pending: ((value: unknown) => void)[] = [], seen: display.BuildRead[] = [];
+  const scheduled: (() => void)[] = [];
+  const poller = display.createGitHubBuildPoller({ repoPath: '/acme/app', branch: 'main', document: null,
+    controller: () => new Promise(resolve => pending.push(resolve)),
+    onChange: value => { if (value) seen.push(value); },
+    timers: { setTimeout(callback) { scheduled.push(callback); return callback; }, clearTimeout() {} },
+  });
+  t.after(() => poller.stop());
+  poller.refresh();
+  poller.refresh();
+  assert.equal(pending.length, 1, 'Refreshes do not overlap the active read.');
+  pending[0](reply());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2, 'A changed Build is reread after the older request settles.');
+  assert.equal(scheduled.length, 0, 'The explicit refresh must not wait for a polling timer.');
+  pending[1](reply([run({ status: 'in_progress', conclusion: null })]));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2, 'Several pending refreshes coalesce into one read.');
+  assert.equal(seen.at(-1)?.view?.runs[0].status, 'in_progress');
+  assert.equal(scheduled.length, 1);
+});

@@ -101,6 +101,7 @@ test('a run can choose another twin account, an entered account or none, and ref
   const runs=f.requests.length;
   await assert.rejects(f.manager.run(f.context,{accountId:'nobody'},manual),/Choose a test account of this environment/);
   await assert.rejects(f.manager.run(f.context,{accountId:'owner',credentials:entered},manual),/Choose one test account/);
+  await assert.rejects(f.manager.run(f.context,{accountId:null,credentials:entered},manual),/Choose one test account/);
   await assert.rejects(f.manager.run(f.context,{accountId:7},manual),/Choose one test account/);
   assert.equal(f.requests.length,runs,'A refused choice starts no worker.');
 });
@@ -142,6 +143,15 @@ test('a manually entered account does not borrow an unselected twin account sign
   assert.equal(f.requests.length,0);
   const {run}=await f.manager.discover(f.context,{accountId:'viewer'});await f.finished(run.id);
   assert.equal(f.requests[0].credentials!.username,'viewer@example.test');
+});
+
+test('the selected twin account supplies its own sign-in endpoint, not another account’s',async t=>{
+  const signingIn={...auth,accounts:async(ctx:ServiceContext<Users>)=>(await auth.accounts(ctx)).map(account=>({...account,authEndpoints:[ctx.url('api',`/auth/${account.id}`)]}))};
+  const f=await fixture(t,{service:signingIn});
+  const {run}=await f.manager.discover(f.context,{accountId:'viewer'});await f.finished(run.id);
+  assert.equal(f.requests[0].credentials!.username,'viewer@example.test');
+  assert.equal(f.requests[0].authEndpoints?.length,1);
+  assert.match(f.requests[0].authEndpoints![0],/^http:\/\/host\.docker\.internal:\d+\/auth\/viewer$/);
 });
 
 test('discovery lets through the sign-in endpoint the twin publishes for its test account',async t=>{

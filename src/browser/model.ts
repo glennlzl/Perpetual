@@ -2,7 +2,8 @@ import {createSaveQueue,readStateFile,writeStateFile} from '../store.ts';
 import {join} from 'node:path';
 import {validateBrowserTarget} from './runtime.ts';
 import {resolveBrowserModel,browserModelView,browserModelEnvironment} from './model-policy.ts';
-import type {BrowserModelInput,BrowserModelView} from './model-policy.ts';
+import type {BrowserModelInput} from './model-policy.ts';
+import type {ModelSettingsView} from '../../contract/settings.ts';
 import {OPENROUTER_BASE_URL,isOpenRouterEndpoint} from './openrouter-models.ts';
 
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
@@ -18,9 +19,9 @@ export async function createBrowserModelSettings({dataDir,env=process.env}:{data
   const configuration=()=>resolveBrowserModel({saved,env});
   /** The model build repairs and twin config authoring escalate to after two failed attempts; null until one is saved. */
   const escalationModel=()=>modelId(saved?.escalationModel)?saved.escalationModel:null;
-  const view=()=>({...browserModelView(configuration()),escalationModel:escalationModel()??''});
+  const view=():ModelSettingsView=>({...browserModelView(configuration()),escalationModel:escalationModel()??''});
   const saves=createSaveQueue();
-  function save(input:unknown,{openRouterOnly=false}={}):Promise<BrowserModelView>{
+  function save(input:unknown,{openRouterOnly=false}={}):Promise<ModelSettingsView>{
       return saves.run(async()=>{
         const fields=openRouterOnly?['apiKey','model','escalationModel']:['apiKey','model','baseUrl'];
         if(!isRecord(input)||Object.keys(input).some(key=>!fields.includes(key)))throw new Error(openRouterOnly?'Provide an OpenRouter model and API key.':'Provide model, API key or API URL.');

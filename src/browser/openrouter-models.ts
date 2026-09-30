@@ -1,3 +1,5 @@
+import type {OpenRouterModel,OpenRouterModelView} from '../../contract/settings.ts';
+
 export const OPENROUTER_BASE_URL='https://openrouter.ai/api/v1';
 export const isOpenRouterEndpoint=(value:unknown):boolean=>typeof value==='string'&&value.replace(/\/$/,'')===OPENROUTER_BASE_URL;
 const CATALOG_URL=`${OPENROUTER_BASE_URL}/models`;
@@ -7,9 +9,6 @@ export const ESCALATION_MODELS=['anthropic/claude-sonnet-5','openai/gpt-6','anth
 const CACHE_TTL_MS=5*60*1000;
 const CATALOG_LIMIT=8*1024*1024;
 
-/** An eligible catalog model, as the Settings model Select lists it. */
-export type OpenRouterModel={id:string;name:string;provider:string};
-export type OpenRouterModelView={models:OpenRouterModel[];defaultModel:string;defaultEscalationModel:string};
 type CatalogModel={id:string;name:string;expiration_date?:unknown};
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 

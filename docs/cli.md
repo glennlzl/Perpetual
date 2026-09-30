@@ -4,6 +4,8 @@ Run the CLI from the source directory with `node src/cli.ts <command>`. It needs
 
 Every command accepts `--data PATH` for the local data directory (default: `.perpetual` in the current directory) and `--repo PATH` for the repository (default: the current directory). Output is JSON unless noted.
 
+The controller keeps the data directory private (mode 0700), resolving aliases for directory ownership while preserving the configured path used by existing twin resource labels. Its `state.json` snapshot is limited to 32 MiB on read and write; symbolic links and non-files are refused. Saves use a private temporary file and an atomic rename, and a failed save keeps the previously published state. An unreadable snapshot is preserved for recovery rather than overwritten.
+
 ## Commands
 
 | Command | What it does |

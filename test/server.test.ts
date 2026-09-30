@@ -1,10 +1,62 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
 import { startServer, type Controller } from '../src/server.ts';
+
+test('controller state refuses a linked snapshot and releases ownership after refusing it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-linked-state-')), dataDir = join(dir, 'data');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  await mkdir(dataDir);
+  const content = JSON.stringify({ schema: 1, state: { scan: null, providers: [], pipelines: {} } });
+  await writeFile(join(dir, 'outside.json'), content);
+  await symlink(join(dir, 'outside.json'), join(dataDir, 'state.json'));
+  await assert.rejects(async () => { app = await startServer({ port: 0, repo: dir, dataDir }); }, /Cannot load saved state/);
+  assert.equal(await readFile(join(dir, 'outside.json'), 'utf8'), content);
+  await rm(join(dataDir, 'state.json'));
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal((await fetch(app.url + '/api/state')).status, 200);
+});
+
+test('controller state keeps an existing data directory private', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-private-state-')), dataDir = join(dir, 'data');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  await mkdir(dataDir); await chmod(dataDir, 0o755);
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal((await stat(dataDir)).mode & 0o777, 0o700);
+});
+
+test('controller state refuses an oversized JSON snapshot without overwriting it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-large-state-')), dataDir = join(dir, 'data');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  await mkdir(dataDir);
+  const snapshot = JSON.stringify({ schema: 1, state: { scan: null, providers: [], pipelines: {} } });
+  const content = snapshot + ' '.repeat(32 * 1024 * 1024);
+  await writeFile(join(dataDir, 'state.json'), content);
+  await assert.rejects(async () => { app = await startServer({ port: 0, repo: dir, dataDir }); }, /Cannot load saved state/);
+  assert.equal(await readFile(join(dataDir, 'state.json'), 'utf8'), content);
+  await writeFile(join(dataDir, 'state.json'), snapshot);
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal((await fetch(app.url + '/api/state')).status, 200);
+});
+
+test('saving controller state does not follow a pre-existing temporary-file alias', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-state-write-')), dataDir = join(dir, 'data');
+  const app = await startServer({ port: 0, repo: dir, dataDir });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const outside = join(dir, 'untouched.txt');
+  await writeFile(outside, 'keep this content');
+  await symlink(outside, join(dataDir, 'state.json.tmp'));
+  const { token } = await (await fetch(app.url + '/api/session')).json();
+  const response = await fetch(app.url + '/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify({ path: dir }) });
+  assert.equal(response.status, 200);
+  assert.equal(await readFile(outside, 'utf8'), 'keep this content');
+});
 
 test('preview CSP binds runtime styles to a fresh response nonce while keeping scripts and style attributes restricted',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'perpetual-csp-'));
@@ -81,10 +133,11 @@ test('API requires same-origin session for mutations, scans real fixture and per
   assert.equal((await fetch(`${url}/api/state`,{headers:{Origin:'https://evil.example'}})).status,403);
   assert.equal((await fetch(`${url}/api/scan`,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':session.token},body:JSON.stringify({path:dir})})).status,200);
   const state=await (await fetch(`${url}/api/state`)).json();assert.equal(state.scan.repo.name,'server-fixture');
-  await mkdir(join(dir,'data/state.json.tmp'));
+  const savedState=await readFile(join(dir,'data/state.json'));
+  await rm(join(dir,'data/state.json'));await mkdir(join(dir,'data/state.json'));
   const rescan=()=>fetch(`${url}/api/scan`,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':session.token},body:JSON.stringify({path:dir})});
   assert.equal((await rescan()).status,400);
-  await rm(join(dir,'data/state.json.tmp'),{recursive:true});
+  await rm(join(dir,'data/state.json'),{recursive:true});await writeFile(join(dir,'data/state.json'),savedState);
   assert.equal((await rescan()).status,200,'Persistence recovers after a transient filesystem failure');
   await app.close();
   restarted=await startServer({port:0,repo:dir,dataDir:join(dir,'data')});

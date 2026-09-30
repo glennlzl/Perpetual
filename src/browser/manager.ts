@@ -12,7 +12,8 @@ import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from '.
 import {journeyResult,runStatus} from './results.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createEnvironmentUsage,scopeId} from '../environments/usage.ts';
-import {validateRunCredentials} from './run-credentials.ts';
+import {selectRunAccount} from './run-credentials.ts';
+import type {AccountSignIn,RunCredentials} from './run-credentials.ts';
 import {appId} from '../twin/detect.ts';
 import {createTwinRuntime} from '../twin/runtime.ts';
 import {createPlaywrightRuntime} from '../journeys/playwright/runtime.ts';
@@ -22,6 +23,7 @@ import {CANCELLED,generateJourneySpec} from '../journeys/playwright/generation.t
 import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
+import type {ModelSettingsReply} from '../../contract/settings.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
 import type {ConcurrencyLimit} from './journey-scheduler.ts';
@@ -29,7 +31,6 @@ import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
 import type {EnvironmentUsage} from '../environments/usage.ts';
 import type {ScanRepo,ScanService} from '../scanner.ts';
-import type {TwinAccount} from '../twin/runtime.ts';
 
 /** The active source scan, as far as browser tests read it (src/scanner.ts). */
 type StageScan={repo:Pick<ScanRepo,'path'>&Partial<Pick<ScanRepo,'sha'>>;services?:readonly (Pick<ScanService,'id'>&Partial<Pick<ScanService,'framework'|'path'>>)[]};
@@ -42,8 +43,6 @@ export type BrowserStageContext={key:string;stageId:string;scan:StageScan;contro
 export type BrowserConfig={targetUrl:string;signInUrl:string;scope:string;requirements:string;maxSteps:number;journeyTimeoutSeconds:number;externalOrigins:string[];authEndpoints:string[]};
 /** The environment behind a target URL, as the environments manager resolves it (src/environments/manager.ts). */
 export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
-/** One test account's sign-in, read from the twin's private state for one operation. */
-type AccountSignIn=Pick<TwinAccount,'username'|'password'|'authEndpoints'>;
 /** What the manager uses of environment leases. */
 type Leases=Pick<EnvironmentUsage,'assertAvailable'|'acquire'>;
 /** Runs one journey's approved Playwright code (src/journeys/playwright/runtime.ts). */
@@ -612,9 +611,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const [snapshot]=validateBrowserCases([item],{draft:false});
     if(!snapshot.steps.length)throw new Error('Add journey steps before generating code.');
     if(!hasJourneyChecks(snapshot))throw new Error('Add at least one milestone check or final assertion before generating code.');
-    let credentials=validateRunCredentials(input.credentials);
-    const accountId=input.accountId;
-    if(accountId!==undefined&&(credentials||(accountId!==null&&typeof accountId!=='string')))throw new Error('Choose one test account.');
+    const account=selectRunAccount(input);let credentials:RunCredentials|undefined;
     const configuration=modelSettings.configuration();
     if(!configuration.modelConfigured||!isOpenRouterEndpoint(configuration.baseUrl))throw new Error('Add your OpenRouter API key in Settings first.');
     const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
@@ -627,14 +624,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     generations.set(key,entry);
     try{
       if(!(await playwright.capabilities()).browserInstalled)throw new Error('Install Chromium for Playwright: npx playwright install chromium.');
-      // The entered account, chosen twin account or its first by default; values are never saved.
-      const accounts=environment?.accounts||[];
-      if(typeof accountId==='string'&&!accounts.some(account=>account.id===accountId))throw new Error('Choose a test account of this environment.');
-      if(!credentials&&accountId!==null&&accounts.length){
-        const account=await twinAccount(environment!,(accountId as string|undefined)??accounts[0].id);
-        credentials=account?validateRunCredentials({username:account.username,password:account.password}):undefined;
-        if(!credentials)throw new Error('The environment test account is unavailable. Recreate the environment.');
-      }
+      ({credentials}=await account(environment,twinAccount));
       if(closed||entry.cancelled)throw conflict('Code generation cancelled.');
       // Only an admitted new attempt replaces the previous terminal failure, before any worker starts.
       await clearGenerationFailure(scope,item.id);
@@ -699,7 +689,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   // A test run executes an immutable case snapshot, so case writes may overlap it; discovery may not.
   // A verification holds its stage between attempts too, except for its own attempts and the writes a run allows.
   function requireIdle(context:BrowserStageContext,{duringRun=false,verification=false}={}){if(closed)throw conflict('The controller is shutting down.');usage.assertAvailable(context);if(modelSaving)throw conflict('Model settings are being saved. Please wait.');const scope=scopeId(context);if(busy.has(scope)||state.runs.some(r=>r.scope===scope&&active(r)&&!(duringRun&&r.mode==='run'))||!duringRun&&!verification&&verifying(scope))throw conflict('A browser operation is already in progress for this stage.');}
-  async function viewModel(){return {capabilities:{...modelSettings.view(),...await runtime!.capabilities()}};}
+  async function viewModel():Promise<ModelSettingsReply>{return {capabilities:{...modelSettings.view(),...await runtime!.capabilities()}};}
   // Discovery and code generation need the browser agent's runtime and model; runs need only Playwright's Chromium.
   async function capabilities(){
     const [agent,coded]=await Promise.all([runtime!.capabilities(),playwright.capabilities().catch(()=>({browserInstalled:false}))]);
@@ -776,9 +766,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   async function startWork(context:BrowserStageContext,mode:'run'|'discover',input:StartInput={},options:StartOptions={}){
     // Run-only account values: never persisted; discovery may use them to see authenticated pages.
     // Without entered values, the target twin's test account (accountId, else its first) signs in; accountId null uses none.
-    let credentials=validateRunCredentials(input.credentials);
-    const accountId=input.accountId;
-    if(accountId!==undefined&&(credentials||(accountId!==null&&typeof accountId!=='string')))throw new Error('Choose one test account.');
+    const account=selectRunAccount(input);
     // Checked for a run, the only mode that uses it: set exactly when the mode is run.
     const concurrency=mode==='run'?runConcurrency(input.concurrency??2):undefined;
     requireIdle(context,{verification:Boolean(options.verification)});const scope=scopeId(context);busy.add(scope);
@@ -808,17 +796,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       // A journey runs its Playwright code, which needs no model; discovery needs the browser agent.
       if(mode==='run'){if(!(await playwright.capabilities()).browserInstalled)throw new Error('Install Chromium for Playwright: npx playwright install chromium.');}
       else{const capabilities=await runtime!.capabilities();if(!capabilities.runtimeInstalled)throw new Error('Install the local Browser Use runtime first.');if(capabilities.browserInstalled===false)throw new Error('Install Chromium for the local browser runtime.');if(!capabilities.modelConfigured)throw new Error(capabilities.modelError||'Configure a model API key to use the browser agent.');}
-      const accounts=environment?.accounts||[];let accountEndpoints:readonly unknown[]=[];
-      if(typeof accountId==='string'&&!accounts.some(account=>account.id===accountId))throw new Error('Choose a test account of this environment.');
-      if(!credentials&&accountId!==null&&accounts.length){
-        // The password is read from the twin's private state here and never reaches a view.
-        // Accounts come from the environment, and accountId is a string or undefined by now.
-        const account=await twinAccount(environment!,(accountId as string|undefined)??accounts[0].id);
-        credentials=account?validateRunCredentials({username:account.username,password:account.password}):undefined;
-        if(!account||!credentials)throw new Error('The environment test account is unavailable. Recreate the environment.');
-        // The twin says where its sign-in posts, so read-only discovery can let exactly that request through.
-        accountEndpoints=account.authEndpoints||[];
-      }
+      const {credentials,authEndpoints:accountEndpoints}=await account(environment,twinAccount);
       // An entered account authorizes using its credentials, not arbitrary POSTs. Discover only
       // with configured endpoints or the selected twin account's own reviewed sign-in endpoints.
       const discoveryEndpoints=mode==='discover'&&credentials?authEndpoints([...new Set([...config.authEndpoints,...accountEndpoints])],config.targetUrl):undefined;

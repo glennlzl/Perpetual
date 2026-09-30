@@ -126,10 +126,12 @@ test('concurrent pipeline mutations serialize and failed persistence cannot chan
   assert.ok(responses.every(response => response.status === 200));
   const before = (await request('/api/pipeline')).data.pipeline;
   assert.equal(before.stages.length, 5);
-  await mkdir(join(fixture.dataDir, 'state.json.tmp'));
+  const savedState = await readFile(join(fixture.dataDir, 'state.json'));
+  await rm(join(fixture.dataDir, 'state.json')); await mkdir(join(fixture.dataDir, 'state.json'));
   assert.equal((await action({ action: 'toggle-stage', stageId: 'source' })).status, 400);
   assert.deepEqual((await request('/api/pipeline')).data.pipeline, before);
-  await rm(join(fixture.dataDir, 'state.json.tmp'), { recursive: true });
+  await rm(join(fixture.dataDir, 'state.json'), { recursive: true });
+  await writeFile(join(fixture.dataDir, 'state.json'), savedState);
   assert.equal((await action({ action: 'toggle-stage', stageId: 'source' })).status, 200);
   const disk = JSON.parse(await readFile(join(fixture.dataDir, 'state.json'), 'utf8'));
   assert.equal(disk.state.pipelines[repoPath].stages[0].collapsed, true);

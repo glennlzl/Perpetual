@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
 import type { ExecFileException } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import { gitReadOnly } from '../process.ts';
+import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 import { fail, plain } from './config.ts';
 import { services as registry } from './registry.ts';
 import type { DockerCommand, InputValues, ProvisionResult, ServiceInput, TwinService, TwinServices } from './registry.ts';
@@ -16,6 +17,8 @@ import type { DockerCommand, InputValues, ProvisionResult, ServiceInput, TwinSer
 
 const FILE = 'twin-inputs.json';
 const PROVISIONS = 'twin-provisions.json';
+// Credentials and provision metadata are small; each file is limited to 1 MiB on both read and write.
+const STORAGE_LIMIT = 1024 * 1024;
 /** A provision input default the controller fills from `git config --global user.email`. */
 const GIT_EMAIL = 'git-email';
 const DAY = 86_400_000;
@@ -33,12 +36,11 @@ export async function dockerCommand(args: string[], { timeoutMs }: { timeoutMs?:
   catch (error) { throw new Error((error as ExecFileException).killed ? 'The docker command timed out.' : 'The docker command failed.'); }
 }
 /** The global git email, or '' when it is unset. */
-export const globalGitEmail = () => execFileAsync('git', ['config', '--global', '--get', 'user.email'], { timeout: 2000 }).then(({ stdout }) => stdout.trim(), () => '');
+export const globalGitEmail = () => gitReadOnly(process.cwd(), ['config', '--global', '--get', 'user.email'], { timeout: 2000, maxBuffer: 64 * 1024 }).then(({ stdout }) => stdout.trim(), () => '');
 
-// Shared by every store on the machine: one provisioning per service, and one write at a time.
+// Shared by every store instance in this process: one provisioning per service, and one write at a time.
 const provisioning = new Map<string, Promise<void>>();
-let writing: Promise<unknown> = Promise.resolve();
-const inTurn = <T>(work: () => Promise<T>) => { const turn = writing.then(work); writing = turn.catch(() => {}); return turn; };
+const saves = createSaveQueue();
 const busy = (item: TwinService) => Object.assign(new Error(`${item.title} setup is already running.`), { statusCode: 409 });
 
 const valid = (input: ServiceInput, value: unknown): value is string => typeof value === 'string' && value.length > 0 && (!input.pattern || new RegExp(input.pattern).test(value));
@@ -50,17 +52,23 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
   dataDir: string; services?: TwinServices; docker?: DockerCommand; gitEmail?: () => Promise<string>; now?: () => Date;
 }) {
   const file = join(dataDir, FILE), records = join(dataDir, PROVISIONS);
+  const directory = () => privateDirectory(dataDir, 'Twin input storage must not be a symbolic link.');
   // Both files are this store's own, by service id: values by input name, and provision records. Each entry is checked
   // where it is read.
   const read = async (path: string): Promise<Record<string, unknown>> => {
-    try { const stored: unknown = JSON.parse(await readFile(path, 'utf8')); return plain(stored) ? stored : {}; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error; }
+    await directory();
+    const stored = await readStateFile(path, { limit: STORAGE_LIMIT, invalid: 'Invalid twin input storage.' });
+    return plain(stored) ? stored : {};
   };
-  const write = async (path: string, value: unknown) => {
-    await mkdir(dataDir, { recursive: true, mode: 0o700 });
-    const temporary = `${path}.${randomUUID()}`;
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
+  const write = async (...entries: [string, Record<string, unknown>][]) => {
+    // Refuse oversized provision metadata before replacing the credentials that belong to it.
+    const contents = entries.map(([path, value]) => {
+      const content = `${JSON.stringify(value, null, 2)}\n`;
+      if (Buffer.byteLength(content) > STORAGE_LIMIT) fail('Twin input storage is full.');
+      return { path, content };
+    });
+    await directory();
+    for (const { path, content } of contents) await writeStateFile(path, content, { prefix: '.twin-inputs-', removeTemporary: true });
   };
   const service = (id: string) => Object.hasOwn(services, id) ? services[id] : fail(`Unknown service "${id}".`);
   // UTC dates: a record whose expiry is today or earlier has expired.
@@ -113,7 +121,7 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
     const item = service(id), { inputs = [] } = item;
     if (!plain(entries)) fail('Inputs must map input names to values.');
     if (provisioning.has(key(id))) throw busy(item);
-    await inTurn(async () => {
+    await saves.run(async () => {
       const { stored, provisions } = await current();
       const next: Record<string, unknown> = Object.hasOwn(provisions, id) ? {} : { ...valuesOf(stored[id]) };
       for (const [name, value] of Object.entries(entries)) {
@@ -122,8 +130,9 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
         if (!valid(input, value)) fail(`${input.label ?? name} does not have the expected format.`);
         next[name] = value;
       }
-      await write(file, { ...await read(file), [id]: next });
-      if (Object.hasOwn(provisions, id)) { const { [id]: ended, ...rest } = provisions; await write(records, rest); }
+      const inputFile: [string, Record<string, unknown>] = [file, { ...await read(file), [id]: next }];
+      if (Object.hasOwn(provisions, id)) { const { [id]: ended, ...rest } = provisions; await write(inputFile, [records, rest]); }
+      else await write(inputFile);
     });
     return view();
   }
@@ -133,7 +142,7 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
   // passes the record it renews and stores nothing once a save has ended it or another provision replaced it.
   // Only services with a provision reach here, and its values are ones the service declares as inputs.
   async function run(item: TwinService, inputs: InputValues, renewing?: Pick<ProvisionRecord, 'provisionedAt'>) {
-    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    await directory();
     const tempDir = await mkdtemp(join(dataDir, 'provision-'));
     let result: ProvisionResult | undefined;
     try { await chmod(tempDir, 0o700); result = await item.provision!.run({ inputs: { ...inputs }, docker, tempDir }); }
@@ -148,12 +157,12 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
     if (!details || !DATE.test(details.expiresAt ?? '')) fail(`${item.title} provided no expiry date.`);
     const claimUrl = typeof details.claimUrl === 'string' && details.claimUrl.startsWith('https://') ? details.claimUrl : null;
     const account = typeof details.account === 'string' && details.account ? details.account : null;
-    await inTurn(async () => {
+    await saves.run(async () => {
       const provisions = await read(records), record = provisions[item.id];
       if (renewing && !(plain(record) && record.provisionedAt === renewing.provisionedAt)) return;
-      await write(file, { ...await read(file), [item.id]: { ...provided } });
-      await write(records, { ...provisions, [item.id]: { inputs: { ...inputs }, expiresAt: details.expiresAt,
-        ...(claimUrl ? { claimUrl } : {}), ...(account ? { account } : {}), provisionedAt: now().toISOString() } });
+      await write([file, { ...await read(file), [item.id]: { ...provided } }],
+        [records, { ...provisions, [item.id]: { inputs: { ...inputs }, expiresAt: details.expiresAt,
+          ...(claimUrl ? { claimUrl } : {}), ...(account ? { account } : {}), provisionedAt: now().toISOString() } }]);
     });
   }
 

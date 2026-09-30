@@ -2,15 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
-import { githubMark, combinedMark, githubBuildSummary, githubBuildStatus, githubRunsActive, workflowRuns, jobRuns, stepMark, workflowMark, jobMark, actionLabel, actionText, createGitHubRunsPoller } from '../client/src/lib/pipeline-github.ts';
-import type { GitHubJob, GitHubRun, GitHubRuns, GitHubStep } from '../client/src/lib/pipeline-github.ts';
+import { githubMark, combinedMark, githubBuildSummary, githubBuildStatus, actionLabel, actionText, createGitHubBuildPoller } from '../client/src/lib/pipeline-github.ts';
+import type { BuildRead, BuildReply, GitHubRun } from '../client/src/lib/pipeline-github.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
 // Shapes returned by GET /api/github/runs (src/github-runs.ts).
-const step = (name: string, status: string, conclusion: string | null = null): GitHubStep => ({ number: 1, name, status, conclusion });
-const job = (name: string, status: string, conclusion: string | null, steps: GitHubStep[] = []): GitHubJob => ({ id: name, name, status, conclusion, startedAt: null, completedAt: null, url: null, steps });
-const run = (id: string, path: string | null, status: string, conclusion: string | null, jobs: GitHubJob[] | null = null): GitHubRun => ({ id, workflowId: '7', name: 'CI', path, event: 'push', status, conclusion, attempt: 1, sha: SHA, branch: null, url: null, createdAt: null, startedAt: null, updatedAt: null, jobs });
-const result = (runs: GitHubRun[]): GitHubRuns => ({ repository: 'acme/storefront', sha: SHA, runs });
+const run = (id: string, path: string | null, status: string, conclusion: string | null): GitHubRun => ({ id, workflowId: '7', name: 'CI', path, event: 'push', status, conclusion, attempt: 1, sha: SHA, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: null });
+const result = (runs: GitHubRun[]): BuildReply => ({ repoPath: '/repo', repository: 'acme/storefront', branch: 'main', sha: SHA, scannedSha: SHA, source: 'scanned', runs });
 // Scanned .github/workflows files, the same set the Build rail lists.
 const WORKFLOWS = ['.github/workflows/ci.yml', '.github/workflows/lint.yml', '.github/workflows/release.yml'];
 
@@ -31,9 +29,6 @@ test('the Build summary uses current-commit runs only and never claims deploymen
   assert.equal(githubBuildSummary(result([run('1', '.github/workflows/ci.yml', 'completed', 'success')]), '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567', WORKFLOWS), null, 'A result for another commit is ignored.');
   assert.equal(githubBuildSummary(result([]), SHA, WORKFLOWS), null);
   assert.equal(githubBuildSummary(null, SHA, WORKFLOWS), null);
-  assert.equal(githubRunsActive(result([run('1', '.github/workflows/ci.yml', 'queued', null)]), WORKFLOWS), true);
-  assert.equal(githubRunsActive(result([run('1', '.github/workflows/ci.yml', 'waiting', null)]), WORKFLOWS), false, 'Waiting for approval is not active work.');
-  assert.equal(githubRunsActive(null, WORKFLOWS), false);
 });
 
 test('the Build status claims nothing until the current commit\'s runs are read, and Not run only once none ran for it', () => {
@@ -51,7 +46,7 @@ test('the Build status claims nothing until the current commit\'s runs are read,
   assert.deepEqual(githubBuildStatus(result([run('1', '.github/workflows/ci.yml', 'completed', 'cancelled')]), SHA, WORKFLOWS), { kind: 'idle', text: 'Cancelled', sha: 'cb9292c' });
 });
 
-test('runs without a rail row never set the Build status or activity', () => {
+test('runs without a rail row never set the Build status', () => {
   // Dynamic runs report paths such as dynamic/pages/pages-build-deployment or
   // dynamic/github-code-scanning/codeql; none is a scanned workflow file.
   const dynamic = [
@@ -60,42 +55,13 @@ test('runs without a rail row never set the Build status or activity', () => {
     run('9', 'dynamic/dependabot/dependabot-updates', 'queued', null),
   ];
   assert.equal(githubBuildSummary(result(dynamic), SHA, WORKFLOWS), null, 'Only unlisted runs leave the stage unrun.');
-  assert.equal(githubRunsActive(result(dynamic), WORKFLOWS), false, 'An unlisted running run neither animates Source to Build nor pulses GitHub.');
   const listed = run('1', '.github/workflows/ci.yml@refs/heads/main', 'completed', 'success');
   assert.deepEqual(githubBuildSummary(result([...dynamic, listed]), SHA, WORKFLOWS), { status: 'passed', sha: 'cb9292c' }, 'A failed Pages run cannot mark a passing rail as failed.');
   assert.equal(githubBuildSummary(result([listed]), SHA, []), null, 'With no scanned workflows there is no rail to summarise.');
   assert.equal(githubBuildSummary(result([listed]), SHA), null);
-  assert.equal(githubRunsActive(result([run('10', null, 'in_progress', null)]), ['']), false, 'A run without a path never matches a row.');
 });
 
-test('rail rows match runs by workflow path, jobs by name, and steps by name', () => {
-  const data = result([
-    run('1', '.github/workflows/ci.yml', 'in_progress', null, [
-      job('Test (ubuntu-latest, 22)', 'completed', 'success', [step('Run actions/checkout@v4', 'completed', 'success'), step('Unit tests', 'completed', 'success')]),
-      job('Test (ubuntu-latest, 24)', 'in_progress', null, [step('Run actions/checkout@v4', 'completed', 'success'), step('Unit tests', 'in_progress')]),
-      job('lint', 'completed', 'failure', [step('Lint', 'completed', 'failure')]),
-      job('Deploy / publish', 'queued', null),
-    ]),
-    run('2', '.github/workflows/release.yml', 'completed', 'success'),
-  ]);
-  assert.deepEqual(workflowRuns(data, '.github/workflows/ci.yml').map(item => item.id), ['1']);
-  assert.equal(workflowMark(data, '.github/workflows/ci.yml'), 'running');
-  assert.equal(workflowMark(data, '.github/workflows/release.yml'), 'passed');
-  assert.equal(workflowMark(data, '.github/workflows/unknown.yml'), null);
-  const runs = workflowRuns(data, '.github/workflows/ci.yml');
-  assert.equal(jobRuns(runs, { id: 'test', name: 'Test' }).length, 2, 'Matrix jobs share their configured name.');
-  assert.equal(jobMark(runs, { id: 'test', name: 'Test' }), 'running');
-  assert.equal(jobMark(runs, { id: 'lint', name: 'lint' }), 'failed');
-  assert.equal(jobMark(runs, { id: 'deploy', name: 'Deploy' }), 'queued', 'Reusable workflow jobs are prefixed by their caller.');
-  assert.equal(jobMark(runs, { id: 'build', name: 'Build ${{ matrix.os }}' }), null, 'An unmatched job has no mark.');
-  const tests = jobRuns(runs, { id: 'test', name: 'Test' });
-  assert.equal(stepMark(tests, { name: 'actions/checkout@v4' }), 'passed');
-  assert.equal(stepMark(tests, { name: 'Unit tests' }), 'running');
-  assert.equal(stepMark(tests, { name: 'Run command' }), null);
-  assert.equal(stepMark(null, { name: 'Unit tests' }), null);
-});
-
-test('rail labels shorten action refs and unevaluated expressions without changing matching', () => {
+test('configured rail labels shorten action refs and unevaluated expressions', () => {
   // Scanned names from GET /api/github-actions: unnamed `uses:` steps carry the full reference.
   assert.deepEqual(actionLabel('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5'), { text: 'actions/checkout', ref: '34e1148', contexts: [] });
   assert.deepEqual(actionLabel('github/codeql-action/init@v3'), { text: 'github/codeql-action/init', ref: 'v3', contexts: [] }, 'A tag ref is kept whole.');
@@ -109,9 +75,6 @@ test('rail labels shorten action refs and unevaluated expressions without changi
   assert.deepEqual(actionLabel('Run command'), { text: 'Run command', ref: null, contexts: [] });
   assert.equal(actionText('Frontend Tests (${{ matrix.shard }}/2)'), 'Frontend Tests (matrix)');
   assert.equal(actionText('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5'), 'actions/checkout 34e1148');
-  const runs = [run('1', '.github/workflows/ci.yml', 'in_progress', null, [job('Frontend Tests (1/2)', 'completed', 'success', [step('Run actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5', 'completed', 'success')])])];
-  assert.equal(jobMark(runs, { id: 'frontend-tests', name: 'Frontend Tests' }), 'passed');
-  assert.equal(stepMark(jobRuns(runs, { id: 'frontend-tests', name: 'Frontend Tests' }), { name: 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' }), 'passed', 'Steps still match by their original name.');
 });
 
 type TimerHandle = { callback: () => unknown; delay: number };
@@ -124,11 +87,11 @@ function harness() {
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 test('the poller reads every 5 seconds while a current-commit run is active, otherwise every 60', async () => {
-  const h = harness(), requests: string[] = [], changes: (GitHubRuns | null)[] = [];
+  const h = harness(), requests: string[] = [], changes: (BuildRead | null)[] = [];
   let response = result([run('1', '.github/workflows/ci.yml', 'in_progress', null)]);
-  const poller = createGitHubRunsPoller({ controller: async path => { requests.push(path); return structuredClone(response); }, repoPath: '/repo', workflows: WORKFLOWS, onChange: value => changes.push(value), document: h.document, timers: h.timers });
+  const poller = createGitHubBuildPoller({ controller: async path => { requests.push(path); return structuredClone(response); }, repoPath: '/repo', branch: 'main', onChange: value => changes.push(value), document: h.document, timers: h.timers });
   await flush();
-  assert.deepEqual(requests, ['/api/github/runs?repoPath=%2Frepo']);
+  assert.deepEqual(requests, ['/api/github/build?repoPath=%2Frepo&branch=main']);
   assert.equal(h.next().delay, 5000);
   await h.fire();
   assert.equal(changes.length, 1, 'An unchanged result is not republished.');
@@ -142,7 +105,7 @@ test('the poller reads every 5 seconds while a current-commit run is active, oth
 
 test('a running run without a rail row does not speed up polling', async () => {
   const h = harness();
-  const poller = createGitHubRunsPoller({ controller: async () => result([run('8', 'dynamic/github-code-scanning/codeql', 'in_progress', null)]), repoPath: '/repo', workflows: WORKFLOWS, onChange: () => {}, document: h.document, timers: h.timers });
+  const poller = createGitHubBuildPoller({ controller: async () => result([run('8', 'dynamic/github-code-scanning/codeql', 'in_progress', null)]), repoPath: '/repo', branch: 'main', onChange: () => {}, document: h.document, timers: h.timers });
   await flush();
   assert.equal(h.next().delay, 60000);
   poller.stop();
@@ -150,7 +113,7 @@ test('a running run without a rail row does not speed up polling', async () => {
 
 test('the poller pauses while hidden and reads immediately when visible again', async () => {
   const h = harness(), requests: string[] = [];
-  const poller = createGitHubRunsPoller({ controller: async path => { requests.push(path); return result([]); }, repoPath: '/repo', onChange: () => {}, document: h.document, timers: h.timers });
+  const poller = createGitHubBuildPoller({ controller: async path => { requests.push(path); return result([]); }, repoPath: '/repo', branch: 'main', onChange: () => {}, document: h.document, timers: h.timers });
   await flush();
   h.document.hidden = true;
   await h.fire();
@@ -165,17 +128,17 @@ test('the poller pauses while hidden and reads immediately when visible again', 
   assert.equal(requests.length, 2, 'A stopped poller ignores visibility.');
 });
 
-test('a hidden page does not start reading, and an unavailable gate clears the result', async () => {
-  const h = harness(), changes: (GitHubRuns | null)[] = [];
+test('a hidden page does not start reading, and unavailable Build clears the result', async () => {
+  const h = harness(), changes: (BuildRead | null)[] = [];
   h.document.hidden = true;
   let fail = false;
-  const poller = createGitHubRunsPoller({ controller: async () => { if (fail) throw new Error('Connect your GitHub account'); return result([run('1', 'ci', 'queued', null)]); }, repoPath: '/repo', onChange: value => changes.push(value), document: h.document, timers: h.timers });
+  const poller = createGitHubBuildPoller({ controller: async () => { if (fail) throw new Error('Connect your GitHub account'); return result([run('1', 'ci', 'queued', null)]); }, repoPath: '/repo', branch: 'main', onChange: value => changes.push(value), document: h.document, timers: h.timers });
   await flush();
   assert.equal(changes.length, 0);
   h.document.hidden = false; h.document.dispatchEvent(new Event('visibilitychange')); await flush();
   assert.equal(changes.length, 1);
   fail = true; await h.fire();
-  assert.deepEqual(changes.at(-1), null);
+  assert.deepEqual(changes.at(-1), { view: null, error: 'Connect your GitHub account' });
   assert.equal(h.next().delay, 60000);
   poller.stop();
 });

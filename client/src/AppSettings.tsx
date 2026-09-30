@@ -8,22 +8,18 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
+import type { ModelSettingsReply, ModelSettingsView, OpenRouterModel, OpenRouterModelView } from '../../contract/settings.ts';
 
-/** GET /api/settings/model: the model settings; the stored key itself is never returned. */
-type ModelCapabilities = { provider: 'openrouter' | 'custom'; model: string; baseUrl: string; keyConfigured: boolean; modelConfigured: boolean; modelError?: string; escalationModel?: string };
-/** An eligible model in the OpenRouter catalog (GET /api/settings/models). */
-type CatalogModel = { id: string; name: string; provider: string };
-type Catalog = { models: CatalogModel[]; defaultModel?: string; defaultEscalationModel?: string };
-type ModelGroup = { label: string; models: CatalogModel[] };
+type ModelGroup = { label: string; models: OpenRouterModel[] };
 /** Unsaved App Settings edits; they outlive the page until saved or discarded. escalationModel is what build repairs escalate to. */
 export type SettingsDraft = { model: string; apiKey: string; escalationModel: string };
 
-const openRouter = (capabilities: ModelCapabilities | null) => capabilities?.provider === 'openrouter';
+const openRouter = (capabilities: ModelSettingsView | null) => capabilities?.provider === 'openrouter';
 const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', 'meta-llama': 'Meta', 'x-ai': 'xAI', qwen: 'Qwen', mistralai: 'Mistral', nvidia: 'NVIDIA', openrouter: 'OpenRouter', rekaai: 'Reka' };
 const namePrefix = (name: string) => /^([^:]{1,48}):\s+\S/.exec(name)?.[1].trim();
 // Groups are named as the catalog names its models ("Meta: Llama 4"), so slugs that share
 // a vendor merge; the slug is only a fallback for a provider whose names carry no prefix.
-function modelGroups(models: CatalogModel[], pinnedId?: string) {
+function modelGroups(models: OpenRouterModel[], pinnedId?: string) {
   const prefixes = new Map<string, Map<string, number>>();
   for (const item of models) {
     const prefix = namePrefix(item.name);
@@ -50,7 +46,7 @@ function modelGroups(models: CatalogModel[], pinnedId?: string) {
     .map(group => ({ ...group, models: group.models.sort((a, b) => collator.compare(a.name, b.name) || a.id.localeCompare(b.id)) }));
 }
 // Inside its group a model drops the repeated vendor prefix; typeahead still matches the full name.
-const modelOption = (item: CatalogModel, group?: string) => {
+const modelOption = (item: OpenRouterModel, group?: string) => {
   const prefix = namePrefix(item.name);
   const text = group && prefix?.toLocaleLowerCase() === group.toLocaleLowerCase() ? item.name.slice(item.name.indexOf(':') + 1).trim() : item.name;
   return <SelectItem value={item.id} key={item.id} textValue={item.name}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{text}</span></SelectItem>;
@@ -71,7 +67,7 @@ function PinnedGroup({ label, children }: { label: string; children: ReactNode }
 }
 
 // A catalog Select whose saved or preselected model stays pinned above the provider groups.
-function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange }: { id: string; value: string; models: CatalogModel[]; pinned?: CatalogModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void }) {
+function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void }) {
   const selected = models.find(item => item.id === value);
   const groups = useMemo(() => modelGroups(models, pinned?.id), [models, pinned]);
   return <Select value={selected ? value : ''} disabled={disabled} onValueChange={onChange}>
@@ -81,8 +77,8 @@ function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading
 }
 
 export default function AppSettings({ draft, onDraftChange }: { draft: SettingsDraft | null; onDraftChange: Dispatch<SetStateAction<SettingsDraft | null>> }) {
-  const [capabilities, setCapabilities] = useState<ModelCapabilities | null>(null);
-  const [models, setModels] = useState<CatalogModel[]>([]);
+  const [capabilities, setCapabilities] = useState<ModelSettingsView | null>(null);
+  const [models, setModels] = useState<OpenRouterModel[]>([]);
   const [savedModel, setSavedModel] = useState('');
   const [serverModel, setServerModel] = useState('');
   const [savedEscalation, setSavedEscalation] = useState('');
@@ -111,7 +107,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
   const pinnedModel = models.find(item => item.id === savedModel);
   const pinnedEscalation = models.find(item => item.id === savedEscalation);
 
-  function acceptCatalog(catalog: Catalog, preferred = '', preferredEscalation = '') {
+  function acceptCatalog(catalog: OpenRouterModelView, preferred = '', preferredEscalation = '') {
     setModels(catalog.models);
     const listed = (id: string) => catalog.models.some(item => item.id === id);
     const selected = listed(preferred) ? preferred : catalog.defaultModel;
@@ -122,7 +118,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
     if (loadingRef.current) return;
     loadingRef.current = true;
     setLoading(true); setError(''); setModelsError('');
-    const [settings, catalog] = await Promise.allSettled([api<{ capabilities: ModelCapabilities }>('/api/settings/model'), api<Catalog>('/api/settings/models')]);
+    const [settings, catalog] = await Promise.allSettled([api<ModelSettingsReply>('/api/settings/model'), api<OpenRouterModelView>('/api/settings/models')]);
     loadingRef.current = false;
     if (!active.current) return;
     let preferred = '', preferredEscalation = '';
@@ -142,7 +138,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
     if (modelsLoadingRef.current) return;
     modelsLoadingRef.current = true; setModelsLoading(true); setModelsError('');
     try {
-      const catalog = await api<Catalog>('/api/settings/models');
+      const catalog = await api<OpenRouterModelView>('/api/settings/models');
       if (active.current) acceptCatalog(catalog, model, escalationModel);
     } catch (failure) { if (active.current) setModelsError((failure as Error).message); }
     finally { modelsLoadingRef.current = false; if (active.current) setModelsLoading(false); }
@@ -158,7 +154,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
     const submittedDraft = draft;
     savingRef.current = true; setSaving(true); setError(''); setSaved(false);
     try {
-      const { capabilities: next } = await api<{ capabilities: ModelCapabilities }>('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) });
+      const { capabilities: next } = await api<ModelSettingsReply>('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) });
       // A completed save may outlive this page; retain any newer edits.
       onDraftChange(current => current === submittedDraft ? null : current);
       if (!active.current) return;

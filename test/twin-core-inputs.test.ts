@@ -1,10 +1,10 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createTwinInputs, missingInputs } from '../src/twin/inputs.ts';
+import { createTwinInputs, globalGitEmail, missingInputs } from '../src/twin/inputs.ts';
 import { services as registry } from '../src/twin/registry.ts';
 import { services } from './fixtures/twin/services.ts';
 import type { ServiceProvision, TwinService } from '../src/twin/registry.ts';
@@ -46,6 +46,70 @@ test('Missing inputs lists absent and malformed values', () => {
   assert.deepEqual(missingInputs(services.payments, { PAYMENTS_KEY: 'sk_other' }), ['PAYMENTS_KEY']);
   assert.deepEqual(missingInputs(services.payments, { PAYMENTS_KEY: KEY }), []);
   assert.deepEqual(missingInputs(services.mail, {}), []);
+});
+
+test('Input storage refuses linked state, non-files and oversized files before using credentials', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-inputs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ['twin-inputs.json', 'twin-provisions.json']) for (const kind of ['link', 'directory', 'oversized']) await t.test(`${name}: ${kind}`, async () => {
+    const dataDir = join(root, `${name}-${kind}`);
+    await mkdir(dataDir);
+    const file = join(dataDir, name);
+    if (kind === 'link') {
+      const target = join(root, `${name}-outside.json`);
+      await writeFile(target, JSON.stringify({ payments: { PAYMENTS_KEY: KEY } }));
+      await symlink(target, file);
+    } else if (kind === 'directory') await mkdir(file);
+    else await writeFile(file, JSON.stringify({ padding: 'x'.repeat(1024 * 1024) }));
+    const store = createTwinInputs({ dataDir, services });
+    await assert.rejects(store.values(), /Invalid twin input storage/);
+  });
+});
+
+test('Input storage refuses a linked directory and makes an existing directory private', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-inputs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data'), alias = join(root, 'linked');
+  await mkdir(dataDir);
+  await chmod(dataDir, 0o755);
+  await symlink(dataDir, alias);
+  await t.test('a link is rejected', async () => {
+    await assert.rejects(createTwinInputs({ dataDir: alias, services }).view(), /storage must not be a symbolic link/);
+  });
+  await t.test('existing permissions are tightened', async () => {
+    await createTwinInputs({ dataDir, services }).set('payments', { PAYMENTS_KEY: KEY });
+    assert.equal((await stat(dataDir)).mode & 0o777, 0o700);
+  });
+});
+
+test('An oversized credential save preserves the stored values and does not block later saves', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-inputs-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const store = createTwinInputs({ dataDir, services });
+  await store.set('payments', { PAYMENTS_KEY: KEY });
+  await assert.rejects(store.set('payments', { PAYMENTS_KEY: `pk_test_${'x'.repeat(1024 * 1024)}` }), /Twin input storage is full/);
+  assert.deepEqual(await store.values(), { payments: { PAYMENTS_KEY: KEY } });
+  await store.set('payments', { PAYMENTS_KEY: 'pk_test_replaced_fixture' });
+  assert.deepEqual(await store.values(), { payments: { PAYMENTS_KEY: 'pk_test_replaced_fixture' } });
+  assert.deepEqual(await readdir(dataDir), ['twin-inputs.json']);
+});
+
+test('The default provisioning email ignores ambient Git configuration overrides', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-inputs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configured = process.env.GIT_CONFIG_GLOBAL;
+  try {
+    delete process.env.GIT_CONFIG_GLOBAL;
+    const baseline = await globalGitEmail();
+    const file = join(root, 'config');
+    const injected = baseline === 'injected@example.test' ? 'other@example.test' : 'injected@example.test';
+    await writeFile(file, `[user]\nemail = ${injected}\n`);
+    process.env.GIT_CONFIG_GLOBAL = file;
+    assert.ok(await globalGitEmail() === baseline, 'The provisioning default comes from the ordinary global configuration, not an ambient override.');
+  } finally {
+    if (configured === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = configured;
+  }
 });
 
 // A service that provisions its own test keys, in the shape of the Stripe adapter; `run` is scripted per test.
@@ -100,6 +164,17 @@ test('A provision runs in a private empty directory, stores its values and recor
   assert.equal(own.find(item => item.id === 'sandbox')!.provisioned, undefined);
   assert.deepEqual(await records(f.dataDir), {});
   assert.deepEqual((await f.store.values()).sandbox, { KEY: 'sk_test_own_fixture' });
+});
+
+test('Oversized provision metadata cannot replace the credentials without their expiry record', async t => {
+  const f = await provisionStore(t, { run: async (_ctx, n) => issued('2026-10-01', n) });
+  await f.store.provision('sandbox', { email: 'owner@example.test' });
+  const saved = await records(f.dataDir);
+  await assert.rejects(f.store.provision('sandbox', { email: 'x'.repeat(1024 * 1024) }), /Twin input storage is full/);
+  assert.deepEqual((await f.store.values()).sandbox, { KEY: `${SECRET}_1`, PUBLIC });
+  assert.deepEqual(await records(f.dataDir), saved);
+  await f.store.provision('sandbox', { email: 'owner@example.test' });
+  assert.deepEqual((await f.store.values()).sandbox, { KEY: `${SECRET}_3`, PUBLIC });
 });
 
 test('A save that ends a provision keeps none of its values, which would never be renewed or expire', async t => {
