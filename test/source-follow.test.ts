@@ -31,6 +31,7 @@ async function harness(t: TestContext, { stages = PLAIN, heads = [], saved, outc
       connection: async () => (connected ? { login: 'glennlzl', repository: 'owner/app' } : null),
       async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 304 as const }; return typeof next === 'function' ? next(input) : next; },
       async post() {},
+      async build() { return { status: 'passed' as const }; },
     },
     steps: { async prepare(gate) { log.push(`prepare ${gate.stageId} ${gate.sha[0]}`); return gate; }, journeys: () => 0, async rebuild() { return null; }, async run() { return null; } },
     // The controller moves the managed copy and rescans it, so the scanned commit becomes the head.

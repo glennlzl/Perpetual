@@ -8,14 +8,14 @@ import type { GateReply, GateStatus, ProductionGate, StageGate } from '../../../
 export type { GateStatus, ProductionGate, StageGate };
 export type GateView = GateReply;
 export type GateTone = 'idle' | 'working' | 'passed' | 'failed' | 'blocked';
-export const GATE_LABELS: Record<string, string> = { queued: 'Queued', rebuilding: 'Running', running: 'Running', passed: 'Passed', failed: 'Failed', 'needs-release': 'Needs release', released: 'Released' };
-const TONES: Record<string, GateTone> = { queued: 'idle', rebuilding: 'working', running: 'working', passed: 'passed', released: 'passed', failed: 'failed', 'needs-release': 'blocked' };
+export const GATE_LABELS: Record<string, string> = { queued: 'Queued', 'waiting-build': 'Waiting for Build', 'build-failed': 'Build failed', rebuilding: 'Running', running: 'Running', passed: 'Passed', failed: 'Failed', 'needs-release': 'Needs release', released: 'Released' };
+const TONES: Record<string, GateTone> = { queued: 'idle', 'waiting-build': 'idle', 'build-failed': 'failed', rebuilding: 'working', running: 'working', passed: 'passed', released: 'passed', failed: 'failed', 'needs-release': 'blocked' };
 const short = (sha: string | null | undefined) => String(sha || '').slice(0, 7);
 
 /** A stage card's gate is a Sandbox stage's gate or Production's readiness; only the former names a stage. */
 export const isStageGate = (gate: StageGate | ProductionGate | null | undefined): gate is StageGate => Boolean(gate && 'stageId' in gate);
 export const gateActive = (gate: Pick<StageGate, 'status'> | null | undefined) => ['rebuilding', 'running'].includes(gate?.status ?? '');
-export const gatePending = (gate: Pick<StageGate, 'status'> | null | undefined) => gate?.status === 'queued' || gateActive(gate);
+export const gatePending = (gate: Pick<StageGate, 'status'> | null | undefined) => ['queued', 'waiting-build'].includes(gate?.status ?? '') || gateActive(gate);
 /** Only a gate that needs release offers Release; a failed gate never does. */
 export const canRelease = <G extends Pick<StageGate, 'status'>>(gate: G | null | undefined): gate is G => gate?.status === 'needs-release';
 

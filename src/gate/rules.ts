@@ -28,6 +28,8 @@ type Dated = Pick<Gate, 'status' | 'detectedAt' | 'updatedAt'>;
 
 export { SHA } from '../github-cli.ts';
 export const ACTIVE: readonly GateStatus[] = Object.freeze(['rebuilding', 'running']);
+/** No twin or journey started; these gates can recheck CI and be superseded by a newer commit. */
+export const PENDING: readonly GateStatus[] = Object.freeze(['queued', 'waiting-build', 'build-failed']);
 export const PROMOTED: readonly GateStatus[] = Object.freeze(['passed', 'released']);
 export const short = (sha: unknown) => String(sha).slice(0, 7);
 
@@ -50,6 +52,8 @@ export function verdict(run: RunRollup | null | undefined): Verdict {
 }
 
 const STATUSES: Partial<Record<GateStatus, [CommitState, string]>> = {
+  'waiting-build': ['pending', 'Waiting for Build'],
+  'build-failed': ['failure', 'Build did not pass'],
   rebuilding: ['pending', 'Running'],
   running: ['pending', 'Running'],
   passed: ['success', 'Passed'],
@@ -75,7 +79,7 @@ export function stageGate<G extends Dated>(gates: readonly G[]): G | null {
 
 /** The next gate to run: later stages first, so a commit leaves the pipeline before another enters it. */
 export function nextGate<G extends Dated & Pick<Gate, 'stageId'>>(gates: readonly G[], sandboxIds: readonly string[]): G | null {
-  return gates.filter(gate => gate.status === 'queued' && sandboxIds.includes(gate.stageId))
+  return gates.filter(gate => PENDING.includes(gate.status) && sandboxIds.includes(gate.stageId))
     .sort((a, b) => sandboxIds.indexOf(b.stageId) - sandboxIds.indexOf(a.stageId) || newest(a, b))[0] || null;
 }
 

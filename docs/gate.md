@@ -2,9 +2,10 @@
 
 The journey gate decides whether one commit may leave one Sandbox stage. For each new commit on the target branch, and on a manual **Run now**, the controller:
 
-1. rebuilds the stage's [twin](twins.md) at that commit;
-2. replays the approved code of the stage's reviewed, selected [business journeys](journeys.md) against it, with no model;
-3. reports the verdict as a GitHub commit status, `perpetual/<stage name>`, that branch protection or a deployment workflow can require.
+1. waits for GitHub Actions Build to pass at that exact branch commit;
+2. rebuilds the stage's [twin](twins.md) at that commit;
+3. replays the approved code of the stage's reviewed, selected [business journeys](journeys.md) against it, with no model;
+4. reports the verdict as a GitHub commit status, `perpetual/<stage name>`, that branch protection or a deployment workflow can require.
 
 A failed journey fails the gate. Blocked and needs-review results wait for a person to release them. A passed or released gate moves the commit to the next Sandbox stage. The gate never deploys anything.
 
@@ -30,6 +31,12 @@ While the controller runs, it polls the head of the managed source's branch thro
 
 ## What a gate does
 
+Before moving the managed source or creating a twin, the gate reads the branch's GitHub Actions runs for its exact commit. Only `push` and `workflow_dispatch` runs backed by a repository workflow count. The newest run of each workflow replaces its older runs; every counted workflow must succeed, conclude neutral or be skipped, and at least one must succeed or conclude neutral. Pull-request, scheduled, other-branch and other-commit runs cannot authorize the target branch's gate. The reader checks all pages, up to 1,000 runs, and incomplete evidence never passes.
+
+No runs yet, a running workflow, a disconnected account or an unreadable response leaves the gate **Waiting for Build**. Failed, cancelled, action-required and all-skipped builds show **Build failed**. Both states are rechecked while the controller runs, so a successful rerun at the same commit can proceed without another push. Neither state offers Release, neither starts a journey, and a newer push supersedes it. A restart resumes these checks. An already-finished journey is never retried this way; a manual release rechecks Build before accepting the release.
+
+Build admission reads Actions runs, never the `perpetual/*` commit statuses its own journeys must produce. A deployment workflow that waits for these statuses must start after the gates, rather than join the branch's Build runs; otherwise it would wait on its own prerequisite. This admission covers the workflow runs GitHub has reported, not a configured list of required workflows that have yet to appear. Repair gates keep their existing CI-first admission through the repair controller, and may verify the repair while the target branch is waiting for Build. Local, unmanaged checkouts retain manual gates without GitHub CI.
+
 1. **Prepare.** A stage busy with a person's run, a code generation, a code verification or an environment operation, or a pipeline with a twin still reading the source (one being created, including a creation accepted but not yet recorded, or one whose preparation still reads the checkout, as generating a twin config does), keeps the gate queued; it is retried every 10 seconds without holding back other stages. The managed source copy then moves to the commit in place (fetch that commit, then reset), so environments stay attached to its path, and the repository is scanned again. Your own checkout never changes. If a health check takes a twin between admission and rebuild, the gate stays queued. If it takes the newly ready twin before the browser starts, the gate waits for browser admission and rechecks the target URL. Neither wait retries a journey that already started.
 2. **Check for journeys.** With no reviewed, selected journeys the gate needs release (`No reviewed journeys.`) and nothing is rebuilt.
 3. **Rebuild.** The stage's twins that hold resources are deleted, and a new one is created: a new snapshot, fresh service data, fixtures and test accounts. A provisioned sandbox that expires by the next day, such as a [Stripe sandbox Perpetual created](twins.md#a-stripe-sandbox-without-an-account), is renewed first. The twin is built from the stage's saved config, or the detected one when there is none; a gate never generates a config. The gate waits for the twin to be Ready, which needs every app to answer and a test account where a service can create one, and for its browser preparation.
@@ -42,6 +49,8 @@ Gates run one at a time, the furthest stage first, so a commit finishes its way 
 
 | Gate | When |
 | --- | --- |
+| `waiting-build` | Build is still running, has no runs, or its evidence cannot be read. No twin or journey has started. |
+| `build-failed` | Build did not pass. It is checked again for a successful rerun; it cannot be manually released. |
 | `passed` | The run passed. |
 | `failed` | A journey failed. |
 | `needs-release` | Anything else, with its reason: a blocked or needs-review journey (including one without current approved code), a skipped journey, a cancelled run, a run that stopped without a failed journey (for example a browser runtime error), no reviewed journeys, a twin that could not be rebuilt, an application URL that is not the rebuilt twin, or a gate interrupted by a controller restart. |
@@ -54,6 +63,8 @@ Statuses are posted through the connected account's GitHub CLI session, with the
 
 | Gate | Status | Description |
 | --- | --- | --- |
+| Waiting for Build | `pending` | Waiting for Build |
+| Build failed | `failure` | Build did not pass |
 | Rebuilding or running | `pending` | Running |
 | Passed | `success` | Passed |
 | Failed | `failure` | Failed |
@@ -66,7 +77,7 @@ Queued and superseded gates report nothing. Every gate whose status changed sinc
 
 **Release** needs the connected GitHub account and is offered only for a gate that needs release; a failed gate is never released. The status becomes `success` with `Released by <login>`.
 
-A passed or released gate queues the next Sandbox stage (for example Gamma) at the same commit. Production shows **Ready** for the newest commit that every Sandbox gate passed or released. Perpetual does not deploy Production; existing deployment workflows can require the commit status.
+A passed or released gate queues the next Sandbox stage (for example Gamma) at the same commit. Production shows **Ready** for the newest commit that every Sandbox gate passed or released. A gate never deploys by itself. A separate, explicitly configured [release](releases.md) can deploy that commit after a person confirms it; existing deployment workflows can also require the commit status.
 
 ## Repair gates
 

@@ -69,7 +69,7 @@ flowchart LR
 4. **Turn those journeys into a release gate.** Generate, verify and approve their Playwright code. On each new push to the target branch, Perpetual rebuilds the twin at that commit and runs the approved tests. Watch the browser live and inspect the recordings afterward. A failed journey blocks promotion; a blocked or needs-review result requires a manual release; a pass advances to the next Sandbox stage.
 5. **Repair failed builds through a PR.** For eligible build failures, an agent works in an isolated Docker repair box and opens a fix. Build's **Autopilot** can merge after CI and every configured Sandbox journey gate pass at the exact PR head, provided no change rule holds it. Choose **Ask first** to keep the merge decision with you.
 
-Perpetual posts a `perpetual/<Stage>` GitHub commit status. Require it when promoting from the tested branch into a protected release branch, or have your deployment workflow check it. **Perpetual currently gates promotion; your existing workflow performs the production deployment.** [Gate configuration →](docs/gate.md#requiring-the-status-on-github)
+Perpetual waits for the commit's reported GitHub Actions builds before running Sandbox gates, then posts a `perpetual/<Stage>` GitHub commit status. Require it when promoting into a protected release branch, or have your deployment workflow check it. The optional **Deploy** action requests the tested commit through a repository-owned GitHub deployment handler and follows its real status. [Gate configuration →](docs/gate.md#requiring-the-status-on-github) · [Deployment setup and limits →](docs/releases.md)
 
 ## Test the application and its dependencies together
 
@@ -126,7 +126,8 @@ Set up Perpetual (https://github.com/willlzl/Perpetual) for this repository: clo
 - **You review the tests.** AI writes twin configurations, drafts journeys and code, and proposes build repairs. Only reviewed journeys with approved code run automatically in the gate.
 - **Approved tests replay without an agent.** Runs execute approved Playwright code with independent browser checks and no automatic retries. API and database checks are planned. Test execution uses no model; AI features inside your application can still use one.
 - **You control the environment.** The controller binds to localhost and polls GitHub while running. Hosted twins, a GitHub App and webhooks are not available yet. The desktop sandbox is experimental.
-- **The full vision is still being built.** Pipeline optimization, dependency upgrades, test-code repair, deployment automation and production rollback are planned.
+- **Deployment needs a configured handler.** Manual deployment requests are available through GitHub; your workflow deploys the exact tested commit and reports the result. This channel still needs end-to-end cloud acceptance. Existing provider autodeploy must be gated separately.
+- **The full vision is still being built.** Pipeline optimization, dependency upgrades, test-code repair, automatic deployment after gates and production rollback are planned.
 
 [Journey approval and verification →](docs/journeys.md#journey-code) · [Build repair and its limits →](docs/repair.md) · [Changelog →](CHANGELOG.md)
 

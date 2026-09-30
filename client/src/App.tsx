@@ -39,6 +39,8 @@ import StageJourneyList from './StageJourneyList';
 import TwinServices from './TwinServices';
 import { environmentStatusLabel, latestEnvironment } from './EnvironmentSettings';
 import { GateActions, GateBadge, useStageGates } from './StageGate';
+import { ProductionRelease, useReleases } from './ProductionRelease';
+import { releaseBadge } from '@/lib/production-release';
 import { isStageGate, productionStatus } from '@/lib/stage-gate.ts';
 import type { BrowserView, Environment, StageRemoval, WorkspaceSnapshot } from '@/lib/test-workspace';
 import type { GitHubSource, SourceSelection } from './SourceSettings';
@@ -190,11 +192,13 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
 // Source reports where its scanned commit came from; Production reports only
 // deployments bound to it, or the gate's readiness for a commit. Neither is a deployment or test result.
 // null is a status not known yet, which shows no Badge.
-function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, origin, revision, services, gate, gated }: Pick<StageData, 'blocked' | 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated'>>): StageStatusView | null {
+function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'blocked' | 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (blocked) return { kind: 'blocked', text: 'Transition paused' };
   if (stage.kind === 'source') return revision ? { kind: 'ready', text: origin === 'github' ? 'GitHub' : 'Local', sha: revision } : { kind: 'unconfigured', text: 'No commit' };
-  // Ready is a gate verdict for a commit; Perpetual never deploys production. The badge's tooltip says what the verdict rests on.
+  // Ready is a gate verdict; a requested deployment reports its own state at its exact commit.
   if (stage.kind === 'production') {
+    const release = releaseBadge(releases?.current);
+    if (release) return { kind: release.tone, text: release.label, sha: release.sha, hint: release.hint };
     const ready = productionStatus(gate && !isStageGate(gate) ? gate : null);
     if (ready) return { ...ready, hint: 'Every Sandbox gate passed or released this commit.' };
     if (!services.length) return { kind: 'unconfigured', text: 'Not connected', hint: 'No deployment target found in the repository or in its GitHub deployments.' };
@@ -259,7 +263,7 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
   const { stage, services, repoPath, scannedAt, sha, blocked, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
-  const status = stageStatus(stage, { blocked, environment, buildStatus, origin, revision, services, gate, gated });
+  const status = stageStatus(stage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
   const sandbox = stage.kind === 'sandbox';
   // The changes Autopilot records for the stage; one under way lights the card's beam.
   const changes = autopilot?.changes || [];
@@ -268,8 +272,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
   const activeBrowserRun = browserRuns.find(run => ['queued', 'running'].includes(run.status));
   const preparation = browserTests?.preparation?.status;
   const preparingTests = ['preparing', 'discovering'].includes(preparation ?? '');
-  // Production is header-only until a deployment is bound to it; its badge says so.
-  const hasBody = stage.kind !== 'production' || services.length > 0 || changes.length > 0;
+  const hasBody = true;
   const expanded = hasBody && !stage.collapsed;
   const openTests = () => openDialog({ type: 'environment', stageId: stage.id, tab: 'browser' });
   return <BaseNode className="pipeline-stage" data-status={status?.kind} data-activity={activity || undefined} data-expanded={expanded} data-selected={selected} tabIndex={-1}>
@@ -306,6 +309,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
           {changes.map(change => <StepItem key={change.id} icon={<ChangeMark change={change} />}><ChangeRow change={change} repoPath={repoPath} /></StepItem>)}
         </StepList>}
         {!services.length && stage.kind === 'build' && <div className="stage-placeholder"><p>No actions configured</p></div>}
+        {stage.kind === 'production' && <div className="px-3 pb-3"><ProductionRelease key={repoPath} repoPath={repoPath} view={data.releases ?? null} readError={data.releaseReadError} disabled={busy} /></div>}
         {sandbox && <div className="flex min-w-0 flex-col gap-3 px-3 pb-3">
           <TwinServices repoPath={repoPath} scannedAt={scannedAt} stageId={stage.id} environment={environment} />
           {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status)) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{environmentBusy ? 'Creating…' : `Create ${stage.name} environment`}</Button>}
@@ -437,6 +441,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const build = useMemo(() => githubBuildSummary(github, sha, workflows), [github, sha, workflows]);
   const buildStatus = useMemo(() => githubBuildStatus(github, sha, workflows), [github, sha, workflows]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);
+  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
   const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
@@ -467,7 +472,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const [healthBeat] = useState(createHealthBeats);
   const nodes = useMemo(() => {
     let x = 0;
-    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, gates, production, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
+    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, gates, production, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
     return (pipeline?.stages || []).map((stage): StageFlowNode => {
       const position = { x, y: 0 };
       const measured = stageSizes[stage.id];
@@ -479,7 +484,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
         className: 'nopan', style: STAGE_STYLE, data: reuseStageData(stage.id, stageNodeData(stage, context)) as StageData,
       };
     });
-  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, gates, production, autopilot]);
+  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, gates, production, releases, releaseReadError, autopilot]);
   const edges = useMemo(() => (pipeline?.transitions || []).map((edge): Edge => {
     const flow = transitionFlow(edge, { stages: pipeline.stages, snapshot: activitySnapshot, build, latest, sha, gates });
     const sourceName = pipeline.stages.find(stage => stage.id === edge.source)?.name, targetName = pipeline.stages.find(stage => stage.id === edge.target)?.name;

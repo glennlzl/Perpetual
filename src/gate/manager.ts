@@ -3,18 +3,22 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { failureText } from '../redaction.ts';
 import { isEnvironmentBusy } from '../environments/usage.ts';
-import type { GateView, StageGate } from '../../contract/gate.ts';
+import type { GateView, ReleaseEvidence, StageGate } from '../../contract/gate.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from './github.ts';
-import { ACTIVE, SHA, commitStatus, nextGate, productionReady, sameStatus, short, stageGate, verdict, type CommitState, type CommitStatus, type Gate, type GateRef, type GateStatus, type RunRollup } from './rules.ts';
+import { ACTIVE, PENDING, SHA, commitStatus, nextGate, productionReady, sameStatus, short, stageGate, verdict, type CommitState, type CommitStatus, type Gate, type GateRef, type GateStatus, type RunRollup } from './rules.ts';
 
 export interface GateStage { id: string; name: string; kind: string }
 /** The active pipeline; repository is set only for a managed GitHub source, the only one the watcher may move. */
 export interface GateSource { key: string; branch: string | null; sha: string | null; repository?: string | null; stages: readonly GateStage[] }
 export interface GateConnection { login: string; repository: string }
+export interface BuildInput { repository: string; branch: string | null; sha: string; login: string }
+export type BuildVerdict = { status: 'passed' } | { status: 'waiting' | 'blocked'; reason: string };
 export interface GateGitHub {
   connection(): Promise<GateConnection | null>;
   head(input: BranchHeadInput): Promise<BranchHead>;
   post(status: CommitStatusPost): Promise<void>;
+  /** Only Actions build evidence, never the journey's own commit statuses. Missing evidence fails closed. */
+  build?(input: BuildInput): Promise<BuildVerdict>;
 }
 /** A gate's work: prepare(gate) -> context (409: not now), journeys(context) -> count, rebuild(context) -> twin, run(context, twin) -> finished run. */
 export interface GateSteps<Context, Twin, Run = RunRollup | null | undefined> {
@@ -47,7 +51,7 @@ interface Head { branch: string | null; login: string; sha: string; etag: string
 interface GateState { version: 1; gates: Gate[]; heads: Partial<Record<string, Head>> }
 
 // Every gate status and commit state, so a stored gate is checked against the whole set.
-const GATE_STATUSES: Record<GateStatus, true> = { queued: true, rebuilding: true, running: true, passed: true, failed: true, 'needs-release': true, released: true, superseded: true };
+const GATE_STATUSES: Record<GateStatus, true> = { queued: true, 'waiting-build': true, 'build-failed': true, rebuilding: true, running: true, passed: true, failed: true, 'needs-release': true, released: true, superseded: true };
 const COMMIT_STATES: Record<CommitState, true> = { pending: true, success: true, failure: true, error: true };
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string';
@@ -110,7 +114,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   function enqueue(current: GateSource, stage: GateStage, sha: string, detectedAt: string) {
     const time = now();
     let gate = state.gates.find(item => item.key === current.key && item.branch === current.branch && !item.repair && item.stageId === stage.id && item.sha === sha);
-    if (gate && ['queued', ...ACTIVE].includes(gate.status)) return gate;
+    if (gate && [...PENDING, ...ACTIVE].includes(gate.status)) return gate;
     // Only the newest pending commit of a stage runs; an older one arriving later is recorded as superseded.
     const newer = scoped(current).some(item => item.stageId === stage.id && item.sha !== sha && item.status !== 'superseded' && item.detectedAt > detectedAt);
     if (!gate) { gate = { id: randomUUID(), key: current.key, branch: current.branch, stageId: stage.id, sha, context: `perpetual/${stage.name}`, createdAt: time, status: 'queued', detectedAt, updatedAt: time }; state.gates.unshift(gate); }
@@ -118,8 +122,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     gate.context = `perpetual/${stage.name}`;
     for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt'] as const) delete gate[field];
     Object.assign(gate, { status: newer ? 'superseded' : 'queued', detectedAt, updatedAt: time } satisfies Partial<Gate>, newer ? { reason: 'A newer commit reached this stage.' } : {});
-    if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && other.status === 'queued') Object.assign(other, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, updatedAt: time } satisfies Partial<Gate>);
-    state.gates = state.gates.filter((item, index) => index < LIMIT || ['queued', ...ACTIVE].includes(item.status));
+    if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && PENDING.includes(other.status)) Object.assign(other, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, updatedAt: time } satisfies Partial<Gate>);
+    state.gates = state.gates.filter((item, index) => index < LIMIT || [...PENDING, ...ACTIVE].includes(item.status));
     return gate;
   }
   // A passed or released commit moves to the next Sandbox stage; Production is only shown Ready. A repair gate's commit
@@ -149,11 +153,39 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   // Returns false when the stage cannot start now; the gate stays queued for a later attempt. A repair gate its repair
   // stopped while it was prepared is not started, and neither is one that stopped after the queue chose it.
   async function execute(gate: Gate) {
-    if (gate.status !== 'queued') return true;
+    if (!PENDING.includes(gate.status)) return true;
     executing = gate;
     try { return await work(gate); } finally { executing = null; abandoned.delete(gate.id); }
   }
+  async function readBuild(current: GateSource, gate: Gate): Promise<BuildVerdict> {
+    if (!current.repository || gate.repair) return { status: 'passed' };
+    if (!github.build) return { status: 'waiting', reason: 'Build verification is unavailable.' };
+    const identity = sourceIdentity(current);
+    try {
+      const connection = await github.connection();
+      if (sourceIdentity(active()) !== identity) return { status: 'waiting', reason: CHANGED };
+      if (!connection || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return { status: 'waiting', reason: 'Connect GitHub to verify Build.' };
+      return await github.build({ repository: current.repository, branch: gate.branch, sha: gate.sha, login: connection.login });
+    } catch (error) { return { status: 'waiting', reason: text(error) }; }
+  }
+  async function admitBuild(gate: Gate): Promise<boolean> {
+    if (gate.repair) return true;
+    const current = active(), identity = sourceIdentity(current);
+    if (!current || current.key !== gate.key || current.branch !== gate.branch) return false;
+    const build = await readBuild(current, gate);
+    // CI can finish after a source switch, stage removal or newer push. Its result belongs only to this queued commit.
+    if (closed || sourceIdentity(active()) !== identity || !PENDING.includes(gate.status)
+      || !sandboxes(active()!).some(stage => stage.id === gate.stageId)) return false;
+    if (build.status !== 'passed') {
+      const status = build.status === 'blocked' ? 'build-failed' : 'waiting-build';
+      if (gate.status !== status || gate.reason !== build.reason) await transition(gate, status, { reason: build.reason });
+      return false;
+    }
+    if (gate.status !== 'queued') { delete gate.reason; await transition(gate, 'queued'); }
+    return true;
+  }
   async function work(gate: Gate) {
+    if (!(await admitBuild(gate))) return false;
     let context: Context;
     const stopped = async () => { if (!abandoned.has(gate.id)) return false; await settle(gate, 'superseded', STOPPED); return true; };
     try { context = await steps.prepare({ key: gate.key, branch: gate.branch, stageId: gate.stageId, sha: gate.sha, ...(gate.repair ? { repair: gate.repair, snapshot: gate.snapshot } : {}) }); }
@@ -215,7 +247,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (!current || gate.key !== current.key) await settle(gate, 'needs-release', CHANGED);
       else if (!sandboxes(current).some(stage => stage.id === gate.stageId)) await settle(gate, 'needs-release', 'The stage was removed.');
     }
-    if (!current || nextGate(scoped(current), sandboxes(current).map(stage => stage.id))) return null;
+    // A failing target build must not prevent the repair PR's already-verified CI from reaching its journey gates.
+    if (!current || nextGate(scoped(current).filter(gate => gate.status === 'queued'), sandboxes(current).map(stage => stage.id))) return null;
     return state.gates.filter(item => item.repair && item.status === 'queued' && item.key === current.key && !waiting.has(item)).at(-1) || null;
   }
   // Resolves once the gate settles. A queued gate stops at once as superseded when signal aborts, and one being prepared
@@ -314,6 +347,22 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   return {
     view,
     watch,
+    /** A fresh copy lets release callers compare evidence again after asynchronous checks, before deployment. */
+    releaseEvidence(sha: unknown): ReleaseEvidence | null {
+      const current = active();
+      if (!current?.repository || !current.branch || typeof sha !== 'string' || !SHA.test(sha)) return null;
+      const head = state.heads[current.key];
+      if (sha.toLowerCase() !== current.sha?.toLowerCase() || head?.branch === current.branch && head.sha.toLowerCase() !== sha.toLowerCase()) return null;
+      const stages = sandboxes(current), gates = scoped(current), evidence: ReleaseEvidence['stages'] = [];
+      if (!stages.length) return null;
+      for (const stage of stages) {
+        const gate = stageGate(gates.filter(gate => gate.stageId === stage.id));
+        if (!gate || gate.sha !== sha.toLowerCase() || gate.status !== 'passed' && gate.status !== 'released' || gate.statusError || !sameStatus(commitStatus(gate), gate.posted)) return null;
+        evidence.push({ id: stage.id, name: stage.name, gateId: gate.id, context: gate.context, status: gate.status, updatedAt: gate.updatedAt,
+          ...(gate.releasedBy ? { releasedBy: gate.releasedBy, releasedAt: gate.releasedAt } : {}) });
+      }
+      return { key: current.key, repository: current.repository, branch: current.branch, sha: sha.toLowerCase(), stages: evidence };
+    },
     /** Run now: the stage's gate at the branch head (or the scanned commit), re-running a finished one. */
     async run({ stageId }: { stageId: unknown }) {
       guard();
@@ -347,6 +396,9 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         ?? state.gates.find(item => item.repair && item.key === current.key && item.stageId === stageId && item.sha === sha);
       if (!gate) throw Object.assign(new Error('Gate not found.'), { statusCode: 404 });
       if (gate.status !== 'needs-release') throw conflict(gate.status === 'failed' ? 'A failed gate cannot be released.' : 'This gate does not need release.');
+      const identity = sourceIdentity(current), build = await readBuild(current, gate);
+      if (closed || sourceIdentity(active()) !== identity || gate.status !== 'needs-release') throw conflict('The gate changed. Reload the pipeline.');
+      if (build.status !== 'passed') throw conflict(build.reason);
       Object.assign(gate, { status: 'released', releasedBy: login, releasedAt: now(), updatedAt: now() } satisfies Partial<Gate>);
       promote(gate);
       await persist();
@@ -388,7 +440,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         const time = now(), stopped = Boolean(signal?.aborted);
         const gate: Gate = { id: randomUUID(), key, branch, stageId: stage.id, sha: sha.toLowerCase(), context: `perpetual/${stage.name}`, repair, snapshot, createdAt: time, status: stopped ? 'superseded' : 'queued', ...(stopped ? { reason: STOPPED, completedAt: time } : {}), detectedAt: time, updatedAt: time };
         state.gates.unshift(gate);
-        state.gates = state.gates.filter((item, index) => index < LIMIT || ['queued', ...ACTIVE].includes(item.status));
+        state.gates = state.gates.filter((item, index) => index < LIMIT || [...PENDING, ...ACTIVE].includes(item.status));
         await persist();
         if (!stopped) { void kick(); await settled(gate, signal); }
         judged.push(gate);

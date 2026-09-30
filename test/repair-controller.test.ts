@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { startServer, type ServerOptions } from '../src/server.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import { readBranchHead, type CommitStatusPost } from '../src/gate/github.ts';
+import { readBuild } from '../src/gate/build.ts';
 import { createGitHubRunsReader, githubRequest } from '../src/github-runs.ts';
 import { REJECTED } from '../src/repair/changes.ts';
 import { createRepairHost } from '../src/repair/clone.ts';
@@ -68,6 +69,7 @@ function fakeGitHub(sha: string, { remote, next }: { remote?: string; next?: str
     if (args[0] === 'run' && args.includes('--log-failed')) return { stdout: log };
     if (endpoint === 'repos/owner/app/branches/main') return answer({ commit: { sha: target } }, 'head');
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=50`) return answer({ workflow_runs: [run] }, included ? 'runs' : undefined);
+    if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=100&page=1`) return answer({ total_count: 1, workflow_runs: [{ ...run, workflow_id: 1 }] });
     if (endpoint === 'repos/owner/app/actions/runs/2/jobs?per_page=100') return answer(jobs, included ? 'jobs' : undefined);
     if (endpoint === 'user') return answer({ login: 'glennlzl', id: 1234 });
     if (endpoint?.startsWith('repos/owner/app/pulls?state=open&')) return answer([]);
@@ -156,6 +158,7 @@ async function controller(t: TestContext, { build = brokenRepository, root = '/'
       auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
       runs: createGitHubRunsReader({ request, session: async () => SESSION }),
       head: input => readBranchHead(input, { request }),
+      build: input => readBuild(input, { request, session: async () => SESSION }),
       status: async input => { github.statuses.push(input); },
       failure: input => getGitHubFailure(input, { run: github.gh }),
       rerun: input => rerunFailedJobs(input, { run: github.gh }),

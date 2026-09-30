@@ -30,6 +30,9 @@ import { createGateManager, type SourceHead } from './gate/manager.ts';
 import { createGateSteps, createReadiness } from './gate/steps.ts';
 import { assertCheckoutAt } from './gate/checkout.ts';
 import { readBranchHead, postCommitStatus } from './gate/github.ts';
+import { readBuild } from './gate/build.ts';
+import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub } from './releases/manager.ts';
+import type { ReleaseReply } from '../contract/releases.ts';
 import { createRepairManager, type Repair } from './repair/manager.ts';
 import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs } from './repair/github.ts';
 import { createRepairAgent, type CI, type ModelFactory, type RepairAgentGitHub } from './repair/agent.ts';
@@ -66,9 +69,11 @@ export interface ServerOptions {
    * Tests supply the sign-in manager, runs and deployments readers, branch head, commit status, failed-run reader, rerun
    * and the managed source copy's move to a commit; no CLI is spawned for them.
    */
-  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; update?: typeof updateGitHubSource };
+  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; build?: typeof readBuild; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; update?: typeof updateGitHubSource };
   /** Tests supply a shorter branch head poll. */
   gate?: { pollInterval?: number };
+  /** Deployment writes and observations; tests provide an adapter without calling GitHub. */
+  releases?: { github?: ReleaseGitHub };
   /** Tests supply provisioning's docker and git email; no container runs for them. */
   twin?: Omit<Parameters<typeof createTwinInputs>[0], 'dataDir'>;
   /** Tests supply the twins' runtime, and the browser agent's and journeys' Playwright runtimes; no container or browser runs for them. */
@@ -174,7 +179,7 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   }
 }
 
-async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
+async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
   await mkdir(dataDir,{recursive:true,mode:0o700});
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
@@ -333,6 +338,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     github:{
       connection:connectedAccount,
       head:input=>(github.head??readBranchHead)(input),
+      build:input=>(github.build??readBuild)(input),
       post:input=>(github.status??postCommitStatus)(input),
     },
     steps:createGateSteps<StageContext>({environments,browser,readiness:twinsReady,signal:gateStop.signal,async checkout({key,branch,stageId,sha,repair,snapshot}): Promise<StageContext>{
@@ -356,6 +362,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     async checkoutAt({scan}){if(state.source?.scanPath!==scan.repo.path)await assertCheckoutAt(scan.repo.path,String(scan.repo.sha));}}),
   });
   onCleanup(()=>{gateStop.abort();return gates.close();});
+  // A deployment is a separate, explicitly requested operation. Gate readiness alone never starts one.
+  const releases=await createReleaseManager({dataDir,...releaseOptions,async getEvidence():Promise<ReleaseEvidence>{
+    const scan=state.scan,source=state.source;
+    if(!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    const connection=await connectedAccount();
+    if(!connection||state.scan!==scan||state.source!==source||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    const evidence=gates.releaseEvidence(scan.repo.sha);
+    return {source:{key:pipelineKey(state),repository:source.repository,branch:source.branch,sha:scan.repo.sha,login:connection.login},
+      ready:Boolean(evidence),reason:evidence?undefined:'Every Sandbox gate must pass or be explicitly released and reported for this commit.',
+      gates:evidence?.stages.map(stage=>({id:stage.gateId,stageId:stage.id,sha:evidence.sha,context:stage.context,status:stage.status,updatedAt:stage.updatedAt,
+        ...(stage.releasedBy?{releasedBy:stage.releasedBy,releasedAt:stage.releasedAt}:{})}))??[]};
+  }});
+  onCleanup(()=>releases.close());
   // Build repair: a failed head of the managed source's target branch is triaged without a model, then repaired by the
   // agent step through a pull request. The user's own checkout is never repaired.
   // The agent runs on the App Settings models, read when a repair needs them; the key never enters a repair or its box.
@@ -493,6 +512,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         if(req.method==='GET'&&path==='/api/stages/removal')return reply(res,200,previous);
         if(req.method==='POST'&&path==='/api/stages/remove')return reply(res,202,await removals.start(context));
         return reply(res,404,{error:'Stage operation not found.'});
+      }
+      if(path==='/api/releases'||path.startsWith('/api/releases/')) {
+        const operation=path.slice('/api/releases'.length);
+        if(!['','/configure','/deploy','/refresh'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Release operation not found.'});
+        requireSourceIdle();
+        const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
+        return reply(res,operation==='/deploy'?202:200,await withActiveScan(input.repoPath,async scan=>{
+          requireSourceIdle();
+          const view=operation==='/configure'?await releases.configure(input.target)
+            :operation==='/deploy'?await releases.deploy({sha:input.sha,target:input.target})
+            :operation==='/refresh'?await releases.refresh():await releases.view();
+          return {repoPath:scan.repo.path,...view} satisfies ReleaseReply;
+        }));
       }
       if(path==='/api/gate'||path.startsWith('/api/gate/')) {
         const scan=state.scan;
@@ -766,7 +798,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
+    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
     closing=(async()=>{const results=await Promise.allSettled(draining);await saving;const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }
