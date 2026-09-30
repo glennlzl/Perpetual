@@ -84,10 +84,12 @@ export async function getProviderStatus(scan: Pick<Scan,'repo'>,env: NodeJS.Proc
 export function diagnoseFailure(log: unknown): FailureDiagnosis {
   const text=redact(log);
   const access='Credentials or permissions need attention. Supply them in the provider settings; a source patch cannot grant access.';
+  const assertion='An existing test failed. Reproduce this exact test and patch application code without weakening its assertion.';
   // The first rule that matches decides. Credentials and permissions are read with their case and wording, as CI, CLIs
   // and HTTP clients print them, so an application's own compile errors and failed tests about a token, 401, 403 or
   // unauthorized stay code. A dependency or compile error outranks a network error in the same log, since a rerun
-  // cannot fix it; a test that failed on a refused connection or a deadline may be flaky, so it reruns first.
+  // cannot fix it. An explicit assertion failure also outranks incidental timeout output from other tests;
+  // a FAIL header alone may instead describe a refused connection or deadline, which still reruns first.
   const rules: [RegExp,string,string][]=[
     // An environment credential that is not set, such as VERCEL_TOKEN is required.
     [/\b(?:[A-Z][A-Z\d]*_)*(?:TOKEN|API_KEY|SECRET(?:_KEY)?)\b(?: environment variable)?(?: is| was)? (?:required|missing|not set)\b/,'configuration',access],
@@ -97,9 +99,10 @@ export function diagnoseFailure(log: unknown): FailureDiagnosis {
     [/Input required and not supplied: |Resource not accessible by (?:integration|personal access token)|\bPermission to \S+ denied to |HttpError\]?: Bad credentials|"message":\s*"Bad credentials"|Authentication failed for '|could not read Username for '|\bHTTP 40[13]\b|returned error: 40[13]\b|\b40[13] (?:Unauthorized|Forbidden)\b|\bcode E40[13]\b|\bENEEDAUTH\b/,'configuration',access],
     [/ERR_PNPM_OUTDATED_LOCKFILE|npm ci.*lock|lockfile.*(?:outdated|mismatch)/i,'dependency','Dependency manifest and lockfile disagree. Regenerate with the pinned package manager, then rerun the original build.'],
     [/error TS\d+|Type error:|Cannot find module/i,'build','Compilation or module resolution failed. Reproduce with the pinned toolchain and workspace root.'],
+    [/\b(?:AssertionError(?: \[[^\]\r\n]+\])?|TestingLibraryElementError):/,'test-regression',assertion],
     // Network and deadline errors only: an identifier such as timeout or setTimeout in a type or lint error is code.
     [/\btimed out\b|\b(?:ETIMEDOUT|ESOCKETTIMEDOUT|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN)\b|socket hang up|i\/o timeout|handshake timeout|could not resolve host|temporary failure in name resolution/i,'availability','A dependency is unavailable or exceeded its deadline. Check the upstream service and target URL before changing code.'],
-    [/AssertionError|TestingLibraryElementError|FAIL\s|expected .*received/i,'test-regression','An existing test failed. Reproduce this exact test and patch application code without weakening its assertion.'],
+    [/AssertionError|TestingLibraryElementError|FAIL\s|expected .*received/i,'test-regression',assertion],
   ];
   const rule=rules.find(([pattern])=>pattern.test(text));
   return {method:'rule-based',category:rule?.[1]||'unknown',summary:rule?.[2]||'Inspect the failed step and reproduce its unchanged command before changing code.'};
