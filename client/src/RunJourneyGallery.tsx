@@ -45,10 +45,12 @@ function JourneyFocus({ entry, entries, run, repoPath, stageId, onSkip, skipping
         {document.fullscreenEnabled && <Button variant="secondary" size="icon-sm" className="absolute top-3 right-3" aria-label={fullscreen ? 'Exit full screen' : 'Full screen'} aria-pressed={fullscreen} onClick={toggleFullscreen}>{fullscreen ? <Minimize2 /> : <Maximize2 />}</Button>}
       </div>
       <aside className="min-h-0 space-y-4 overflow-y-auto border-t p-4 lg:border-t-0 lg:border-l" aria-label={`${item.name} milestones`}>
-        <div className="flex items-start gap-2">
-          <Button variant="ghost" size="icon-sm" className="-ml-1 shrink-0" aria-label="All journeys" onClick={onBack}><ArrowLeft /></Button>
-          <h3 ref={headingRef} tabIndex={-1} className="min-w-0 flex-1 break-words text-sm font-medium leading-8 focus:outline-none">{item.name}</h3>
-          <Badge variant={status === 'failed' ? 'destructive' : 'outline'} className="mt-1.5 shrink-0"><JourneyMark status={status} />{label}</Badge>
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="flex min-w-0 flex-1 basis-48 items-start gap-2">
+            <Button variant="ghost" size="icon-sm" className="-ml-1 shrink-0" aria-label="All journeys" onClick={onBack}><ArrowLeft /></Button>
+            <h3 ref={headingRef} tabIndex={-1} className="min-w-0 flex-1 text-sm font-medium leading-6 [overflow-wrap:anywhere] focus:outline-none">{item.name}</h3>
+          </div>
+          <Badge variant={status === 'failed' ? 'destructive' : 'outline'} className="ml-auto mt-1 shrink-0"><JourneyMark status={status} />{label}</Badge>
         </div>
         {journeyStreaming(status) && <div className="flex items-start justify-between gap-3 text-xs leading-5 text-muted-foreground"><span className="min-w-0 break-words">{journeySummary(steps, status).text}</span><span className="shrink-0 tabular-nums">{journeyElapsed(progress?.startedAt, now)}</span></div>}
         <JourneySegments steps={steps} />
@@ -75,7 +77,7 @@ function JourneyFocus({ entry, entries, run, repoPath, stageId, onSkip, skipping
 export default function RunJourneyGallery({ run, repoPath, stageId, initialFocus = '' }: { run: BrowserRun; repoPath: string; stageId: string; initialFocus?: string }) {
   const [skipping, setSkipping] = useState('');
   const [error, setError] = useState('');
-  const [focusId, setFocusId] = useState(initialFocus);
+  const [focusId, setFocusId] = useState(() => initialFocus || (run.caseSummaries?.length === 1 ? run.caseSummaries[0].id : ''));
   const [viewFocus] = useState(createViewFocus);
   useEffect(() => { if (initialFocus) setFocusId(initialFocus); }, [initialFocus]);
   useEffect(() => { viewFocus.settle(); }, [focusId, viewFocus]);
