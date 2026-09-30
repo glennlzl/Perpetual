@@ -139,14 +139,14 @@ test('authenticated discovery takes a run-only account and auth endpoints, stays
   assert.deepEqual(input.allowedOrigins,['http://localhost:3000'],'Discovery never navigates to external origins.');assert.equal(input.timeoutSeconds,600);assert.equal(input.scope,'Billing focus');
   f.workers[0].event({type:'discovery',cases:drafts,summary:`Signed in as ${account.username}. `+'Observed billing. '.repeat(300),authenticated:true});f.workers[0].gate.resolve();
   const discovered=await f.terminal(run.id);assert.equal(discovered.run.status,'completed');
-  const {analysis}=await f.manager.view(f.context);
+  const {analysis}=await f.manager.view(f.context);assert.ok(analysis);
   assert.equal(analysis.authenticated,true);assert.equal(analysis.summary.length,4000,'The discovery summary limit matches the runner.');
   assert.ok(analysis.summary.startsWith(`Signed in as ${account.username}. Observed billing.`),'A summary naming the test account is kept as reported.');
   assert.ok(!(await readFile(join(f.dataDir,'browser','state.json'),'utf8')).includes(account.password),'The account itself is never stored.');
   ({run}=await f.manager.discover(f.context,{}));await until(()=>f.workers.length===2);
   assert.equal(f.workers[1].input.credentials,undefined);assert.equal(f.workers[1].input.authEndpoints,undefined,'Auth endpoints are only opened for a supplied account.');
   f.workers[1].event({type:'discovery',cases:[],summary:'Public pages only',authenticated:true});f.workers[1].gate.resolve();await f.terminal(run.id);
-  assert.equal((await f.manager.view(f.context)).analysis.authenticated,false,'A worker cannot claim authentication without an account.');
+  assert.equal((await f.manager.view(f.context)).analysis?.authenticated,false,'A worker cannot claim authentication without an account.');
 });
 
 test('discovery keeps where its account signed in as the sign-in page while the stage has none, as a path on the application’s origin',async t=>{
@@ -367,7 +367,7 @@ test('progress revision, total action count, last action and worker capture time
   const f=await fixture(t,[journey('one')]);
   const {run}=await f.manager.run(f.context,{},manual);await until(()=>f.workers.length===1);
   const worker=f.workers[0];
-  const before=(await f.report(run.id)).progress.revision;assert.ok(before>=1,'Admission is a progress change.');
+  const before=(await f.report(run.id)).progress.revision;assert.ok(typeof before==='number');assert.ok(before>=1,'Admission is a progress change.');
   const actions=Array.from({length:160},(_,index)=>({type:index===159?'input':'click',status:index===159?'failed':'passed',...(index===159?{errorCode:'navigation_not_allowed'}:{})}));
   worker.event({type:'case',caseId:'one',status:'running',actions});
   let current=(await f.report(run.id)).progress;
@@ -383,9 +383,9 @@ test('progress revision, total action count, last action and worker capture time
   worker.event({type:'status',status:'ready'});assert.equal((await f.report(run.id)).progress.revision,before+2,'Ignored worker events do not change progress.');
   worker.event({type:'case',caseId:'one',status:'running',actions:[]});
   current=(await f.report(run.id)).progress;assert.equal(current.cases[0].actionCount,0);assert.equal(current.cases[0].lastAction,undefined);
-  const last=current.revision;
+  const last=current.revision;assert.ok(typeof last==='number');
   f.complete(0,'one');worker.event({type:'result',result:outcome('one')});worker.gate.resolve();
-  const completed=await f.terminal(run.id);assert.equal(completed.run.status,'passed');assert.ok(completed.progress.revision>last);
+  const completed=await f.terminal(run.id);assert.equal(completed.run.status,'passed');assert.ok(typeof completed.progress.revision==='number'&&completed.progress.revision>last);
 });
 
 test('effective concurrency is limited by a shared account or shared data and records the reason',async t=>{
@@ -418,8 +418,8 @@ test('graph summaries carry progress only for active runs and each case latest r
   assert.equal(runs[old].progress,undefined,'An older run of the same case is summarized without progress.');
   assert.equal(runs[latest].progress!.cases[0].steps!.length,3);
   const live=runs[started.run.id].progress!.cases[0];
-  assert.equal(live.actions,undefined);assert.equal(live.actionCount,2);assert.deepEqual(live.lastAction,{type:'click',status:'running'});
-  assert.ok(live.frameUpdatedAt&&live.frameCapturedAt);assert.ok(runs[started.run.id].progress!.revision>0);assert.ok(runs[started.run.id].frameCapturedAt);
+  assert.equal('actions' in live,false);assert.equal(live.actionCount,2);assert.deepEqual(live.lastAction,{type:'click',status:'running'});
+  assert.ok(live.frameUpdatedAt&&live.frameCapturedAt);const revision=runs[started.run.id].progress?.revision;assert.ok(typeof revision==='number'&&revision>0);assert.ok(runs[started.run.id].frameCapturedAt);
   assert.equal((await f.report(started.run.id)).progress.cases[0].actions.length,2,'Full progress remains available.');
   await finish(2,'two');await f.terminal(started.run.id);
 });
@@ -463,7 +463,7 @@ test('restart recovery cancels unstarted journeys, fails interrupted ones, finis
   assert.deepEqual(recovered.results.map(item=>[item.caseId,item.status]),[['running','failed'],['queued','cancelled'],['skipping','skipped'],['done','passed']]);
   assert.equal(recovered.results[1].error,'Controller stopped before this journey started');
   assert.match(recovered.results[0].error!,/controller stopped/i);assert.equal(recovered.results[2].error,undefined);
-  assert.ok(recovered.progress.revision>revision);
+  assert.ok(typeof recovered.progress.revision==='number'&&recovered.progress.revision>revision);
 });
 
 test('evidence naming the test account is kept as reported, with its blocker kinds and check operators',async t=>{

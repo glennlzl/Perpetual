@@ -6,6 +6,8 @@ import type { TestAccount } from './test-accounts.ts';
 import type { PageVisibility } from './utils.ts';
 import type { PipelineView } from './pipeline-nodes.ts';
 import type { Environment } from '../../../contract/environment.ts';
+import type { BrowserConfig as PublicBrowserConfig, BrowserAnalysis, BrowserViewReply } from '../../../contract/browser.ts';
+export type { BrowserPreparation, BrowserAnalysis } from '../../../contract/browser.ts';
 import type { PipelineActionReply } from '../../../contract/pipeline.ts';
 export type { Environment, EnvironmentHealth, EnvironmentService } from '../../../contract/environment.ts';
 
@@ -16,14 +18,13 @@ export type PipelineAction =
   | { action: 'rename-stage'; stageId: string; name: string }
   | { action: 'set-transition'; sourceStageId?: string; targetStageId?: string; blocked: boolean }
   | { action: 'toggle-stage'; stageId: string };
-/** A stage's test settings; signInUrl is the sign-in page, where the test account signs in when the target URL shows no sign-in form. */
-export interface BrowserConfig { targetUrl: string; signInUrl?: string; scope: string; requirements: string; maxSteps: number; journeyTimeoutSeconds?: number; externalOrigins?: string[]; authEndpoints?: string[] }
-/** Integration-test drafts a new ready environment prepares; preparing never approves or runs them. */
-export interface BrowserPreparation { status: string; environmentId?: string; targetUrl?: string; runId?: string; error?: string; createdAt?: string; completedAt?: string }
-/** The last journey exploration: its summary and whether it ran signed in. */
-export interface BrowserAnalysis { summary?: string; authenticated?: boolean; createdAt?: string; sourceRevision?: string | null; error?: string }
-/** A Sandbox stage's browser tests. The source summary carries cases, runs and preparation; the inspector's read carries the rest. */
-export interface BrowserView { cases: BrowserCase[]; runs: BrowserRun[]; capabilities: BrowserCapabilities | null; preparation: BrowserPreparation | null; config: BrowserConfig; specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[] }
+/** Unsaved/loading settings may not have received all normalized controller defaults yet. */
+export type BrowserConfig = Pick<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'> & Partial<Omit<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'>>;
+/** The workspace starts from source summaries before the inspector has loaded its full view. */
+export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
+  runs: BrowserRun[]; capabilities: BrowserCapabilities | null; config: BrowserConfig;
+  specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[];
+};
 /** A stage's sandboxes and its twin config, which this UI passes through to the controller unread. */
 export interface EnvironmentView { environments: Environment[]; plan: unknown }
 /** A confirmed stage removal and the sandbox cleanup it owns. */
@@ -78,7 +79,11 @@ const active = (entry: StageEntry) => entry.view.environment.environments.some(i
   || Object.values(entry.view.browser.specs || {}).some(spec => spec?.generation?.status === 'running' || spec?.draft?.verification?.status === 'running');
 // Browser progress with an unchanged revision and case states is reused whole;
 // scheduler states and frame times stay part of the key.
-const progressKey = (progress: RunProgress | null | undefined) => typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray(item.actions)])]) : null;
+const progressKey = (value: unknown) => {
+  // share calls this only for the controller's progress field; old saved progress could also carry status.
+  const progress = value as (RunProgress & { status?: string }) | null | undefined;
+  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined)])]) : null;
+};
 // Structural sharing: unchanged records keep their identity across polls.
 // A record reused in place of next has next's fields and values, so it stands for next's type.
 function share<T>(previous: unknown, next: T, key?: string): T {

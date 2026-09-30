@@ -10,8 +10,8 @@ const OLD = '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567';
 const stages = [{ id: 'source', kind: 'source' }, { id: 'build', kind: 'build' }, { id: 'beta', kind: 'sandbox' }, { id: 'gamma', kind: 'sandbox' }, { id: 'production', kind: 'production' }];
 const edge = (source: string, target: string, blocked = false) => ({ id: `${source}-${target}`, source, target, blocked });
 const environment = (status: string, extra: Partial<Environment> = {}): Environment => ({ id: `beta-${status}`, stageId: 'beta', status, sourceRevision: SHA, updatedAt: '2026-09-23T10:00:00.000Z', ...extra });
-const context = ({ environments = [], runs = [], build = null, latest = {} }: { environments?: Environment[]; runs?: BrowserRun[]; build?: { status: string; sha?: string } | null; latest?: Record<string, Environment> } = {}) => {
-  const snapshot: ActivitySnapshot & { browserTests: NonNullable<ActivitySnapshot['browserTests']> } = { environments, browserTests: { beta: { cases: [], runs } }, stageRemovals: [] };
+const context = ({ environments = [], runs = [], build = null, latest = {} }: { environments?: Environment[]; runs?: Pick<BrowserRun, 'mode' | 'status'>[]; build?: { status: string; sha?: string } | null; latest?: Record<string, Environment> } = {}) => {
+  const snapshot: ActivitySnapshot & { browserTests: NonNullable<ActivitySnapshot['browserTests']> } = { environments, browserTests: { beta: { runs } }, stageRemovals: [] };
   return { stages, sha: SHA, build, latest, snapshot };
 };
 
@@ -23,9 +23,9 @@ test('Source to Build flows only while a current-commit run is queued or in prog
 
 test('Build to a sandbox flows while it provisions or a browser run is active on it', () => {
   for (const status of ['queued', 'creating', 'preparing']) assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment(status)] })), 'active', status);
-  for (const status of ['queued', 'running']) assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ id: 'run', mode: 'run', status }] })), 'active', status);
-  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ id: 'run', mode: 'discover', status: 'running' }] })), 'active');
-  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ id: 'run', mode: 'run', status: 'passed' }] })), null);
+  for (const status of ['queued', 'running'] as const) assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ mode: 'run', status }] })), 'active', status);
+  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ mode: 'discover', status: 'running' }] })), 'active');
+  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('ready')], runs: [{ mode: 'run', status: 'passed' }] })), null);
   assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [environment('destroying')] })), null);
   assert.equal(transitionFlow(edge('beta', 'gamma'), context({ environments: [environment('creating')] })), null, 'Another stage must not borrow Beta activity.');
 });
@@ -34,7 +34,7 @@ test('a sandbox fed by another sandbox never flows, because it is built from the
   const gamma = (status: string, extra: Partial<Environment> = {}) => environment(status, { id: `gamma-${status}`, stageId: 'gamma', ...extra });
   for (const status of ['queued', 'creating', 'preparing']) assert.equal(transitionFlow(edge('beta', 'gamma'), context({ environments: [environment('ready'), gamma(status)] })), null, status);
   const running = context({ environments: [environment('ready'), gamma('ready')] });
-  running.snapshot.browserTests.gamma = { cases: [], runs: [{ id: 'run', mode: 'run', status: 'running' }] };
+  running.snapshot.browserTests.gamma = { runs: [{ mode: 'run', status: 'running' }] };
   assert.equal(transitionFlow(edge('beta', 'gamma'), running), null, 'A Gamma browser run shows on its card, not as Beta-to-Gamma motion.');
   const behind = gamma('ready', { sourceRevision: OLD });
   assert.equal(transitionFlow(edge('beta', 'gamma'), context({ environments: [behind], latest: { gamma: behind } })), 'behind', 'Drift is still marked statically on its inbound edge.');
@@ -49,7 +49,7 @@ test('blocked edges and edges into Production never flow', () => {
 test('a ready sandbox on an older revision draws a static behind edge', () => {
   const behind = environment('ready', { sourceRevision: OLD });
   assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [behind], latest: { beta: behind } })), 'behind');
-  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [behind], latest: { beta: behind }, runs: [{ id: 'run', mode: 'run', status: 'running' }] })), 'active', 'Actual activity takes precedence over drift.');
+  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [behind], latest: { beta: behind }, runs: [{ mode: 'run', status: 'running' }] })), 'active', 'Actual activity takes precedence over drift.');
   assert.equal(transitionFlow(edge('build', 'beta', true), context({ latest: { beta: behind } })), null);
 });
 

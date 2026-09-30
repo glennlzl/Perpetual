@@ -27,9 +27,10 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {ModelSettingsReply} from '../../contract/settings.ts';
+import type {BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
+export type {BrowserConfig,PublicRun,RunSummary} from '../../contract/browser.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
-import type {ConcurrencyLimit} from './journey-scheduler.ts';
 import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
 import type {EnvironmentUsage} from '../environments/usage.ts';
@@ -39,11 +40,6 @@ import type {ScanRepo,ScanService} from '../scanner.ts';
 type StageScan={repo:Pick<ScanRepo,'path'>&Partial<Pick<ScanRepo,'sha'>>;services?:readonly (Pick<ScanService,'id'>&Partial<Pick<ScanService,'framework'|'path'>>)[]};
 /** The Sandbox stage a browser operation belongs to, with its active source. */
 export type BrowserStageContext={key:string;stageId:string;scan:StageScan;controllerOrigin?:string};
-/**
- * A stage's browser test settings. signInUrl is the sign-in page, where a journey's test account signs in when the
- * application URL shows no sign-in form: '' or a URL on the application URL's origin.
- */
-export type BrowserConfig={targetUrl:string;signInUrl:string;scope:string;requirements:string;maxSteps:number;journeyTimeoutSeconds:number;externalOrigins:string[];authEndpoints:string[]};
 /** The environment behind a target URL, as the environments manager resolves it (src/environments/manager.ts). */
 export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
 /** What the manager uses of environment leases. */
@@ -53,22 +49,19 @@ type JourneyRuntime={capabilities():Promise<{browserInstalled?:boolean}>;start(i
 /** The browser agent, which discovers journeys; an absent capability is unknown. */
 type AgentRuntime={capabilities():Promise<Partial<BrowserCapabilities>>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void):WorkerJob<unknown>};
 
-type CheckResult=MilestoneCheck&{passed:boolean;observed?:number;resolved?:string;error?:string;provenance:'independent'};
-type StepProgress={id:string;title:string;status:string;evidence?:string;checks?:CheckResult[]};
-type ActionProgress={type:string;status:string;errorCode?:string};
-/** One journey's live progress in a run, or discovery's. */
-export type CaseProgress={id:string;caseId:string;name:string;status:string;actions:ActionProgress[];actionCount:number;steps?:StepProgress[];lastAction?:{type:string;status:string};queueReason?:string;startedAt?:string;completedAt?:string;frameUpdatedAt?:string;frameCapturedAt?:string;videos?:string[]};
-export type RunProgress={revision:number;cases:CaseProgress[]};
-type Discovery={cases:BrowserCase[];summary:string;authenticated:boolean};
-type Analysis=Discovery&{createdAt:string;sourceRevision:string|null;error?:string};
+type CheckResult=MilestoneCheckResult&{provenance:'independent'};
+type StepProgress=Omit<PublicStepProgress,'checks'>&{title:string;checks?:CheckResult[]};
+type ActionProgress=BrowserAction;
+/** Current execution always has initialized counts; old public history may predate them. */
+export type CaseProgress=Omit<PublicCaseProgress,'steps'>&{actionCount:number;steps?:StepProgress[]};
+export type RunProgress=Omit<PublicRunProgress,'cases'>&{revision:number;cases:CaseProgress[]};
+type Discovery=BrowserDiscovery;
+type Analysis=BrowserAnalysis;
 /** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. */
-export type BrowserRun={
-  id:string;scope:string;stageId:string;mode:'run'|'discover';status:'queued'|'running'|RunStatus;createdAt:string;startedAt?:string;completedAt?:string;
-  targetUrl:string;sourceRevision:string|null;caseIds:string[];approvedCases:BrowserCase[];progress:RunProgress;results?:JourneyResult[];error?:string;
-  engine?:'playwright';concurrency?:number;effectiveConcurrency?:number;concurrencyLimit?:ConcurrencyLimit;specHashes?:Record<string,string>;
-  environmentId?:string;environmentUseUncertain?:boolean;verification?:Verification;discovery?:Discovery;frameUpdatedAt?:string;frameCapturedAt?:string;
+export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engine'>&{
+  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;
 };
-type Preparation={environmentId:string;status:string;createdAt:string;targetUrl?:string;runId?:string;error?:string;completedAt?:string};
+type Preparation=BrowserPreparation;
 /** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
 type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
 type BrowserState={
@@ -105,16 +98,11 @@ const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&
 const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
-const publicRun=({scope,approvedCases,environmentUseUncertain,...run}:StoredRun)=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
+const publicRun=({scope,approvedCases,environmentUseUncertain,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
 const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
-/** A run as a view shows it: without its stage scope or the approved snapshots, with case summaries. */
-export type PublicRun=ReturnType<typeof publicRun>;
-type SummaryProgress={revision:number;cases:Omit<CaseProgress,'actions'>[]};
-/** A run as graph polling shows it: summary fields, with live progress for active and latest runs. */
-export type RunSummary=Partial<Omit<PublicRun,'progress'>>&{progress?:SummaryProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
-function summaryRun({progress,...run}:BrowserRun,withProgress:boolean){
+function summaryRun({progress,...run}:BrowserRun,withProgress:boolean):RunSummary{
   // Only the summary keys of the public run.
   const view=Object.fromEntries(Object.entries(publicRun(run)).filter(([key])=>summaryKeys.has(key))) as RunSummary;
   if(withProgress&&progress)view.progress=structuredClone({...progress,cases:progress.cases.map(({actions,...item})=>item)});
@@ -551,7 +539,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   function requireIdle(context:BrowserStageContext,{duringRun=false,verification=false}={}){if(closed)throw conflict('The controller is shutting down.');usage.assertAvailable(context);if(modelSaving)throw conflict('Model settings are being saved. Please wait.');const scope=scopeId(context);if(busy.has(scope)||state.runs.some(r=>r.scope===scope&&active(r)&&!(duringRun&&r.mode==='run'))||!duringRun&&!verification&&verifying(scope))throw conflict('A browser operation is already in progress for this stage.');}
   async function viewModel():Promise<ModelSettingsReply>{return {capabilities:{...modelSettings.view(),...await runtime!.capabilities()}};}
   // Discovery and code generation need the browser agent's runtime and model; runs need only Playwright's Chromium.
-  async function capabilities(){
+  async function capabilities():Promise<PublicCapabilities>{
     const [agent,coded]=await Promise.all([runtime!.capabilities(),playwright.capabilities().catch(()=>({browserInstalled:false}))]);
     return {...modelSettings.view(),...agent,playwright:{browserInstalled:coded.browserInstalled===true}};
   }
@@ -611,7 +599,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       assertCurrent();return result;
     },options);
   }
-  const report=(run:BrowserRun)=>({run:publicRun(run),results:run.results||[],progress:run.progress||{cases:[]},...(run.discovery?{discovery:run.discovery}:{})});
+  const report=(run:BrowserRun):RunProgressReply=>({run:publicRun(run),results:run.results||[],progress:run.progress||{cases:[]},...(run.discovery?{discovery:run.discovery}:{})});
   function acceptFrame(run:BrowserRun,event:WorkerEvent,progress:CaseProgress){
     if(typeof event.data!=='string'||event.data.length>2800000||!(/^[a-zA-Z0-9+/]+={0,2}$/.test(event.data)))throw new Error('Browser runtime returned an invalid frame.');
     const bytes=Buffer.from(event.data,'base64');if(bytes.length>2*1024*1024||bytes[0]!==0xff||bytes[1]!==0xd8||bytes.at(-2)!==0xff||bytes.at(-1)!==0xd9)throw new Error('Browser runtime returned an invalid JPEG frame.');
@@ -892,7 +880,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     }catch{/* An invalid saved URL remains available for the person to edit. */}
     return config;
   }
-  function summary(context:{key:string;stageId:string}){
+  function summary(context:{key:string;stageId:string}):BrowserSummaryReply{
     const scope=scopeId(context),cases=state.cases[scope]||[],runs=state.runs.filter(r=>r.scope===scope).slice(0,30);
     // A control run never counts as a journey's current status.
     const latest=new Set(cases.map(item=>runs.find(run=>run.mode==='run'&&!run.verification?.control&&run.caseIds.includes(item.id))?.id).filter(Boolean));
@@ -963,7 +951,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     interruptedEnvironmentIds:()=>[...new Set(state.runs.filter((run):run is BrowserRun&{environmentId:string}=>Boolean(run.environmentUseUncertain&&run.environmentId)).map(run=>run.environmentId))],
     draft:(...args:Parameters<typeof draft>)=>admit(()=>draft(...args)),transcribe:(...args:Parameters<typeof transcribe>)=>admit(()=>transcribe(...args)),
     hasPendingInput:()=>inputJobs.size>0,
-    async view(context:BrowserStageContext){const scope=scopeId(context);return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
+    async view(context:BrowserStageContext):Promise<BrowserViewReply>{const scope=scopeId(context);return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
     saveModel(context:BrowserStageContext,input:unknown){return admit(()=>{requireIdle(context);return updateModel(()=>modelSettings.save(input));});},
     async saveConfig(context:BrowserStageContext,config:unknown){
       requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context),target=state.configTargets[scope];

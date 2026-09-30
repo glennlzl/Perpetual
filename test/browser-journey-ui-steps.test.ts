@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { StepCheck } from '../client/src/lib/browser-test-ui.ts';
+import type { CheckRow } from '../client/src/lib/journey-steps.ts';
 import { assignStepIds, buildJourneySteps, checkRow, earlierCaptures, nextCaptureName, reviewedStepError, stepRow } from '../client/src/lib/journey-steps.ts';
 
 const original = [{ id:'login', title:'Sign in' }, { id:'step-3', title:'Run a workflow' }, { id:'credits', title:'Verify credits decreased' }];
@@ -39,7 +39,7 @@ test('a check that names the run token as {run} is kept as written', () => {
   assert.deepEqual(buildJourneySteps([row], []), { steps:[{ id:'step-1', title:'Reopen the profile', checks:[{ type:'text-visible', value:'QA {run}' }, { type:'url-contains', value:'/items/{run}' }, { type:'read-number', label:'Tasks for QA {run}', name:'tasks' }] }], error:'' });
 });
 test('check validation rejects incomplete or unordered captures', () => {
-  const errorFor = (checks: Partial<StepCheck>[]) => { const row = stepRow({ title:'Verify' }); row.checks = checks.map(checkRow); return buildJourneySteps([row], []).error; };
+  const errorFor = (checks: Partial<CheckRow>[]) => { const row = stepRow({ title:'Verify' }); row.checks = checks.map(checkRow); return buildJourneySteps([row], []).error; };
   assert.equal(errorFor([{ type:'text-visible', value:' ' }]), 'Complete each step check.');
   assert.equal(errorFor([{ type:'read-number', label:'Credits', name:'Credits before' }]), 'Use a check name such as creditsBefore.');
   assert.equal(errorFor([{ type:'compare-number', label:'Credits', name:'after', op:'<', than:'before' }]), 'Compare with a number read earlier.');
@@ -69,4 +69,11 @@ test('new number checks get an unused capture name', () => {
   const edited = [stepRow({ title:'A', checks:[{ type:'read-number', label:'Credits', name:'reading1' }, { type:'compare-number', label:'Credits', name:'reading3', op:'<', than:'reading1' }] })];
   assert.equal(nextCaptureName(edited), 'reading2');
   assert.equal(nextCaptureName([]), 'reading1');
+});
+
+
+test('unsupported local editor check types never serialize as a normalized comparison', () => {
+  const row = stepRow({ title: 'Verify the changed balance' });
+  row.checks = [{ ...checkRow({ type: 'compare-number', label: 'Credits', name: 'after', op: '<', than: 'before' }), type: 'unsupported' }];
+  assert.deepEqual(buildJourneySteps([row]), { steps: [], error: 'Complete each step check.' });
 });

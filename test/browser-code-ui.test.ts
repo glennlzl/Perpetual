@@ -9,7 +9,7 @@ import type { BrowserCase } from '../client/src/lib/browser-test-ui.ts';
 // Actual panel, workspace and controls in Chromium. Only the controller/model boundary is a fixture.
 const journey: BrowserCase = { id: 'save', name: 'Save and reopen a workflow', goal: 'Save a workflow and reopen it.',
   preconditions: ['A test account'], expectedOutcomes: ['The saved workflow is shown'], assertions: [{ type: 'text-visible', value: 'Workflow {run}' }],
-  steps: [{ id: 'save', title: 'Save workflow' }, { id: 'reopen', title: 'Reopen workflow' }], selected: true, needsReview: false };
+  steps: [{ id: 'save', title: 'Save workflow' }, { id: 'reopen', title: 'Reopen workflow' }], selected: true, needsReview: false, isolation: 'shared', evidence: [] };
 const hash = 'a'.repeat(64);
 
 test('journey authoring offers account choices and an actionable missing-check state in Chromium', { timeout: 60000 }, async t => {

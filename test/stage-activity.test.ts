@@ -7,8 +7,8 @@ import type { BrowserPreparation, Environment, StageRemoval } from '../client/sr
 const beta = { id: 'beta', kind: 'sandbox', name: 'Beta' };
 // Shapes follow /api/state: environments.summaries, browser.summary and stageRemovals.
 const environment = (status: string, extra: Partial<Environment> = {}): Environment => ({ id: `env-${status}`, stageId: 'beta', status, step: status === 'ready' ? 'Ready' : 'Preparing application', sourceRevision: 'cb9292c', createdAt: '2026-09-23T10:00:00.000Z', updatedAt: '2026-09-23T10:01:00.000Z', ...extra });
-const run = (mode: BrowserRun['mode'], status: string, extra: Partial<BrowserRun> = {}): BrowserRun => ({ id: `run-${mode}-${status}`, stageId: 'beta', mode, status, createdAt: '2026-09-23T10:02:00.000Z', caseIds: mode === 'run' ? ['journey'] : [], progress: { cases: [{ id: mode === 'run' ? 'journey' : 'discovery', status: status === 'running' ? 'running' : 'queued' }] }, ...extra });
-const snapshot = ({ environments = [], runs = [], preparation = null, stageRemovals = [] }: { environments?: Environment[]; runs?: BrowserRun[]; preparation?: BrowserPreparation | null; stageRemovals?: StageRemoval[] } = {}): ActivitySnapshot => ({ environments, browserTests: { beta: { cases: [], runs, preparation } }, stageRemovals });
+const run = (mode: BrowserRun['mode'], status: BrowserRun['status']): Pick<BrowserRun, 'mode' | 'status'> => ({ mode, status });
+const snapshot = ({ environments = [], runs = [], preparation = null, stageRemovals = [] }: { environments?: Environment[]; runs?: Pick<BrowserRun, 'mode' | 'status'>[]; preparation?: Pick<BrowserPreparation, 'status'> | null; stageRemovals?: StageRemoval[] } = {}): ActivitySnapshot => ({ environments, browserTests: { beta: { runs, preparation } }, stageRemovals });
 
 test('ready environments and finished runs are idle', () => {
   assert.equal(stageActivity(beta, snapshot({ environments: [environment('ready')], runs: [run('run', 'passed'), run('discover', 'completed')], preparation: { status: 'completed' } })), null);

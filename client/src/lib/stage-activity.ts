@@ -1,12 +1,12 @@
 // Stage motion derives only from controller records: environment lifecycle,
 // browser preparation and runs, and confirmed stage removal.
 import type { BrowserRun } from './browser-test-ui.ts';
-import type { BrowserView, Environment, StageRemoval } from './test-workspace.ts';
+import type { BrowserPreparation, Environment, StageRemoval } from './test-workspace.ts';
 
 /** The controller records stage motion reads: a workspace snapshot, or the part of it a view holds. */
 export interface ActivitySnapshot {
   environments?: Pick<Environment, 'stageId' | 'status'>[]; stageRemovals?: Pick<StageRemoval, 'stageId' | 'status'>[];
-  browserTests?: Record<string, Partial<Pick<BrowserView, 'cases' | 'runs' | 'preparation'>> | undefined>;
+  browserTests?: Record<string, { runs?: Pick<BrowserRun, 'mode' | 'status'>[]; preparation?: Pick<BrowserPreparation, 'status'> | null } | undefined>;
 }
 export type StageActivity = 'removing' | 'provisioning' | 'testing' | 'discovering';
 

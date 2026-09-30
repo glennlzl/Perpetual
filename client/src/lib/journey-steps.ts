@@ -1,8 +1,8 @@
 import type { JourneyStep, StepCheck } from './browser-test-ui.ts';
 
 // Business milestones are edited as rows. IDs stay stable so results keep matching their milestone.
-export const STEP_CHECKS = ['text-visible', 'text-absent', 'url-contains', 'read-number', 'compare-number'];
-export const COMPARE_OPS = ['<', '>', '=', '!='];
+export const STEP_CHECKS = ['text-visible', 'text-absent', 'url-contains', 'read-number', 'compare-number'] as const;
+export const COMPARE_OPS = ['<', '>', '=', '!='] as const;
 const NAME = /^[a-z][A-Za-z0-9]{0,39}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 let rows = 0;
@@ -12,7 +12,7 @@ const key = () => `row-${++rows}`;
 export interface CheckRow { key: string; type: string; value: string; label: string; name: string; op: string; than: string }
 /** A milestone as its row edits it; id is empty until the milestone is saved. */
 export interface StepRow { key: string; id: string; title: string; checks: CheckRow[] }
-export const checkRow = (check: Partial<StepCheck> = {}): CheckRow => ({ key: key(), type: STEP_CHECKS.find(type => type === check.type) ?? 'text-visible', value: check.value ?? '', label: check.label ?? '', name: check.name ?? '', op: check.op ?? '<', than: check.than ?? '' });
+export const checkRow = (check: Partial<Omit<CheckRow, 'key'>> = {}): CheckRow => ({ key: key(), type: STEP_CHECKS.find(type => type === check.type) ?? 'text-visible', value: check.value ?? '', label: check.label ?? '', name: check.name ?? '', op: check.op ?? '<', than: check.than ?? '' });
 export const stepRow = (step: Partial<JourneyStep> = {}): StepRow => ({ key: key(), id: step.id || '', title: step.title || '', checks: (step.checks || []).map(checkRow) });
 
 // Title matches win, then a row's own ID; new lines mint IDs never used by this case.
@@ -41,11 +41,12 @@ export function earlierCaptures(values: Pick<StepRow, 'checks'>[], stepIndex: nu
 }
 
 function stepCheck(check: CheckRow): StepCheck | null {
-  if (['text-visible', 'text-absent', 'url-contains'].includes(check.type)) return check.value.trim() && check.value.trim().length <= 4000 ? { type: check.type, value: check.value.trim() } : null;
+  if (check.type === 'text-visible' || check.type === 'text-absent' || check.type === 'url-contains') return check.value.trim() && check.value.trim().length <= 4000 ? { type: check.type, value: check.value.trim() } : null;
   const label = check.label.trim(), name = check.name.trim();
   if (!label || label.length > 120 || !name) return null;
   if (check.type === 'read-number') return { type: check.type, label, name };
-  return COMPARE_OPS.includes(check.op) && check.than.trim() ? { type: check.type, label, name, op: check.op, than: check.than.trim() } : null;
+  const op = COMPARE_OPS.find(value => value === check.op);
+  return check.type === 'compare-number' && op && check.than.trim() ? { type: check.type, label, name, op, than: check.than.trim() } : null;
 }
 
 export function buildJourneySteps(values: StepRow[], original: Pick<JourneyStep, 'id' | 'title'>[] = []): { steps: JourneyStep[]; error: string } {
@@ -61,7 +62,7 @@ export function buildJourneySteps(values: StepRow[], original: Pick<JourneyStep,
     for (const value of row.checks) {
       const check = stepCheck(value);
       if (!check) return { steps: [], error: 'Complete each step check.' };
-      if (check.name !== undefined && !NAME.test(check.name)) return { steps: [], error: 'Use a check name such as creditsBefore.' };
+      if ('name' in check && !NAME.test(check.name)) return { steps: [], error: 'Use a check name such as creditsBefore.' };
       if (check.type === 'compare-number' && !captures.has(check.than ?? '')) return { steps: [], error: 'Compare with a number read earlier.' };
       if (check.type === 'read-number') captures.add(check.name ?? '');
       checks.push(check);

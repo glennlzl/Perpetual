@@ -9,16 +9,18 @@ import { Separator } from '@/components/ui/separator';
 import { api, replyError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
-import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase, type BrowserRun, type CaseResult, type RunProgress } from '@/lib/browser-test-ui';
+import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
 
 // A finished run's frame is its last one, never a paused stream, so it says when the run ended.
 const endedLabel = (at: string | undefined) => { const time = at ? new Date(at) : null; return time && !Number.isNaN(time.getTime()) ? `Ended ${time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Ended'; };
 
 /** GET /api/browser/runs/:id: the run with its full progress and results. */
-export type RunSnapshot = { run: BrowserRun; results: CaseResult[]; progress: RunProgress; discovery?: { summary?: string } };
+import type { RunProgressReply as RunSnapshot } from '../../contract/browser.ts';
+export type { RunProgressReply as RunSnapshot } from '../../contract/browser.ts';
 // A journey as the activity list shows it: live progress, or a result once progress is gone. Older runs reported
 // their actions as steps.
-type ViewerCase = { id?: string; caseId?: string; name?: string; status: string; error?: string; actions?: BrowserAction[]; steps?: BrowserAction[] };
+type ViewerAction = Pick<BrowserAction, 'status'> & Partial<Omit<BrowserAction, 'status'>>;
+type ViewerCase = { id?: string; caseId?: string; name?: string; status: string; error?: string; actions?: ViewerAction[]; steps?: ViewerAction[] };
 type BrowserAgentViewerProps = {
   repoPath: string; stageId: string; runId?: string | null; mode?: 'run' | 'discover'; cases?: BrowserCase[]; focusCaseId?: string; startingError?: string;
   focusFallback?: Parameters<typeof useReturnFocus>[0]; onClose: () => void; onFinished?: (snapshot: RunSnapshot) => void; onTestSettings?: () => void;
@@ -117,7 +119,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   };
   const orderedCases = finished ? [...displayedCases].sort((a, b) => casePriority(a) - casePriority(b)) : displayedCases;
   const current = displayedCases.find(item => item.status === 'running');
-  const actions: BrowserAction[] = current?.actions || current?.steps || [];
+  const actions: ViewerAction[] = current?.actions || current?.steps || [];
   useEffect(() => { currentAction.current?.scrollIntoView({ block: 'nearest' }); }, [current?.caseId, actions.length, actions.at(-1)?.status]);
 
   async function stop() {

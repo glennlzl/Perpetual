@@ -5,7 +5,10 @@ import {CHECK_VERSION} from '../journeys/playwright/checks.ts';
 import type {BrowserCase} from '../business/browser-cases.ts';
 import type {JourneyResult} from './results.ts';
 
-type VerificationState={status:'passed'|'failed'|'cancelled';passes:number;control:'missed'|'caught'|null;error?:string};
+import type { Verification, SpecVerification, SpecSummary, SpecCodeReply } from '../../contract/browser.ts';
+export type { Verification, SpecSummary } from '../../contract/browser.ts';
+
+type VerificationState=Omit<SpecVerification,'status'>&{status:Exclude<SpecVerification['status'],'running'>};
 type StoredVerification=VerificationState&{id:string;checkVersion:number;runIds:string[]};
 type StoredSpec={code:string;hash:string;caseHash:string;savedAt:string;provenance?:unknown;verification?:StoredVerification};
 type ApprovedSpec=StoredSpec&{approvedAt:string;approvedRunIds:string[];checkVersion?:number};
@@ -15,18 +18,10 @@ export type GenerationFailure={caseHash:string;error:string;rejected?:string};
 /** Durable journey code belongs to the browser manager's state file, never a second store. */
 export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>};
 export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number};
-/** Older attempts predate check versions; their checks were version 1. */
-export type Verification={id:string;hash:string;caseHash:string;checkVersion?:number;attempt:number;control:boolean};
 type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
 type LiveVerification=VerificationIdentity&{caseId:string;done:boolean;error?:string};
 type LiveGeneration={status:'running'|'failed';step?:string;error?:string;rejected?:string;discarded?:true};
 export type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
-type SpecVerification=Omit<VerificationState,'status'>&{status:VerificationState['status']|'running'};
-export type SpecSummary={
-  approved?:{hash:string;stale:boolean;approvedAt:string;provenance?:unknown};
-  draft?:{hash:string;stale:boolean;provenance?:unknown;verification?:SpecVerification};
-  generation?:Pick<LiveGeneration,'status'|'step'|'error'|'rejected'>;
-};
 /** Read at the call/commit, including current execution facts; the code owner never retains a worker or lease. */
 export type JourneyCodeSnapshot={cases:readonly BrowserCase[];code:JourneyCodeState;runs:readonly VerificationRun[];verifications:readonly LiveVerification[];generations:ReadonlyMap<string,LiveGeneration>};
 type Persistence={
@@ -137,7 +132,7 @@ export function createJourneyCode(storage:Persistence){
         }];
       }));
     },
-    code(scope:string,caseId:unknown){
+    code(scope:string,caseId:unknown):SpecCodeReply{
       const current=storage.read(scope),item=caseOf(current,caseId),{approved,draft}=current.code.specs[item.id]||{};
       return {...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
     },

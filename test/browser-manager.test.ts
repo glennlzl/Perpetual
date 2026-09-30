@@ -1,7 +1,7 @@
 import test from 'node:test';
 import type {TestContext} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,mkdir,writeFile,access,symlink,readdir} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,writeFile,readFile,access,symlink,readdir} from 'node:fs/promises';
 import {writeFileSync} from 'node:fs';
 import {randomBytes,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
@@ -161,4 +161,41 @@ test('an invalid recording report is ignored and never fails its journey',async 
   const report=await completed(f,run.id);
   assert.equal(report.run.status,'passed');
   assert.equal(report.progress.cases[0].videos,undefined);
+});
+
+
+test('public browser projections keep full evidence, graph summaries and code review distinct',async t=>{
+  const f=await fixture(t,[{type:'case',caseId:scenario.id,actions:[{type:'click',status:'passed'}]},...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const {run}=await f.manager.run(f.context,{},manual),report=await completed(f,run.id);
+  const view=await f.manager.view(f.context),summary=f.manager.summary(f.context),listed=summary.runs[0];
+  for(const value of [report.run,view.runs[0],listed]){
+    for(const privateField of ['scope','approvedCases','environmentUseUncertain','credentials'])assert.equal(Object.hasOwn(value,privateField),false,privateField);
+    assert.deepEqual(Object.keys(value.caseSummaries[0]).sort(),['assertions','expectedOutcomes','goal','id','isolation','name','preconditions','steps']);
+  }
+  assert.deepEqual(report.progress.cases[0].actions,[{type:'click',status:'passed'}]);
+  assert.ok(listed.progress);assert.equal(Object.hasOwn(listed.progress.cases[0],'actions'),false);
+  assert.equal(Object.hasOwn(listed,'specHashes'),false);assert.equal(Object.hasOwn(listed,'discovery'),false);
+  assert.ok(report.run.specHashes?.[scenario.id]);
+  assert.equal(Object.hasOwn(view.specs[scenario.id].draft!,'code'),false);
+  const code=await f.manager.specCode(f.context,{caseId:scenario.id});
+  assert.deepEqual(Object.keys(code.draft!).sort(),['code','hash']);assert.match(code.draft!.code,/journey.milestone/);
+  assert.equal(typeof view.capabilities.playwright.browserInstalled,'boolean');
+  assert.equal(Object.hasOwn(view.capabilities,'apiKey'),false);
+});
+
+test('public history preserves missing progress, old revision and immutable legacy definitions',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const {run}=await f.manager.run(f.context,{},manual);await completed(f,run.id);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),old=state.runs[0];
+  old.engine='browser-use';delete old.progress.revision;delete old.progress.cases[0].actionCount;old.progress.cases[0].steps[0].provenance='agent';
+  for(const field of ['goal','preconditions','expectedOutcomes','assertions','steps','isolation'])delete old.approvedCases[0][field];
+  const absent=structuredClone(old);absent.id=randomUUID();absent.status='legacy-completed';delete absent.progress;state.runs.unshift(absent);
+  await writeFile(file,JSON.stringify(state));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  const historical=await manager.runProgress(f.context,run.id),missing=await manager.runProgress(f.context,absent.id);
+  assert.equal(historical.run.engine,'browser-use');assert.equal(historical.progress.revision,undefined);assert.equal(historical.progress.cases[0].steps?.[0].provenance,'agent');
+  assert.equal(historical.run.caseSummaries[0].goal,undefined);assert.deepEqual(historical.run.caseSummaries[0].steps,[]);assert.equal(historical.run.caseSummaries[0].isolation,'shared');
+  assert.equal(missing.run.status,'legacy-completed');assert.equal(Object.hasOwn(missing.run,'progress'),false);assert.deepEqual(missing.progress,{cases:[]});
+  assert.equal((await manager.view(f.context)).cases[0].goal,scenario.goal,'Editable cases normalize independently of historical approvals.');
+  assert.equal(manager.summary(f.context).runs[0].progress,undefined);
 });

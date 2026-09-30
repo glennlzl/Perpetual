@@ -1,6 +1,7 @@
 /** A journey to schedule: only reviewed independent (isolated) test data may overlap another journey. */
 export type SchedulableCase={id:string;isolation?:string};
-export type ConcurrencyLimit='account'|'shared-data'|null;
+import type { ConcurrencyLimit } from '../../contract/browser.ts';
+export type { ConcurrencyLimit } from '../../contract/browser.ts';
 /** A launched journey: its promise settles only after its browser cleanup. */
 export type ScheduledJob<R>={promise:R|PromiseLike<R>;cancel():void};
 /** A journey's place in the run: queued, running, skipping or cancelling, else settled with its result's status. */

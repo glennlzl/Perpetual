@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { verificationAttempt, watchedRun, browserActionError, browserActionFailure, browserActionLabel, browserBlockers, browserCaseState, browserConcurrencyLabel, browserFrameLabel, browserInstallCommand, browserJourneySteps, browserReadiness, browserRunLabel, browserUnavailable, checkedOutcome, generateRequestDialog, inspectorTab, JOURNEY_GENERATE_REQUEST, journeyActions, journeyCheckState, journeyCode, journeyElapsed, journeyErrorTone, journeyLastAction, journeyOpenByDefault, journeyQueueLabel, journeyRecordings, journeyRequest, journeyRevision, journeyRunRequest, journeySegments, journeySummary, orderJourneys, browserCaseRun, codeLines, runnableCode, runReady, stageJourneyGroups, testToolbar } from '../client/src/lib/browser-test-ui.ts';
-import type { BrowserCase, BrowserRun, CaseProgress, CodeVerification, JourneySpec, JourneyStep } from '../client/src/lib/browser-test-ui.ts';
+import type { BrowserCase, BrowserRun, CodeVerification, JourneySpec, JourneyStep } from '../client/src/lib/browser-test-ui.ts';
 
-const journey = { id:'happy', name:'Create and run a workflow', goal:'Execute the workflow and verify credit usage', preconditions:['Test account'], expectedOutcomes:['Result delivered and credits debited'], assertions:[{type:'text-visible',value:'Workflow complete'}], steps:[{id:'login',title:'Sign in'},{id:'execute',title:'Execute workflow'}], isolation:'shared', needsReview:false } satisfies BrowserCase;
-const run = (status: string, cases: CaseProgress[], extra: Partial<BrowserRun> = {}): BrowserRun => ({id:'run',mode:'run',status,createdAt:'2026-09-23T00:00:00Z',caseIds:['happy','payment'],caseSummaries:[journey],progress:{cases},...extra});
+import { browserRunFixture, journeyResultFixture } from './fixtures/browser-view.ts';
+import type { ProgressFixture } from './fixtures/browser-view.ts';
+
+const journey = { id:'happy', name:'Create and run a workflow', goal:'Execute the workflow and verify credit usage', preconditions:['Test account'], expectedOutcomes:['Result delivered and credits debited'], assertions:[{type:'text-visible',value:'Workflow complete'}], steps:[{id:'login',title:'Sign in'},{id:'execute',title:'Execute workflow'}], isolation:'shared', needsReview:false, selected:false, evidence:[] } satisfies BrowserCase;
+const run = (status: BrowserRun['status'], cases: ProgressFixture[], extra: Parameters<typeof browserRunFixture>[0] = {}) => browserRunFixture({id:'run',mode:'run',status,createdAt:'2026-09-23T00:00:00Z',caseIds:['happy','payment'],caseSummaries:[journey],progress:{cases},...extra});
 
 test('a queued journey stays queued while another journey is running', () => {
   assert.equal(browserCaseState(journey,[run('running',[{id:'happy',status:'queued'},{id:'payment',status:'running'}])]).status,'queued');
@@ -135,9 +138,9 @@ test('queue reasons and the latest action come from real progress', () => {
 });
 test('finished runs list failures first, then blocked and review', () => {
   const summaries = ['a','b','c','d'].map(id => ({...journey,id,name:id}));
-  const finished: BrowserRun = {...run('failed',[]),caseIds:['a','b','c','d'],caseSummaries:summaries,results:[{caseId:'a',status:'passed'},{caseId:'b',status:'needs_review'},{caseId:'c',status:'blocked'},{caseId:'d',status:'failed'}]};
+  const finished: BrowserRun = {...run('failed',[]),caseIds:['a','b','c','d'],caseSummaries:summaries,results:[journeyResultFixture({caseId:'a',status:'passed'}),journeyResultFixture({caseId:'b',status:'needs_review'}),journeyResultFixture({caseId:'c',status:'blocked'}),journeyResultFixture({caseId:'d',status:'failed'})]};
   assert.deepEqual(orderJourneys(summaries,finished).map(entry => entry.item.id),['d','c','b','a']);
-  const active = {...finished,status:'running'};
+  const active = {...finished,status:'running' as const};
   assert.deepEqual(orderJourneys(summaries,active).map(entry => entry.item.id),['a','b','c','d']);
 });
 test('forced serial execution is shown with its reason', () => {
@@ -182,7 +185,7 @@ test('a journey frame revision changes only with that journey\'s own events', ()
   assert.equal(first,journeyRevision({actionCount:3,steps:[{id:'login',status:'completed'},{id:'execute',status:'running'}],frameUpdatedAt:'later'}));
   assert.notEqual(first,journeyRevision({actionCount:4,steps:[{id:'login',status:'completed'},{id:'execute',status:'running'}]}));
   assert.notEqual(first,journeyRevision({actionCount:3,steps:[{id:'login',status:'completed'},{id:'execute',status:'completed'}]}));
-  assert.equal(journeyRevision({actions:[{},{}]}),'2:');
+  assert.equal(journeyRevision({actions:[{type:'click',status:'passed'},{type:'click',status:'passed'}]}),'2:');
   assert.equal(journeyRevision(undefined),undefined);
 });
 test('browser capabilities list every missing prerequisite, and unknown is not unavailable', () => {
@@ -214,17 +217,17 @@ test('a graph Generate request opens Generate only when the toolbar would allow 
   assert.equal(generateRequestDialog({validTarget:true,disabled:true}),null);
 });
 test('an unreached final check is neither passed nor failed', () => {
-  const unreached = {type:'text-visible',value:'Payment complete',passed:false,reached:false};
+  const unreached = {passed:false,reached:false as const};
   assert.deepEqual(journeyCheckState(unreached),{label:'Not reached',variant:'outline'});
   assert.deepEqual(journeyCheckState({...unreached,passed:true}),{label:'Not reached',variant:'outline'});
-  assert.deepEqual(journeyCheckState({type:'text-visible',value:'Payment complete',passed:false}),{label:'Failed',variant:'destructive'});
-  assert.deepEqual(journeyCheckState({type:'text-visible',value:'Payment complete',passed:true}),{label:'Passed',variant:'outline'});
-  assert.deepEqual(journeyCheckState({type:'text-visible',value:'Payment complete'}),{label:'Not checked',variant:'outline'});
+  assert.deepEqual(journeyCheckState({passed:false}),{label:'Failed',variant:'destructive'});
+  assert.deepEqual(journeyCheckState({passed:true}),{label:'Passed',variant:'outline'});
+  assert.deepEqual(journeyCheckState({}),{label:'Not checked',variant:'outline'});
 });
 test('finished journeys rank by the controller status alone, never by re-reading their checks', () => {
-  const unreached = [{type:'text-visible',value:'Payment complete',passed:false,reached:false}];
+  const unreached = [{type:'text-visible' as const,value:'Payment complete',passed:false,reached:false as const}];
   const summaries = ['timeout','blocked','failed'].map(id => ({...journey,id,name:id}));
-  const finished = {...run('failed',[]),caseIds:summaries.map(item => item.id),caseSummaries:summaries,results:[
+  const finished: BrowserRun = {...run('failed',[]),caseIds:summaries.map(item => item.id),caseSummaries:summaries,results:[
     {caseId:'timeout',status:'needs_review',assertions:unreached},
     {caseId:'blocked',status:'blocked',assertions:unreached,blockers:[{kind:'integration',evidence:'Stripe keys missing'}]},
     {caseId:'failed',status:'failed',assertions:[{type:'text-visible',value:'Payment complete',passed:false}]},
@@ -287,9 +290,9 @@ test('a graph case request selects the tests tab in the same render and waits fo
 });
 test('the runtime and Chromium show their install command; a configured runtime has none', () => {
   assert.equal(browserInstallCommand(null), '');
-  assert.equal(browserInstallCommand({runtimeInstalled:true,browserInstalled:true,modelConfigured:false}), '');
-  assert.equal(browserInstallCommand({runtimeInstalled:true,browserInstalled:false,modelConfigured:false}), 'uv run --project integrations/browser-use python -m playwright install chromium');
-  assert.equal(browserInstallCommand({runtimeInstalled:false,browserInstalled:false,modelConfigured:true}), 'uv sync --project integrations/browser-use --frozen\nuv run --project integrations/browser-use python -m playwright install chromium');
+  assert.equal(browserInstallCommand({runtimeInstalled:true,browserInstalled:true}), '');
+  assert.equal(browserInstallCommand({runtimeInstalled:true,browserInstalled:false}), 'uv run --project integrations/browser-use python -m playwright install chromium');
+  assert.equal(browserInstallCommand({runtimeInstalled:false,browserInstalled:false}), 'uv sync --project integrations/browser-use --frozen\nuv run --project integrations/browser-use python -m playwright install chromium');
   assert.equal(browserInstallCommand({runtimeInstalled:false,runtimeProject:'/opt/perpetual/integrations/browser-use'}).split('\n')[0], 'uv sync --project /opt/perpetual/integrations/browser-use --frozen');
   assert.match(browserInstallCommand({runtimeInstalled:false,runtimeProject:'/tmp/x; rm -rf ~'}), /^uv sync --project integrations\/browser-use /, 'An unsafe path never reaches a copyable command');
 });
@@ -355,7 +358,7 @@ test('cancelling a live run asks first with Keep running as the default', async 
   assert.match(viewer, /<DialogClose asChild><Button[^>]*aria-label="Close viewer"><X \/><\/Button><\/DialogClose>/);
 });
 test('watching a verification live follows its next attempt once the shown one ends, and marks its control run', async () => {
-  const attempt = (id: string, status: string, number: number, verification = 'v1') => run(status, [], { id, verification: { id: verification, attempt: number, control: number === 4 } });
+  const attempt = (id: string, status: BrowserRun['status'], number: number, verification = 'v1') => run(status, [], { id, verification: { id: verification, attempt: number, control: number === 4 } });
   // The viewer opened on these attempts while they ran, as Watch live does.
   const live = (id: string) => watchedRun(attempt(id, 'running', 1)), ended = attempt('a1', 'passed', 1);
   assert.equal(verificationAttempt(live('a1'), [attempt('a2', 'running', 2), ended])?.id, 'a2');
@@ -371,7 +374,7 @@ test('watching a verification live follows its next attempt once the shown one e
   assert.match(viewer, /\{run\?\.verification\?\.control && <Badge variant="outline">Control<\/Badge>\}/, 'The viewer marks a control run as the Runs list does.');
 });
 test('an attempt a person opened after it ended stays open while its verification runs', async () => {
-  const attempt = (id: string, status: string, number: number) => run(status, [], { id, verification: { id: 'v1', attempt: number, control: false } });
+  const attempt = (id: string, status: BrowserRun['status'], number: number) => run(status, [], { id, verification: { id: 'v1', attempt: number, control: false } });
   const runs = [attempt('a2', 'running', 2), attempt('a1', 'passed', 1)];
   assert.equal(verificationAttempt(watchedRun(runs[1]), runs), null, 'Attempt 1 opened from the Runs list stays open.');
   assert.equal(verificationAttempt({ id: 'a1' }, runs), null, 'A run opened before its status is known is not followed.');
@@ -389,10 +392,10 @@ test('a finished run’s frame says when the run ended, never that it is live or
   assert.match(viewer, /`Ended \$\{time\.toLocaleTimeString\(\[\], \{ hour: 'numeric', minute: '2-digit' \}\)\}` : 'Ended'/);
 });
 test('a failed browser action names its failure in text', () => {
-  assert.equal(browserActionFailure({type:'click',status:'failed',errorCode:'navigation_not_allowed'}),'Navigation blocked');
-  assert.equal(browserActionFailure({type:'click',status:'failed',errorCode:'unknown_code'}),'Failed');
-  assert.equal(browserActionFailure({type:'click',status:'failed'}),'Failed');
-  assert.equal(browserActionFailure({type:'click',status:'passed',errorCode:'navigation_not_allowed'}),'');
+  assert.equal(browserActionFailure({status:'failed',errorCode:'navigation_not_allowed'}),'Navigation blocked');
+  assert.equal(browserActionFailure({status:'failed',errorCode:'unknown_code'}),'Failed');
+  assert.equal(browserActionFailure({status:'failed'}),'Failed');
+  assert.equal(browserActionFailure({status:'passed',errorCode:'navigation_not_allowed'}),'');
   assert.equal(browserActionFailure(undefined),'');
 });
 test('journey status text is at least 12px and unreached final checks never read as failures', async () => {
@@ -413,11 +416,11 @@ test('the exploration view shows the agent summary of a finished discovery besid
 });
 
 test('a run is offered when every chosen journey has current code and Playwright has its browser, and its evidence is never an agent claim', () => {
-  const other = { ...journey, id: 'other' }, current = { hash: 'a'.repeat(64), stale: false };
+  const other = { ...journey, id: 'other' }, current = { hash: 'a'.repeat(64), stale: false, approvedAt: '2026-01-01T00:00:00Z' };
   assert.equal(runnableCode([journey, other], { happy: { approved: current }, other: { approved: current } }), true);
   assert.equal(runnableCode([journey, other], { happy: { approved: current }, other: { draft: current } }), true, 'A person may run a current draft.');
   assert.equal(runnableCode([journey], { happy: { approved: { ...current, stale: true }, draft: current } }), true, 'A current draft stands in for stale approved code.');
-  for (const specs of [undefined, {}, { happy: { approved: current } }, { happy: { approved: current }, other: { approved: { ...current, stale: true } } }, { happy: { approved: current }, other: { generation: { status: 'running' } } }]) assert.equal(runnableCode([journey, other], specs), false, JSON.stringify(specs));
+  for (const specs of [undefined, {}, { happy: { approved: current } }, { happy: { approved: current }, other: { approved: { ...current, stale: true } } }, { happy: { approved: current }, other: { generation: { status: 'running' as const } } }]) assert.equal(runnableCode([journey, other], specs), false, JSON.stringify(specs));
   assert.equal(runnableCode([], { happy: { approved: current } }), false);
   // No model or agent runtime is needed to run; Playwright's browser is.
   const noAgent = { runtimeInstalled: false, modelConfigured: false, playwright: { browserInstalled: true } };
@@ -438,8 +441,8 @@ test('a run is offered when every chosen journey has current code and Playwright
 test('journey code shows its approved code and the draft beside it, which is approvable only after a passed verification', () => {
   const hash = 'a'.repeat(64), draft = (verification?: CodeVerification): JourneySpec => ({ draft: { hash, stale: false, ...(verification ? { verification } : {}) } });
   assert.deepEqual(journeyCode(undefined), { approved: '', draft: '', hash: '', verificationError: '', generating: false, error: '', exists: false, verifying: false, verifiable: false, approvable: false, reusable: false });
-  assert.deepEqual([journeyCode({ approved: { hash, stale: false } }).approved, journeyCode({ approved: { hash, stale: true } }).approved], ['Approved', 'Stale']);
-  assert.deepEqual([journeyCode({ approved: { hash, stale: false } }).reusable, journeyCode({ approved: { hash, stale: true } }).reusable, journeyCode({ approved: { hash, stale: true }, draft: { hash, stale: false } }).reusable, journeyCode({ approved: { hash, stale: true }, draft: { hash, stale: true } }).reusable], [false, true, false, true], 'Stale approved code is reusable while no current draft exists.');
+  assert.deepEqual([journeyCode({ approved: { hash, stale: false, approvedAt: '2026-01-01T00:00:00Z' } }).approved, journeyCode({ approved: { hash, stale: true, approvedAt: '2026-01-01T00:00:00Z' } }).approved], ['Approved', 'Stale']);
+  assert.deepEqual([journeyCode({ approved: { hash, stale: false, approvedAt: '2026-01-01T00:00:00Z' } }).reusable, journeyCode({ approved: { hash, stale: true, approvedAt: '2026-01-01T00:00:00Z' } }).reusable, journeyCode({ approved: { hash, stale: true, approvedAt: '2026-01-01T00:00:00Z' }, draft: { hash, stale: false } }).reusable, journeyCode({ approved: { hash, stale: true, approvedAt: '2026-01-01T00:00:00Z' }, draft: { hash, stale: true } }).reusable], [false, true, false, true], 'Stale approved code is reusable while no current draft exists.');
   const states: [CodeVerification | undefined, string, boolean, boolean][] = [
     [undefined, 'Draft', true, false], [{ status: 'running', passes: 2, control: null }, 'Verifying 2/3', false, false],
     [{ status: 'passed', passes: 3, control: 'caught' }, 'Verified', false, true], [{ status: 'failed', passes: 3, control: 'missed', error: 'The journey passed with every change blocked. Strengthen its checks.' }, 'Verification failed', true, false],
@@ -463,9 +466,9 @@ test('the graph runs a journey once Playwright can run its code, and only Regene
   assert.match(list, /const unavailable = busy \|\| Boolean\(browserUnavailable\(capabilities\)\);/);
   assert.match(list, /disabled=\{unavailable\} onClick=\{\(\) => open\(\{ caseId: JOURNEY_GENERATE_REQUEST \}\)\}/);
   // A runs-only setup runs approved code without the agent or a key, which only Generate lacks; without Playwright's browser nothing runs.
-  const approved = { happy: { approved: { hash: 'a'.repeat(64), stale: false } } }, runsOnly = { runtimeInstalled: false, modelConfigured: false, playwright: { browserInstalled: true } };
+  const approved = { happy: { approved: { hash: 'a'.repeat(64), stale: false, approvedAt: '2026-01-01T00:00:00Z' } } }, runsOnly = { runtimeInstalled: false, modelConfigured: false, playwright: { browserInstalled: true } };
   assert.deepEqual([runReady(runsOnly, [journey], approved), browserUnavailable(runsOnly)], [true, 'Install the browser runtime\nAdd an OpenRouter API Key']);
-  assert.deepEqual([runReady({ runtimeInstalled: true, modelConfigured: true, playwright: { browserInstalled: false } }, [journey], approved), browserUnavailable({ runtimeInstalled: true, modelConfigured: true })], [false, '']);
+  assert.deepEqual([runReady({ playwright: { browserInstalled: false } }, [journey], approved), browserUnavailable({ runtimeInstalled: true, modelConfigured: true })], [false, '']);
 });
 
 test('a verifying journey keeps its actions open to Stop verifying while an attempt runs, and every other action waits', async () => {
@@ -491,8 +494,8 @@ test('a person approves the draft as code, or as its line diff against the appro
 });
 
 test('a control run never counts as a journey\'s status, except in its own run view', () => {
-  const passed = run('passed', [{ id: 'happy', status: 'passed' }], { id: 'attempt', createdAt: '2026-09-23T00:00:00Z', results: [{ caseId: 'happy', status: 'passed' }], verification: { attempt: 3, control: false } });
-  const control = run('needs_review', [{ id: 'happy', status: 'needs_review' }], { id: 'control', createdAt: '2026-09-23T00:01:00Z', results: [{ caseId: 'happy', status: 'needs_review' }], verification: { attempt: 4, control: true } });
+  const passed = run('passed', [{ id: 'happy', status: 'passed' }], { id: 'attempt', createdAt: '2026-09-23T00:00:00Z', results: [{ caseId: 'happy', status: 'passed' }], verification: { id: 'verification', attempt: 3, control: false } });
+  const control = run('needs_review', [{ id: 'happy', status: 'needs_review' }], { id: 'control', createdAt: '2026-09-23T00:01:00Z', results: [{ caseId: 'happy', status: 'needs_review' }], verification: { id: 'verification', attempt: 4, control: true } });
   assert.equal(browserCaseRun(journey, [passed, control])!.id, 'attempt');
   assert.equal(browserCaseState(journey, [passed, control]).status, 'passed');
   assert.equal(browserCaseRun(journey, [control]), null);

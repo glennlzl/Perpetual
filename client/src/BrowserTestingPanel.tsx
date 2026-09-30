@@ -40,7 +40,7 @@ type AccountFields = AccountRequest | Record<string, never>;
 type Watching = Omit<Partial<BrowserRun>, 'id' | 'mode'> & { id?: string | null; mode: BrowserRun['mode']; focusCaseId?: string; error?: string; live?: boolean };
 type RunRequest = { caseIds: string[] | null; title: string };
 type CodeRequest = { action: 'generate' | 'verify'; caseId: string; hash?: string };
-type CodeReview = { draft?: { code: string; hash: string } | null; approved?: { code: string } | null };
+import type { SpecCodeReply as CodeReview } from '../../contract/browser.ts';
 const ACTIVE = new Set(['queued', 'running']);
 const CHECKS: Record<string, string> = { 'text-visible': 'Text visible', 'text-absent': 'Text absent', 'url-contains': 'URL contains' };
 const DEFINITION = ['name', 'goal', 'preconditions', 'expectedOutcomes', 'assertions', 'steps'] as const;
@@ -330,7 +330,7 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
             <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="w-full justify-between px-0 [&[data-state=open]>svg]:rotate-180">Final checks<ChevronDown /></Button></CollapsibleTrigger>
             <CollapsibleContent className="space-y-3 pt-2">
               {draft.assertions.map((check, index) => <div key={index} className="flex flex-wrap items-center gap-2">
-                <Select value={check.type} onValueChange={type => change('assertions', draft.assertions.map((entry, current) => current === index ? { ...entry, type } : entry))}><SelectTrigger aria-label={`Check ${index + 1} type`} className="w-36"><SelectValue /></SelectTrigger><SelectContent>{Object.entries(CHECKS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
+                <Select value={check.type} onValueChange={type => (type === 'text-visible' || type === 'text-absent' || type === 'url-contains') && change('assertions', draft.assertions.map((entry, current) => current === index ? { ...entry, type } : entry))}><SelectTrigger aria-label={`Check ${index + 1} type`} className="w-36"><SelectValue /></SelectTrigger><SelectContent>{Object.entries(CHECKS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
                 <Input aria-label={`Check ${index + 1} value`} value={check.value} className="min-w-32 flex-1" maxLength={2000} onChange={event => change('assertions', draft.assertions.map((entry, current) => current === index ? { ...entry, value: event.target.value } : entry))} />
                 <Button type="button" variant="ghost" size="icon" aria-label={`Remove check ${index + 1}`} onClick={() => change('assertions', draft.assertions.filter((_, current) => current !== index))}><Trash2 /></Button>
               </div>)}

@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestWorkspace, type StageRemoval } from '../client/src/lib/test-workspace.ts';
+import type { BrowserCase } from '../contract/browser.ts';
 import type { Controller } from '../client/src/lib/api.ts';
 import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
 
@@ -60,7 +61,7 @@ test('a late pipeline read from the previous branch cannot change the new source
   await reading;
   assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Gamma', 'Production']);
 });
-const scenario = { id: 'journey', name: 'Complete checkout', goal: 'Buy a product', expectedOutcomes: ['Order saved'], preconditions: [], assertions: [], needsReview: true, selected: false };
+const scenario: BrowserCase = { steps: [], isolation: 'shared', evidence: [], id: 'journey', name: 'Complete checkout', goal: 'Buy a product', expectedOutcomes: ['Order saved'], preconditions: [], assertions: [], needsReview: true, selected: false };
 const deferred = () => { let resolve = (_value: unknown) => {}; const promise = new Promise<unknown>(done => { resolve = done; }); return { promise, resolve }; };
 function fixture(t: TestContext, controller: Controller) {
   const workspace = createTestWorkspace({ controller, pollInterval: 0 });
