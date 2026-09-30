@@ -258,13 +258,14 @@ test('unsaved forms offer Cancel and Save; read-only surfaces offer Close', asyn
   assert.doesNotMatch(editor, />Close<\/Button>|Save test/);
   assert.doesNotMatch(panel, /Save changes/);
   const inspector = await readFile(new URL('../client/src/EnvironmentSettings.tsx', import.meta.url), 'utf8');
-  assert.match(inspector, /aria-label="Close" onClick=\{onClose\}/);
-  assert.doesNotMatch(inspector, /Close sandbox/);
+  const header = await readFile(new URL('../client/src/InspectorHeaders.tsx', import.meta.url), 'utf8');
+  assert.match(header, /aria-label="Close" onClick=\{onClose\}/);
+  assert.doesNotMatch(header, /Close sandbox/);
   // One clear close: the view-only inspector has no second "Close" in a footer.
   assert.doesNotMatch(inspector, />Close<\/Button>|SheetFooter/);
-  assert.match(inspector, /\(current \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{current\?\.status\} step=\{current\?\.step\} \/>/);
+  assert.match(header, /\(current \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{current\?\.status\} step=\{current\?\.step\} \/>/);
   // The header status reads like the stage card: outline + icon when absent or idle, secondary when ready or working, destructive when failed.
-  const status = inspector.slice(inspector.indexOf('export function environmentTone'), inspector.indexOf('export function safeLink'));
+  const status = header.slice(header.indexOf('export function environmentTone'));
   assert.match(status, /variant=\{tone === 'failed' \? 'destructive' : quiet \? 'outline' : 'secondary'\}/);
   assert.match(status, /const quiet = \['idle', 'unconfigured'\]\.includes\(tone\);/);
   assert.match(status, /<Icon aria-hidden="true"[^\n]*\/>\{stopped \? 'Stopped' : environmentStatusLabel\(status\)\}/);

@@ -1,0 +1,148 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { chromium, expect } from '@playwright/test';
+import { startServer } from '../src/server.ts';
+import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
+
+// Exercise the production bundle. HTTP data is neutral and no business action is submitted.
+test('unopened views load on demand without trapping navigation or losing drafts', { timeout: 60000 }, async t => {
+  const assets = await readdir(new URL('../public/build/assets/', import.meta.url));
+  const views = ['AppSettings', 'EnvironmentSettings', 'GitGraphPanel'];
+  const chunks = Object.fromEntries(views.map(view => {
+    const file = assets.find(name => name.startsWith(`${view}-`) && name.endsWith('.js'));
+    assert.ok(file, `${view} should have an independently loaded production chunk`);
+    return [view, `/build/assets/${file}`];
+  }));
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-deferred-ui-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'state') });
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => { await browser.close(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const repoPath = '/acme/app', sha = 'a'.repeat(40);
+  const pipeline = applyPipelineAction(defaultPipeline(repoPath), { action: 'add-stage', afterStageId: 'build', name: 'Beta' });
+  const stageId = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const view = { cases: [], runs: [], accounts: [], specs: {}, preparation: null, config: { targetUrl: '', scope: '', requirements: '', maxSteps: 60 },
+    capabilities: { modelConfigured: false, runtimeInstalled: true, browserInstalled: true, playwright: { browserInstalled: true } } };
+  const writes: string[] = [];
+  const pageErrors: string[] = [];
+  async function newPage(width = 1200) {
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    page.setDefaultTimeout(5000);
+    page.on('pageerror', error => pageErrors.push(error.message));
+    await page.route('**/api/**', async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (route.request().method() === 'POST') writes.push(path);
+      let result: unknown = {};
+      if (path === '/api/state') result = { defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [], production: [] } }, pipeline, environments: [], browserTests: { [stageId]: view }, providers: [] };
+      else if (path === '/api/session') result = { token: 'test-session' };
+      else if (path === '/api/gate') result = { repoPath, sha, stages: {}, production: null };
+      else if (path === '/api/environments') result = { environments: [], plan: {} };
+      else if (path === '/api/browser') result = view;
+      else if (path === '/api/twin/services') result = { services: [] };
+      else if (path === '/api/git-history') result = { commits: [], branch: 'main', repository: 'acme/app', source: 'local' };
+      else if (path === '/api/settings/model') result = { capabilities: { provider: 'openrouter', model: 'acme/model', escalationModel: 'acme/strong', keyConfigured: false, modelConfigured: false } };
+      else if (path === '/api/settings/models') result = { models: [{ id: 'acme/model', name: 'Acme: Model', provider: 'acme' }, { id: 'acme/strong', name: 'Acme: Strong', provider: 'acme' }], defaultModel: 'acme/model', defaultEscalationModel: 'acme/strong' };
+      await route.fulfill({ json: result });
+    });
+    return page;
+  }
+  await t.test('Pipeline requests none of the three views until opened', async t => {
+    const page = await newPage(); t.after(() => page.close());
+    const requested = new Set<string>(); page.on('request', request => requested.add(new URL(request.url()).pathname));
+    await page.goto(app.url);
+    await expect(page.getByRole('button', { name: 'Configure source', exact: true })).toBeVisible();
+    for (const chunk of Object.values(chunks)) assert.equal(requested.has(chunk), false, chunk);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'OpenRouter', exact: true })).toBeVisible();
+    assert.equal(requested.has(chunks.AppSettings), true);
+    assert.equal(requested.has(chunks.EnvironmentSettings), false);
+    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Git graph', exact: true }).click();
+    await expect(page.getByText('No commits found', { exact: true })).toBeVisible();
+    assert.equal(requested.has(chunks.GitGraphPanel), true);
+    await page.getByRole('button', { name: 'Close Git graph', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Git graph', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: 'Integration tests, 0', exact: true }).click();
+    await expect(page.getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
+    assert.equal(requested.has(chunks.EnvironmentSettings), true);
+  });
+  await t.test('a delayed inspector can close, restore focus and open when ready', async t => {
+    const page = await newPage(320); t.after(() => page.close());
+    const held = Promise.withResolvers<void>(); t.after(() => held.resolve());
+    await page.route(`**${chunks.EnvironmentSettings}`, async route => { await held.promise; await route.continue(); });
+    await page.goto(`${app.url}?watch=browser&stage=${stageId}`);
+    const sheet = page.getByRole('dialog', { name: 'Beta', exact: true });
+    await expect(sheet.getByRole('status')).toHaveText('Loading…');
+    await expect(sheet.getByRole('button', { name: 'Close', exact: true })).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Escape');
+    await expect(sheet).toBeHidden();
+    await page.getByRole('button', { name: 'Fit view', exact: true }).click();
+    const opener = page.getByRole('button', { name: 'Integration tests, 0', exact: true });
+    await opener.click();
+    await expect(sheet.getByRole('status')).toHaveText('Loading…');
+    await sheet.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(opener).toBeFocused();
+    const loaded = page.waitForResponse(response => new URL(response.url()).pathname === chunks.EnvironmentSettings);
+    held.resolve();
+    await loaded;
+    await expect(opener).toBeFocused();
+    await opener.press('Enter');
+    await expect(sheet.getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
+  });
+  await t.test('a focused Close button survives the view finishing its download', async t => {
+    const page = await newPage(); t.after(() => page.close());
+    const held = Promise.withResolvers<void>(); t.after(() => held.resolve());
+    await page.route(`**${chunks.GitGraphPanel}`, async route => { await held.promise; await route.continue(); });
+    await page.goto(app.url);
+    await page.getByRole('button', { name: 'Git graph', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
+    await expect(sheet.getByRole('status')).toHaveText('Loading…');
+    await page.keyboard.press('Tab');
+    const close = sheet.getByRole('button', { name: 'Close Git graph', exact: true });
+    await expect(close).toBeFocused();
+    held.resolve();
+    await expect(sheet.getByText('No commits found', { exact: true })).toBeVisible();
+    await expect(close).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(sheet).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Git graph', exact: true })).toBeFocused();
+  });
+  await t.test('a failed view stays local and navigating away preserves the Settings draft', async t => {
+    const page = await newPage(); t.after(() => page.close());
+    await page.route(`**${chunks.GitGraphPanel}`, route => route.abort('failed'));
+    await page.goto(app.url);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    const key = page.getByLabel('OpenRouter API Key', { exact: true });
+    await key.fill('unsaved-ui-draft');
+    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Git graph', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
+    await expect(sheet.getByRole('alert')).toHaveText('Could not load this view.');
+    await expect(sheet.getByRole('button', { name: 'Reload', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Git graph', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(key).toHaveValue('unsaved-ui-draft');
+    await page.getByRole('button', { name: 'Discard changes', exact: true }).click();
+  });
+  await t.test('failed Settings keeps navigation usable and explicit Reload recovers', async t => {
+    const page = await newPage(320); t.after(() => page.close());
+    let failed = true;
+    await page.route(`**${chunks.AppSettings}`, route => failed ? route.abort('failed') : route.continue());
+    await page.goto(`${app.url}#settings`);
+    await expect(page.getByRole('alert')).toHaveText('Could not load this view.');
+    // The mobile sidebar remains reachable outside the failed route.
+    await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
+    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Configure source', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    failed = false;
+    await Promise.all([page.waitForEvent('load'), page.getByRole('button', { name: 'Reload', exact: true }).click()]);
+    await expect(page.getByRole('heading', { name: 'OpenRouter', exact: true })).toBeVisible();
+  });
+  assert.deepEqual(writes, [], 'Loading views never submits settings, source, discovery or run actions.');
+  assert.deepEqual(pageErrors, [], 'Chunk failures stay inside their local error boundary.');
+});

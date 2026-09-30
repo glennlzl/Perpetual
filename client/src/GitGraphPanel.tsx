@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { GitGraph, RefreshCw, X } from 'lucide-react';
+import { GitGraph, RefreshCw } from 'lucide-react';
 import { CommitGraph, type Commit } from '@/components/commit-graph';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { SheetFooter, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { SheetFooter } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
+import { GitGraphHeader } from './InspectorHeaders';
 import type { Scan } from './App';
 import './branch-map.css';
 
@@ -29,7 +30,7 @@ function HistoryLoading() {
   </div>;
 }
 
-export default function GitGraphPanel({ scan, onClose }: { scan: Scan | null; onClose: () => void }) {
+export default function GitGraphPanel({ scan, onClose, showHeader = true }: { scan: Scan | null; onClose: () => void; showHeader?: boolean }) {
   const [scope, setScope] = useState('current');
   const [limit, setLimit] = useState(100);
   const [revision, setRevision] = useState(0);
@@ -68,11 +69,7 @@ export default function GitGraphPanel({ scan, onClose }: { scan: Scan | null; on
   }, [loading]);
 
   return <>
-    <SheetHeader className="flex-row items-center gap-3 border-b">
-      <GitGraph className="size-6 shrink-0" />
-      <SheetTitle className="min-w-0 flex-1 truncate text-xl">Git graph</SheetTitle>
-      <Button variant="ghost" size="icon" aria-label="Close Git graph" onClick={onClose}><X /></Button>
-    </SheetHeader>
+    {showHeader && <GitGraphHeader onClose={onClose} />}
     {/* One row down to 375px; a long repository name wraps inside its badge, after the slash first. */}
     <div className="git-graph-toolbar flex items-center gap-2 px-4">
       <Badge variant="outline" className="min-w-0 shrink whitespace-normal text-left"><span className="min-w-0 [overflow-wrap:anywhere]">{wrapAtSlash(history?.repository || scan?.repo?.name)}</span></Badge>
