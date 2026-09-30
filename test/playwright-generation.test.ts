@@ -312,11 +312,12 @@ test('saving code or replacing its reviewed case removes an obsolete generation 
   });
 });
 
-test('an in-flight generation failure cannot attach itself to a replacement case',async t=>{
+test('an in-flight generation failure cannot attach itself to a replacement case',{timeout:30000},async t=>{
   let rejectSeed:((error:Error)=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  const seedStarted=Promise.withResolvers<void>();
+  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  await seedStarted.promise;
   assert.ok(rejectSeed);
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   rejectSeed(new Error('The original seed failed.'));
@@ -342,11 +343,12 @@ test('discovery replacing a case cannot attach its old generation failure to the
   assert.equal((await restarted.view(f.context)).specs[journey.id],undefined);
 });
 
-test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',async t=>{
+test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',{timeout:30000},async t=>{
   let rejectSeed:((error:Error)=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  const seedStarted=Promise.withResolvers<void>();
+  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  await seedStarted.promise;
   assert.ok(rejectSeed);
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
@@ -361,11 +363,12 @@ test('a generation failure that cannot be saved keeps its original cause and an 
   }finally{await rm(file,{recursive:true});await writeFile(file,saved);}
 });
 
-test('a refused generation cannot restore an unsaved old failure onto a replacement case',async t=>{
+test('a refused generation cannot restore an unsaved old failure onto a replacement case',{timeout:30000},async t=>{
   let rejectSeed:((error:Error)=>void)|undefined,refuseNext=false,refuse:((value:{browserInstalled:boolean})=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refuse=resolve;}):{browserInstalled:true},start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  const seedStarted=Promise.withResolvers<void>(),capabilityRequested=Promise.withResolvers<void>();
+  const f=await setup(t,{playwright:{capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refuse=resolve;capabilityRequested.resolve();}):{browserInstalled:true},start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
+  await seedStarted.promise;
   assert.ok(rejectSeed);
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
@@ -373,7 +376,7 @@ test('a refused generation cannot restore an unsaved old failure onto a replacem
   finally{await rm(file,{recursive:true});await writeFile(file,saved);}
   refuseNext=true;
   const rejected=assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/Install Chromium/);
-  for(let i=0;i<100&&!refuse;i++)await wait(10);
+  await capabilityRequested.promise;
   assert.ok(refuse);
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   refuse({browserInstalled:false});await rejected;
