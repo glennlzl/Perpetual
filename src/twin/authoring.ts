@@ -10,9 +10,11 @@
 import { constants } from 'node:fs';
 import { chmod, cp, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasSecretLiteral, hide as hideValues, redact } from '../redaction.ts';
 import aiPackage from 'ai/package.json' with { type: 'json' };
 import { OPENCODE, createOpencodeRunner, opencodeEnvironment, opencodeRun, opencodeSettings, setupCommand, setupEnvironment, type Harness, type OpencodeRunner, type RunFailure } from '../agents/opencode.ts';
 import { serviceCatalog } from './catalog.ts';
@@ -236,7 +238,7 @@ export type AuthorFailure = Error & { logs?: string; cleanupIncomplete?: true };
 export type AuthoringOptions = {
   /** A private, empty folder the caller owns and removes. */
   workspace: string;
-  /** The environment's source snapshot, copied read-only into the workspace. */
+  /** The environment's execution snapshot; an author-only copy removes secrets and omits non-text contents/links. */
   source: string;
   /** twin.json's text as the attempt starts. */
   draft: string;
@@ -245,12 +247,37 @@ export type AuthoringOptions = {
   /** The repository's facts, which facts.json keeps beside the project, so the loop can recompute unwired variables. */
   facts?: WorkFacts;
   feedback?: string | null;
+  /** Supplied secrets stay in this process and are removed from the author's observations. */
+  secrets?: Iterable<unknown>;
   apiKey: string; model: string; harness?: Harness; services?: TwinServices;
   env?: NodeJS.ProcessEnv; timeoutMs?: number; cleanupGraceMs?: number;
 };
 
 type Tree = Map<string, string>;
 const hash = async (file: string) => createHash('sha256').update(await readFile(file)).digest('hex');
+/** The author's copy is observation text; binary contents are omitted and the execution snapshot keeps its bytes. */
+async function redactSource(directory: string, observation: (text: string) => string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) await redactSource(path, observation);
+    else if (entry.isFile()) {
+      const bytes = await readFile(path), source = bytes.toString('utf8');
+      const text = !isUtf8(bytes) || bytes.includes(0) ? 'Binary file omitted from author workspace.\n' : observation(source);
+      if (text !== source) { await chmod(path, 0o600); await writeFile(path, text); }
+    }
+  }
+}
+/** Facts are private inputs to the native harness, whose tool results are observations too. Keep the controller's
+ * facts intact; project only their known string fields rather than redacting a JSON encoding and breaking its shape. */
+function authorFacts(facts: WorkFacts, observation: (text: string) => string): WorkFacts {
+  const use = (value: WorkFacts['reads'][number]) => ({ ...value, name: observation(value.name), file: observation(value.file) });
+  return {
+    packages: facts.packages.map(value => ({ directory: observation(value.directory), ...(value.name === undefined ? {} : { name: observation(value.name) }), dependencies: value.dependencies.map(observation) })),
+    reads: facts.reads.map(use),
+    functions: facts.functions.map(value => ({ folder: observation(value.folder), reads: value.reads.map(use) })),
+    examples: Object.fromEntries(Object.entries(facts.examples).map(([name, value]) => [observation(name), observation(value)])),
+  };
+}
 /**
  * Every entry of the project but twin.json, by path: a file's sha256, or what else it is. readOnly makes its files
  * read-only. .git is among them: the file that points to the git metadata beside the project.
@@ -296,28 +323,35 @@ const authorFailure = (failure: RunFailure): AuthorFailure => Object.assign(new 
  * environment, and a failure's output is redacted of it. It rejects with an AuthorFailure when the agent cannot start,
  * stops, is cancelled, or its processes could not be confirmed stopped.
  */
-export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
+export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
   const abort = new AbortController();
+  const supplied = [apiKey, ...secrets], hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
   let runner: OpencodeRunner | null = null;
   const promise = (async (): Promise<Authored> => {
+    if (hasSecretLiteral(draft, supplied)) return { error: `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.` };
     const userHome = env.HOME || homedir(), root = await realpath(workspace);
     // The project is OpenCode's and its own git root, so OpenCode reads no instructions or config above it. Its git
     // metadata, which OpenCode writes to, and HOME are beside it, outside every folder the agent may write.
     const project = join(root, 'project'), home = join(root, 'home'), git = join(root, 'git');
     for (const directory of [project, home]) await mkdir(directory, { mode: 0o700 });
     await setupCommand('git', ['init', '--quiet', `--separate-git-dir=${git}`], { cwd: project, env: setupEnvironment(env, home), signal: abort.signal, failure: 'Git is required to write a twin config.', cancelled: CANCELLED });
-    await cp(source, join(project, REPO), { recursive: true, errorOnExist: true, force: false, mode: constants.COPYFILE_FICLONE });
-    await writeFile(join(project, INSTRUCTIONS), twinInstructions(services));
-    await writeFile(join(project, EVIDENCE), evidence);
-    if (feedback) await writeFile(join(project, FEEDBACK), feedback);
+    await cp(source, join(project, REPO), { recursive: true, errorOnExist: true, force: false, mode: constants.COPYFILE_FICLONE,
+      filter: async path => {
+        const entry = await lstat(path), name = relative(source, path);
+        return (entry.isDirectory() || entry.isFile()) && observation(name) === name;
+      } });
+    await redactSource(join(project, REPO), observation);
+    await writeFile(join(project, INSTRUCTIONS), observation(twinInstructions(services)));
+    await writeFile(join(project, EVIDENCE), observation(evidence));
+    if (feedback) await writeFile(join(project, FEEDBACK), observation(feedback));
     await writeFile(join(project, 'opencode.json'), `${JSON.stringify(authorConfig(model), null, 2)}\n`);
     await writeFile(join(project, CONFIG), draft, { mode: 0o600 });
-    if (facts) await writeFile(join(root, FACTS), JSON.stringify({ packages: facts.packages, reads: facts.reads, functions: facts.functions, examples: facts.examples }), { mode: 0o400 });
+    if (facts) await writeFile(join(root, FACTS), JSON.stringify(authorFacts(facts, observation)), { mode: 0o400 });
     // Everything but twin.json is read-only, and the attempt counts only while it is unchanged.
     const before = await tree(project, { readOnly: true }), drafted = await lastWrite(project);
     if (abort.signal.aborted) throw new Error(CANCELLED);
     runner = createOpencodeRunner({ harness, model, cwd: project, env: { ...setupEnvironment(env, home), ...opencodeEnvironment(env, { home, userHome, apiKey }) },
-      secrets: [apiKey], timeoutMs, cleanupGraceMs, messages: MESSAGES });
+      secrets: supplied.filter((value): value is string => typeof value === 'string'), timeoutMs, cleanupGraceMs, messages: MESSAGES });
     // A run that ran out of time, with its processes stopped, still counts with what it wrote.
     let timedOut: RunFailure | null = null, output = '';
     try { ({ output } = await runner.run(authoringPrompt(Boolean(feedback)))); }
@@ -328,9 +362,10 @@ export function authorTwinConfig({ workspace, source, draft, evidence, facts, fe
     }
     // The end of the author's output, kept with every outcome, so a person can see what each attempt did.
     const tail = timedOut ? timedOut.output : output, logs = tail ? { logs: tail } : {};
-    const changed = changes(before, await tree(project));
+    const changed = changes(before, await tree(project)).map(observation);
     if (changed.length) return { error: `Only ${CONFIG} may change, but ${changed.length > 5 ? `${changed.slice(0, 5).join(', ')} and ${changed.length - 5} more` : changed.join(', ')} changed too.`, ...logs };
     const written = await readConfig(project);
+    if (written.text !== undefined && hasSecretLiteral(written.text, supplied)) return { error: `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.`, ...logs };
     if (!timedOut) return written.text === draft && await lastWrite(project) === drafted ? { error: UNWRITTEN.feedback, reason: UNWRITTEN.reason, ...logs } : { ...written, ...logs };
     if (written.text === undefined || written.text === draft || !parses(written.text)) return { error: OUT_OF_TIME.feedback, reason: OUT_OF_TIME.reason, timedOut: true, ...logs };
     return { text: written.text, timedOut: true, ...logs };

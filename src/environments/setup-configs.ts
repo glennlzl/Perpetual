@@ -6,6 +6,7 @@
 import { parse as parseJsonc, visit as visitJsonc } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
 import { parseDocument, visit as visitYaml } from 'yaml';
+import { redact } from '../redaction.ts';
 
 /** A setup file's evidence: its lines, and the variable names it declares or references with their line. */
 export interface SetupEvidence { lines: string[]; names: { name: string; line: number }[] }
@@ -34,8 +35,13 @@ export function code(value: string) {
 const PLAIN = /^[\w.*!/:@-]+$/;
 /** A key, port or name pattern as it is when it is one plain word, else as inline code: never Markdown of its own. */
 export const word = (value: string) => PLAIN.test(value) ? value : code(value);
-const command = (value: string) => code(clip(value.trim()));
-const names = (values: Iterable<string>) => [...new Set(values)].map(word).join(', ');
+type Observation = (text: string) => string;
+/** Quoted repository text is redacted before formatting or clipping; parsed facts stay untouched. */
+function quoted(observe: Observation) {
+  const quote = (value: string) => code(observe(value)), name = (value: string) => word(observe(value));
+  return { code: quote, word: name, command: (value: string) => code(clip(observe(value).trim())),
+    names: (values: Iterable<string>) => [...new Set(values)].map(name).join(', ') };
+}
 /** The first entries of a long list, and how many it left out. */
 function capped(lines: string[], limit = SETUP_LIMITS.entries, indent = '') {
   return lines.length <= limit ? lines : [...lines.slice(0, limit), `${indent}- … ${lines.length - limit} more left out.`];
@@ -126,7 +132,7 @@ const REFERENCE = /(?<![\w.])(?:secrets|vars)(?<=\$\{\{[^}\n]{0,200}(?:secrets|v
 // A setup action's version inputs, such as actions/setup-node's node-version or pnpm/action-setup's version.
 const SETUP_ACTION = /(?:^|\/)(?:setup-[\w-]+|action-setup)@/i, VERSION_INPUT = /(?:^|-)version(?:-file)?$/i;
 
-function runsOn(value: unknown): string | null {
+function runsOn(value: unknown, code: (value: string) => string): string | null {
   if (scalar(value)) return code(String(value));
   if (Array.isArray(value)) return value.filter(scalar).map(item => code(String(item))).join(', ') || null;
   const labels = fields(value) && [...strings(fields(value)?.group), ...strings(fields(value)?.labels)];
@@ -135,7 +141,8 @@ function runsOn(value: unknown): string | null {
 const image = (value: unknown) => typeof value === 'string' ? value : typeof fields(value)?.image === 'string' ? fields(value)!.image as string : null;
 
 /** A GitHub Actions workflow: per job, where it runs, its services, working directory, variables and steps. */
-export function workflow(text: string): SetupEvidence {
+export function workflow(text: string, observe: Observation = redact): SetupEvidence {
+  const { code, word, command, names } = quoted(observe);
   const parsed = yaml(text), document = fields(parsed.value);
   if (!document) return { lines: ['- Not a workflow.'], names: [] };
   // What its expressions read, then the names its variable tables declare.
@@ -150,7 +157,7 @@ export function workflow(text: string): SetupEvidence {
   for (const [id, value] of Object.entries(fields(document.jobs) ?? {})) {
     const job = fields(value);
     if (!job) continue;
-    const where = runsOn(job['runs-on']), calls = typeof job.uses === 'string' ? job.uses : null;
+    const where = runsOn(job['runs-on'], code), calls = typeof job.uses === 'string' ? job.uses : null;
     lines.push(`- Job ${code(id)}${where ? `: runs on ${where}` : ''}${calls ? `: calls ${code(calls)}` : ''}`);
     const container = image(job.container);
     if (container) lines.push(`  - Container: ${code(container)}`);
@@ -180,7 +187,7 @@ export function workflow(text: string): SetupEvidence {
         const other = inputs.filter(input => !version(input)).map(([key]) => key);
         stepLines.push(`    - ${code(step.uses)}${[...versions, ...(other.length ? [`with ${names(other)}`] : []), ...notes].map(part => `; ${part}`).join('')}`);
       } else if (typeof step.run === 'string') {
-        const run = step.run.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        const run = observe(step.run).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
         const suffix = notes.map(part => `; ${part}`).join('');
         if (run.length === 1) stepLines.push(`    - run ${command(run[0])}${suffix}`);
         else stepLines.push(`    - run${suffix}:`, ...capped(run.map(line => `      - ${command(line)}`), SETUP_LIMITS.lines, '      '));
@@ -202,7 +209,8 @@ const spaced = (text: string) => unquoted(text).trim().split(/\s+/).filter(Boole
 const CONTINUED = /\\\s*$/, COMMENT = /^\s*#/;
 
 /** A Dockerfile: its base images, working directories, build arguments, variables, ports and start commands. */
-export function dockerfile(text: string): SetupEvidence {
+export function dockerfile(text: string, observe: Observation = redact): SetupEvidence {
+  const { code, word, command } = quoted(observe);
   const rows = text.split(/\r?\n/), found = new Map<string, number>();
   const parts: Record<'From' | 'Workdir' | 'Args' | 'Env' | 'Expose' | 'Cmd' | 'Entrypoint', string[]> = { From: [], Workdir: [], Args: [], Env: [], Expose: [], Cmd: [], Entrypoint: [] };
   for (let index = 0, heredoc: string | null = null; index < rows.length; index += 1) {
@@ -233,7 +241,7 @@ export function dockerfile(text: string): SetupEvidence {
       const declared = keyword === 'ARG' ? spaced(args).map(item => item.split('=')[0])
         : /^[A-Za-z_][A-Za-z0-9_]*=/.test(bare) ? [...bare.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=/g)].map(item => item[1]) : [spaced(args)[0] ?? ''];
       for (const name of declared.filter(name => VARIABLE.test(name))) {
-        parts[keyword === 'ARG' ? 'Args' : 'Env'].push(name);
+        parts[keyword === 'ARG' ? 'Args' : 'Env'].push(word(name));
         if (!found.has(name)) found.set(name, line);
       }
     }
@@ -243,15 +251,17 @@ export function dockerfile(text: string): SetupEvidence {
 }
 
 /** A dev container command: a string, a list of arguments, or named commands that run in parallel. */
-function devCommand(value: unknown): string[] {
+function devCommand(value: unknown, quotes: ReturnType<typeof quoted>): string[] {
+  const { code, command } = quotes;
   if (typeof value === 'string') return [command(value)];
   if (Array.isArray(value)) return [command(strings(value).join(' '))];
-  return Object.entries(fields(value) ?? {}).flatMap(([name, item]) => devCommand(item).map(text => `${code(name)} ${text}`));
+  return Object.entries(fields(value) ?? {}).flatMap(([name, item]) => devCommand(item, quotes).map(text => `${code(name)} ${text}`));
 }
 const LIFECYCLE = ['onCreateCommand', 'updateContentCommand', 'postCreateCommand', 'postStartCommand'];
 
 /** A devcontainer.json, comments allowed: its image or build, features, forwarded ports, setup commands and variables. */
-export function devcontainer(text: string): SetupEvidence {
+export function devcontainer(text: string, observe: Observation = redact): SetupEvidence {
+  const quotes = quoted(observe), { code, names } = quotes;
   const parsed = jsonc(text), config = fields(parsed.value);
   if (!config) return { lines: ['- Could not be read.'], names: [] };
   const lines: string[] = [], build = fields(config.build);
@@ -263,7 +273,7 @@ export function devcontainer(text: string): SetupEvidence {
   if (features.length) lines.push(`- Features: ${features.map(code).join(', ')}`);
   const ports = Array.isArray(config.forwardPorts) ? config.forwardPorts.filter(scalar).map(String) : [];
   if (ports.length) lines.push(`- Forwarded ports: ${names(ports)}`);
-  for (const key of LIFECYCLE) for (const item of devCommand(config[key])) lines.push(`- ${key}: ${item}`);
+  for (const key of LIFECYCLE) for (const item of devCommand(config[key], quotes)) lines.push(`- ${key}: ${item}`);
   const containerEnv = keys(config.containerEnv), remoteEnv = keys(config.remoteEnv);
   if (containerEnv.length) lines.push(`- containerEnv: ${names(containerEnv)}`);
   if (remoteEnv.length) lines.push(`- remoteEnv: ${names(remoteEnv)}`);
@@ -284,10 +294,11 @@ function tableNames(value: unknown) {
 }
 
 /** Commands, directories, settings and variable names anywhere in a parsed deploy manifest. */
-function manifestEntries(value: unknown, path: string, lines: string[], found: string[], depth = 0) {
+function manifestEntries(value: unknown, path: string, lines: string[], found: string[], quotes: ReturnType<typeof quoted>, depth = 0) {
   if (depth > SETUP_LIMITS.depth) return;
+  const { code, command, names } = quotes;
   if (Array.isArray(value)) {
-    value.forEach((item, index) => { const name = fields(item)?.name; manifestEntries(item, `${path}[${typeof name === 'string' ? name : index}]`, lines, found, depth + 1); });
+    value.forEach((item, index) => { const name = fields(item)?.name; manifestEntries(item, `${path}[${typeof name === 'string' ? name : index}]`, lines, found, quotes, depth + 1); });
     return;
   }
   for (const [key, child] of Object.entries(fields(value) ?? {})) {
@@ -300,27 +311,29 @@ function manifestEntries(value: unknown, path: string, lines: string[], found: s
       for (const [process, item] of Object.entries(fields(child)!)) if (typeof item === 'string') lines.push(`- ${code(`${at}.${process}`)}: ${command(item)}`);
     } else if ((COMMAND_KEY.test(key) || DIRECTORY_KEY.test(key)) && strings(child).length) lines.push(`- ${code(at)}: ${strings(child).map(command).join(', ')}`);
     else if (SETTING_KEY.test(key) && scalar(child)) lines.push(`- ${code(at)}: ${code(String(child))}`);
-    else if (child !== null && typeof child === 'object') manifestEntries(child, at, lines, found, depth + 1);
+    else if (child !== null && typeof child === 'object') manifestEntries(child, at, lines, found, quotes, depth + 1);
   }
 }
 
 /** A deploy manifest by its file name: Procfile, TOML, YAML or JSON with comments. */
-export function deployManifest(name: string, text: string): SetupEvidence {
+export function deployManifest(name: string, text: string, observe: Observation = redact): SetupEvidence {
+  const quotes = quoted(observe), { code, command } = quotes;
   const lines: string[] = [], found: string[] = [];
   let positions: Positions = new Map();
   if (/^procfile$/i.test(name)) {
-    for (const row of text.split(/\r?\n/)) { const entry = /^([\w-]+):\s*(.+)$/.exec(row.trim()); if (entry) lines.push(`- ${code(entry[1])}: ${command(entry[2])}`); }
+    for (const row of observe(text).split(/\r?\n/)) { const entry = /^([\w-]+):\s*(.+)$/.exec(row.trim()); if (entry) lines.push(`- ${code(entry[1])}: ${command(entry[2])}`); }
   } else {
     const parsed = /\.toml$/i.test(name) ? toml(text) : /\.ya?ml$/i.test(name) ? yaml(text) : jsonc(text);
     if (!fields(parsed.value)) return { lines: ['- Could not be read.'], names: [] };
     positions = parsed.positions;
-    manifestEntries(parsed.value, '', lines, found);
+    manifestEntries(parsed.value, '', lines, found, quotes);
   }
   return { lines: lines.length ? capped(lines) : ['- No commands, directories or variables it reads.'], names: located(text, found, positions) };
 }
 
 /** turbo.json: its tasks and the variables each passes to them. */
-export function turbo(text: string): SetupEvidence {
+export function turbo(text: string, observe: Observation = redact): SetupEvidence {
+  const { code, names } = quoted(observe);
   const parsed = jsonc(text), config = fields(parsed.value);
   if (!config) return { lines: ['- Could not be read.'], names: [] };
   const tasks = Object.entries(fields(config.tasks) ?? fields(config.pipeline) ?? {}), found: string[] = [], lines: string[] = [];
@@ -346,12 +359,13 @@ function references(value: unknown, path: string, found: [string, string][], dep
 const enabled = (value: unknown, key = 'enabled') => fields(value)?.[key] === true;
 
 /** A Supabase config.toml: its env() references, functions, seed and enabled sign-in methods. */
-export function supabaseConfig(text: string): SetupEvidence {
+export function supabaseConfig(text: string, observe: Observation = redact): SetupEvidence {
+  const { code, word } = quoted(observe);
   const config = fields(toml(text).value);
   if (!config) return { lines: ['- Could not be read.'], names: [] };
   const lines: string[] = [], found: [string, string][] = [];
   references(config, '', found);
-  if (found.length) lines.push(`- Variables from env(): ${joined(found.map(([path, name]) => `${code(path)} ${name}`))}`);
+  if (found.length) lines.push(`- Variables from env(): ${joined(found.map(([path, name]) => `${code(path)} ${word(name)}`))}`);
   const functions = Object.entries(fields(config.functions) ?? {});
   if (functions.length) lines.push(`- Functions in config: ${joined(functions.map(([name, value]) => {
     const settings = Object.entries(fields(value) ?? {}).filter(([, setting]) => scalar(setting)).map(([key, setting]) => `${word(key)} ${code(String(setting))}`);

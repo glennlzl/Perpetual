@@ -155,7 +155,7 @@ test('read offsets and grep matches redact a PEM using the complete file context
   assert.equal((await f.call('read', { path: 'config.txt', offset: 5, limit: 1 })).content, '5\tafter');
 });
 
-test('line-addressed observations refuse a redaction that changes the source line count', async t => {
+test('multiline credential redaction preserves later read offsets and grep line numbers', async t => {
   const f = await tools(t);
   await writeFile(join(f.root, 'config.txt'), 'before\nPASSWORD="synthetic first\nsynthetic second"\nafter\n');
   for (const [name, input] of [
@@ -163,10 +163,12 @@ test('line-addressed observations refuse a redaction that changes the source lin
     ['grep', { pattern: 'after', include: 'config.txt' }],
   ] as const) await t.test(name, async () => {
     const result = await f.call(name, input);
-    assert.equal(result.ok, false);
-    assert.match(result.error ?? '', /line (?:numbers|mapping)/i);
+    assert.equal(result.ok, true);
+    if (name === 'read') assert.equal(result.content, '4\tafter');
+    else assert.deepEqual(result.matches, ['config.txt:4:after']);
     assert.ok(!JSON.stringify(result).includes('synthetic'));
   });
+  assert.equal((await f.call('read', { path: 'config.txt', offset: 2, limit: 2 })).content, '2\tPASSWORD=[REDACTED]\n3\t[REDACTED]');
 });
 
 test('a small selected line does not bypass the complete-file observation limit', async t => {

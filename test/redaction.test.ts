@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { REDACTED, failureText, hide, redact } from '../src/redaction.ts';
+import { REDACTED, failureText, hasCredential, hasSecretLiteral, hide, redact } from '../src/redaction.ts';
 
 test('redact knows every secret shape once: named values, tokens, key blocks, user info', () => {
   const cases: [string, string[]][] = [
@@ -23,12 +23,39 @@ test('redact knows every secret shape once: named values, tokens, key blocks, us
   assert.equal(redact('\u001b[31mred\u001b[0m'), 'red', 'ANSI colour is removed.');
   const long = 'a'.repeat(220000);
   assert.equal(redact(long), long, 'Ordinary text comes back unchanged.');
+  const colons = 'https://' + ':'.repeat(220000);
+  assert.equal(redact(colons), colons, 'A long URL-shaped value without user info comes back unchanged.');
   assert.equal(redact(undefined), '');
 });
 
 test('a private key block is blanked line by line, so line numbers hold', () => {
   const block = 'before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nAAAA\n-----END RSA PRIVATE KEY-----\nafter';
   assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
+});
+
+test('an unfinished private key or certificate block stays hidden through the end of the observation', () => {
+  for (const kind of ['PRIVATE KEY', 'RSA PRIVATE KEY', 'CERTIFICATE']) {
+    const input = `before\n-----BEGIN ${kind}-----\npartial-body\n`;
+    assert.equal(redact(input), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}`);
+    assert.equal(hasSecretLiteral(JSON.stringify({ value: input })), true);
+  }
+});
+
+test('named and flag credentials keep every source line when their quoted value spans lines', () => {
+  for (const prefix of ['API_KEY=', 'password: ', '--token ', '--password=']) {
+    for (const quote of ['"', "'"]) {
+      const source = `before\n${prefix}${quote}first line\nsecond line${quote}\nafter`;
+      assert.equal(redact(source), `before\n${prefix}${REDACTED}\n${REDACTED}\nafter`);
+    }
+  }
+  assert.equal(redact('before\nBearer\nsecret-value\nafter'), `before\nBearer ${REDACTED}\n${REDACTED}\nafter`);
+});
+
+test('URL passwords are hidden inside prefixed text without losing any prefix', () => {
+  for (const prefix of ['prefix_', 'prefix-', '1', '.', '+', '123.-+', 'prefix_1', 'word,']) {
+    assert.equal(redact(`${prefix}https://user:pass@host/path`), `${prefix}https://${REDACTED}@host/path`);
+    assert.equal(hasSecretLiteral(`${prefix}https://user:pass@host/path`), true);
+  }
 });
 
 test('hide replaces known values longest first, honours a marker and a minimum length, and ignores what is not a string', () => {
@@ -38,6 +65,13 @@ test('hide replaces known values longest first, honours a marker and a minimum l
   assert.equal(hide(['pass'], { marker: '[redacted]', minLength: 4 })('pw pass'), 'pw [redacted]');
   assert.equal(hide(['1234'])('count 1234'), `count ${REDACTED}`, 'Without a minimum, a four-character value is replaced.');
   assert.equal(hide([])(12), '12');
+});
+
+test('source observations can hide supplied multiline values without moving the following lines', () => {
+  const key = 'fixture first line\nfixture second line\n';
+  const source = `before\n${key}after\n`;
+  assert.equal(hide([key], { preserveLines: true })(source), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}after\n`);
+  assert.equal(hide([key])(source), `before\n${REDACTED}after\n`, 'Other call sites retain their existing replacement behavior.');
 });
 
 test('failureText redacts before it clips, so a clipped message never keeps part of a secret', () => {
@@ -61,4 +95,47 @@ test('vendor-generated webhook and restricted keys are redacted before their val
     assert.equal(redact(`generated\n${token}\n`),`generated\n${REDACTED}\n`);
     assert.ok(!failureText(new Error(`failed ${token}`),100).includes(token));
   }
+});
+
+test('editable data recognizes strong credential literals without rewriting ordinary values, keys or references', () => {
+  for (const value of ['ghp_fixture_value', 'sk-or-v1-fixture-value', 'rk_test_fixture_value', 'whsec_fixture_value', 'sbp_fixture_value',
+    'AKIAABCDEFGHIJKLMNOP', 'eyJhbGci.eyJzdWIi.SflKxw', 'postgres://user:literal-password@db/app',
+    '-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----', '-----BEGIN CERTIFICATE-----\nbody\n-----END CERTIFICATE-----']) {
+    assert.equal(hasSecretLiteral(value), true, value);
+    assert.equal(hasSecretLiteral(JSON.stringify({ value })), true, 'Encoded JSON values are inspected after decoding.');
+  }
+  const references = JSON.stringify({ env: { API_KEY: '{{llm.OPENAI_API_KEY}}', SESSION_SECRET: 'fixture-secret-value',
+    DATABASE_URL: 'postgres://user:{{secrets.DATABASE_PASSWORD}}@db/app', SHELL: 'postgres://$USER:$PASSWORD@db/app',
+    TOKEN_URL: 'https://example.test/token', FILE: '/run/secrets/app', PASSWORD: 'process.env.PASSWORD', FLAG: false, RETRIES: 3 },
+  FIELD_NAME: 'ordinary value' });
+  assert.equal(hasSecretLiteral(references), false, 'Ordinary credential field names and references are not literals.');
+  assert.equal(hasCredential('SESSION_SECRET="fixture-secret-value"'), true, 'Repair change admission keeps its stricter named-literal policy.');
+  assert.equal(hasSecretLiteral('SESSION_SECRET="fixture-secret-value"'), false);
+  const supplied = 'a supplied "value"\nwith a newline';
+  assert.equal(hasSecretLiteral(JSON.stringify({ value: supplied }), [null, '', 42, supplied]), true);
+  assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value"}'), true, 'JSON escapes do not conceal a known shape.');
+  assert.equal(hasSecretLiteral('{"ghp_\\u0066ixture_value":"ordinary"}'), true, 'A field name can itself disclose a known credential.');
+  assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value",'), true, 'An incomplete draft still exposes its completed string values.');
+  assert.equal(hasSecretLiteral('"ordinary text"', ['', undefined]), false);
+  const depth = 20000;
+  assert.equal(hasSecretLiteral('['.repeat(depth) + JSON.stringify(supplied) + ']'.repeat(depth), [supplied]), true, 'Untrusted nesting does not recurse on the call stack.');
+});
+
+test('URL credential admission examines the password reference, not punctuation elsewhere in user info', () => {
+  for (const userinfo of ['user:fixture%40password', 'user:fixture$literal', 'user%40name:literal-password', '$USER:literal-password']) {
+    const url = `postgres://${userinfo}@db/app`;
+    assert.equal(hasSecretLiteral(JSON.stringify({ value: url })), true);
+    assert.equal(hasCredential(url), true);
+  }
+  for (const password of ['{{database.PASSWORD}}', '${PASSWORD}', '$PASSWORD']) {
+    const url = `postgres://user:${password}@db/app`;
+    assert.equal(hasSecretLiteral(JSON.stringify({ value: url })), false);
+    assert.equal(hasCredential(url), false);
+  }
+});
+
+test('literal admission inspects every quoted value before duplicate JSON keys can discard one', () => {
+  assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value","value":"ordinary"}'), true);
+  assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value'), true, 'A missing closing quote does not hide otherwise decodable text.');
+  assert.equal(hasSecretLiteral('{"value":"ordinary incomplete'), false);
 });

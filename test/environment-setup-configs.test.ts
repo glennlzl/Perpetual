@@ -1,11 +1,61 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { code, deployManifest, devcontainer, dockerfile, supabaseConfig, turbo, workflow } from '../src/environments/setup-configs.ts';
+import { hide, redact } from '../src/redaction.ts';
 
 // A repository's setup files as EVIDENCE.md quotes them: commands, images, ports, versions and paths, and variable names
 // with their line, never a value. Every fixture is synthetic.
 const VALUE = 'value-never-shown';
 const hidden = (text: string) => assert.ok(!text.includes(VALUE), text);
+
+test('workflow evidence redacts a whole multiline command before selecting its run lines', () => {
+  const source = [
+    'jobs:', '  build:', '    runs-on: ubuntu-latest', '    env:', '      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}',
+    '    steps:', '      - run: |', "          cat <<'EOF'", '          -----BEGIN PRIVATE KEY-----',
+    '          PRIVATE_BODY_FIRST', '          PRIVATE_BODY_SECOND', '          -----END PRIVATE KEY-----', '          EOF',
+    '          npm run build',
+  ].join('\n');
+  const result = workflow(source), output = result.lines.join('\n');
+  assert.ok(!output.includes('PRIVATE_BODY_FIRST') && !output.includes('PRIVATE_BODY_SECOND'), 'A multiline key body never becomes separate quoted run lines.');
+  assert.match(output, /\[REDACTED\]/);
+  assert.match(output, /npm run build/);
+  assert.deepEqual(result.names, [{ name: 'DEPLOY_TOKEN', line: 5 }], 'Names and positions still come from the original workflow.');
+});
+
+test('setup readers redact complete commands and metadata before their limits', () => {
+  const token = `sk-${'a'.repeat(350)}`, command = `${'x'.repeat(193)} ${token} npm start`;
+  const cases = [
+    workflow(`jobs:\n  build:\n    runs-on: ${token}\n    steps:\n      - run: ${command}\n`),
+    dockerfile(`FROM node:24\nCMD ${command}\n`),
+    devcontainer(JSON.stringify({ image: `registry.example/${token}`, postCreateCommand: command })),
+    deployManifest('vercel.json', JSON.stringify({ framework: token, buildCommand: command })),
+    deployManifest('Procfile', `web: ${command}\n`),
+    turbo(JSON.stringify({ tasks: { [token]: { env: ['API_URL'] } } })),
+  ];
+  for (const result of cases) {
+    const output = result.lines.join('\n');
+    assert.ok(!output.includes(token.slice(0, 6)), 'No clipped prefix of a token reaches a quoted command or metadata.');
+    assert.match(output, /\[REDA/);
+  }
+});
+
+test('setup readers hide supplied values before command clipping without rewriting semantic facts', () => {
+  const secret = `provided-value-${'z'.repeat(350)}`, observe = (text: string) => redact(hide([secret])(text));
+  const command = `${'x'.repeat(194)}${secret}`;
+  const result = workflow(`jobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      SESSION_SECRET: value\n    steps:\n      - run: ${command}\n`, observe);
+  const output = result.lines.join('\n');
+  assert.ok(!output.includes(secret.slice(0, 6)), 'An arbitrary supplied value is hidden before its full value is lost to clipping.');
+  assert.deepEqual(result.names, [{ name: 'SESSION_SECRET', line: 5 }]);
+});
+
+test('setup evidence observes variable names without changing their semantic positions', () => {
+  const name = 'OPAQUE_NAME_Z_12345678', hidden = hide([name]), observe = (text: string) => redact(hidden(text));
+  for (const result of [dockerfile(`FROM node:24\nENV ${name}=value\n`, observe), supabaseConfig(`[auth]\nsecret = "env(${name})"\n`, observe)]) {
+    assert.ok(!result.lines.join('\n').includes(name));
+    assert.match(result.lines.join('\n'), /\[REDACTED\]/);
+    assert.deepEqual(result.names, [{ name, line: 2 }]);
+  }
+});
 
 test('a workflow gives each job’s runner, services, working directory, variables, setup versions and run lines', () => {
   const long = `echo ${'x'.repeat(300)}`;

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import aiPackage from 'ai/package.json' with { type: 'json' };
-import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
+import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
 import { CHANGE_APPROACH, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
 import { OPENCODE } from '../src/agents/opencode.ts';
 import type { Harness } from '../src/agents/opencode.ts';
@@ -216,6 +216,136 @@ test('reads page by line with a truncated flag, and grep filters by a glob and c
     '→ grep "needle" in repo (*.ts)', '→ grep "needle" in repo (src/*.js)', `✗ grep "(" in repo: ${String(broken.error)}`]);
 });
 
+test('repository reads protect complete text before selecting lines, searching or clipping', async t => {
+  const body = 'private-material-offset-must-not-leave', known = `known-exact-value-${'z'.repeat(100)}`;
+  const source = `notes\n-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n${'x'.repeat(LIMITS.lineChars - 5)}${known}\n`;
+  const { calls, project } = await loop(t, [{ calls: [
+    { tool: 'read', input: { path: 'repo/notes.txt', offset: 3, limit: 1 } },
+    { tool: 'read', input: { path: 'repo/notes.txt', offset: 5 } },
+    { tool: 'grep', input: { path: 'repo/notes.txt', pattern: body } },
+    { tool: 'grep', input: { path: 'repo/notes.txt', pattern: 'REDACTED' } },
+  ] }], { files: { 'repo/notes.txt': source }, secrets: [known] });
+  const [offset, clipped, secretSearch, protectedSearch] = received(calls[1]) as Record<string, unknown>[];
+  assert.equal(offset.content, '3\t[REDACTED]', 'A PEM body stays protected when its header is outside the requested page.');
+  assert.equal(clipped.content, `5\t${'x'.repeat(LIMITS.lineChars - 5)}[REDA…`, 'Known values are hidden before a line clip can leave their prefix.');
+  assert.deepEqual(secretSearch.matches, [], 'Search matches the protected observation, never the raw credential.');
+  assert.deepEqual((protectedSearch.matches as string[]).slice(0, 3), ['repo/notes.txt:2: [REDACTED]', 'repo/notes.txt:3: [REDACTED]', 'repo/notes.txt:4: [REDACTED]']);
+  assert.doesNotMatch(JSON.stringify(received(calls[1])), /private-material|known-exact/);
+  assert.equal(await readFile(join(project, 'repo/notes.txt'), 'utf8'), source, 'Observation protection never rewrites the repository.');
+});
+
+test('a supplied multiline value preserves later source line numbers in read and grep', async t => {
+  const known = 'caller-only-first-line\ncaller-only-second-line';
+  const source = `heading\n${known}\nconst result = 42;\n`;
+  const { calls } = await loop(t, [{ calls: [
+    { tool: 'read', input: { path: 'repo/notes.txt', offset: 4, limit: 1 } },
+    { tool: 'grep', input: { path: 'repo/notes.txt', pattern: 'const result' } },
+  ] }], { files: { 'repo/notes.txt': source }, secrets: [known] });
+  assert.deepEqual(received(calls[1]), [
+    { ok: true, path: 'repo/notes.txt', lines: 4, content: '4\tconst result = 42;', truncated: false },
+    { ok: true, path: 'repo/notes.txt', matches: ['repo/notes.txt:4: const result = 42;'], truncated: false },
+  ]);
+});
+
+test('credential-shaped multiline text preserves later source line numbers', async t => {
+  for (const [name, credential] of [
+    ['named', 'API_KEY="neutral-first-line\nneutral-second-line"'],
+    ['flag', 'command --api-key "neutral-first-line\nneutral-second-line"'],
+    ['bearer', 'Bearer\nneutral-value'],
+  ]) await t.test(name, async t => {
+    const { calls } = await loop(t, [{ calls: [
+      { tool: 'read', input: { path: 'repo/notes.txt', offset: 4, limit: 1 } },
+      { tool: 'grep', input: { path: 'repo/notes.txt', pattern: 'const result' } },
+    ] }], { files: { 'repo/notes.txt': `heading\n${credential}\nconst result = 42;\n` } });
+    assert.deepEqual(received(calls[1]), [
+      { ok: true, path: 'repo/notes.txt', lines: 4, content: '4\tconst result = 42;', truncated: false },
+      { ok: true, path: 'repo/notes.txt', matches: ['repo/notes.txt:4: const result = 42;'], truncated: false },
+    ]);
+  });
+});
+
+test('initial instructions, evidence, prompt and feedback protect known values and credential shapes', async t => {
+  const known = 'only-the-caller-knows-this-value', token = 'sk-observation-fixture-token-12345', body = 'private-feedback-body';
+  const { calls } = await loop(t, [done], { secrets: [known], prompt: `Inspect ${known}`, files: {
+    'TWIN.md': `Instructions ${known}`,
+    'EVIDENCE.md': `Evidence ${token}`,
+    'feedback.md': `Failure\n-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----`,
+  } });
+  assert.deepEqual(calls[0].prompt.slice(0, 2).map(({ role, content }) => ({ role, content })), [
+    { role: 'system', content: 'Instructions [REDACTED]\n\nEvidence [REDACTED]' },
+    { role: 'user', content: [{ type: 'text', text: 'Inspect [REDACTED]\n\nFailure\n[REDACTED]\n[REDACTED]\n[REDACTED]' }] },
+  ]);
+});
+
+test('tool paths, list entries, refusals and logs are protected before metadata is clipped', async t => {
+  const known = `caller-only-value-${'m'.repeat(90)}`, token = 'sk-list-entry-fixture-12345', absolute = `/${'x'.repeat(190)}${known}`;
+  const { calls, out } = await loop(t, [{ calls: [
+    { tool: 'read', input: { path: absolute } },
+    { tool: 'list', input: { path: 'repo' } },
+    { tool: 'read', input: { path: `repo/${token}.txt` } },
+    { tool: 'grep', input: { path: 'repo', pattern: `(${known}` } },
+  ] }], { secrets: [known], files: { [`repo/${token}.txt`]: 'ordinary text' } });
+  const [outside, listed, read, pattern] = received(calls[1]) as Record<string, unknown>[];
+  assert.doesNotMatch(JSON.stringify([received(calls[1]), out]), /caller-only|sk-list-entry/, 'A metadata clip must not keep even the recognizable prefix.');
+  assert.match(String(outside.error), /\[REDACTED/);
+  assert.ok((listed.entries as string[]).includes('[REDACTED].txt'));
+  assert.equal(read.path, 'repo/[REDACTED].txt');
+  assert.match(String(pattern.error), /\[REDACTED\]/);
+});
+
+test('twin.json observations and accepted writes preserve legitimate templates and ordinary application values', async t => {
+  const template = JSON.stringify({ services: { payments: {} }, apps: { web: { ...app, env: { PAYMENTS_KEY: '{{payments.PAYMENTS_KEY}}', SESSION_SECRET: 'fixture-secret-value', SOURCE_REFERENCE: 'process.env.TOKEN' } } } }, null, 2);
+  const changed = template.replace('fixture-secret-value', 'fixture-changed-value');
+  const { calls, config } = await loop(t, [
+    { calls: [{ tool: 'read', input: { path: 'twin.json' } }, { tool: 'grep', input: { path: 'twin.json', pattern: 'PAYMENTS_KEY' } }] },
+    { calls: [write(changed)] },
+    call('read', { path: 'twin.json' }),
+  ], { files: { 'twin.json': template } });
+  const initial = received(calls[1]) as Record<string, unknown>[];
+  assert.equal(initial[0].content, template.split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'));
+  assert.match(String((initial[1].matches as string[])[0]), /"PAYMENTS_KEY": "\{\{payments\.PAYMENTS_KEY\}\}"/);
+  assert.deepEqual(received(calls[2]), [{ ok: true }]);
+  assert.equal((received(calls[3])[0] as Record<string, unknown>).content, changed.split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'));
+  assert.equal(await config(), changed);
+});
+
+test('write_config refuses credential literals without replacing the prior draft', async t => {
+  for (const literal of ['sk-twin-config-fixture-12345', 'a-value-only-the-caller-knows']) await t.test(literal.startsWith('sk-') ? 'catalogued' : 'supplied', async t => {
+    const withLiteral = JSON.stringify({ apps: { web: { ...app, env: { CUSTOM_VALUE: literal } } } });
+    const { calls, config } = await loop(t, [{ calls: [write(withLiteral)] }, call('read', { path: 'twin.json' })], { secrets: ['a-value-only-the-caller-knows'] });
+    const refusal = received(calls[1])[0] as Record<string, unknown>;
+    assert.equal(refusal.ok, false);
+    assert.match(String(refusal.error), /credential literal.*service placeholder.*test input/i);
+    assert.doesNotMatch(JSON.stringify(received(calls[1])), /sk-twin-config|a-value-only/);
+    assert.equal((received(calls[2])[0] as Record<string, unknown>).content, draft.trimEnd().split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'));
+    assert.equal(await config(), draft);
+  });
+});
+
+test('an existing twin.json credential literal is refused before an offset read or grep exposes it', async t => {
+  const withLiteral = JSON.stringify({ apps: { web: { ...app, env: { CUSTOM_VALUE: 'sk-existing-config-fixture-12345' } } } }, null, 2);
+  const { calls, config } = await loop(t, [{ calls: [
+    { tool: 'read', input: { path: 'twin.json', offset: 8, limit: 1 } },
+    { tool: 'grep', input: { path: 'twin.json', pattern: 'CUSTOM_VALUE' } },
+  ] }], { files: { 'twin.json': withLiteral } });
+  for (const result of received(calls[1]) as Record<string, unknown>[]) {
+    assert.equal(result.ok, false);
+    assert.match(String(result.error), /credential literal.*service placeholder.*test input/i);
+  }
+  assert.doesNotMatch(JSON.stringify(received(calls[1])), /sk-existing-config/);
+  assert.equal(await config(), withLiteral, 'An unsafe draft stays private and unchanged.');
+});
+
+test('unwired tool feedback protects original fact values before formatting them', async t => {
+  const known = 'only-the-caller-knows\nthis-function-path', { path } = await workspace(t);
+  const facts = { packages: [], reads: [], examples: {}, functions: [{ folder: `functions/${known}`, reads: [{ name: 'NEEDS_INPUT', file: 'functions/index.ts', line: 1, role: 'runtime' }] }] };
+  await writeFile(join(path, FACTS), JSON.stringify(facts));
+  const model = scriptedModel([{ calls: [write(valid)] }, done]);
+  assert.equal(await authorLoop({ workspace: path, prompt: 'Go', model, services, secrets: [known], print: () => {} }), 0);
+  assert.deepEqual(received(model.doGenerateCalls[1]), [{ ok: true, unwired: ['- `web`: none', '- Functions not served that read variables: `functions/[REDACTED] [REDACTED]`'] }]);
+  assert.deepEqual(JSON.parse(await readFile(join(path, FACTS), 'utf8')), facts, 'Raw semantic facts remain unchanged.');
+});
+
 const OUT_OF_TIME = `The search took over ${LIMITS.searchMs / 1000} seconds; use a simpler pattern, include or a narrower path.`;
 
 test('a pattern that backtracks without end stops at the search’s time limit', async t => {
@@ -297,8 +427,9 @@ test(`a model that has not written a valid config must write at step ${FORCED_WR
 });
 
 test('reasoning and its provider metadata reach the next step as the provider returned them', async t => {
-  const details = [{ type: 'reasoning.text', text: 'Read the manifest first.', signature: 'sig-1', format: 'google-gemini-v1' }, { type: 'reasoning.encrypted', data: 'opaque' }];
-  const { calls } = await loop(t, [{ reasoning: { text: 'Read the manifest first.', details }, calls: [{ tool: 'read', input: { path: 'repo/package.json' } }] }, done]);
+  const opaque = 'sk-provider-opaque-fixture-12345';
+  const details = [{ type: 'reasoning.text', text: 'Read the manifest first.', signature: opaque, format: 'google-gemini-v1' }, { type: 'reasoning.encrypted', data: opaque }];
+  const { calls } = await loop(t, [{ reasoning: { text: 'Read the manifest first.', details }, calls: [{ tool: 'read', input: { path: 'repo/package.json' } }] }, done], { secrets: [opaque] });
   const assistant = calls[1].prompt.find(message => message.role === 'assistant') as ToolMessage | undefined;
   const carried = { openrouter: { reasoning_details: details } };
   assert.deepEqual(assistant?.content.map(part => [part.type, part.providerOptions]), [['reasoning', carried], ['tool-call', carried]]);
@@ -340,6 +471,15 @@ test('a long provider error is redacted before it is clipped, so its Error: line
   const { code: status, message } = JSON.parse(stderr[1].replace(/^Error: /, '')) as { code: number; message: string };
   assert.deepEqual([status, message], [402, `${'x'.repeat(ERROR_MESSAGE_CHARS - 5)}[REDA…`]);
   assert.ok(!stderr.some(line => line.includes(KEY.slice(0, 5))));
+});
+
+test('provider errors protect credential shapes before clipping without a supplied secret value', async t => {
+  const token = 'sk-provider-failure-fixture-12345', prefix = `${'x'.repeat(ERROR_MESSAGE_CHARS - 6)} `;
+  const { code, err } = await loop(t, [{ error: { status: 402, message: `${prefix}${token}` } }]);
+  assert.equal(code, 1);
+  assert.equal(err[0], PROVIDER_STOPPED);
+  assert.deepEqual(JSON.parse(err[1].replace(/^Error: /, '')), { code: 402, message: `${prefix}[REDA…` });
+  assert.doesNotMatch(err.join('\n'), /sk-pr/);
 });
 
 test('SIGTERM stops the loop at once, so cancelling an attempt confirms its process stopped', async t => {
