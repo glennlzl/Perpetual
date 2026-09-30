@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
-import { canRelease, createGatePoller, gateBadge, gateChanges, gatePending, shareGates, sourceMoved, type GateView, type StageGate } from '@/lib/stage-gate.ts';
+import { canRelease, createGatePoller, gateBadge, gateChanges, gatePending, gateReleaseRequest, shareGates, sourceMoved, type GateReleaseConfirmation, type GateView, type StageGate } from '@/lib/stage-gate.ts';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 import type { ScanRepo } from './App';
 
@@ -42,7 +42,8 @@ export function GateBadge({ gate }: { gate: StageGate | null | undefined }) {
 export function GateActions({ repoPath, stage, gate, disabled = false }: { repoPath?: string; stage: PipelineStage; gate: StageGate | null | undefined; disabled?: boolean }) {
   const [pending, setPending] = useState('');
   const [error, setError] = useState('');
-  const [releasing, setReleasing] = useState(false);
+  const [confirmation, setConfirmation] = useState<GateReleaseConfirmation | null>(null);
+  const request = gateReleaseRequest({ repoPath, stageId: stage.id, gate }, confirmation);
   async function act(operation: 'run' | 'release', input = {}) {
     setPending(operation); setError('');
     try { await api(`/api/gate/${operation}`, { repoPath, stageId: stage.id, ...input }); gateChanges.notify(); return true; }
@@ -51,17 +52,23 @@ export function GateActions({ repoPath, stage, gate, disabled = false }: { repoP
   }
   return <>
     <Button className="nodrag" variant="ghost" size="sm" disabled={disabled || Boolean(pending) || gatePending(gate)} onClick={() => act('run')}><Play />Run now</Button>
-    {canRelease(gate) && <AlertDialog open={releasing} onOpenChange={open => { if (!pending) { setReleasing(open); setError(''); } }}>
-      <AlertDialogTrigger asChild><Button className="nodrag" variant="ghost" size="sm" disabled={disabled}><ShieldCheck />Release</Button></AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader><AlertDialogTitle>Release {gate.sha.slice(0, 7)}?</AlertDialogTitle><AlertDialogDescription>{gate.reason || stage.name}</AlertDialogDescription></AlertDialogHeader>
+    {(canRelease(gate) || confirmation) && <AlertDialog open={Boolean(confirmation)} onOpenChange={open => {
+      if (pending) return;
+      setError('');
+      if (!open) setConfirmation(null);
+      else if (repoPath && canRelease(gate)) setConfirmation({ repoPath, stageId: stage.id, gateId: gate.id, sha: gate.sha, detectedAt: gate.detectedAt, reason: gate.reason || stage.name });
+    }}>
+      {canRelease(gate) && <AlertDialogTrigger asChild><Button className="nodrag" variant="ghost" size="sm" disabled={disabled || Boolean(pending) || !repoPath}><ShieldCheck />Release</Button></AlertDialogTrigger>}
+      {confirmation && <AlertDialogContent>
+        <AlertDialogHeader><AlertDialogTitle>Release {confirmation.sha.slice(0, 7)}?</AlertDialogTitle><AlertDialogDescription>{confirmation.reason}</AlertDialogDescription></AlertDialogHeader>
+        {!request && <p role="alert" className="text-sm text-destructive">The gate changed. Close and review it again.</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={Boolean(pending)}>Cancel</AlertDialogCancel>
-          <AlertDialogAction disabled={Boolean(pending)} onClick={async event => { event.preventDefault(); if (await act('release', { sha: gate!.sha })) setReleasing(false); }}>{pending ? 'Releasing…' : 'Release'}</AlertDialogAction>
+          <AlertDialogAction disabled={disabled || Boolean(pending) || !request} onClick={async event => { event.preventDefault(); if (request && await act('release', request)) setConfirmation(null); }}>{pending ? 'Releasing…' : 'Release'}</AlertDialogAction>
         </AlertDialogFooter>
-      </AlertDialogContent>
+      </AlertDialogContent>}
     </AlertDialog>}
-    {error && !releasing && <p role="alert" className="basis-full text-xs text-destructive">{error}</p>}
+    {error && !confirmation && <p role="alert" className="basis-full text-xs text-destructive">{error}</p>}
   </>;
 }

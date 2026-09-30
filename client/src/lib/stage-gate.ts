@@ -20,6 +20,14 @@ export const gatePending = (gate: Pick<StageGate, 'status'> | null | undefined) 
 /** Only a gate that needs release offers Release; a failed gate never does. */
 export const canRelease = <G extends Pick<StageGate, 'status'>>(gate: G | null | undefined): gate is G => gate?.status === 'needs-release';
 
+/** A person's release confirmation belongs to one source, stage and execution of a commit's gate. */
+export interface GateReleaseConfirmation { repoPath: string; stageId: string; gateId: string; sha: string; detectedAt: string; reason?: string }
+export function gateReleaseRequest({ repoPath, stageId, gate }: { repoPath?: string; stageId: string; gate: StageGate | null | undefined }, confirmation: GateReleaseConfirmation | null) {
+  if (!confirmation || repoPath !== confirmation.repoPath || stageId !== confirmation.stageId || !canRelease(gate)
+    || gate.stageId !== confirmation.stageId || gate.id !== confirmation.gateId || gate.sha !== confirmation.sha || gate.detectedAt !== confirmation.detectedAt) return null;
+  return { repoPath: confirmation.repoPath, stageId: confirmation.stageId, sha: confirmation.sha };
+}
+
 export function gateBadge(gate: StageGate | null | undefined) {
   if (!gate || !GATE_LABELS[gate.status]) return null;
   return { label: GATE_LABELS[gate.status], tone: TONES[gate.status], sha: short(gate.sha), hint: [gate.reason, gate.statusError].filter(Boolean).join(' ') };
