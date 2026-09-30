@@ -44,18 +44,26 @@ import { ProductionRelease, useReleases } from './ProductionRelease';
 import { releaseBadge } from '@/lib/production-release';
 import { isStageGate, productionStatus } from '@/lib/stage-gate.ts';
 import type { BrowserView, Environment, PipelineAction, StageRemoval, WorkspaceSnapshot } from '@/lib/test-workspace';
-import type { GitHubSource, SourceSelection } from './SourceSettings';
+import type { SourceSelection } from './SourceSettings';
+import type { GitHubSource } from '../../contract/github.ts';
+import type { Scan as ScanReply } from '../../contract/scanner.ts';
+import type { PipelineStateReply, SourceReply } from '../../contract/pipeline.ts';
 
 // The pipeline as GET /api/state reports it. Scans may predate the current discovery shape, so their fields are optional.
-export type ScanRepo = { path: string; name?: string; sha?: string; branch?: string; remote?: string };
+export type ScanRepo = Pick<ScanReply['repo'], 'path'> & Partial<Omit<ScanReply['repo'], 'path'>>;
 /** A discovered node: a repository, workflow, job or deployment target. */
-export type ScanNode = { id: string; kind?: string; provider?: string; label?: string; projectName?: string; previewAlias?: string; deployBranches?: unknown };
+export type ScanNode = Pick<ScanReply['nodes'][number], 'id'> & Partial<Omit<ScanReply['nodes'][number], 'id'>>;
 /** A Production provider's group: its discovered targets and the deployments GitHub records for the commit. */
 export type DeploymentGroupService = DeploymentGroupRow<ScanNode>;
 /** A delivery row: Build's GitHub Actions runner, or a Production provider's deployment group or single target. */
 export type DeliveryService = ScanNode | DeploymentGroupService;
-export type Scan = { repo: ScanRepo; scannedAt?: string; nodes?: ScanNode[]; workflows?: { file?: unknown }[]; delivery?: { source?: DeliveryService[]; build?: DeliveryService[]; production?: DeliveryService[] } };
-export type PipelineState = { scan: Scan | null; defaultRepo: string; pipeline?: PipelineView | null; source?: GitHubSource | null; environments?: Environment[]; stageRemovals?: StageRemoval[]; browserTests?: Record<string, Partial<BrowserView>>; providers?: unknown[]; autopilot?: AutopilotView | null };
+export type Scan = Pick<Partial<ScanReply>, 'scannedAt'> & {
+  repo: ScanRepo; nodes?: ScanNode[]; workflows?: Partial<ScanReply['workflows'][number]>[];
+  delivery?: { [Stage in 'source' | 'build' | 'production']?: DeliveryService[] };
+};
+export type PipelineState = Pick<PipelineStateReply, 'defaultRepo'> & Partial<Omit<PipelineStateReply, 'defaultRepo' | 'scan' | 'pipeline' | 'browserTests' | 'stageRemovals'>> & {
+  scan: Scan | null; pipeline?: PipelineView | null; browserTests?: Record<string, Partial<BrowserView>>; stageRemovals?: StageRemoval[];
+};
 /** The open sheet or dialog, and what it was opened for. */
 export type PipelineDialog = {
   type: 'source' | 'service' | 'stage' | 'rename-stage' | 'remove-stage' | 'transition' | 'environment' | 'git-graph';
@@ -63,7 +71,7 @@ export type PipelineDialog = {
   connect?: boolean; connectRequest?: number; tab?: string; runId?: string; watch?: boolean; caseId?: string; caseRequestKey?: number; error?: string;
 };
 export type OpenDialog = (next: PipelineDialog | null) => void;
-export type SourceResult = { scan: Scan; source: GitHubSource; pipeline: PipelineView; environments?: Environment[] };
+export type SourceResult = Omit<SourceReply, 'scan' | 'pipeline'> & { scan: Scan; pipeline: PipelineView; environments?: PipelineStateReply['environments'] };
 type Page = 'pipeline' | 'settings';
 /** The dialog Settings was opened from, handed back on return to the Pipeline. */
 type SettingsReturn = { dialog: PipelineDialog | null; newTest: string };
@@ -105,7 +113,7 @@ const MODAL_DIALOGS = new Set(['stage', 'rename-stage', 'remove-stage', 'transit
 const STATUS_VARIANTS: Record<string, 'destructive' | 'outline'> = { failed: 'destructive', idle: 'outline', unconfigured: 'outline' };
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-function ProviderMark({ provider, active = false }: { provider?: string; active?: boolean }) {
+function ProviderMark({ provider, active = false }: { provider?: ScanNode['provider']; active?: boolean }) {
   const slug = providerAsset(provider) || 'service';
   return <img className="provider-logo" data-monochrome={monochromeAsset(slug)} data-active={active || undefined} src={`/assets/providers/${slug}.svg`} alt={provider || 'Service'} width={20} height={20} />;
 }

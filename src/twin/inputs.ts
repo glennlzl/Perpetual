@@ -8,6 +8,7 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { fail, plain } from './config.ts';
 import { services as registry } from './registry.ts';
 import type { DockerCommand, InputValues, ProvisionResult, ServiceInput, TwinService, TwinServices } from './registry.ts';
+import type { TwinServiceInputView } from '../../contract/twin.ts';
 
 // User-supplied test credentials, stored once per machine and reused across twins.
 // Views say only which inputs are set; values go to the twin runtime and nowhere else.
@@ -92,7 +93,7 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
     return run;
   }
 
-  async function view() {
+  async function view(): Promise<TwinServiceInputView[]> {
     const { stored, provisions } = await current();
     const listed = Object.values(services).filter(hasInputs);
     const email = listed.some(item => item.provision?.inputs.some(input => input.default === GIT_EMAIL)) ? await gitEmail() : '';

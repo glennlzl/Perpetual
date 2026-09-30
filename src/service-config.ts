@@ -4,16 +4,12 @@ import { parse } from 'yaml';
 import { redact } from './redaction.ts';
 import { SECRET_PATH, readRepositoryFile } from './repository-files.ts';
 import type { Scan } from './scanner.ts';
+import type { ConfigField, ConfigSection, ServiceConfiguration } from '../contract/service-config.ts';
+import type { ActionJob, ActionWorkflow, GitHubActionsReply } from '../contract/github.ts';
+export type { ConfigField, ConfigSection, ConfigFile, ServiceConfiguration } from '../contract/service-config.ts';
+export type { ActionStep, ActionJob, ActionWorkflow } from '../contract/github.ts';
 
 type Scalar = string | number | boolean;
-export interface ConfigField { key: string; label: string; type: 'list' | 'boolean' | 'number' | 'text'; value: string[] | Scalar; readOnly: true }
-export interface ConfigSection { id: string; title: string; fields: ConfigField[] }
-/** A configuration file; the controller adds a GitHub edit link, or marks a branch GitHub does not have. */
-export interface ConfigFile { path: string; editUrl?: string; local?: boolean }
-export interface ServiceConfiguration { nodeId: string | null; provider: string | null; files: ConfigFile[]; sections: ConfigSection[] }
-export interface ActionStep { id: string; name: string }
-export interface ActionJob { id: string; name: string; steps: ActionStep[] }
-export interface ActionWorkflow { file: string; name: string; jobs: ActionJob[]; error?: string }
 
 // Parsed YAML and JSON are untrusted: a record's fields stay unknown until each is checked.
 type Fields = { readonly [key: string]: unknown };
@@ -50,15 +46,6 @@ function addSection(sections: ConfigSection[], id: string, title: unknown, field
   if (actual.length) sections.push({ id, title: text(title), fields: actual });
 }
 
-function vercelProject(raw: string, name: string, expectedAlias: string | undefined) {
-  for (const match of raw.matchAll(/\{[^{}]{0,1500}\}/g)) {
-    const projectName = match[0].match(/\bname\s*:\s*["']([\w.-]+)["']/)?.[1];
-    const alias = match[0].match(/\bpreviewAlias\s*:\s*["']([\w.-]+\.vercel\.app)["']/)?.[1];
-    if (projectName === name && alias && (!expectedAlias || alias === expectedAlias)) return { name: projectName, alias };
-  }
-  return null;
-}
-
 export async function readServiceConfig(scan: Pick<Scan, 'repo' | 'nodes' | 'services'>, nodeId: string | null): Promise<ServiceConfiguration> {
   const node = scan?.nodes?.find(item => item.id === nodeId);
   if (!node) throw new Error('This service is no longer in the pipeline.');
@@ -77,23 +64,18 @@ export async function readServiceConfig(scan: Pick<Scan, 'repo' | 'nodes' | 'ser
       try { if (node.id.startsWith('vercel:')) name = decodeURIComponent(node.id.slice(7)); } catch { /* Legacy node has no project association. */ }
     }
     for (const file of paths) {
-      if (!/^scripts\/vercel[\w/-]*alias[\w-]*\.m?js$/.test(file) && !/(?:^|\/)vercel\.json$/.test(file)) continue;
+      if (!/(?:^|\/)vercel\.json$/.test(file)) continue;
       const raw = await readConfig(root, file);
       if (raw === null) continue;
-      if (file.endsWith('.json')) {
-        let data: unknown;
-        try { data = JSON.parse(raw); } catch { throw new Error('Could not read this Vercel configuration.'); }
-        // A scanned config path is authoritative; legacy names need an explicit match.
-        if (node.configFile !== file && name && name !== 'Vercel' && at(data, 'name') !== name) continue;
-        addSection(result.sections, `vercel:${file}`, 'Build', [
-          field('framework', 'Framework', at(data, 'framework')), field('buildCommand', 'Build command', at(data, 'buildCommand')),
-          field('installCommand', 'Install command', at(data, 'installCommand')), field('outputDirectory', 'Output directory', at(data, 'outputDirectory')),
-          field('devCommand', 'Development command', at(data, 'devCommand')),
-        ]);
-      } else {
-        const project = vercelProject(raw, name, node.previewAlias);
-        if (project) addSection(result.sections, `project:${file}`, 'Project', [field('name', 'Project', project.name), field('previewAlias', 'Preview alias', project.alias)]);
-      }
+      let data: unknown;
+      try { data = JSON.parse(raw); } catch { throw new Error('Could not read this Vercel configuration.'); }
+      // A scanned config path is authoritative; legacy names need an explicit match.
+      if (node.configFile !== file && name && name !== 'Vercel' && at(data, 'name') !== name) continue;
+      addSection(result.sections, `vercel:${file}`, 'Build', [
+        field('framework', 'Framework', at(data, 'framework')), field('buildCommand', 'Build command', at(data, 'buildCommand')),
+        field('installCommand', 'Install command', at(data, 'installCommand')), field('outputDirectory', 'Output directory', at(data, 'outputDirectory')),
+        field('devCommand', 'Development command', at(data, 'devCommand')),
+      ]);
     }
   }
 
@@ -116,7 +98,7 @@ function actionName(value: unknown, fallback = 'Action') {
   return isAction || isLocal || isImage ? text(value) : fallback;
 }
 
-export async function readGitHubActions(scan: Pick<Scan, 'repo' | 'workflows'>): Promise<{ workflows: ActionWorkflow[] }> {
+export async function readGitHubActions(scan: Pick<Scan, 'repo' | 'workflows'>): Promise<GitHubActionsReply> {
   const root = scan?.repo?.path;
   if (typeof root !== 'string' || !path.isAbsolute(root)) throw new Error('Repository configuration is unavailable.');
   let rootStat;

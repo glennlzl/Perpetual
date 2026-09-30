@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type FormEvent, type ReactNode } from 'react';
 import { Check, ChevronDown, CircleCheck, CircleX, Code, Copy, ExternalLink, Eye, GitBranch, ListChecks, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, RotateCcw, Sparkles, Square, Trash2, Undo2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -21,7 +21,7 @@ import { verificationAttempt, watchedRun, browserCaseRun, browserCaseState, brow
 import { useReturnFocus } from '@/lib/journey-focus';
 import { MAX_CASES, branchMismatchNote, defaultReplaceIds, generateError, journeyTimeoutMinutes, sameUrl, validUrl, validateTestSettings, type TargetSuggestion } from '@/lib/journey-config';
 import { buildJourneySteps, reviewedStepError, stepRow } from '@/lib/journey-steps';
-import { oneOffSelection, rememberOneOffRun, restoreSelection, settleOneOffRun } from '@/lib/run-selection';
+import { oneOffSelection, runSelection, RESTORE_FIRST } from '@/lib/run-selection';
 import { MANUAL, NONE, accountOptions, accountRequest, initialAccount, usesAccount, type AccountChoice, type AccountRequest, type TestAccount } from '@/lib/test-accounts';
 import type { BrowserAnalysis, BrowserConfig, StageTransaction } from '@/lib/test-workspace';
 import BrowserAgentViewer from './BrowserAgentViewer';
@@ -427,6 +427,8 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const pending = snapshot.pending;
   const error = snapshot.error || snapshot.pollErrors.browser;
   const dirty = Boolean(snapshot.dirty.config);
+  const selection = runSelection(repoPath, stageId);
+  const temporary = useSyncExternalStore(selection.subscribe, selection.getSnapshot);
   const [editingCase, setEditingCase] = useState<BrowserCase | null>(null);
   const [caseFilter, setCaseFilter] = useState('all');
   const [deletingCase, setDeletingCase] = useState<BrowserCase | null>(null);
@@ -475,16 +477,15 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const toolbar = testToolbar({ wait, readiness, caseCount: cases.length, selectedCount: selected.length, maxCases: MAX_CASES, runnable: runnableCode(selected, data.specs) });
   const emphasis = (action: string) => toolbar.primary === action ? 'default' : 'outline';
   const runCases = runDialog?.caseIds ? cases.filter(item => runDialog.caseIds!.includes(item.id) && reviewed(item)) : selected;
-  const runBlocked = runDialog?.caseIds ? oneOffSelection(cases, runCases.map(item => item.id)).error || '' : '';
+  const runBlocked = temporary.caseIds.length ? RESTORE_FIRST : runDialog?.caseIds ? oneOffSelection(cases, runCases.map(item => item.id)).error || '' : '';
   const codeItem = codeDialog && cases.find(item => item.id === codeDialog.caseId);
   const codeBlocked = !codeItem || !reviewed(codeItem) ? 'Review the journey and add checks first.' : !validTarget ? 'Set a target URL.' : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : codeDialog?.action === 'generate' && !openRouterConfigured ? 'Add an OpenRouter API Key in Settings.' : '';
   const concurrencyLabel = browserConcurrencyLabel(activeRun);
   useEffect(() => { if (!loading) pruneCaseDrafts(repoPath, stageId, cases); }, [loading, repoPath, stageId, cases]);
   useEffect(() => {
-    if (disabled) return;
-    const restored = settleOneOffRun(repoPath, stageId, { cases, runs: data.runs, active: run => ACTIVE.has(run.status) });
-    if (restored) updateCases(restored);
-  }, [repoPath, stageId, disabled, cases, data.runs]);
+    if (loading || busy || pending) return;
+    void selection.restore(cases, (next, baseCases) => stage.perform('browser', 'cases', tx => tx.post('cases', { cases: next, baseCases })), { active: Boolean(activeRun) }).catch(() => {});
+  }, [selection, stage, loading, busy, pending, cases, activeRun]);
   useEffect(() => {
     if (!focusedCase) return undefined;
     const timer = setTimeout(() => setFocusedCase(null), 1200);
@@ -544,7 +545,10 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   function transcribeDescription(audio: Parameters<TranscribeAudio>[0], options: Parameters<TranscribeAudio>[1]) {
     return stage.perform('browser', 'transcribe', tx => tx.post('transcribe', audio, options) as Promise<{ text?: unknown }>);
   }
-  function updateCases(next: BrowserCase[]) { void perform('cases', tx => tx.post('cases', { cases: next, baseCases: cases })); }
+  function updateCases(next: BrowserCase[]) {
+    const changed = next.filter(item => item.selected !== cases.find(previous => previous.id === item.id)?.selected).map(item => item.id);
+    void perform('cases', async tx => { const result = await tx.post('cases', { cases: next, baseCases: cases }); selection.keep(changed); return result; });
+  }
   // Playwright code for one reviewed journey: generated as a draft, verified, then approved in review.
   function codeAction(name: string, action: string, input: Record<string, unknown>) { void perform(name, tx => tx.post(action, input)); }
   // account: the request's { accountId } or { credentials }, from the dialog's account choice.
@@ -559,18 +563,12 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
     void perform(mode, async tx => {
       try {
         await persistConfig(tx, nextConfig);
-        // The controller runs only selected, reviewed cases; a one-off run selects its case for this run alone.
-        if (oneOff.added.length) await tx.post('cases', { cases: oneOff.cases, baseCases: cases });
         const input = mode === 'discover'
           ? { ...(options.replaceCaseIds?.length ? { replaceCaseIds: options.replaceCaseIds, baseCases: cases } : {}), ...account }
           : { caseIds, concurrency: options.concurrency || 2, ...account };
-        const result = await tx.post(mode === 'discover' ? 'discover' : 'run', input).catch(async failure => {
-          // The run never started, so its one-off selection is undone at once.
-          const restored = restoreSelection(oneOff.cases, oneOff.added);
-          if (restored) await tx.post('cases', { cases: restored, baseCases: oneOff.cases }).catch(() => {});
-          throw failure;
-        });
-        if (mode === 'run') rememberOneOffRun(repoPath, stageId, result.run?.id!, oneOff.added);
+        const result = mode === 'run'
+          ? await selection.start(cases, caseIds, (next, baseCases) => tx.post('cases', { cases: next, baseCases }), () => tx.post('run', input))
+          : await tx.post('discover', input);
         if (mode === 'discover' && mounted.current && stage.isCurrent()) setWatching({ ...result.run, mode });
       } catch (failure) {
         if (mode === 'discover' && mounted.current && stage.isCurrent()) setWatching({ id: null, mode, error: (failure as Error).message });
@@ -588,7 +586,10 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   }, [watchedId, watchedLive, data.runs]);
 
   return <div ref={root} className="test-workspace space-y-5">
-    <ErrorText>{error || environmentError}</ErrorText>
+    <ErrorText>{temporary.error ? error && !temporary.error.includes(error) ? `${error} ${temporary.error}` : temporary.error : error || environmentError}</ErrorText>
+    {temporary.error && <Button size="sm" variant="outline" disabled={disabled} onClick={() => {
+      void selection.restore(stage.getSnapshot().browser.cases, (next, baseCases) => stage.perform('browser', 'cases', tx => tx.post('cases', { cases: next, baseCases })), { retry: true }).catch(() => {});
+    }}>Restore selection</Button>}
     {view === 'tests' && <>
       {(preparation?.status === 'preparing' || ['queued', 'creating', 'preparing'].includes(environmentStatus ?? '')) && <Badge variant="secondary">Creating environment</Badge>}
       {preparation?.status === 'discovering' && !activeRun && <Badge variant="secondary">Generating tests</Badge>}
@@ -602,7 +603,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
         <div className="flex flex-wrap items-center gap-2 @max-md:w-full">
           <BlockedButton reason={toolbar.blockers.generate} size="sm" variant={emphasis('generate')} className={NARROW_TOOL} onClick={() => setConfigDialog('generate')}><Sparkles />Generate</BlockedButton>
           <BlockedButton reason={toolbar.blockers.add} size="sm" variant="outline" className={NARROW_TOOL} onClick={() => setCreatingCase(true)}><Plus />Add test</BlockedButton>
-          <BlockedButton reason={toolbar.blockers.run} size="sm" variant={emphasis('run')} className={NARROW_TOOL} onClick={() => setRunDialog({ caseIds: null, title: 'Run integration tests' })}><Play />Run selected{selected.length > 0 && ` (${selected.length})`}</BlockedButton>
+          <BlockedButton reason={toolbar.blockers.run || runBlocked} size="sm" variant={emphasis('run')} className={NARROW_TOOL} onClick={() => setRunDialog({ caseIds: null, title: 'Run integration tests' })}><Play />Run selected{selected.length > 0 && ` (${selected.length})`}</BlockedButton>
         </div>
         {dirty && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => perform('config', persistConfig)}>Save</Button>}
       </div>

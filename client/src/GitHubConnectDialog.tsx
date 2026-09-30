@@ -5,16 +5,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
-import type { GitHubConnection } from './SourceSettings';
-
-/** A GitHub device sign-in as /api/github/auth/start and /status report it. */
-type AuthSession = { id?: string; status?: string; userCode?: string; error?: string; account?: { login: string } | null };
+import type { GitHubConnection, SignInSnapshot } from '../../contract/github.ts';
 
 const DEVICE_URL = 'https://github.com/login/device';
-const pending = (session: AuthSession | null) => ['starting', 'pending'].includes(session?.status ?? '');
+const pending = (session: SignInSnapshot | null) => ['starting', 'pending'].includes(session?.status ?? '');
 
 export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void }) {
-  const [session, setSession] = useState<AuthSession | null>(null);
+  const [session, setSession] = useState<SignInSnapshot | null>(null);
   const [starting, setStarting] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [error, setError] = useState('');
@@ -57,7 +54,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
       try {
-        const result = await api<AuthSession>('/api/github/auth/status', { id });
+        const result = await api<SignInSnapshot>('/api/github/auth/status', { id });
         if (cancelled || !active.current) return;
         setSession(result);
         if (result.status === 'complete') {
@@ -72,7 +69,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
       } catch (failure) {
         if (!cancelled && active.current) {
           setError((failure as Error).message);
-          setSession(previous => ({ ...previous, status: 'error' }));
+          setSession(previous => previous ? { ...previous, status: 'error' } : previous);
           void api('/api/github/auth/cancel', { id }).catch(() => {});
         }
       }
@@ -87,7 +84,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
     setError('');
     setCopied(false);
     try {
-      const result = await api<AuthSession>('/api/github/auth/start', {});
+      const result = await api<SignInSnapshot>('/api/github/auth/start', {});
       if (!active.current) {
         if (result.id) void api('/api/github/auth/cancel', { id: result.id }).catch(() => {});
         return;

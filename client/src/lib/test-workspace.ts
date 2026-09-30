@@ -5,7 +5,7 @@ import type { BrowserCapabilities, BrowserCase, BrowserRun, JourneySpecs, RunPro
 import type { TestAccount } from './test-accounts.ts';
 import type { PageVisibility } from './utils.ts';
 import type { PipelineView } from './pipeline-nodes.ts';
-import type { Environment } from '../../../contract/environment.ts';
+import type { Environment, StageRemoval as PublicStageRemoval } from '../../../contract/environment.ts';
 import type { BrowserConfig as PublicBrowserConfig, BrowserAnalysis, BrowserViewReply } from '../../../contract/browser.ts';
 export type { BrowserPreparation, BrowserAnalysis } from '../../../contract/browser.ts';
 import type { PipelineActionReply } from '../../../contract/pipeline.ts';
@@ -28,7 +28,7 @@ export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
 /** A stage's sandboxes and its twin config, which this UI passes through to the controller unread. */
 export interface EnvironmentView { environments: Environment[]; plan: unknown }
 /** A confirmed stage removal and the sandbox cleanup it owns. */
-export interface StageRemoval { id?: string; stageId: string; status: string; environmentIds?: string[]; completedEnvironmentIds?: string[]; error?: string; createdAt?: string; updatedAt?: string }
+export type StageRemoval = Pick<PublicStageRemoval, 'stageId'> & Partial<Omit<PublicStageRemoval, 'stageId' | 'status'>> & { status: string };
 /** A source's pipeline, as far as draft pruning reads it. */
 export interface PipelineStages { repoPath?: string; stages?: { id: string }[] }
 /** The source summary GET /api/state returns, as far as the workspace reads it; an activation seed has the same fields. */

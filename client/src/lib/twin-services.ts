@@ -1,13 +1,9 @@
+import type { TwinInput, TwinService } from '../../../contract/twin.ts';
+export type { TwinInput, TwinService } from '../../../contract/twin.ts';
+
 // Twin service rows for a Sandbox stage. The controller reports the stage's twin
 // services and whether each is blocked; Ready needs the stage's latest ready
 // environment to report the service ready in its twin. Blocked always wins.
-/** An input a service needs, such as a test key; a secret one is never shown. */
-export interface TwinInput { name: string; label?: string; secret?: boolean; value?: string }
-/** A stage's twin service as GET /api/twin/services reports it. */
-export interface TwinService {
-  id: string; provider?: string; title?: string; fidelity: string; source?: string; blocked?: boolean; missing?: TwinInput[]; keys?: TwinInput[];
-  provision?: { inputs: TwinInput[] } | null; provisioned?: { expiresAt?: string; claimUrl?: string } | null;
-}
 export type TwinStatus = 'ready' | 'blocked' | 'not-started';
 export const TWIN_STATUS: Record<TwinStatus, string> = { ready: 'Ready', blocked: 'Blocked', 'not-started': 'Not started' };
 export const TWIN_FIDELITY: Record<string, string> = { actual: 'Actual', 'official-sandbox': 'Official sandbox', emulate: 'Emulate' };

@@ -20,7 +20,7 @@ test('the contract holds types only, and every side imports it as types', async 
   for (const file of [...await files('src/'), ...await files('client/src/'), ...await files('test/')]) {
     const text = await source(file);
     for (const line of text.split('\n')) {
-      if (!/^\s*(import|export)\b.*contract\/\w+\.ts['"]/.test(line)) continue;
+      if (!/^\s*(import|export)\b.*contract\/[\w-]+\.ts['"]/.test(line)) continue;
       assert.match(line, /^\s*(import type|export type)\b/, `${file}: ${line.trim()}`);
     }
   }

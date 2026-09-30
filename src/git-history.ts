@@ -4,14 +4,10 @@ import { promisify } from 'node:util';
 import { parseGitHubRemote } from './providers.ts';
 import { redact } from './redaction.ts';
 import type { ScanRepo } from './scanner.ts';
+import type { GitCommit, GitHistory } from '../contract/git-history.ts';
+export type { GitCommit, GitHistory } from '../contract/git-history.ts';
 
 interface GitRef { hash: string; type: string; name: string; symbolic: string }
-export interface GitCommit { hash: string; message: string; author: { name: string }; date: string; parents: string[]; refs?: string[]; tag?: string }
-export interface GitHistory {
-  commits: GitCommit[]; branch: string | null; repository: string | null;
-  refCount: number; localBranchCount: number; remoteBranchCount: number;
-  shallow: boolean; hasMore: boolean; limit: number; scope: string; readAt: string; source: 'local';
-}
 
 const exec = promisify(execFile);
 const NULL_FILE = process.platform === 'win32' ? 'NUL' : '/dev/null';

@@ -33,3 +33,15 @@ test('Vercel configuration retains the read-only fields its drawer displays', as
   assert.deepEqual(result.files, [{ path: 'vercel.json' }]);
   assert.deepEqual(result.sections.flatMap(section => section.fields.map(({ key, value }) => [key, value])), [['framework', 'vite'], ['buildCommand', 'npm run build']]);
 });
+
+test('a legacy helper node keeps its file link without interpreting custom JavaScript as provider configuration', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-config-helper-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = 'scripts/vercel-preview-alias.mjs';
+  await mkdir(dirname(join(root, file)), { recursive: true });
+  await writeFile(join(root, file), 'const unused = [{name:"web",previewAlias:"web.vercel.app"}];');
+  const node: ScanNode = { id: 'vercel:web', label: 'Web', kind: 'deployment', provider: 'Vercel', status: 'configured', detail: '', projectName: 'web', previewAlias: 'web.vercel.app', configFile: file, evidence: [{ file, summary: 'Legacy discovery' }] };
+  const result = await readServiceConfig({ repo: { path: root, name: 'app', branch: 'main', sha: null, remote: null }, nodes: [node], services: [] }, node.id);
+  assert.deepEqual(result.files, [{ path: file }]);
+  assert.deepEqual(result.sections, []);
+});

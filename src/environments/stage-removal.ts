@@ -5,20 +5,18 @@ import { join, resolve } from 'node:path';
 import { failureText } from '../redaction.ts';
 import type { EnvironmentManager, PublicEnvironment } from './manager.ts';
 import type { EnvironmentUsage, StageRef } from './usage.ts';
+import type { RemovalStatus, StageRemoval as PublicStageRemoval, StageRemovalReply } from '../../contract/environment.ts';
+export type { RemovalStatus } from '../../contract/environment.ts';
 
-export type RemovalStatus = 'queued' | 'removing' | 'completed' | 'failed';
 /** A Sandbox stage's accepted deletion: the environments it owns and has cleaned up, pinned to the stage it was for. */
-export interface StageRemoval {
-  id: string; context: StageRef; stageId: string; status: RemovalStatus; environmentIds: string[]; completedEnvironmentIds: string[];
-  createdAt: string; updatedAt: string; currentEnvironmentId?: string; error?: string; completedAt?: string;
-}
+export interface StageRemoval extends PublicStageRemoval { context: StageRef }
 type RemovalState = { version: 1; removals: StageRemoval[] };
 
 const now = () => new Date().toISOString();
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
 const failure = (error: unknown) => failureText(error, 1500);
 const inProgress = (item: PublicEnvironment) => IN_PROGRESS.includes(item.status);
-const publicRemoval = ({ context, ...item }: StageRemoval) => structuredClone(item);
+const publicRemoval = ({ context, ...item }: StageRemoval): PublicStageRemoval => structuredClone(item);
 
 function pinnedContext(value: { key?: unknown; stageId?: unknown } | null | undefined): StageRef {
   if (typeof value?.key !== 'string' || !value.key || value.key.length > 4096
@@ -144,12 +142,12 @@ export async function createStageRemovalManager({ dataDir, usage, environments, 
   }
 
   const manager = {
-    view(context: StageRef) {
+    view(context: StageRef): StageRemovalReply {
       const record = recordFor(pinnedContext(context));
       return { removal: record ? publicRemoval(record) : null };
     },
     summaries(key: string) { return state.removals.filter(item => item.context.key === key).map(publicRemoval); },
-    async start(value: { key?: unknown; stageId?: unknown } | null | undefined) {
+    async start(value: { key?: unknown; stageId?: unknown } | null | undefined): Promise<StageRemovalReply> {
       if (closed) throw conflict('The controller is shutting down.');
       const context = pinnedContext(value), scope = scopeId(context);
       if (admissions.has(scope)) { await admissions.get(scope); return manager.view(context); }

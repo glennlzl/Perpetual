@@ -5,7 +5,7 @@ import type { PageVisibility, Timers } from './utils.ts';
 import { createVisiblePoller } from './visible-poller.ts';
 
 // The shapes are the controller's contract (contract/github.ts): GET /api/github/runs as the controller replies.
-import type { BuildReply, CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
+import type { ActionWorkflow, BuildReply, CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
 export type { BuildReply };
 export type GitHubStep = WorkflowStep;
 export type GitHubJob = WorkflowJob;
@@ -111,7 +111,7 @@ export function watchedBuildStatus(view: BuildReply | null | undefined, error?: 
 }
 
 /** Names from the scanned workflow files. These are configuration, never execution evidence. */
-export interface ConfiguredWorkflow { file: string; name: string; jobs: { id: string; name: string; steps: { id: string; name: string }[] }[]; error?: string }
+export type ConfiguredWorkflow = ActionWorkflow;
 export interface BuildWorkflowRow extends ConfiguredWorkflow { runs: GitHubRun[] }
 /** Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. */
 export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined): BuildWorkflowRow[] {

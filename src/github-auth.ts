@@ -1,14 +1,10 @@
 import { startGitHubLogin } from './github-cli.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { getGitHubSession, type GitHubAccount, type GitHubSession } from './github-source.ts';
+import { getGitHubSession } from './github-source.ts';
+import type { GitHubSession, SignInStatus, SignInSnapshot } from '../contract/github.ts';
+export type { SignInStatus, SignInSnapshot } from '../contract/github.ts';
 
-export type SignInStatus = 'starting' | 'pending' | 'complete' | 'error' | 'expired' | 'cancelled';
-/** What the browser may see of one device sign-in: never CLI output or credentials. */
-export interface SignInSnapshot {
-  id: string; status: SignInStatus; userCode: string | null; verificationUrl: string | null;
-  expiresAt: string; account: GitHubAccount | null; error: string | null;
-}
 interface SignIn extends SignInSnapshot {
   output: string; child: ChildProcess | null;
   startupTimer?: NodeJS.Timeout; expiryTimer?: NodeJS.Timeout; killTimer?: NodeJS.Timeout;

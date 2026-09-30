@@ -10,10 +10,10 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
 import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
-import { twinInputsChanges, twinInputsRequest, twinKeyFields, twinProvisionRequest, twinServiceRows, type TwinService } from '@/lib/twin-services';
+import { twinInputsChanges, twinInputsRequest, twinKeyFields, twinProvisionRequest, twinServiceRows } from '@/lib/twin-services';
 import type { Environment } from '@/lib/test-workspace';
+import type { TwinService, TwinServicesReply, TwinInputsReply } from '../../contract/twin.ts';
 
-/** GET /api/twin/services: a Sandbox stage's twin services and the inputs each still needs; views never carry values. */
 type TwinServiceRow = ReturnType<typeof twinServiceRows>[number];
 type ServicesView = { key: string; services: TwinService[]; generated: boolean; error: string };
 
@@ -30,7 +30,7 @@ export default function TwinServices({ repoPath, scannedAt, stageId, environment
   useEffect(() => {
     if (!repoPath || !stageId) return undefined;
     const controller = new AbortController();
-    api<{ services: TwinService[]; generated?: boolean }>(`/api/twin/services?${new URLSearchParams({ repoPath, stageId })}`, undefined, { signal: controller.signal }).then(
+    api<TwinServicesReply>(`/api/twin/services?${new URLSearchParams({ repoPath, stageId })}`, undefined, { signal: controller.signal }).then(
       result => setView({ key, services: result.services, generated: result.generated === true, error: '' }),
       (failure: Error) => { if (failure.name !== 'AbortError') setView({ key, services: [], generated: false, error: failure.message }); });
     return () => controller.abort();
@@ -82,7 +82,7 @@ function ConnectDialog({ service, onClose, onSaved }: { service: TwinServiceRow;
     event.preventDefault();
     if (saving || !body) return;
     setSaving(true); setError('');
-    try { await api(path, body, { method }); onSaved(); }
+    try { await api<TwinInputsReply>(path, body, { method }); onSaved(); }
     catch (failure) { setError((failure as Error).message); setSaving(false); }
   }
   const failure = error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>;

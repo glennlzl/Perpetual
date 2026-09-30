@@ -41,9 +41,9 @@ function nextStageName(pipeline: PipelineView | null | undefined, afterStageId: 
   }
 }
 
-function InspectorMark({ provider, type }: { provider?: string; type: PipelineDialog['type'] }) {
+function InspectorMark({ provider, type }: { provider?: string | null; type: PipelineDialog['type'] }) {
   const asset = providerAsset(provider);
-  if (asset) return <img className="provider-logo" data-monochrome={monochromeAsset(asset)} src={`/assets/providers/${asset}.svg`} alt={provider} width={24} height={24} />;
+  if (asset) return <img className="provider-logo" data-monochrome={monochromeAsset(asset)} src={`/assets/providers/${asset}.svg`} alt={provider ?? undefined} width={24} height={24} />;
   const Icon = type === 'source' ? GitBranch : Box;
   return <Icon className="size-6" aria-hidden="true" />;
 }

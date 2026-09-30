@@ -10,3 +10,10 @@ export interface Environment {
   timings?: StepTiming[]; attempts?: EnvironmentAttempt[]; cleanupError?: string; cancellationRequestedAt?: string; failedStep?: string;
 }
 export interface EnvironmentLogs { logs: string }
+export type RemovalStatus = 'queued' | 'removing' | 'completed' | 'failed';
+/** Public progress of an accepted stage deletion; private source ownership is not included. */
+export interface StageRemoval {
+  id: string; stageId: string; status: RemovalStatus; environmentIds: string[]; completedEnvironmentIds: string[];
+  createdAt: string; updatedAt: string; currentEnvironmentId?: string; error?: string; completedAt?: string;
+}
+export interface StageRemovalReply { removal: StageRemoval | null }

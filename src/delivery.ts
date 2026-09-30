@@ -1,3 +1,6 @@
+import type { GitHubActionsEntry, DeploymentGroup, ProductionEntry, Delivery } from '../contract/scanner.ts';
+export type { GitHubActionsEntry, DeploymentGroup, ProductionEntry, Delivery } from '../contract/scanner.ts';
+
 const PROVIDERS = new Map([
   ['github', 'GitHub'],
   ['vercel', 'Vercel'],
@@ -7,11 +10,6 @@ const PROVIDERS = new Map([
 // Saved scans may predate the current discovery shape, so every field is checked before use.
 export interface DeliveryNode { id?: unknown; kind?: unknown; provider?: unknown }
 export interface DeliveryScan { nodes?: readonly (DeliveryNode | null | undefined)[]; workflows?: unknown }
-export interface GitHubActionsEntry { id: 'github-actions'; kind: 'github-actions'; provider: 'GitHub'; label: 'GitHub Actions' }
-export interface DeploymentGroup<N> { id: string; kind: 'deployment-group'; provider: string; label: string; deployments: N[] }
-export type ProductionEntry<N> = DeploymentGroup<N> | N;
-/** Build holds the workflow runner; Production holds the deployment targets the repository configures. */
-export interface Delivery<N> { version: 2; source: N[]; build: GitHubActionsEntry[]; production: ProductionEntry<N>[] }
 type NodeOf<S extends DeliveryScan> = NonNullable<NonNullable<S['nodes']>[number]>;
 export type WithDelivery<S extends DeliveryScan> = S & { delivery: Delivery<NodeOf<S>> };
 

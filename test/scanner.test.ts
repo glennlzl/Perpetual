@@ -40,8 +40,8 @@ test('discovers existing monorepo CI and provider clues without claiming authent
   assert.deepEqual(scan.workflows.find(w => w.name === 'Checks')!.jobs.find(j => j.id === 'gate')!.needs, ['test']);
   assert.equal(scan.services.find(s => s.path === 'frontend')!.framework, 'Next.js');
   assert.equal(scan.services.find(s => s.path === 'backend/api')!.provider, 'Railway');
-  assert.equal(scan.nodes.filter(n => n.provider === 'Vercel' && n.kind === 'deployment').length, 2);
-  assert.ok(scan.nodes.filter(n => n.previewAlias).every(n => !('deployBranches' in n)), 'an unfiltered push leaves the deployed branch unknown');
+  assert.equal(scan.nodes.filter(n => n.provider === 'Vercel' && n.kind === 'deployment').length, 1);
+  assert.ok(scan.nodes.filter(n => n.provider === 'Vercel').every(n => !n.previewAlias && !n.deployBranches), 'custom JavaScript does not establish project or deployed-branch identity');
   assert.ok(scan.nodes.some(n => n.label === 'LangGraph'));
   assert.ok(scan.nodes.some(n => n.label === 'Composio'));
   assert.ok(scan.edges.some(e => e.label.includes('API') && e.confidence === 'inferred'));
@@ -182,25 +182,19 @@ test('starter checks only declared workspace members, excluding unrelated exampl
   assert.deepEqual(workflow.jobs.validate.steps.filter(s => s.run === 'pnpm run test').map(s => s['working-directory']), ['apps/web']);
 });
 
-test('records the literal push branches a Vercel preview alias workflow deploys, never globs', async t => {
-  const alias = 'const PROJECTS = [{name:"web",id:"prj_web",previewAlias:"web.vercel.app"}];\n';
-  const run = 'jobs:\n  aliases:\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/vercel-point-git-preview-aliases.mjs\n';
-  const literal = await scanRepository(await fixture(t, {
-    'package.json': { name: 'literal' },
-    '.github/workflows/aliases.yml': `name: Aliases\non:\n  push:\n    branches: [preview]\n${run}`,
-    'scripts/vercel-point-git-preview-aliases.mjs': alias,
-  }));
-  assert.deepEqual(literal.nodes.find(n => n.previewAlias === 'web.vercel.app')!.deployBranches, ['preview']);
-  const glob = await scanRepository(await fixture(t, {
-    'package.json': { name: 'glob' },
-    '.github/workflows/aliases.yml': `name: Aliases\non:\n  push:\n    branches: [preview, 'release/*']\n${run}`,
-    'scripts/vercel-point-git-preview-aliases.mjs': alias,
-  }));
-  assert.equal(glob.nodes.find(n => n.previewAlias === 'web.vercel.app')!.deployBranches, undefined);
-  const pullRequests = await scanRepository(await fixture(t, {
-    'package.json': { name: 'pull-requests' },
-    '.github/workflows/aliases.yml': `name: Aliases\non:\n  push:\n    branches: [main]\n  pull_request:\n${run}`,
-    'scripts/vercel-point-git-preview-aliases.mjs': alias,
-  }));
-  assert.equal(pullRequests.nodes.find(n => n.previewAlias === 'web.vercel.app')!.deployBranches, undefined, 'pull request runs deploy other refs');
+test('custom helper paths and object fields never establish a Vercel project identity', async t => {
+  for (const helper of ['scripts/vercel-preview-alias.mjs', 'tools/deploy.mjs']) await t.test(helper, async () => {
+    const root = await fixture(t, {
+      'package.json': { name: 'app' },
+      'vercel.json': { framework: 'vite' },
+      '.github/workflows/deploy.yml': `name: Vercel deploy\non:\n  push:\n    branches: [preview]\njobs:\n  deploy:\n    steps:\n      - run: node ${helper}\n`,
+      [helper]: 'const unused = [{name:"web",previewAlias:"web.vercel.app"}];\n',
+    });
+    const scan = await scanRepository(root);
+    const targets = scan.nodes.filter(node => node.kind === 'deployment' && node.provider === 'Vercel');
+    assert.equal(targets.length, 2, 'standard configuration and unidentified workflow evidence stay visible');
+    assert.ok(targets.every(node => node.projectName === null && !node.previewAlias && !node.deployBranches), 'a custom object and a push filter do not identify a deployed project or branch');
+    assert.deepEqual(targets.flatMap(node => node.evidence.map(item => item.file)).sort(), ['.github/workflows/deploy.yml', 'vercel.json']);
+    assert.equal(scan.workflows.length, 1, 'the workflow remains with the Build runner');
+  });
 });

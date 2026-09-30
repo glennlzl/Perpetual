@@ -12,20 +12,8 @@ import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } f
 import { BranchName, BranchOptions } from './BranchSwitcher';
 import GitHubConnectDialog from './GitHubConnectDialog';
 import type { Scan } from './App';
+import type { GitHubSource, GitHubConnection, GitHubRepositoryChoice, GitHubRepositoryPage, GitHubBranch, GitHubBranchPage } from '../../contract/github.ts';
 
-/** The saved GitHub source, or the one detected from a local checkout's remote. */
-export type GitHubSource = { repository: string; branch?: string | null; rootDirectory?: string | null; scanPath?: string };
-/** GET /api/github/connection and the connect/disconnect replies; the session never carries a token. */
-export type GitHubConnection = {
-  authenticated?: boolean; connected?: boolean; message?: string;
-  account?: { login: string } | null;
-  source?: GitHubSource | null;
-  localCheckout?: { path: string; branch: string | null } | null;
-};
-export type GitHubRepository = { fullName: string; name?: string; private?: boolean };
-type GitHubBranch = { name: string };
-type Page<Key extends string, Item> = { [key in Key]?: Item[] } & { nextPage?: number | null };
-type BranchPage = Page<'branches', GitHubBranch> & { defaultBranch?: string | null };
 /** A GitHub source choice as POST /api/source/github takes it. */
 export type SourceSelection = { repository: string; branch: string; rootDirectory: string };
 export type SourceState = { canSave: boolean; loading: boolean; connection: GitHubConnection | null; repository?: string; branch?: string; rootDirectory?: string };
@@ -43,11 +31,11 @@ const ownerOf = (fullName: string) => fullName.split('/')[0];
 
 // Pinned repositories keep their order. Owners are grouped only when there are
 // several; the connected account leads and the rest keep GitHub's recency order.
-export function repositoryGroups(repositories: GitHubRepository[], pinnedNames: (string | undefined)[] = [], account = '') {
+export function repositoryGroups(repositories: GitHubRepositoryChoice[], pinnedNames: (string | undefined)[] = [], account = '') {
   const known = new Map(repositories.map(item => [item.fullName, item]));
   const pinnedSet = new Set(pinnedNames.filter((name): name is string => Boolean(name)));
   const pinned = [...pinnedSet].map(fullName => known.get(fullName) || { fullName, name: fullName.split('/')[1] || fullName });
-  const owners = new Map<string, GitHubRepository[]>();
+  const owners = new Map<string, GitHubRepositoryChoice[]>();
   for (const item of repositories) {
     if (pinnedSet.has(item.fullName)) continue;
     const owner = ownerOf(item.fullName);
@@ -80,7 +68,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const [connectionError, setConnectionError] = useState('');
   const [connectOpen, setConnectOpen] = useState(autoConnect);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
+  const [repositories, setRepositories] = useState<GitHubRepositoryChoice[]>([]);
   const [repository, setRepository] = useState('');
   const [repositoriesLoading, setRepositoriesLoading] = useState(false);
   const [repositoriesError, setRepositoriesError] = useState('');
@@ -165,7 +153,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     setRepositoriesLoading(true);
     setRepositoriesError('');
     try {
-      const result = await api<Page<'repositories', GitHubRepository>>(`/api/github/repositories?page=${encodeURIComponent(page)}`);
+      const result = await api<GitHubRepositoryPage>(`/api/github/repositories?page=${encodeURIComponent(page)}`);
       if (!active.current || request !== repositoryRequest.current) return;
       setRepositories(previous => mergeBy(append ? previous : [], result.repositories || [], 'fullName'));
       setRepositoryPage(result.nextPage || null);
@@ -193,7 +181,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     setBranchesLoading(true);
     setBranchesError('');
     try {
-      const result = await api<BranchPage>(`/api/github/branches?repository=${encodeURIComponent(target)}&page=${encodeURIComponent(page)}${Number(page) === 1 && preferred ? `&preferredBranch=${encodeURIComponent(preferred)}` : ''}`);
+      const result = await api<GitHubBranchPage>(`/api/github/branches?repository=${encodeURIComponent(target)}&page=${encodeURIComponent(page)}${Number(page) === 1 && preferred ? `&preferredBranch=${encodeURIComponent(preferred)}` : ''}`);
       if (!active.current || request !== branchRequest.current) return;
       setBranches(previous => mergeBy(append ? previous : [], result.branches || [], 'name'));
       setBranchPage(result.nextPage || null);
@@ -242,7 +230,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const savedBranch = source?.repository === repository ? source.branch || '' : '';
   const savedLocalOnly = local && Boolean(savedBranch) && !branchesLoading && !branchesError && !branches.some(item => item.name === savedBranch);
   const { pinned: pinnedRepositories, owners } = repositoryGroups(repositories, [source?.repository, repository], connection?.account?.login || '');
-  const repositoryItem = (item: GitHubRepository, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
+  const repositoryItem = (item: Pick<GitHubRepositoryChoice, 'fullName'> & Partial<Pick<GitHubRepositoryChoice, 'private'>>, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
 
   return <>
     {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} />}

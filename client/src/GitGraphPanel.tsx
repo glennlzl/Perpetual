@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { GitGraph, RefreshCw, X } from 'lucide-react';
-import { CommitGraph, type Commit } from '@/components/commit-graph';
+import { CommitGraph } from '@/components/commit-graph';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -8,10 +8,9 @@ import { SheetFooter, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
 import type { Scan } from './App';
+import type { GitHistory } from '../../contract/git-history.ts';
 import './branch-map.css';
 
-/** GET /api/git-history: real commits with their parent hashes, and where they were read. */
-type GitHistory = { commits: Commit[]; branch?: string | null; repository?: string | null; shallow?: boolean; hasMore?: boolean; source?: string };
 type HistoryResult = { key: string; history?: GitHistory; error?: string };
 
 const wrapAtSlash = (value: string | null | undefined) => String(value || '').split('/').flatMap((part, index, parts) => index < parts.length - 1 ? [`${part}/`, <wbr key={index} />] : [part]);

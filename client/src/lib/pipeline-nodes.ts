@@ -6,11 +6,12 @@ import type { GateView } from './stage-gate.ts';
 import type { SavedSource } from './source-selection.ts';
 import type { BrowserView, Environment } from './test-workspace.ts';
 import type { ReleaseReply } from '../../../contract/releases.ts';
+import type { Pipeline, Stage, Transition } from '../../../contract/pipeline.ts';
 
-export interface PipelineStage { id: string; name: string; kind: string; collapsed?: boolean }
-export interface PipelineTransition { id: string; source: string; target: string; blocked?: boolean }
+export type PipelineStage = Pick<Stage, 'id' | 'name'> & Partial<Pick<Stage, 'collapsed'>> & { kind: string };
+export type PipelineTransition = Pick<Transition, 'id' | 'source' | 'target'> & Partial<Pick<Transition, 'blocked'>>;
 /** A source's pipeline: its stages in order and the transitions between them. */
-export interface PipelineView { repoPath?: string; stages: PipelineStage[]; transitions: PipelineTransition[] }
+export type PipelineView = Partial<Pick<Pipeline, 'repoPath'>> & { stages: PipelineStage[]; transitions: PipelineTransition[] };
 /** A scan as stage cards read it. R is a delivery row the scan projects for Source, Build or Production. */
 export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
 

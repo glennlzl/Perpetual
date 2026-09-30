@@ -1,3 +1,35 @@
+// Public GitHub source, connection and evidence replies. Private CLI output and credentials never join these types.
+
+export interface GitHubAccount { login: string; name: string | null }
+/** A verified CLI account is present exactly when the session is authenticated. */
+export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined }
+  | { available: boolean; authenticated: false; account: null; message?: string };
+/** A saved source or a local checkout's detected remote; older/local projections omit managed-copy fields. */
+export interface GitHubSource {
+  repository: string; branch?: string | null; rootDirectory?: string | null; scanPath?: string | null;
+  checkoutPath?: string; sha?: string | null; connectedAccount?: string; savedAt?: string;
+}
+/** GET /api/github/connection and POST connect/disconnect. Only GET includes the original local checkout. */
+export type GitHubConnection = (
+  | (Extract<GitHubSession, { authenticated: true }> & { connected: true })
+  | (GitHubSession & { connected: false })
+) & { source: GitHubSource | null; localCheckout?: { path: string; branch: string | null } | null };
+export interface GitHubRepositoryChoice { fullName: string; name: string | null; private: boolean; defaultBranch: string | null }
+export interface GitHubRepositoryPage { repositories: GitHubRepositoryChoice[]; nextPage: number | null }
+export interface GitHubBranch { name: string }
+export interface GitHubBranchPage { branches: GitHubBranch[]; nextPage: number | null; defaultBranch: string | null }
+export type SignInStatus = 'starting' | 'pending' | 'complete' | 'error' | 'expired' | 'cancelled';
+/** POST /api/github/auth/start, status and cancel expose this snapshot, never the login process's output. */
+export interface SignInSnapshot {
+  id: string; status: SignInStatus; userCode: string | null; verificationUrl: string | null;
+  expiresAt: string; account: GitHubAccount | null; error: string | null;
+}
+/** GET /api/github-actions: declared workflow rails, separate from actual workflow run evidence. */
+export interface ActionStep { id: string; name: string }
+export interface ActionJob { id: string; name: string; steps: ActionStep[] }
+export interface ActionWorkflow { file: string; name: string; jobs: ActionJob[]; error?: string }
+export interface GitHubActionsReply { workflows: ActionWorkflow[] }
+
 // What the controller reads from GitHub for the scanned commit, as GET /api/github/runs and
 // GET /api/github/deployments reply with it. The controller implements these shapes
 // (src/github-runs.ts, src/github-deployments.ts) and the client reads them

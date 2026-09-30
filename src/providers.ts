@@ -1,6 +1,8 @@
 import { runGitHub } from './github-cli.ts';
 import type { Scan } from './scanner.ts';
 import { redact } from './redaction.ts';
+import type { ProviderRun, ProviderStatus, FailureDiagnosis } from '../contract/providers.ts';
+export type { ProviderRun, ProviderStatus, FailureDiagnosis } from '../contract/providers.ts';
 
 // Provider API responses are external data, read as unknown: each list must be a list of objects, or the reply is of
 // another shape and throws inside the caller's try/catch, so the provider is not connected; each field is text or null.
@@ -11,9 +13,6 @@ function records(value: unknown,provider: string): Record<string, unknown>[] {
   if(!Array.isArray(value)||!value.every(isRecord))throw new Error(`${provider} returned an unreadable reply.`);
   return value;
 }
-export interface ProviderRun { id: string | null; name: string | null; status: string | null; conclusion: string | null; sha: string | null; url?: string | null; branch?: string | null; createdAt?: string | null; matchesCommit: boolean }
-export interface ProviderStatus { provider: string; status: 'connected' | 'not-connected'; detail: string; observedAt?: string; runs: ProviderRun[] }
-export interface FailureDiagnosis { method: 'rule-based'; category: string; summary: string }
 
 // Redaction lives in src/redaction.ts; the name stays exported here for its callers.
 export { redact };

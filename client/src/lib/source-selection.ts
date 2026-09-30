@@ -1,3 +1,5 @@
+import type { GitHubSource } from '../../../contract/github.ts';
+
 // Mirrors sourceRoot in src/github-source.ts: / is the repository root, not the host filesystem.
 export function rootDirectoryError(value: string) {
   const path = value.trim();
@@ -25,7 +27,7 @@ export function initialBranch({ previous = '', preferred = '', defaultBranch = '
 }
 
 /** A saved GitHub source: its repository, branch and root directory, and the managed copy's path once scanned. */
-export interface SavedSource { repository?: string; branch?: string | null; rootDirectory?: string | null; scanPath?: string | null }
+export type SavedSource = Partial<Pick<GitHubSource, 'repository' | 'branch' | 'rootDirectory' | 'scanPath'>>;
 // The canvas reads a managed GitHub copy only when the saved source scanned this exact path.
 export function readsLocalCheckout(source: SavedSource | null | undefined, scanPath: string | null | undefined) {
   return Boolean(scanPath) && source?.scanPath !== scanPath;
