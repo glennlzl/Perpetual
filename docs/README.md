@@ -7,6 +7,7 @@
 - [Business journeys](journeys.md): reviewed browser journeys, discovery, journey code and its verification, runs, live view and recordings.
 - [Twins](twins.md): Compose application environments and their services, with provenance.
 - [Journey gate](gate.md): rebuilding a twin for each pushed commit, running its journeys and reporting a GitHub commit status.
+- [Releases](releases.md): requesting an exact-commit deployment through a configured GitHub handler and following its real result.
 - [Build repair](repair.md): the agent that fixes a failed build in a Docker box, its change rules, its pull request, the journey gates at its head and the merge.
 - [Provider connections](providers.md): GitHub, Vercel and Railway.
 - [CLI](cli.md): commands, scripts and tests.

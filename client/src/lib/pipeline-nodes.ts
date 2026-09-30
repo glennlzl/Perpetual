@@ -5,6 +5,7 @@ import type { AutopilotView } from './pipeline-autopilot.ts';
 import type { GateView } from './stage-gate.ts';
 import type { SavedSource } from './source-selection.ts';
 import type { BrowserView, Environment } from './test-workspace.ts';
+import type { ReleaseReply } from '../../../contract/releases.ts';
 
 export interface PipelineStage { id: string; name: string; kind: string; collapsed?: boolean }
 export interface PipelineTransition { id: string; source: string; target: string; blocked?: boolean }
@@ -56,12 +57,14 @@ export interface StageNodeContext<D = unknown, R = unknown> {
   healthBeat?: (environment: Environment | undefined) => string; build?: BuildSummary | null; buildStatus?: BuildStatus | null; github?: GitHubRuns | null; gates?: GateView | null;
   /** Production's rows with the deployments GitHub records for the commit; absent, the scan's rows stand. */
   production?: readonly R[] | null;
+  releases?: ReleaseReply | null;
+  releaseReadError?: string | null;
   /** Autopilot as the controller reports it; every stage but Source carries its own entry. */
   autopilot?: AutopilotView | null;
   selection?: D | null; selectedStageId?: string | null; busyStages?: string[]; busy?: boolean;
   openDialog?: (dialog: D) => void; toggleStage?: (stageId: string) => void; addTest?: (stageId: string) => void; createSandbox?: (stageId: string) => void;
 }
-export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { scan, source = null, pipeline, sha = null, latest = {}, snapshot = {}, arrivals = {}, healthBeat = () => '', build = null, buildStatus = null, github = null, gates = null, production = null, autopilot = null, selection = null, selectedStageId = null, busyStages = [], busy = false, openDialog, toggleStage, addTest, createSandbox }: StageNodeContext<D, R>) {
+export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { scan, source = null, pipeline, sha = null, latest = {}, snapshot = {}, arrivals = {}, healthBeat = () => '', build = null, buildStatus = null, github = null, gates = null, production = null, releases = null, releaseReadError = null, autopilot = null, selection = null, selectedStageId = null, busyStages = [], busy = false, openDialog, toggleStage, addTest, createSandbox }: StageNodeContext<D, R>) {
   const environment = latest[stage.id], services = stage.kind === 'production' && production ? production : stageServices(scan, stage);
   return {
     stage, services, repoPath: scan?.repo?.path, scannedAt: scan?.scannedAt, sha,
@@ -74,7 +77,7 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
     gate: stage.kind === 'sandbox' ? gates?.stages?.[stage.id] || null : stage.kind === 'production' ? gates?.production || null : null,
     ...(stage.kind === 'source' ? sourceProvenance(scan, source) : {}),
     // Whether a Sandbox stage gates commits before Production; its badge says so when none does.
-    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')) } : {}),
+    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), releases, releaseReadError } : {}),
     // Source is the repository connection; the other stages carry their Autopilot.
     ...(stage.kind !== 'source' ? { autopilot: autopilot?.stages?.[stage.id] || null } : {}),
     ...(stage.kind === 'build' ? { build, buildStatus, github } : {}),

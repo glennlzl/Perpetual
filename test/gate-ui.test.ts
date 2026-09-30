@@ -29,6 +29,22 @@ test('Release is offered only for a gate that needs release, never a failed one;
   assert.deepEqual(['queued', 'rebuilding', 'running', 'passed'].map(status => gateActive(gate(status))), [false, true, true, false]);
 });
 
+test('waiting for Build keeps the same commit pending without offering a second run or test motion', () => {
+  const waiting = gate('waiting-build', { reason: 'GitHub Actions is still running for this commit.' });
+  assert.deepEqual(gateBadge(waiting), { label: 'Waiting for Build', tone: 'idle', sha: 'cb9292c', hint: 'GitHub Actions is still running for this commit.' });
+  assert.equal(gatePending(waiting), true, 'Run now cannot queue another gate while Build is pending.');
+  assert.equal(gateActive(waiting), false, 'Waiting for Build does not imply a test or rebuild is running.');
+  assert.equal(canRelease(waiting), false, 'A user cannot release an unverified Build.');
+});
+
+test('a Build failure exposes the reason and commit, allows a recheck, and cannot be released', () => {
+  const failed = gate('build-failed', { reason: 'GitHub Actions failed for this commit.', statusError: 'Connect GitHub to report commit status.' });
+  assert.deepEqual(gateBadge(failed), { label: 'Build failed', tone: 'failed', sha: 'cb9292c', hint: 'GitHub Actions failed for this commit. Connect GitHub to report commit status.' });
+  assert.equal(gatePending(failed), false, 'Run now can recheck the same commit after its workflow is rerun.');
+  assert.equal(gateActive(failed), false);
+  assert.equal(canRelease(failed), false, 'Build failure must be fixed rather than manually released.');
+});
+
 test('Production shows Ready only from a gate readiness record', () => {
   assert.deepEqual(productionStatus({ sha: SHA, status: 'ready' }), { kind: 'passed', text: 'Ready', sha: 'cb9292c' });
   assert.equal(productionStatus(null), null);
@@ -63,7 +79,7 @@ test('gate motion: an edge flows into a Sandbox stage only while its gate rebuil
   const gates = (status: string) => view({ gamma: gate(status, { stageId: 'gamma' }) });
   const context = (extra: { gates: GateView }) => ({ stages, sha: SHA, snapshot: { environments: [], browserTests: {} }, latest: {}, ...extra });
   for (const status of ['rebuilding', 'running']) assert.equal(transitionFlow(edge('beta', 'gamma'), context({ gates: gates(status) })), 'active', status);
-  for (const status of ['queued', 'passed', 'failed', 'needs-release', 'released']) assert.equal(transitionFlow(edge('beta', 'gamma'), context({ gates: gates(status) })), null, status);
+  for (const status of ['queued', 'waiting-build', 'build-failed', 'passed', 'failed', 'needs-release', 'released']) assert.equal(transitionFlow(edge('beta', 'gamma'), context({ gates: gates(status) })), null, status);
   assert.equal(transitionFlow(edge('build', 'beta'), context({ gates: view({ beta: gate('running') }) })), 'active');
   assert.equal(transitionFlow({ ...edge('beta', 'gamma'), blocked: true }, context({ gates: gates('running') })), null, 'A paused edge never flows.');
   assert.equal(transitionFlow(edge('gamma', 'production'), context({ gates: view({}, { sha: SHA, status: 'ready' }) })), null);

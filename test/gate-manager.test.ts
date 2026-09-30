@@ -31,6 +31,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
   const current = { key: KEY, branch: 'main', sha, repository, stages };
   const log: string[] = [], posts: CommitStatusPost[] = [], headCalls: BranchHeadInput[] = [], holds: Holds = {}, seen: { rebuilding?: string; running?: string } = {};
   const github: GateGitHub = {
+    build: async () => ({ status: 'passed' }),
     connection: async () => (typeof connection === 'function' ? connection() : connection),
     async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 304 as const }; if (next instanceof Error) throw next; return next; },
     async post(status) { if (post) await post(status); posts.push(status); },
@@ -252,14 +253,24 @@ test('a failed status report is recorded and retried without blocking the gate o
   assert.equal(h.manager.view().stages.beta.statusError, undefined);
 });
 
-test('without a GitHub connection the gate still runs and shows that no status was reported', async t => {
-  const h = await harness(t, { connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+test('a local checkout gate still runs without a GitHub connection and shows that no status was reported', async t => {
+  const h = await harness(t, { repository: null, connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   const view = h.manager.view().stages.beta;
   assert.equal(view.status, 'passed');
   assert.equal(view.statusError, 'Connect GitHub to report commit status.');
   assert.deepEqual(h.headCalls, [], 'The branch head is read only for a connected account.');
+});
+
+test('a managed source without its GitHub connection cannot bypass Build admission', async t => {
+  const h = await harness(t, { connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'waiting-build');
+  assert.match(h.manager.view().stages.beta.reason!, /Connect GitHub/);
+  assert.deepEqual(h.log, []);
+  assert.equal(h.manager.view().production, null);
 });
 
 test('a gate interrupted by a restart needs release with the interruption, and queued gates resume', async t => {

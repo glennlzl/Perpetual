@@ -40,7 +40,8 @@ test('commit status waits for its original source when the repository changes du
   const original = current, reading = deferred(), account = deferred(), posts: CommitStatusPost[] = [];
   const manager = await createGateManager({ dataDir: await storage(t), source: () => current,
     github: {
-      connection: async () => { if (++calls === 2) { reading.resolve(); await account.promise; } return { login: 'tester', repository: current.repository! }; },
+      connection: async () => { if (++calls === 3) { reading.resolve(); await account.promise; } return { login: 'tester', repository: current.repository! }; },
+      build: async () => ({ status: 'passed' }),
       head: async () => ({ status: 200, sha: A, etag: null }), post: async input => { posts.push(input); },
     }, steps: noJourneys,
   });

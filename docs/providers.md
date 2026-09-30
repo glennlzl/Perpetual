@@ -1,6 +1,6 @@
 # Provider connections
 
-Perpetual reads provider state; it never deploys. A repository that mentions a provider is not proof that the provider is connected.
+Perpetual reads provider state. Its optional [release channel](releases.md) requests an exact-commit deployment through a configured GitHub handler; the Vercel and Railway adapters remain read-only. A repository that mentions a provider is not proof that the provider is connected.
 
 Export credentials into the server process environment. `.env.example` lists the variable names; the server does not load `.env` files. Credentials are not returned to the browser or persisted in Perpetual's state.
 
@@ -45,7 +45,7 @@ Vercel reads `VERCEL_TOKEN`, `VERCEL_PROJECT_ID` (comma-separated IDs for severa
 
 Railway reads `RAILWAY_API_TOKEN` for an account or workspace token, or `RAILWAY_TOKEN` for an environment-scoped project token, plus `RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID`. Project tokens use the `Project-Access-Token` header. The adapter is read-only.
 
-The Vercel and Railway adapters need independent provider access and have not been validated against live accounts.
+The Vercel and Railway adapters need independent provider access and have not been validated against live accounts. The GitHub release channel uses the connected GitHub account; the configured workflow supplies its own deployment credentials.
 
 ## References
 

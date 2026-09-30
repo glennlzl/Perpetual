@@ -8,6 +8,7 @@ import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import type { BranchHeadInput, CommitStatusPost } from '../src/gate/github.ts';
 import type { GateView } from '../src/gate/manager.ts';
 import type { GitHubSession } from '../src/github-source.ts';
+import type { BuildInput, BuildVerdict } from '../src/gate/manager.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
 type GateResponse = GateView & { repoPath: string; sha: string | null; error?: string };
@@ -19,18 +20,20 @@ function github({ login = 'glennlzl' } = {}) {
   return {
     calls,
     auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
-    runs: { async session() { return session(login); }, async read() { throw new Error('unused'); } },
+    runs: { async session() { return session(login); }, async read(input: {repository?: unknown; sha?: unknown}) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } },
     async status(input: CommitStatusPost) { calls.statuses.push(input); },
-    async head(input: BranchHeadInput) { calls.heads.push(input); return { status: 304 as const }; },
+    async head(input: BranchHeadInput) { calls.heads.push(input); return { status: 200 as const, sha: SHA, etag: null }; },
+    async build(_input: BuildInput): Promise<BuildVerdict> { return { status: 'passed' }; },
   };
 }
 
-async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-23T09:00:00.000Z' }, seams = github() }: { connection?: { login: string; connectedAt: string } | null; seams?: ReturnType<typeof github> } = {}) {
+async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-23T09:00:00.000Z' }, seams = github(), managed = false }: { connection?: { login: string; connectedAt: string } | null; seams?: ReturnType<typeof github>; managed?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-gate-api-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
   const stages = [{ id: 'source', name: 'Source', kind: 'source', collapsed: false }, { id: 'build', name: 'Build', kind: 'build', collapsed: false }, { id: 'beta', name: 'Beta', kind: 'sandbox', collapsed: false }, { id: 'production', name: 'Production', kind: 'production', collapsed: false }];
-  const state = { scan, providers: [], pipelines: { [dir]: { repoPath: dir, stages } }, githubConnection: connection };
+  const state = { scan, providers: [], pipelines: { [managed ? 'github:owner/app:/' : dir]: { repoPath: dir, stages } }, githubConnection: connection,
+    ...(managed ? { source: { repository: 'owner/app', branch: 'main', rootDirectory: '/', scanPath: dir, sha: SHA, connectedAccount: 'glennlzl', savedAt: '2026-09-23T10:00:00.000Z' } } : {}) };
   await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state }));
   const app = await startServer({ port: 0, repo: dir, dataDir, github: seams });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -47,6 +50,29 @@ async function start(t: TestContext, { connection = { login: 'glennlzl', connect
 test('the gate view names the active source and starts empty', async t => {
   const f = await start(t);
   assert.deepEqual(await f.view(), { repoPath: f.dir, sha: SHA, stages: {}, production: null });
+});
+
+test('managed Run now waits on the connected Build reader before reaching journey admission', async t => {
+  const seams = github(), builds: BuildInput[] = [];
+  seams.build = async input => { builds.push(input); return { status: 'waiting', reason: 'CI is still running.' }; };
+  const f = await start(t, { seams, managed: true });
+  assert.equal((await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' })).status, 202);
+  const waiting = await f.until(view => view.stages.beta?.status === 'waiting-build');
+  assert.equal(waiting.stages.beta.reason, 'CI is still running.');
+  assert.deepEqual(builds, [{ repository: 'owner/app', branch: 'main', sha: SHA, login: 'glennlzl' }]);
+  assert.equal((await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA })).status, 409);
+  assert.equal(waiting.production, null);
+});
+
+test('managed failed Build cannot be manually released into Production', async t => {
+  const seams = github();
+  seams.build = async () => ({ status: 'blocked', reason: 'CI failed.' });
+  const f = await start(t, { seams, managed: true });
+  await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' });
+  const blocked = await f.until(view => view.stages.beta?.status === 'build-failed');
+  assert.equal(blocked.stages.beta.reason, 'CI failed.');
+  assert.equal((await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA })).status, 409);
+  assert.equal((await f.view()).production, null);
 });
 
 test('Run now on a stage without reviewed journeys needs release and reports it; a person releases it', async t => {

@@ -29,6 +29,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, runs = {}, he
   const log: string[] = [], refs: GateRef[] = [], posts: CommitStatusPost[] = [];
   const holds: { prepare?: (gate: GateRef) => Promise<void>; run?: (context: Context) => Promise<void> } = {};
   const github: GateGitHub = {
+    build: async () => ({ status: 'passed' }),
     connection: async () => ({ login: 'glennlzl', repository: 'owner/app' }),
     async head() { return heads.shift() ?? { status: 304 }; },
     async post(status) { posts.push(status); },

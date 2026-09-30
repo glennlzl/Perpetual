@@ -1,0 +1,55 @@
+# Copy to .github/workflows/deploy.yml, adapt the preview guard, and replace
+# the deliberately failing Deploy step with your actual provider command.
+name: Deploy tested commit
+on: deployment
+permissions:
+  contents: read
+  deployments: write
+concurrency:
+  group: deploy-${{ github.event.deployment.environment }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: >-
+      github.event.deployment.environment == 'preview' &&
+      github.event.deployment.payload.perpetual.workflowPath == '.github/workflows/deploy.yml' &&
+      github.event.deployment.payload.perpetual.sha == github.event.deployment.sha
+    runs-on: ubuntu-latest
+    environment: preview
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.deployment.sha }}
+          persist-credentials: false
+      - name: Record deployment started
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: context.payload.deployment.id,
+              state: 'in_progress',
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+      - name: Deploy
+        id: deploy
+        run: |
+          echo "Configure a real deployment of the checked-out commit."
+          echo "Set the step output url only after the provider confirms it."
+          exit 1
+      - name: Report outcome
+        if: always()
+        uses: actions/github-script@v9
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        with:
+          script: |
+            const succeeded = process.env.DEPLOY_OUTCOME === 'success';
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: context.payload.deployment.id,
+              state: succeeded ? 'success' : 'failure',
+              ...(succeeded && process.env.DEPLOY_URL ? {environment_url: process.env.DEPLOY_URL} : {}),
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
