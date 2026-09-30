@@ -99,6 +99,30 @@ test('journey authoring offers account choices and an actionable missing-check s
     await expect(dialog).toBeHidden();
     assert.equal(item.needsReview, false); assert.deepEqual(item.assertions, [{ type: 'text-visible', value: 'Workflow {run}' }]);
   });
+  await t.test('an invalid long journey keeps its error and editor controls in view on a narrow screen', async t => {
+    requests.length = 0;
+    item = { ...structuredClone(journey), steps: Array.from({ length: 12 }, (_, index) => ({
+      id: `step-${index}`, title: `Milestone ${index + 1}: save the workflow, reopen the persisted result, and confirm that the expected business outcome is visible.`,
+      checks: [{ type: 'text-visible', value: 'Workflow saved' }],
+    })) };
+    const page = await browser.newPage({ viewport: { width: 320, height: 800 } }); t.after(() => page.close());
+    await page.goto(url);
+    const opener = page.getByRole('button', { name: `${journey.name}: Edit`, exact: true });
+    await opener.click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('textbox', { name: 'Step 1 title', exact: true }).fill('');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    const error = dialog.getByRole('alert');
+    await expect(error).toHaveText('Name each business step.');
+    await expect(error).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole('heading', { name: 'Edit test', exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeInViewport({ ratio: 1 });
+    assert.equal(requests.length, 0, 'An invalid draft never reaches the controller.');
+    await dialog.getByRole('button', { name: 'Discard draft', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(opener).toBeFocused();
+    assert.ok(item.steps?.[0].title, 'Discarding the local edit keeps the saved milestone.');
+  });
   await t.test('a selected legacy journey without checks can be deselected but cannot be selected again', async t => {
     requests.length = 0; item = { ...structuredClone(journey), assertions: [] };
     const page = await browser.newPage(); t.after(() => page.close()); await page.goto(url);

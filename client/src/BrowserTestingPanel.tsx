@@ -339,8 +339,8 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
           </Collapsible>
           {!!item.evidence?.length && <Collapsible><CollapsibleTrigger asChild><Button type="button" variant="ghost" className="w-full justify-between px-0 [&[data-state=open]>svg]:rotate-180">Source evidence<ChevronDown /></Button></CollapsibleTrigger><CollapsibleContent><ul className="space-y-2 text-xs text-muted-foreground">{item.evidence.map((source, index) => <li className="break-all" key={index}>{source.path}{source.line ? `:${source.line}` : ''}</li>)}</ul></CollapsibleContent></Collapsible>}
         </fieldset>
-        <ErrorText>{error}</ErrorText>
         </div>
+        {error && <div className="case-editor-error"><ErrorText>{error}</ErrorText></div>}
         <DialogFooter>{edited.current && <Button type="button" variant="ghost" disabled={saving} onClick={() => { caseDrafts.delete(draftKey); onClose(); }}>Discard draft</Button>}<Button type="button" variant="outline" disabled={saving} onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{item.needsReview ? 'Review & save' : 'Save'}</Button></DialogFooter>
       </form>
     </DialogContent>

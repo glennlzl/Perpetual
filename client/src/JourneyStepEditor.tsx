@@ -5,6 +5,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 import { CHECKS } from '@/lib/browser-test-ui';
 import { COMPARE_OPS, STEP_CHECKS, checkRow, earlierCaptures, nextCaptureName, stepRow, type CheckRow, type StepRow } from '@/lib/journey-steps';
 
@@ -50,12 +51,16 @@ export default function JourneyStepEditor({ rows, onChange }: { rows: StepRow[];
   return <div role="group" aria-labelledby="journey-steps-label" className="grid min-w-0 gap-2">
     <div className="flex items-center justify-between gap-3"><Label id="journey-steps-label">Business steps</Label><span className="text-xs tabular-nums text-muted-foreground">{rows.length}/12</span></div>
     {!!rows.length && <ol className="grid gap-2">{rows.map((row, index) => <li key={row.key} className="journey-step-row grid gap-1 rounded-lg border p-2">
-      <div className="flex min-w-0 items-center gap-1">
-        <span aria-hidden="true" className="w-6 shrink-0 text-center text-xs tabular-nums text-muted-foreground">{index + 1}</span>
-        <Input aria-label={`Step ${index + 1} title`} autoFocus={row.key === added} maxLength={240} value={row.title} className="min-w-0 flex-1" onChange={event => update(index, { title: event.target.value })} />
-        <Button type="button" variant="ghost" size="icon-sm" aria-label={`Move step ${index + 1} up`} disabled={!index} onClick={() => move(index, -1)}><ArrowUp /></Button>
-        <Button type="button" variant="ghost" size="icon-sm" aria-label={`Move step ${index + 1} down`} disabled={index === rows.length - 1} onClick={() => move(index, 1)}><ArrowDown /></Button>
-        <Button type="button" variant="ghost" size="icon-sm" aria-label={`Remove step ${index + 1}`} onClick={() => onChange(rows.filter((_, current) => current !== index))}><Trash2 /></Button>
+      <div className="flex min-w-0 flex-wrap items-start gap-1">
+        <div className="flex min-w-0 flex-1 basis-56 items-start gap-1">
+          <span aria-hidden="true" className="mt-3 w-6 shrink-0 text-center text-xs tabular-nums text-muted-foreground">{index + 1}</span>
+          <Textarea aria-label={`Step ${index + 1} title`} autoFocus={row.key === added} rows={1} maxLength={240} value={row.title} className="min-h-10 min-w-0 flex-1 resize-y" onChange={event => update(index, { title: event.target.value })} />
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={`Move step ${index + 1} up`} disabled={!index} onClick={() => move(index, -1)}><ArrowUp /></Button>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={`Move step ${index + 1} down`} disabled={index === rows.length - 1} onClick={() => move(index, 1)}><ArrowDown /></Button>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={`Remove step ${index + 1}`} onClick={() => onChange(rows.filter((_, current) => current !== index))}><Trash2 /></Button>
+        </div>
       </div>
       <StepChecks rows={rows} index={index} added={added} onAdd={setAdded} onChange={checks => update(index, { checks })} />
     </li>)}</ol>}
