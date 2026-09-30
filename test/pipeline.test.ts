@@ -422,9 +422,7 @@ test('a canvas failure is a dismissible Alert above the stages, with Try again o
   assert.doesNotMatch(css, /\.canvas-alert \{[^}]*position: absolute/);
   // A failed toggle and the refresh after a stage removal can repeat; polls retry themselves.
   assert.match(app, /const refresh = \(\) => void refreshPipeline\(\)\.catch\(failure => setError\(failure\.message, refresh\)\);/);
-  assert.match(app, /tests\.error && tests\.error !== quietError \? \{ message: tests\.error, retry: null \}/);
-  assert.match(app, /const dismissError = useCallback\(\(\) => \{ if \(error\) setError\(''\); else setQuietError\(tests\.error\); \}/);
-  assert.match(app, /useEffect\(\(\) => \{ if \(!tests\.error\) setQuietError\(''\); \}, \[tests\.error\]\);/, 'A dismissed poll failure shows again if it recurs after clearing.');
+  // Poll dismissal, recurrence and action retry precedence are exercised on the mounted App in pipeline-sync-ui.test.ts.
 });
 
 test('the header row never clips the sidebar toggle focus ring', async () => {

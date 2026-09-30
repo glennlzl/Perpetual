@@ -101,13 +101,16 @@ test('a global repair cleanup failure is visible without changing Build or impor
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(), repoPath = '/acme/beta', sha = 'b'.repeat(40);
   const reason = 'Repair cleanup must finish before another repair can start. Docker removal failed.';
-  let watchError: string | undefined = reason, pipeline = defaultPipeline(repoPath), writes = 0;
+  let watchError: string | undefined = reason, pipeline = defaultPipeline(repoPath), writes = 0, sourceFailure = false;
   const autopilot = (): AutopilotView => ({ repoPath, stages: { build: { mode: 'merge', changes: [], failed: { sha, runs: [] } } }, ...(watchError ? { watchError } : {}) });
   const build: BuildReply = { repoPath, repository: 'acme/beta', branch: 'main', scannedSha: sha, sha, source: 'watched', runs: [{ id: '1', workflowId: '2', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'failure', attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] }] };
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     let result: unknown = {}, status = 200;
-    if (path === '/api/state') result = { defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'beta', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } }, pipeline, environments: [], browserTests: {}, autopilot: autopilot() };
+    if (path === '/api/state') {
+      if (sourceFailure) { status = 503; result = { error: 'Workspace refresh failed' }; }
+      else result = { defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'beta', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } }, pipeline, environments: [], browserTests: {}, autopilot: autopilot() };
+    }
     else if (path === '/api/autopilot') result = autopilot();
     else if (path === '/api/github/build') result = build;
     else if (path === '/api/github/deployments') result = { repository: 'acme/beta', sha, deployments: [] };
@@ -154,5 +157,19 @@ test('a global repair cleanup failure is visible without changing Build or impor
   await expect(alert).toContainText(reason);
   await expect(buildCard.getByText('Failedbbbbbbb', { exact: true })).toBeVisible();
   await expect(page.getByText('Fixing build', { exact: true })).toHaveCount(0);
+  // Workspace and Autopilot polls own separate dismissals. Clearing either allows its next failure to show.
+  sourceFailure = true;
+  await expect(alert).toContainText('Workspace refresh failed');
+  await expect(page.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(alert).toContainText(reason);
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await (await page.waitForResponse(value => new URL(value.url()).pathname === '/api/state')).finished();
+  await expect(alert).toHaveCount(0);
+  sourceFailure = false;
+  await (await page.waitForResponse(value => new URL(value.url()).pathname === '/api/state' && value.status() === 200)).finished();
+  sourceFailure = true;
+  await expect(alert).toContainText('Workspace refresh failed');
+  await expect(buildCard.getByText('Failedbbbbbbb', { exact: true })).toBeVisible();
   assert.equal(writes, 2);
 });
