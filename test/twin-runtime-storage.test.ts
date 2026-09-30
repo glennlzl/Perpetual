@@ -71,6 +71,15 @@ test('Malformed sibling reservations block allocation, and a failed reservation 
   assert.equal(result.apps[0].url, `http://127.0.0.1:${PORT_BASE + 1}`);
 });
 
+test('Controller metadata beside environment directories is not a twin reservation', async t => {
+  const f = await fixture(t), environments = join(f.dataDir, 'environments');
+  const files = ['state.json', '.state-pending.tmp'];
+  for (const name of files) await writeFile(join(environments, name), 'controller metadata');
+  const result = await f.runtime.prepare({ dataDir: f.dataDir, source: f.source, id: 'beta', config: app });
+  assert.equal(result.apps[0].url, `http://127.0.0.1:${PORT_BASE}`);
+  for (const name of files) assert.equal(await readFile(join(environments, name), 'utf8'), 'controller metadata');
+});
+
 test('Invalid shared-port values never become an empty reservation map', async t => {
   for (const ports of [null, [], { 'shared.http': '43100' }, { 'shared.http': 65536 }]) await t.test(JSON.stringify(ports), async t => {
     const f = await fixture(t), directory = join(f.dataDir, 'twin-services');

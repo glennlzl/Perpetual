@@ -176,7 +176,8 @@ async function sharedPorts(dataDir: string): Promise<HostPorts> {
 async function reservedPorts(dataDir: string, id?: string) {
   const root = resolve(dataDir), environments = join(root, ENVIRONMENTS);
   const entries = await readdir(environments).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error; });
-  const states = await Promise.all(entries.filter(entry => entry !== id).map(entry => readState(join(environments, entry, TWIN, 'twin.json'))));
+  // Controller metadata and atomic-save files share this directory; only accepted twin ids own reservations.
+  const states = await Promise.all(entries.filter(entry => entry !== id && TWIN_ID.test(entry)).map(entry => readState(join(environments, entry, TWIN, 'twin.json'))));
   return new Set([...states.flatMap(state => state?.block ?? []), ...Object.values(await sharedPorts(root))]);
 }
 
