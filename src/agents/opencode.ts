@@ -38,6 +38,7 @@ const TAIL = 4000;
 const INCOMPLETE = 'Cleanup incomplete; the agent’s processes could not be confirmed stopped.';
 // OpenRouter refusals OpenCode reports as `Error: <message>` before it exits, and what a person does about each.
 const REFUSALS: [RegExp, string][] = [
+  [/\bError: .{0,200}?would exceed your available credits given your current in-flight requests\b/i, 'Wait for active OpenRouter requests to finish or add credits, then try again.'],
   [/\bError: .{0,200}?(?:requires more credits|insufficient credits)/i, 'Add credits to your OpenRouter account and try again.'],
   [/\bError: .{0,200}?(?:no auth credentials found|user not found|invalid api key)/i, 'Check your OpenRouter API key in Settings.'],
   // A request the model's provider rejects, such as Gemini's reasoning details, fails the same way on every attempt.
@@ -84,7 +85,8 @@ export const fingerprint = async (files: string[]): Promise<Record<string, strin
   Object.fromEntries(await Promise.all(files.map(async file => [file, createHash('sha256').update(await readFile(file)).digest('hex')])));
 
 /**
- * A failed run: its message is the reason and the end of its output; `reason` and `output` are each alone, and `timedOut`
+ * A failed run: its message is the actionable refusal, or the reason and output tail for other failures;
+ * `reason` and redacted `output` are each alone, and `timedOut`
  * says it ran out of time rather than stopping or being cancelled.
  */
 export type RunFailure = Error & { reason: string; output: string; timedOut?: true; cleanupIncomplete?: true };
@@ -119,8 +121,9 @@ export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeou
       if (abort.signal.aborted) throw Object.assign(new Error(said(messages.cancelled)), { reason: said(messages.cancelled), output: '' }, incomplete);
       const output = (tails.stderr.trim() || tails.stdout.trim()).split('\n').slice(-6).join(' ').slice(-500);
       const stopped = /exited before completing/.test(error.message);
-      const reason = said(error.timedOut ? messages.timedOut : stopped ? openrouterRefusal(output) ?? messages.stopped : error.message);
-      throw Object.assign(new Error(browserError(hide(`${reason}${output ? ` ${output}` : ''}`), env, 800)),
+      const refusal = stopped && !error.timedOut ? openrouterRefusal(output) : undefined;
+      const reason = said(error.timedOut ? messages.timedOut : stopped ? refusal ?? messages.stopped : error.message);
+      throw Object.assign(new Error(browserError(hide(`${reason}${output && !refusal ? ` ${output}` : ''}`), env, 800)),
         { reason: browserError(hide(reason), env, 800), output: output && browserError(hide(output), env, 800) }, error.timedOut ? { timedOut: true } : {}, incomplete);
     } finally { job = null; }
   }

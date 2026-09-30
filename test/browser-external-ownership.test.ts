@@ -62,6 +62,10 @@ test('an external generation with unconfirmed cleanup remains blocked after rest
   await assert.rejects(f.manager.run(f.context('gamma'), {}, { manual: true }), /cleanup.*confirm|confirm.*cleanup/i);
   await f.restart();
   await assert.rejects(f.manager.discover(f.context('gamma')), /cleanup.*confirm|confirm.*cleanup/i);
+  const generation=(await f.manager.view(f.context('beta'))).specs[journey.id].generation;
+  assert.equal(generation?.status,'failed');
+  assert.match(generation?.error??'',/cleanup.*confirm|confirm.*cleanup/i);
+  assert.equal(f.workers.length,1,'Restoring a failure never starts a worker or releases the held origin.');
   const saved = await readFile(join(f.dataDir, 'browser/state.json'), 'utf8');
   assert.doesNotMatch(saved, /temporary-password|fixture-openrouter-key/);
   assert.equal((await f.manager.view(f.context('gamma'))).runs.length, 0);

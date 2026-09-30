@@ -171,6 +171,8 @@ When a test account is selected or supplied, the generation first signs in once,
 
 The generation works in a private folder that is removed after confirmed cleanup; unconfirmed external browser ownership retains it across restarts. The generator can write only test files in its own `tests/` folder; the config, seed, fixture mapping, plan and OpenCode configuration are read-only and must stay unchanged. OpenCode runs with its own `HOME`, so it reads none of your global OpenCode configuration, plugins or instructions, and only OpenCode receives the model key. Each harness call has 10 minutes.
 
+A terminal generation failure keeps its bounded, redacted reason and any rejected code across controller restarts, beside the existing draft. Restoring that explanation starts no worker or model call and never clears an origin's cleanup hold. A newly admitted generation, a successful code save, or deleting or changing the reviewed journey clears the previous failure. Cancellation leaves no failure unless cleanup itself is unconfirmed. If the failure record cannot be saved, the current view keeps the original reason and reports the storage error; that unsaved explanation cannot be guaranteed after restart.
+
 The written file is validated against the grammar. An invalid or missing file gets one repair attempt with the validation error; a still-invalid file fails the generation and nothing is saved. A valid file is saved as the draft with its provenance (harness, generator and model) and still needs verification and approval. The test suite drives the pinned test MCP server with a fake harness (`test/fixtures/fake-opencode.ts`); whether a given model writes good code for a real journey is not covered by it.
 
 ## Verdicts
