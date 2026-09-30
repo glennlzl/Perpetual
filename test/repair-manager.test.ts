@@ -1335,3 +1335,23 @@ test('successful cleanup in progress withholds another source\'s Repair without 
   assert.deepEqual(h.manager.view().head?.failed, [shown('3')]);
   assert.equal(h.manager.view().watchError, undefined);
 });
+
+test('successful restart cleanup clears its own error even while GitHub is disconnected', async t => {
+  for (const legacy of ['history', 'orphan']) await t.test(legacy, async t => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-')), root = join(dataDir, 'repairs');
+    await mkdir(root);
+    if (legacy === 'history') {
+      const at = '2026-09-25T09:00:00.000Z';
+      await writeFile(join(root, 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'finished', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/neutral/source', rootDirectory: '/', trigger: 'push', status: 'merged', merged: E, runs: [], createdAt: at, updatedAt: at }] }));
+    } else await mkdir(join(root, 'orphan'));
+    let failed = true;
+    const a = agent(undefined, { async recover() { if (failed) throw new Error('Docker unavailable'); }, async cleanup() {} });
+    const h = await harness(t, { dataDir, steps: a.steps, connection: null });
+    await h.poll();
+    assert.match(h.manager.view().watchError ?? '', /Docker unavailable/);
+    assert.equal(h.calls.heads.length, 0, 'Disconnected recovery does not need a GitHub read.');
+    failed = false; await h.poll();
+    assert.equal(h.manager.view().watchError, undefined, 'A confirmed recovery clears the error it owns.');
+    assert.equal(a.contexts.length, 0, 'Recovery never resumes authoring.');
+  });
+});

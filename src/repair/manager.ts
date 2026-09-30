@@ -215,7 +215,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   // Adapters with no external resources retain their original directory-only recovery. Real boxes must confirm deletion first.
   if (!steps.cleanup && !steps.recover) for (const name of directories) await rm(join(root, name), { recursive: true, force: true });
   const saves = createSaveQueue();
-  let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, reads = 0;
+  let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, recoveryError: string | null = null, reads = 0;
   const tasks = new Set<Promise<unknown>>(), controllers = new Map<string, AbortController>();
   // The head each source was last read at with its ETag (reads counts the reads that succeeded), the branch's own failed
   // runs of that head as last read, the first head seen since start (a baseline that opens nothing by itself), a head
@@ -549,7 +549,9 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function check() {
     if (closed) return Promise.resolve();
     checking ??= Promise.resolve().then(async () => {
-      await cleanupOutstanding();
+      // Cleanup can recover without a connected source; only it clears its earlier failure.
+      try { await cleanupOutstanding(); recoveryError = null; }
+      catch (error) { recoveryError = text(error); return; }
       if (closed) return;
       const current = managed();
       if (!current && !state.repairs.some(repair => repair.status === 'rerunning')) return;
@@ -573,8 +575,9 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     // Resource ownership holds the whole controller, even when its repair belongs to another source or is outside the visible history.
     const cleanup = state.repairs.find(repair => repair.cleanup?.status === 'failed')?.cleanup ?? state.repairs.find(repair => repair.cleanup)?.cleanup;
     const held = recovering || Boolean(cleanup);
-    const cleanupError = cleanup?.status === 'failed' ? `Repair cleanup must finish before another repair can start. ${cleanup.reason ? text(cleanup.reason) : 'Resource deletion could not be confirmed.'}` : null;
-    const error = [cleanupError, cleanupError && watchError === cleanup?.reason ? null : watchError].filter(Boolean).join(' ');
+    const cleanupReason = cleanup?.status === 'failed' ? cleanup.reason ? text(cleanup.reason) : 'Resource deletion could not be confirmed.' : recoveryError;
+    const cleanupError = cleanupReason ? `Repair cleanup must finish before another repair can start. ${cleanupReason}` : null;
+    const error = [cleanupError, watchError].filter(Boolean).join(' ');
     const failed = !held && head && read?.branch === head.branch && read.login === head.login && read.sha === head.sha ? read.runs.map(publicRun) : [];
     return { repairs, ...(head && head.branch === watched.branch ? { head: { sha: head.sha, branch: head.branch, failed } } : {}), ...(watched ? { autoMerge: autoMerge(watched.key) } : {}), ...(error ? { watchError: error } : {}) };
   }
@@ -611,7 +614,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       await check();
       unchanged();
       const head = heads.get(current.key);
-      if (reads === read || head?.branch !== current.branch) throw conflict(watchError || `Could not read the head of ${current.branch}. Try again.`);
+      if (reads === read || head?.branch !== current.branch) throw conflict(recoveryError || watchError || `Could not read the head of ${current.branch}. Try again.`);
       if (head.login !== connection.login) throw conflict('The GitHub connection changed. Start the repair again.');
       // True when this commit's repair is already running; a held or other active repair refuses.
       const started = () => {
