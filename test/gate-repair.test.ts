@@ -31,7 +31,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, runs = {}, he
   const github: GateGitHub = {
     build: async () => ({ status: 'passed' }),
     connection: async () => ({ login: 'developer', repository: 'owner/app' }),
-    async head() { return heads.shift() ?? { status: 304 }; },
+    async head() { return heads.shift() ?? { status: 200, sha: current.sha, etag: null }; },
     async post(status) { posts.push(status); },
   };
   const steps: GateSteps<Context, { id: string }> = {

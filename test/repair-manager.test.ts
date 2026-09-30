@@ -472,6 +472,38 @@ test('a person\'s Repair is refused when the head cannot be read again, or moves
   assert.deepEqual([h.manager.view().repairs, h.manager.view().head?.sha, h.calls.failures], [[], B, []], 'No repair of the older commit opens, so nothing is read or spent.');
 });
 
+test('a person\'s Repair refuses changed source evidence while the selected head\'s failed runs are read', async t => {
+  const changes: Partial<RepairSource>[] = [
+    { branch: 'release' }, { key: 'github:owner/other:/' }, { repository: 'owner/other' },
+    { checkoutPath: '/data/sources/another/app' }, { rootDirectory: '/web' },
+  ];
+  for (const change of changes) await t.test(Object.keys(change)[0], async t => {
+    const a = agent(), h = await harness(t, { steps: a.steps });
+    h.github.runs[A] = [run('1', A, 'failure')];
+    await h.poll();
+    let reads = 0;
+    h.github.onRuns = () => { if (++reads === 2) Object.assign(h.current, change); };
+    await assert.rejects(h.manager.repair({ runId: '1' }), (error: HttpError) => error.statusCode === 409 && /active source changed/i.test(error.message));
+    await h.manager.idle();
+    assert.deepEqual(a.contexts, [], 'The agent must not start for a source the person has left.');
+    assert.deepEqual((await h.saved()).repairs, [], 'The old source must not acquire an invisible repair.');
+  });
+});
+
+test('a person\'s Repair refuses an account change while the selected head\'s failed runs are read', async t => {
+  for (const connection of [null, { login: 'other', repository: 'owner/app' }]) await t.test(connection?.login ?? 'disconnected', async t => {
+    const a = agent(), h = await harness(t, { steps: a.steps });
+    h.github.runs[A] = [run('1', A, 'failure')];
+    await h.poll();
+    let reads = 0;
+    h.github.onRuns = () => { if (++reads === 2) h.github.connection = connection; };
+    await assert.rejects(h.manager.repair({ runId: '1' }), (error: HttpError) => error.statusCode === 409 && /connection changed/i.test(error.message));
+    await h.manager.idle();
+    assert.deepEqual(a.contexts, []);
+    assert.deepEqual((await h.saved()).repairs, []);
+  });
+});
+
 test('Stop cancels an active repair and aborts its work; a finished or unknown repair cannot be stopped', async t => {
   let stopped = false;
   const h = await harness(t, { steps: agent(async (_context, signal) => { await aborted(signal); stopped = true; return { status: 'ready' }; }).steps });

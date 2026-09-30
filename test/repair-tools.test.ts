@@ -70,16 +70,77 @@ test('edit replaces text that occurs once, write creates folders, and both repor
   assert.deepEqual(f.events.changes, ['add.js', 'docs/notes/fix.md']);
 });
 
-test('run returns the exit code and the tail of the merged output, and stops at its time limit', async t => {
+test('run returns the exit code, withholds incomplete output and stops at its time limit', async t => {
   const f = await tools(t);
   const failing = await f.call('run', { command: 'node check.js' });
   assert.deepEqual([failing.exitCode, failing.timedOut], [1, false]);
   assert.match(String(failing.output), /add\(2, 3\) returned -1, expected 5/);
   const long = await f.call('run', { command: 'for i in $(seq 1 20000); do echo "line $i"; done' });
   assert.equal(long.truncated, true);
-  assert.match(String(long.output), /line 20000\n$/);
+  assert.equal(long.output, undefined);
+  assert.equal(long.exitCode, 0);
+  assert.match(long.error ?? '', /observation unavailable/i);
   const slow = await f.call('run', { command: 'sleep 5', timeoutSeconds: 1 });
   assert.equal(slow.timedOut, true);
   assert.match((await f.call('run', { command: 'true', timeoutSeconds: 901 })).error ?? '', /at most|from 1 to 900/);
   assert.deepEqual(f.events.runs.map(([, code]) => code).slice(0, 2), [1, 0]);
+});
+
+test('read redacts complete credentials before line numbering and clipping without changing the file', async t => {
+  const f = await tools(t);
+  const source = `const ready = true;\n-----BEGIN PRIVATE KEY-----\n${'QUJD'.repeat(600)}\n-----END PRIVATE KEY-----\n`;
+  await writeFile(join(f.root, 'config.txt'), source);
+  const result = await f.call('read', { path: 'config.txt' });
+  assert.equal(result.content, '1\tconst ready = true;\n2\t[REDACTED]\n3\t[REDACTED]\n4\t[REDACTED]');
+  assert.equal(result.truncated, false);
+  assert.equal(await readFile(join(f.root, 'config.txt'), 'utf8'), source);
+});
+
+test('grep redacts a credential before clipping its matched line', async t => {
+  const f = await tools(t);
+  const prefix = 'x'.repeat(280), key = `AKIA${'A'.repeat(16)}`;
+  await writeFile(join(f.root, 'config.txt'), `${prefix} ${key}\n`);
+  const result = await f.call('grep', { pattern: 'AKIA', include: '*.txt' });
+  assert.deepEqual(result.matches, [`config.txt:1:${prefix} [REDACTED]`]);
+});
+
+test('run redacts output while preserving the real exit and reproduction evidence', async t => {
+  const f = await tools(t);
+  const command = 'cat config.txt; exit 3';
+  await writeFile(join(f.root, 'config.txt'), 'API_KEY=synthetic-run-value\nordinary diagnostic\n');
+  const result = await f.call('run', { command });
+  assert.equal(result.output, 'API_KEY=[REDACTED]\nordinary diagnostic\n');
+  assert.deepEqual([result.exitCode, result.timedOut, result.truncated], [3, false, false]);
+  assert.deepEqual(f.events.runs, [[command, 3]]);
+});
+
+test('tool replies redact filenames and refused paths but internal file operations use their exact paths', async t => {
+  const f = await tools(t), name = 'ghp_syntheticfilename0123456789.txt';
+  const contents = 'API_KEY=synthetic-file-value\n';
+  assert.equal((await f.call('write', { path: name, text: contents })).path, '[REDACTED].txt');
+  assert.equal(await readFile(join(f.root, name), 'utf8'), contents, 'Writes keep the original bytes for later change validation.');
+  const listed = await f.call('list', {});
+  assert.ok(Array.isArray(listed.entries) && listed.entries.includes('[REDACTED].txt'));
+  const read = await f.call('read', { path: name });
+  assert.equal(read.path, '[REDACTED].txt');
+  assert.equal(read.content, '1\tAPI_KEY=[REDACTED]');
+  const refused = await f.call('read', { path: `../${name}` });
+  assert.ok(!refused.error?.includes('ghp_'));
+  assert.match(refused.error ?? '', /\[REDACTED\]/);
+});
+
+test('tools withhold a capture already truncated by the box and preserve its execution evidence', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'large.txt'), 'unredactable-fragment'.repeat(60_000));
+  for (const [name, input] of [
+    ['read', { path: 'large.txt' }],
+    ['grep', { pattern: 'fragment', include: 'large.txt' }],
+    ['run', { command: 'cat large.txt; exit 7' }],
+  ] as const) await t.test(name, async () => {
+    const result = await f.call(name, input);
+    assert.deepEqual([result.ok, result.exitCode, result.timedOut, result.truncated], [false, name === 'run' ? 7 : 0, false, true]);
+    assert.match(result.error ?? '', /observation unavailable/i);
+    assert.match(result.error ?? '', /narrow/i);
+    assert.ok(!JSON.stringify(result).includes('unredactable-fragment'), 'An unknown prefix or suffix is never treated as redacted text.');
+  });
 });

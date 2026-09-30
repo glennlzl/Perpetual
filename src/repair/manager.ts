@@ -543,15 +543,25 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (!source()?.key) throw new Error('Scan a repository first.');
       const current = managed();
       if (!current) throw new Error('Connect a GitHub repository to repair its builds.');
-      const connection = await github.connection();
-      if (!connection) throw new Error('Connect GitHub to repair builds.');
+      const unchanged = () => {
+        guard();
+        const latest = managed();
+        if (!latest || (['key', 'repository', 'branch', 'checkoutPath', 'rootDirectory'] as const).some(field => latest[field] !== current[field])) throw conflict('The active source changed. Reload the pipeline.');
+      };
+      const verified = await github.connection();
+      unchanged();
+      if (!verified) throw new Error('Connect GitHub to repair builds.');
+      const connection = { ...verified };
+      if (connection.repository !== current.repository) throw conflict('The GitHub connection changed. Start the repair again.');
       // A check under way may have read the head before this request, so a check of its own follows it.
       if (checking) await checking;
+      unchanged();
       const read = reads;
       await check();
-      const latest = managed(), head = heads.get(current.key);
-      if (latest?.key !== current.key || latest.branch !== current.branch) throw conflict('The active source changed. Reload the pipeline.');
+      unchanged();
+      const head = heads.get(current.key);
       if (reads === read || head?.branch !== current.branch) throw conflict(watchError || `Could not read the head of ${current.branch}. Try again.`);
+      if (head.login !== connection.login) throw conflict('The GitHub connection changed. Start the repair again.');
       // True when this commit's repair is already running; a held or other active repair refuses.
       const started = () => {
         const existing = scoped(current).find(repair => repair.sha === head.sha);
@@ -563,9 +573,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       };
       // The named run is a failed build of the branch at its head, even when that head's repair already runs.
       const { runs } = await github.runs({ repository: current.repository, sha: head.sha, login: connection.login });
-      guard();
+      unchanged();
+      const connected = await github.connection();
+      unchanged();
+      if (connected?.login !== connection.login || connected.repository !== connection.repository) throw conflict('The GitHub connection changed. Start the repair again.');
       // A repair of a commit the head moved past while its runs were read would be superseded at once.
-      if (heads.get(current.key)?.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
+      const latestHead = heads.get(current.key);
+      if (latestHead?.branch !== head.branch || latestHead.login !== head.login || latestHead.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
       const id = String(runId), own = branchRuns(runs, current.branch), failed = own.filter(failedRun);
       if (!failed.some(run => run.id === id)) {
         throw conflict(!runs.some(run => run.id === id) ? `This run is not at the head of ${current.branch}.` : own.some(run => run.id === id) ? 'Choose a failed workflow run.' : `This run is not a build of ${current.branch}.`);
@@ -573,6 +587,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (started()) return view();
       const repair = open(current, connection.login, head.sha, failed, 'person');
       await persist();
+      try { unchanged(); } catch (error) { await settle(repair, 'needs-person', text(error)); throw error; }
       begin(repair);
       return view();
     },

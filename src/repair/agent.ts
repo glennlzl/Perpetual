@@ -125,7 +125,7 @@ export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prom
   const tools = repairTools(box, { signal: stop, events: { run(command, exitCode) { if (!changed && exitCode !== 0 && reproduces(command, failing)) reproduced = true; }, change() { changed = true; } } });
   const result = (end: AttemptResult['end'], extra: Partial<AttemptResult> = {}): AttemptResult => {
     const done = seen.flatMap(step => step.toolCalls).find(call => call.toolName === 'done');
-    const summary = done && isRecord(done.input) && typeof done.input.summary === 'string' ? done.input.summary.slice(0, 4000) : '';
+    const summary = done && isRecord(done.input) && typeof done.input.summary === 'string' ? redact(done.input.summary).slice(0, 4000) : '';
     return { end, summary, steps: seen.length, inputTokens: seen.reduce((total, step) => total + (step.usage.inputTokens ?? 0), 0),
       outputTokens: seen.reduce((total, step) => total + (step.usage.outputTokens ?? 0), 0), cost: spentBy(seen), reproduced, ...extra };
   };

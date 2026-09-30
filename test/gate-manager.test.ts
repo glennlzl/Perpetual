@@ -33,7 +33,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
   const github: GateGitHub = {
     build: async () => ({ status: 'passed' }),
     connection: async () => (typeof connection === 'function' ? connection() : connection),
-    async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 304 as const }; if (next instanceof Error) throw next; return next; },
+    async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 200 as const, sha: current.sha, etag: null }; if (next instanceof Error) throw next; return next; },
     async post(status) { if (post) await post(status); posts.push(status); },
   };
   const steps: GateSteps<Context, { id: string }> = {
@@ -263,12 +263,11 @@ test('a local checkout gate still runs without a GitHub connection and shows tha
   assert.deepEqual(h.headCalls, [], 'The branch head is read only for a connected account.');
 });
 
-test('a managed source without its GitHub connection cannot bypass Build admission', async t => {
+test('a managed source without its GitHub connection cannot admit a new manual gate', async t => {
   const h = await harness(t, { connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
-  await h.manager.run({ stageId: 'beta' });
+  await assert.rejects(h.manager.run({ stageId: 'beta' }), /Connect GitHub/);
   await h.manager.idle();
-  assert.equal(h.manager.view().stages.beta.status, 'waiting-build');
-  assert.match(h.manager.view().stages.beta.reason!, /Connect GitHub/);
+  assert.deepEqual(h.manager.view().stages, {});
   assert.deepEqual(h.log, []);
   assert.equal(h.manager.view().production, null);
 });
