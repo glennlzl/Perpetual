@@ -520,7 +520,12 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   if (nodesInitialized && !ready) setReady(true);
   const [sheetViewport] = useState(createSheetViewport);
   const view = useRef<{ moved: boolean; stageId: string | null; timer: ReturnType<typeof setTimeout> | 0; raf: number }>({ moved: false, stageId: null, timer: 0, raf: 0 });
-  const takeView = useCallback(() => { view.current.moved = true; sheetViewport.moved(); }, [sheetViewport]);
+  const takeView = useCallback(() => {
+    const pending = view.current;
+    clearTimeout(pending.timer); cancelAnimationFrame(pending.raf);
+    pending.moved = true;
+    sheetViewport.moved();
+  }, [sheetViewport]);
   // Programmatic moves report no event; a drag, wheel or pinch does.
   const onMoveStart = useCallback((event: MouseEvent | TouchEvent | null) => { if (event) takeView(); }, [takeView]);
   // An animated move is recorded until it lands, so a sheet opened meanwhile

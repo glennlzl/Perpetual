@@ -1,17 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
-import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
+import { startServer } from '../src/server.ts';
 
 // Exercise the actual App, including independent gate and workspace polls. Only HTTP replies are fixtures.
 test('a gate commit refresh preserves a pending optimistic stage collapse in Chromium', { timeout: 60000 }, async t => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
-  t.after(() => server.close()); await server.listen();
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-pipeline-sync-'));
+  const server = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'state') });
+  t.after(async () => { await server.close(); await rm(dir, { recursive: true, force: true }); });
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage();
+  const pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   const firstSha = 'a'.repeat(40), nextSha = 'b'.repeat(40), repoPath = '/acme/app';
   let pipeline = defaultPipeline(repoPath), gateSha = firstSha;
   const state = () => ({ defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha: gateSha }, delivery: { source: [], build: [], production: [] } }, pipeline, environments: [], browserTests: {}, providers: [] });
@@ -36,12 +40,11 @@ test('a gate commit refresh preserves a pending optimistic stage collapse in Chr
     }
     await route.fulfill({ json: result });
   });
-  const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  await page.goto(`${origin}/build/`);
+  await page.goto(server.url);
   await expect(page.getByRole('button', { name: 'Collapse Build', exact: true })).toBeVisible();
   // The gate learns about the next commit and starts a source read. The user collapses Build before it returns.
   const before = stateRequests; holdState = true; gateSha = nextSha;
-  await page.evaluate(async () => { const module = '/build/src/lib/stage-gate.ts'; (await import(module)).gateChanges.notify(); });
+  // Let the shipped app's gate poll notice the new head; no dev-only module import or notification.
   await expect.poll(() => stateRequests).toBeGreaterThan(before);
   await page.getByRole('button', { name: 'Collapse Build', exact: true }).click();
   await expect.poll(() => writes).toBe(1);
@@ -53,4 +56,5 @@ test('a gate commit refresh preserves a pending optimistic stage collapse in Chr
   releaseWrite();
   await expect.poll(() => pipeline.stages.find(stage => stage.id === 'build')?.collapsed).toBe(true);
   await expect(page.getByRole('button', { name: 'Expand Build', exact: true })).toBeVisible();
+  assert.deepEqual(pageErrors, [], 'The production pipeline renders without uncaught browser errors.');
 });
