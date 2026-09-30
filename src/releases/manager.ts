@@ -75,8 +75,8 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   const own=(source:ReleaseSource)=>state.releases.filter(entry=>scope(entry.source)===scope(source));
   async function view(): Promise<ReleaseView> {
     const evidence=await getEvidence(),source=sourceValid(evidence.source)?evidence.source:null;
-    const target=source?state.targets[scope(source)]??null:null,recent=source?own(source).map(entry=>publicRecord(entry.record)).reverse().slice(0,20):[];
-    const current=recent.find(record=>record.sha===source?.sha)??null;
+    const target=source?state.targets[scope(source)]??null:null,history=source?own(source):[],recent=history.slice(-20).reverse().map(entry=>publicRecord(entry.record));
+    const selected=target?history.findLast(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):undefined,current=selected?publicRecord(selected.record):null;
     let blockedReason=evidenceReason(evidence);
     if(!blockedReason&&!target)blockedReason='Configure a deployment target.';
     if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason='A deployment is unresolved. Check its status before deploying again.';

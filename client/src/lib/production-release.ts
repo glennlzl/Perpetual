@@ -3,6 +3,10 @@ import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
 
 export interface ReleaseConfirmation { sha: string; target: ReleaseTarget }
+/** The managed checkout keeps its path when a gate advances it to a new commit. */
+export function releaseForSource(view: ReleaseReply | null | undefined, repoPath: string | null | undefined, sha: string | null | undefined): ReleaseReply | null {
+  return view && view.repoPath === repoPath && (view.sha === null || view.sha === sha) ? view : null;
+}
 type ReleaseTone = 'idle' | 'working' | 'passed' | 'failed' | 'blocked';
 const STATES: Record<ReleaseRecord['status'], { label: string; tone: ReleaseTone }> = {
   requesting: { label: 'Requesting', tone: 'working' }, queued: { label: 'Queued', tone: 'working' }, deploying: { label: 'Deploying', tone: 'working' },

@@ -189,8 +189,8 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
   </Collapsible>;
 }
 
-// Source reports where its scanned commit came from; Production reports only
-// deployments bound to it, or the gate's readiness for a commit. Neither is a deployment or test result.
+// Source reports where its scanned commit came from. Production distinguishes a requested
+// deployment's reported result from the journey gate's readiness for a commit.
 // null is a status not known yet, which shows no Badge.
 function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'blocked' | 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (blocked) return { kind: 'blocked', text: 'Transition paused' };
@@ -441,7 +441,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const build = useMemo(() => githubBuildSummary(github, sha, workflows), [github, sha, workflows]);
   const buildStatus = useMemo(() => githubBuildStatus(github, sha, workflows), [github, sha, workflows]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);
-  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path);
+  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
   const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
