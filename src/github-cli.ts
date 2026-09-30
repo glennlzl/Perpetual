@@ -3,7 +3,7 @@
 // the gate's branch head and commit status, source selection, device sign-in, provider status).
 // A caller keeps its own timeouts and its own words for a failure; what a failure *is* is decided
 // here, from the exit alone: raw output is read to classify and never returned.
-import { execFile, type ExecFileException } from 'node:child_process';
+import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -33,6 +33,16 @@ export type GitHubRun = (file: string, args: string[], options: { timeout: numbe
 /** Runs gh with `githubEnvironment()`; a failure rejects as execFile's does, for `githubFailureKind` to read. */
 export function runGitHub(args: string[], { timeout = 20_000, maxBuffer = 4 * 1024 * 1024, env = githubEnvironment(), run = exec as GitHubRun }: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv; run?: GitHubRun } = {}) {
   return run('gh', args, { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env });
+}
+
+/** A streamed device login; its caller owns parsing, deadlines and cancellation, never the CLI credential store. */
+export function startGitHubLogin() {
+  // Colour, debugging and clipboard output cannot change the device-code protocol. Omitting --git-protocol
+  // also preserves the user's GitHub preference; this operation requests no extra scopes or SSH keys.
+  const env = githubEnvironment({ strip: ['DEBUG', 'CLICOLOR_FORCE', 'SSH_ASKPASS'], set: { NO_COLOR: '1', CLICOLOR: '0', GIT_TERMINAL_PROMPT: '0' } });
+  return spawn('gh', ['auth', 'login', '--web', '--hostname', 'github.com', '--skip-ssh-key', '--clipboard=false'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env,
+  });
 }
 
 /** The arguments of one `gh api --include` GET, conditional when an entity tag is given. */

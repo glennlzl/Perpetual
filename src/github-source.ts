@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -59,6 +59,7 @@ function commandFailure(error: ExecFileException | GitHubSourceError, executable
 
 async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string) {
   try {
+    if (executable === 'gh') return await runGitHub(args, { timeout, maxBuffer: MAX_OUTPUT, env: commandEnvironment() });
     return await exec(executable, args, {
       timeout, maxBuffer: MAX_OUTPUT, encoding: 'utf8', windowsHide: true,
       env: commandEnvironment(), ...(cwd ? { cwd } : {}),
