@@ -8,24 +8,25 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
-import { createReleasePoller, releaseChanges, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import { createReleasePoller, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
 import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 
 /** One visible-page poller for the source, shared by the Production card and its Badge. */
-export function useReleases(repoPath: string | null | undefined) {
-  const [read, setRead] = useState<{ repoPath: string; view: ReleaseReply | null; error: string | null } | null>(null);
+export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined) {
+  const sha = scannedSha ?? null;
+  const [read, setRead] = useState<{ repoPath: string; sha: string | null; view: ReleaseReply | null; error: string | null } | null>(null);
   useEffect(() => {
     if (!repoPath) return undefined;
     const poller = createReleasePoller({ repoPath, controller: api,
-      onChange: view => setRead(previous => previous?.repoPath === repoPath && JSON.stringify(previous.view) === JSON.stringify(view) ? previous : { repoPath, view, error: null }),
-      onError: error => setRead(previous => previous?.repoPath === repoPath && previous.error === error ? previous : { repoPath, view: previous?.repoPath === repoPath ? previous.view : null, error }),
+      onChange: view => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && JSON.stringify(previous.view) === JSON.stringify(view) ? previous : { repoPath, sha, view, error: null }),
+      onError: error => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && previous.error === error ? previous : { repoPath, sha, view: previous?.repoPath === repoPath && previous.sha === sha ? previous.view : null, error }),
     });
     const unsubscribe = releaseChanges.subscribe(() => poller.refresh());
     return () => { unsubscribe(); poller.stop(); };
-  }, [repoPath]);
-  return read && read.repoPath === repoPath ? { view: read.view, error: read.error } : { view: null, error: null };
+  }, [repoPath, sha]);
+  return read && read.repoPath === repoPath && read.sha === sha ? { view: releaseForSource(read.view, repoPath, sha), error: read.error } : { view: null, error: null };
 }
 
 function TargetDialog({ repoPath, target, onClose, focusFallback }: { repoPath: string; target: ReleaseTarget | null; onClose: () => void; focusFallback?: FocusFallback }) {

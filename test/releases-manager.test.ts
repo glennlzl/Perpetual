@@ -132,3 +132,27 @@ test('restart recovers an interrupted request as unknown and only reads the remo
   assert.equal((await reopened.view()).current?.status,'unknown');assert.equal(f.requests.length,1);
   await reopened.refresh();assert.equal((await reopened.view()).current?.status,'deployed');assert.equal(f.requests.length,1);
 });
+
+test('changing the target at the same commit does not present a previous destination as deployed',async t=>{
+  const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});await f.manager.refresh();
+  const deployed=await f.manager.view();assert.equal(deployed.current?.status,'deployed');assert.equal(deployed.current?.url,'https://app.example.test/');
+  for(const replacement of [{...target,environment:'other'},{...target,productionEnvironment:false},{...target,workflowPath:'.github/workflows/other.yml'}]){
+    const view=await f.manager.configure(replacement);
+    assert.deepEqual(view.target,replacement);assert.equal(view.canDeploy,true);
+    assert.equal(view.current,null,'Only a deployment to the complete configured target belongs in current.');
+    assert.equal(view.recent[0].status,'deployed');assert.equal(view.recent[0].environment,'production');assert.equal(view.recent[0].url,'https://app.example.test/');
+  }
+  const restored=await f.manager.configure(target);assert.equal(restored.current?.id,deployed.current?.id);assert.equal(restored.canDeploy,false);
+});
+
+test('current deployment can be older than the recent history display limit',async t=>{
+  const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const first=(await f.manager.refresh()).current!;
+  for(let index=0;index<20;index++){
+    const next={...target,environment:`target-${index}`};await f.manager.configure(next);await f.manager.deploy({sha:SHA,target:next});await f.manager.refresh();
+  }
+  const restored=await f.manager.configure(target);
+  assert.equal(restored.recent.length,20);assert.equal(restored.recent.some(record=>record.id===first.id),false);
+  assert.equal(restored.current?.id,first.id);assert.equal(restored.canDeploy,false);
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);
+});

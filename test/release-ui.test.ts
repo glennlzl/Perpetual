@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReleasePoller, releaseBadge, releaseRequest } from '../client/src/lib/production-release.ts';
+import { createReleasePoller, releaseBadge, releaseForSource, releaseRequest } from '../client/src/lib/production-release.ts';
 import type { ReleaseRecord, ReleaseReply, ReleaseView } from '../contract/releases.ts';
 import type { PageVisibility, Timers } from '../client/src/lib/utils.ts';
 
@@ -8,6 +8,17 @@ const SHA = 'c'.repeat(40);
 const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
 const view = (extra: Partial<ReleaseView> = {}): ReleaseView => ({ sha: SHA, target, canDeploy: true, blockedReason: null, current: null, recent: [], ...extra });
 const record = (status: ReleaseRecord['status']): ReleaseRecord => ({ id: 'release-1', sha: SHA, ...target, status, createdAt: '2026-09-29T12:00:00.000Z', updatedAt: '2026-09-29T12:00:00.000Z' });
+
+test('a new commit in the same checkout immediately hides the previous commit deployment and eligibility', () => {
+  const previous = { repoPath: '/sources/app', ...view({ current: record('deployed') }) };
+  assert.equal(releaseForSource(previous, '/sources/app', SHA), previous);
+  assert.equal(releaseForSource(previous, '/sources/app', 'd'.repeat(40)), null, 'A retained checkout path does not make old deployment evidence current.');
+  assert.equal(releaseForSource(previous, '/sources/another', SHA), null);
+  assert.equal(releaseForSource(previous, '/sources/app', null), null, 'Without a scanned commit no non-null commit is shown.');
+  const unconnected = { repoPath: '/sources/app', ...view({ sha: null, target: null, canDeploy: false, blockedReason: 'Connect a GitHub source before deploying.' }) };
+  assert.equal(releaseForSource(unconnected, '/sources/app', SHA), unconnected, 'A legitimate unconnected response retains its actionable reason.');
+  assert.equal(releaseForSource(null, '/sources/app', SHA), null);
+});
 
 test('only recorded deployment work spins; an unknown result remains unresolved instead of looking deployed', () => {
   for (const status of ['requesting', 'queued', 'deploying'] as const) assert.equal(releaseBadge(record(status))?.active, true, status);
