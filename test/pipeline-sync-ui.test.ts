@@ -5,6 +5,9 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from 'vite';
 import { chromium, expect } from '@playwright/test';
 import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
+import type { AutopilotView } from '../contract/autopilot.ts';
+import type { BuildReply } from '../contract/github.ts';
+import type { ReleaseReply } from '../contract/releases.ts';
 
 // Exercise the actual App, including independent gate and workspace polls. Only HTTP replies are fixtures.
 test('a gate commit refresh preserves a pending optimistic stage collapse in Chromium', { timeout: 60000 }, async t => {
@@ -90,4 +93,66 @@ test('rapid collapses stay interactive, isolate a failed save and can be retried
   await expect(page.getByRole('button', { name: 'Expand Build', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Expand Production', exact: true })).toBeVisible();
   await expect(page.getByText('Build preference could not be saved', { exact: true })).toHaveCount(0);
+});
+
+test('a global repair cleanup failure is visible without changing Build or importing another source’s repairs', { timeout: 60000 }, async t => {
+  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+  t.after(() => server.close()); await server.listen();
+  const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage(), repoPath = '/acme/beta', sha = 'b'.repeat(40);
+  const reason = 'Repair cleanup must finish before another repair can start. Docker removal failed.';
+  let watchError: string | undefined = reason, pipeline = defaultPipeline(repoPath), writes = 0;
+  const autopilot = (): AutopilotView => ({ repoPath, stages: { build: { mode: 'merge', changes: [], failed: { sha, runs: [] } } }, ...(watchError ? { watchError } : {}) });
+  const build: BuildReply = { repoPath, repository: 'acme/beta', branch: 'main', scannedSha: sha, sha, source: 'watched', runs: [{ id: '1', workflowId: '2', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'failure', attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] }] };
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    let result: unknown = {}, status = 200;
+    if (path === '/api/state') result = { defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'beta', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } }, pipeline, environments: [], browserTests: {}, autopilot: autopilot() };
+    else if (path === '/api/autopilot') result = autopilot();
+    else if (path === '/api/github/build') result = build;
+    else if (path === '/api/github/deployments') result = { repository: 'acme/beta', sha, deployments: [] };
+    else if (path === '/api/github-actions') result = { workflows: [] };
+    else if (path === '/api/gate') result = { repoPath, sha, stages: {}, production: null };
+    else if (path === '/api/releases') result = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, recent: [] } satisfies ReleaseReply;
+    else if (path === '/api/session') result = { token: 'fixture-token' };
+    else if (path === '/api/pipeline/action') {
+      if (++writes === 1) { status = 503; result = { error: 'Build preference could not be saved' }; }
+      else { pipeline = applyPipelineAction(pipeline, route.request().postDataJSON()); result = { pipeline }; }
+    }
+    await route.fulfill({ json: result, status });
+  });
+  const refresh = async () => {
+    const response = page.waitForResponse(value => new URL(value.url()).pathname === '/api/autopilot');
+    await page.evaluate(async () => { const module = '/build/src/lib/pipeline-autopilot.ts'; (await import(module)).autopilotChanges.notify(); });
+    await (await response).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  };
+  const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
+  await page.goto(`${origin}/build/`);
+  const alert = page.getByRole('alert');
+  const buildCard = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(buildCard.getByText('Failedbbbbbbb', { exact: true })).toBeVisible();
+  await expect(alert).toContainText(reason);
+  await expect(page.getByText('Fixing build', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
+  // An operation failure keeps its own retry ahead of the automatic poll error.
+  await page.getByRole('button', { name: 'Collapse Build', exact: true }).click();
+  await expect(alert).toContainText('Build preference could not be saved');
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Expand Build', exact: true })).toBeVisible();
+  await expect(alert).toContainText(reason);
+  // A clean poll clears the error; a later failure is shown and can be dismissed until it clears.
+  watchError = undefined; await refresh();
+  await expect(alert).toHaveCount(0);
+  watchError = reason; await refresh();
+  await expect(alert).toContainText(reason);
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await refresh();
+  await expect(alert).toHaveCount(0);
+  watchError = undefined; await refresh();
+  watchError = reason; await refresh();
+  await expect(alert).toContainText(reason);
+  await expect(buildCard.getByText('Failedbbbbbbb', { exact: true })).toBeVisible();
+  await expect(page.getByText('Fixing build', { exact: true })).toHaveCount(0);
+  assert.equal(writes, 2);
 });

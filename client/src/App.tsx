@@ -660,8 +660,9 @@ function PipelineApp() {
   // A failure the canvas reports, with the operation that can repeat it, if any.
   const [error, setFailure] = useState<CanvasFailure | null>(null);
   const setError = useCallback((message: string, retry: (() => void) | null = null) => setFailure(message ? { message, retry } : null), []);
-  // A workspace poll failure the viewer dismissed stays hidden until it clears.
+  // A poll failure the viewer dismissed stays hidden until that source of errors clears.
   const [quietError, setQuietError] = useState('');
+  const [quietAutopilotError, setQuietAutopilotError] = useState('');
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<PipelineDialog | null>(() => {
     const query = new URLSearchParams(window.location.search);
@@ -851,13 +852,21 @@ function PipelineApp() {
     finally { mutation.current = false; setBusy(false); }
   }, [workspace]);
 
-  // The canvas shows its own failure first, then a workspace poll failure the
-  // viewer has not dismissed. Polls retry on their own, so only the canvas's
-  // own operations offer Try again.
+  // The canvas shows its own failure first, then workspace and Autopilot poll
+  // failures the viewer has not dismissed. Polls retry on their own, so only
+  // the canvas's own operations offer Try again.
+  const autopilotError = autopilot?.watchError || '';
   useEffect(() => { if (!tests.error) setQuietError(''); }, [tests.error]);
-  const canvasError = useMemo(() => error || (tests.error && tests.error !== quietError ? { message: tests.error, retry: null } : null), [error, tests.error, quietError]);
+  useEffect(() => { if (!autopilotError) setQuietAutopilotError(''); }, [autopilotError]);
+  const workspaceError = tests.error && tests.error !== quietError ? tests.error : '';
+  const pollError = workspaceError || (autopilotError !== quietAutopilotError ? autopilotError : '');
+  const canvasError = useMemo(() => error || (pollError ? { message: pollError, retry: null } : null), [error, pollError]);
   const retryError = useCallback(() => { const retry = error?.retry; setError(''); retry?.(); }, [error, setError]);
-  const dismissError = useCallback(() => { if (error) setError(''); else setQuietError(tests.error); }, [error, setError, tests.error]);
+  const dismissError = useCallback(() => {
+    if (error) setError('');
+    else if (workspaceError) setQuietError(workspaceError);
+    else setQuietAutopilotError(autopilotError);
+  }, [error, setError, workspaceError, autopilotError]);
 
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
