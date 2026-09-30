@@ -6,7 +6,7 @@ import { detectEnvironmentConfig } from './plans.ts';
 import { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox } from './runtime.ts';
 import { AUTHORING, isGenerationFailure, type AttemptOutcome } from './generation.ts';
 import { redact } from '../redaction.ts';
-import { IN_PROGRESS, createEnvironmentUsage, holdsResources, scopeId } from './usage.ts';
+import { IN_PROGRESS, applicationOrigin, createEnvironmentUsage, holdsResources, scopeId } from './usage.ts';
 import { serviceOptionErrors, validateTwinConfig } from '../twin/index.ts';
 import { HOST } from '../twin/compose.ts';
 import { createBrowserModelSettings } from '../browser/model.ts';
@@ -102,16 +102,6 @@ const HEALTH_FAILURES = 3;
 const defaultRuntime: ManagedRuntime = { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox };
 const canRecoverHealth = (environment: EnvironmentRecord) => environment.status === 'failed' && environment.step === 'Unhealthy'
   && environment.sandboxId && environment.plan && !environment.cleanedAt;
-// Perpetual's browser and the twin's containers reach the host under these names.
-const LOOPBACK = ['localhost', '127.0.0.1', '[::1]', HOST];
-function targetOrigin(value: unknown) {
-  try {
-    const url = new URL(String(value));
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
-    if (LOOPBACK.includes(url.hostname)) url.hostname = '127.0.0.1';
-    return url.origin;
-  } catch { return null; }
-}
 // A plan saved before twins listed services with install and start commands; a fresh detection replaces it.
 const legacyPlan = (plan: { services?: unknown } | null | undefined) => Array.isArray(plan?.services);
 /** Whether a stored plan is a config an agent wrote. */
@@ -136,7 +126,7 @@ async function appSettingsModel(dataDir: string): Promise<AuthoringModel | null>
 // A twin's sandbox id is its environment's id. Any other sandbox is a Cua guest from
 // before twins, which only awaits deletion.
 function loadedEnvironment({ twinsToken, activeOperation, desktopUrl, serviceOrigins, ...environment }: SavedEnvironment): EnvironmentRecord {
-  environment.origins ??= serviceOrigins ?? (environment.services || []).map(service => targetOrigin(service.url)).filter(origin => origin !== null);
+  environment.origins ??= serviceOrigins ?? (environment.services || []).map(service => applicationOrigin(service.url)).filter(origin => origin !== null);
   if (legacyPlan(environment.plan)) delete environment.plan;
   if (!environment.sandboxId || environment.sandboxId === environment.id) return environment;
   environment.services = [];
@@ -285,7 +275,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     /** Whether a create for the pipeline was admitted and has yet to record its environment. */
     admitting: (key: string) => (admitted.get(key) ?? 0) > 0,
     resolveTarget(url: unknown) {
-      const origin = targetOrigin(url);
+      const origin = applicationOrigin(url);
       if (!origin) return null;
       const environment = state.environments.find(item => (item.origins || []).includes(origin));
       return environment ? structuredClone(publicEnvironment(environment)) : null;
@@ -405,7 +395,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
             if (provenance) { try { keepGenerated(scope, { plan: prepared.plan, provenance }); } catch { /* Storage is full: the stage keeps its detected plan. */ } }
             // A generated config that built again no longer carries the failure it had.
             else if (builtGenerated && state.plans[scope] === saved) delete state.drafts[scope];
-            Object.assign(environment, prepared, { accounts: publicAccounts(prepared.accounts), origins: (prepared.apps || []).map(app => targetOrigin(app.url)).filter(Boolean), updatedAt: now() });
+            Object.assign(environment, prepared, { accounts: publicAccounts(prepared.accounts), origins: (prepared.apps || []).map(app => applicationOrigin(app.url)).filter(Boolean), updatedAt: now() });
             release();
           }
           if (environment.status === 'failed') delete environment.plan;

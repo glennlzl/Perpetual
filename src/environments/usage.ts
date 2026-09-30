@@ -1,4 +1,18 @@
 import { createHash } from 'node:crypto';
+import { HOST, LOOPBACK } from '../twin/compose.ts';
+
+const localHosts = new Set(['localhost', LOOPBACK, '[::1]', HOST]);
+/** Recognized names for the same local machine; callers still decide which schemes, ports and requests they permit. */
+export const applicationHost = (host: string): string => localHosts.has(host) ? LOOPBACK : host;
+/** The application identity used for owned-environment lookup and external reservations, never a navigation allowlist. */
+export function applicationOrigin(value: unknown): string | null {
+  try {
+    const url = new URL(String(value));
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    url.hostname = applicationHost(url.hostname);
+    return url.origin;
+  } catch { return null; }
+}
 
 /** A stage by its pipeline key and id. */
 export type StageRef={key:string;stageId:string};
