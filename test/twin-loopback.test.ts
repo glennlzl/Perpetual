@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loopbackCommand } from '../src/twin/loopback.ts';
@@ -26,6 +27,17 @@ async function assertReleased(port: number) {
   const server = createServer();
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   await new Promise<void>(resolve => server.close(() => resolve()));
+}
+async function assertTerminated(pid: number) {
+  try { process.kill(pid, 0); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error; }
+  if (process.platform === 'linux') {
+    // kill(pid, 0) also finds a dead child awaiting its adopter's waitpid. That
+    // zombie cannot execute or hold sockets; reaping belongs to the host init.
+    try { if (/^State:\s+[ZX]\b/m.test(await readFile(`/proc/${pid}/status`, 'utf8'))) return; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  }
+  assert.fail(`Process ${pid} is still running.`);
 }
 function run(t: TestContext, code: string, ports: number[]) {
   const [file, ...args] = loopbackCommand(command(code), ports, 1);
@@ -62,18 +74,24 @@ test('A failed relay bind starts no app and releases listeners already bound', {
 test('Stopping the supervisor terminates an app group that ignores SIGTERM and releases its public URL', { timeout: 10000 }, async t => {
   const port = await freePort();
   const job = run(t, `const { spawn } = require('node:child_process');
+    const { createServer } = require('node:net');
     process.on('SIGTERM', () => {});
-    const descendant = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] });
-    descendant.stdout.once('data', () => console.log(JSON.stringify({ app: process.pid, descendant: descendant.pid }))); setInterval(() => {}, 1000);`, [port]);
+    const app = createServer();
+    app.listen(0, '127.0.0.1', () => {
+      const descendant = spawn(process.execPath, ['-e', "const { createServer } = require('node:net'); process.on('SIGTERM', () => {}); const server = createServer(); server.listen(0, '127.0.0.1', () => console.log(JSON.stringify({ descendant: process.pid, descendantPort: server.address().port })));"], { stdio: ['ignore', 'pipe', 'ignore'] });
+      descendant.stdout.once('data', data => console.log(JSON.stringify({ app: process.pid, appPort: app.address().port, ...JSON.parse(data) })));
+    });`, [port]);
   while (!job.output().stdout.includes('\n')) {
     assert.equal(job.child.exitCode, null, job.output().stderr);
     await delay(10, undefined, { signal: t.signal });
   }
-  const pids = JSON.parse(job.output().stdout) as { app: number; descendant: number };
+  const pids = JSON.parse(job.output().stdout) as { app: number; descendant: number; appPort: number; descendantPort: number };
+  for (const pid of [pids.app, pids.descendant]) await assert.rejects(assertTerminated(pid), /is still running/);
+  for (const bound of [port, pids.appPort, pids.descendantPort]) await assert.rejects(assertReleased(bound), { code: 'EADDRINUSE' });
   job.child.kill('SIGTERM');
   assert.equal(await job.done, 143);
-  await assertReleased(port);
-  for (const pid of Object.values(pids)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  for (const pid of [pids.app, pids.descendant]) await assertTerminated(pid);
+  for (const bound of [port, pids.appPort, pids.descendantPort]) await assertReleased(bound);
 });
 
 test('Only explicit public references get relays; private, literal and blocked addresses do not', () => {
