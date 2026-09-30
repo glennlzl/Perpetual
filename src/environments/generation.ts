@@ -57,11 +57,16 @@ export function checkWritten(text: string, services: TwinServices = registry): {
 const clip = (text: string, limit: number, keep: 'start' | 'end') => text.length <= limit ? text : keep === 'start' ? `${text.slice(0, limit)}…` : `…${text.slice(-limit)}`;
 const firstLine = (text: string) => clip(text.trim().split('\n')[0].trim(), LINE_TEXT, 'start');
 /**
- * The one line a person sees for a failure. A build or health failure's error is Docker's own output, which starts with
- * progress lines, so it is said by where it failed and the app, service, install or fixture there instead.
+ * Build and health output usually starts with progress. Keep its terminal line beside the failed step, so the
+ * person sees the cause as well as where it happened. Redact the complete error before selecting or clipping lines.
  */
-const summary = (failure: StagedFailure) => failure.reason
-  ?? (failure.subject && (failure.stage === 'build' || failure.stage === 'healthy') ? `${failure.heading}: ${failure.subject}` : failure.error);
+const summary = (failure: StagedFailure, hide: (text: string) => string) => {
+  if (failure.reason) return hide(failure.reason);
+  const error = hide(failure.error).trim();
+  return failure.subject && (failure.stage === 'build' || failure.stage === 'healthy')
+    ? `${clip(hide(`${failure.heading}: ${failure.subject}`), 158, 'start')}; ${clip(error.split('\n').at(-1)?.trim() || 'See logs.', 138, 'start')}`
+    : error;
+};
 /**
  * feedback.md: the failure's stage, the app or service it names and its command, its error, each app's unwired
  * variables in the config the next attempt starts from, then the failed containers' last lines. Every part is redacted
@@ -154,7 +159,7 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
     // The unwired variables of the config the next attempt starts from.
     notes = feedbackText({ title: attemptTitle(attempt), failure, unwired: unwired(text), hide });
     if (written.error === undefined) await checkpoint({ text, feedback: notes });
-    const said = firstLine(hide(summary(failure)));
+    const said = firstLine(summary(failure, hide));
     await failed({ attempt, stage: failure.stage, summary: said });
     record(attempt, `Failed at ${failure.stage}.`, notes);
     if (attempt === ATTEMPTS) throw withLogs(Object.assign(new Error(`Writing the twin config failed after ${ATTEMPTS} attempts: ${said}`), { draft: { text, feedback: notes } }));

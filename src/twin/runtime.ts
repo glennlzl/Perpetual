@@ -231,7 +231,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       // A port for this service's machine-wide instance, the same for every twin and outside all their blocks.
       sharedPort: (name, current) => reserveSharedPort(twin.root, portKey(service, name), current, { start: portBase, isFree }),
       app: id => { const appPort = ports[portKey(APPS, id)] ?? fail(`No app "${id}" is configured.`); return { url: hostUrl(appPort), port: appPort }; },
-      run: (image, args, { env } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`), volumes: [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
+      run: (image, args, { env, mounts } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`),
+        volumes: mounts === 'service-only' ? [`${dir}:${dir}:ro`] : [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.
       exec: (file, args, { cwd = dir } = {}) => host(file, args, { cwd, redact }),
       fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([AbortSignal.timeout(READ_TIMEOUT_MS), ...(operations.getStore()?.signal ? [operations.getStore()!.signal!] : []), ...(init?.signal ? [init.signal] : [])]) }),
@@ -267,7 +268,10 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const addresses = [...placeholders(config.services, 'services'), ...placeholders(config.apps, APPS)].filter(ref => ref.addressOf !== undefined);
     const own = new Set<string>(); // ports services take themselves
     await reserveInTurn(async () => {
-      state.block = await allocatePorts({ start: portBase, reserved: await reservedPorts(dataDir, id), isFree });
+      const reserved = await reservedPorts(dataDir, id);
+      // Public URL relays share each app's network namespace with its own listener.
+      for (const app of Object.values(config.apps)) reserved.add(app.port);
+      state.block = await allocatePorts({ start: portBase, reserved, isFree });
       free.push(...state.block);
       for (const app of Object.keys(config.apps)) take(portKey(APPS, app));
       for (const ref of addresses) take(addressKey(ref));

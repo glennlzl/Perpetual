@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import supabase, { CLI as SUPABASE_CLI, setToml } from '../src/twin/services/supabase.ts';
+import { APP_IMAGE } from '../src/twin/compose.ts';
 import stripe, { CLI as STRIPE_CLI, EVENTS, SANDBOX_FAILED } from '../src/twin/services/stripe.ts';
 import { detectTwinConfig } from '../src/twin/detect.ts';
 import type { CommandOutput, DockerCommand, EnvInput, ServiceContext } from '../src/twin/registry.ts';
@@ -14,7 +15,7 @@ const SOCKET = /docker\.sock/;
 
 type SupabaseContext = Parameters<typeof supabase.setup>[0];
 type StripeContext = Parameters<typeof stripe.setup>[0];
-type Call = { image?: string; command?: string; args: string[]; options?: { env?: EnvInput; cwd?: string } };
+type Call = { image?: string; command?: string; args: string[]; options?: { env?: EnvInput; cwd?: string; mounts?: 'service-only' } };
 type Respond = (call: Call) => string | undefined | Promise<string | undefined>;
 type Fake<C> = C & { calls: Call[] };
 
@@ -73,14 +74,26 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   await supabaseSource(ctx);
   ctx.outputs = await supabase.setup(ctx);
   const workdir = join(ctx.dir, 'supabase');
-  assert.deepEqual(ctx.calls.map(({ command, args }) => [command, ...args]), [
+  assert.deepEqual(ctx.calls.filter(call => call.command).map(({ command, args }) => [command, ...args]), [
     ['npx', '--yes', SUPABASE_CLI, 'stop', '--no-backup', '--project-id', 'perpetual-beta1'],
     ['npx', '--yes', SUPABASE_CLI, 'start', '--workdir', workdir],
     ['npx', '--yes', SUPABASE_CLI, 'status', '--output', 'env', '--workdir', workdir],
   ]);
   assert.match(SUPABASE_CLI, /^supabase@\d+\.\d+\.\d+$/);
-  assert.ok(ctx.calls.every(({ image, args }) => !image && !args.some(arg => SOCKET.test(arg))));
+  assert.ok(ctx.calls.every(({ args }) => !args.some(arg => SOCKET.test(arg))));
+  assert.equal(ctx.calls[1].image, APP_IMAGE);
+  assert.deepEqual(ctx.calls[1].options, { mounts: 'service-only' });
   assert.deepEqual(supabase.containers(), []); // the CLI owns the stack's containers
+});
+
+test('Supabase does not start its stack when the private mount is unavailable to Docker', async () => {
+  const ctx = await context<SupabaseContext>({ respond: ({ image, args }) => {
+    if (image) throw new Error('Private mount unavailable');
+    return args.includes('status') ? STATUS : '';
+  } });
+  await supabaseSource(ctx);
+  await assert.rejects(supabase.setup(ctx), /Private mount unavailable/);
+  assert.ok(ctx.calls.every(call => !call.args.includes('start')));
 });
 
 test('Supabase copies the project with twin ports, id and a host.docker.internal issuer', async () => {
