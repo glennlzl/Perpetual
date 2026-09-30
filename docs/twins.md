@@ -171,6 +171,12 @@ The health monitor reads the twin's containers every 30 seconds. A stopped or un
 
 Each environment keeps its source snapshot in `<data>/environments/<id>/source` and its twin in `<data>/environments/<id>/twin/`: `compose.yaml`, `.env` (mode 0600, holding every value; `compose.yaml` only references it) and `twin.json`. Deletion removes both. While its config is generated, the agent's workspaces are under `<data>/environments/<id>/authoring/`, removed when generation ends. At most eight environments exist at once.
 
+Twin and shared-port storage directories are private (mode 0700); existing directories have their permissions repaired. A twin's state and the shared service port map use guarded reads: symbolic links, non-files, malformed state and oversized files are refused. Files are replaced atomically at mode 0600, and a failed replacement removes its temporary file. Parent path aliases keep the same configured paths and resource owner labels.
+
+`twin.json` has a 32 MiB read budget. A service may return teardown information after creating resources, so preparation saves that information in full before checking the budget. An oversized result fails preparation and keeps the complete state for manual recovery; it cannot be automatically loaded or cleaned up, including after restart. Refused state never counts as absent or successfully destroyed, and its files remain. Resolve the oversized state and its owned resources before retrying.
+
+`<data>/twin-services/ports.json` is limited to 1 MiB. A reservation that would exceed that limit leaves the previous map intact. Host port allocation reads every existing twin's saved block and the shared map in one module-wide queue shared by the process's runtime instances, and records its reservation before releasing the queue. The controller's same-host ownership guard prevents another controller from opening that data directory; the queue itself does not coordinate processes. Invalid existing reservations block allocation until recovered. Service setup runs outside that queue so it can reserve a shared-instance port itself.
+
 An environment created before Compose twins ran its app in a Cua guest. It loads as Failed with the step Retired, and deleting it removes that guest.
 
 Service and app images are pinned by tag, not by digest, so a twin is not a fully reproducible supply-chain lock.

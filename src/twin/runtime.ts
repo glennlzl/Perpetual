@@ -1,9 +1,9 @@
 import type { ExecFileException } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash, randomUUID } from 'node:crypto';
-import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { join, posix, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import YAML from 'yaml';
 import { APPS, ID, INSTALL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
 import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, SOURCE, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
@@ -14,6 +14,7 @@ import type { HostPorts, ResolvedService } from './compose.ts';
 import type { CommandOutput, InputValues, ServiceContext, ServiceOutputs, TwinServices } from './registry.ts';
 import { hide, redact as redactSecrets } from '../redaction.ts';
 import { superviseWorker } from '../browser/runtime.ts';
+import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 
 // A twin is <dataDir>/environments/<id>/twin/{compose.yaml,.env,twin.json}: service setup in
 // placeholder order; once services are up, their test accounts, the shared install and fixtures;
@@ -121,47 +122,76 @@ const exists = (path: string) => access(path).then(() => true, () => false);
 const errorText = (error: unknown) => { const failed = error as Partial<ExecFileException> | null | undefined;
   return tail([failed?.stderr, failed?.stdout].filter((text): text is string => typeof text === 'string' && Boolean(text.trim())).map(text => text.trim()).join('\n') || String(failed?.message || error)); };
 
-/** A JSON file this runtime wrote, or null when it is absent; its fields are checked where they are read. */
-async function readJson(file: string): Promise<unknown> {
-  try { return JSON.parse(await readFile(file, 'utf8')); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
-}
 const fields = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-/** A twin's private state, which only prepare() writes; null when it is absent. */
-const readState = async (file: string) => fields(await readJson(file)) as TwinState | null;
+const STATE_LIMIT = 32 * 1024 * 1024, SHARED_PORTS_LIMIT = 1024 * 1024;
+const INVALID_STATE = 'Invalid twin state; its files are kept for manual recovery.';
+const INVALID_PORTS = 'Invalid shared port state; recover its reservations before creating a twin.';
+const PRIVATE_STORAGE = 'Twin storage must not be a symbolic link.';
+const isPort = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535;
+const portMap = (value: unknown): value is HostPorts => fields(value) !== null && Object.values(value as Record<string, unknown>).every(isPort);
 
-async function writePrivate(file: string, text: string) {
-  const temporary = `${file}.${randomUUID()}`;
-  await writeFile(temporary, text, { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file);
+/** Missing storage stays missing. Existing storage is private; parent aliases keep their lexical paths and owner labels. */
+async function storedJson(file: string, limit: number, invalid: string): Promise<unknown> {
+  try { await lstat(dirname(file)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  await privateDirectory(dirname(file), PRIVATE_STORAGE, { resolveAliases: false });
+  try { return await readStateFile(file, { limit, invalid }); }
+  catch { return fail(invalid); }
+}
+
+/** Absent is different from unreadable: cleanup must never discard ownership after a refused read. */
+async function readState(file: string): Promise<TwinState | null> {
+  const saved = await storedJson(file, STATE_LIMIT, INVALID_STATE);
+  if (saved === undefined) return null;
+  const state = fields(saved);
+  if (!state || typeof state.id !== 'string' || !TWIN_ID.test(state.id)
+    || !['project', 'owner', 'source'].every(name => typeof state[name] === 'string' && state[name])
+    || !Array.isArray(state.block) || !state.block.every(isPort) || !portMap(state.ports)
+    || !Array.isArray(state.services) || !Array.isArray(state.secrets) || !state.secrets.every(value => typeof value === 'string')) fail(INVALID_STATE);
+  for (const record of state.services) {
+    const service = fields(record);
+    if (!service || typeof service.id !== 'string' || !ID.test(service.id) || !fields(service.options)
+      || (service.outputs !== undefined && !fields(service.outputs))) fail(INVALID_STATE);
+  }
+  if (state.accounts !== undefined) {
+    if (!Array.isArray(state.accounts) || state.accounts.some(value => { const account = fields(value); return !account || typeof account.service !== 'string' || !ID.test(account.service); })) fail(INVALID_STATE);
+    try { testAccounts(state.accounts, 'Saved accounts'); } catch { fail(INVALID_STATE); }
+  }
+  return state as unknown as TwinState;
 }
 
 // Host ports belong to the machine: a twin reads the other twins' saved blocks and the ports of shared
 // instances, and saves its own block in one turn, so twins prepared at the same time never share a port.
-let reserving: Promise<unknown> = Promise.resolve();
-const reserveInTurn = <T>(work: () => Promise<T>) => { const turn = reserving.then(work); reserving = turn.catch(() => {}); return turn; };
+const reservations = createSaveQueue();
 /** Ports of services' machine-wide instances, { '<service>.<name>': port }, kept beside their shared state. */
 const SHARED_PORTS = 'ports.json';
-const isPort = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535;
+
+async function sharedPorts(dataDir: string): Promise<HostPorts> {
+  const saved = await storedJson(join(resolve(dataDir), SHARED, SHARED_PORTS), SHARED_PORTS_LIMIT, INVALID_PORTS);
+  if (saved === undefined) return {};
+  if (!portMap(saved)) fail(INVALID_PORTS);
+  return saved;
+}
 
 async function reservedPorts(dataDir: string, id?: string) {
   const root = resolve(dataDir), environments = join(root, ENVIRONMENTS);
   const entries = await readdir(environments).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error; });
-  const blocks = await Promise.all(entries.filter(entry => entry !== id).map(entry => readJson(join(environments, entry, TWIN, 'twin.json')).then(state => fields(state)?.block, () => null)));
-  const shared = Object.values(fields(await readJson(join(root, SHARED, SHARED_PORTS))) ?? {});
-  return new Set([...blocks.flatMap(block => Array.isArray(block) ? block : []), ...shared]);
+  const states = await Promise.all(entries.filter(entry => entry !== id).map(entry => readState(join(environments, entry, TWIN, 'twin.json'))));
+  return new Set([...states.flatMap(state => state?.block ?? []), ...Object.values(await sharedPorts(root))]);
 }
 
 /** The host port of a machine-wide instance: reserved once, outside every twin's block, and never given to a twin.
  * `current` keeps the port an existing instance already publishes. */
-const reserveSharedPort = (dataDir: string, key: string, current: unknown, { start, isFree }: { start: number; isFree: IsFree }) => reserveInTurn(async () => {
-  const dir = join(resolve(dataDir), SHARED), file = join(dir, SHARED_PORTS), ports = fields(await readJson(file)) ?? {};
+const reserveSharedPort = (dataDir: string, key: string, current: unknown, { start, isFree }: { start: number; isFree: IsFree }) => reservations.run(async () => {
+  const dir = join(resolve(dataDir), SHARED), file = join(dir, SHARED_PORTS), ports = await sharedPorts(dataDir);
   const reserved = ports[key];
   if (isPort(reserved)) return reserved;
   const port = isPort(current) ? current : (await allocatePorts({ count: 1, start, reserved: await reservedPorts(dataDir), isFree }))[0];
   ports[key] = port;
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writePrivate(file, `${JSON.stringify(ports, null, 2)}\n`);
+  const content = `${JSON.stringify(ports, null, 2)}\n`;
+  if (Buffer.byteLength(content) > SHARED_PORTS_LIMIT) fail('Shared port state exceeds 1 MiB; no new port was reserved.');
+  await privateDirectory(dir, PRIVATE_STORAGE, { resolveAliases: false });
+  await writeStateFile(file, content, { removeTemporary: true });
   return port;
 });
 
@@ -257,17 +287,32 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const twin = locate(dataDir, id);
     if (typeof source !== 'string' || !await exists(source)) fail('A source snapshot directory is required.');
     source = resolve(source);
-    if (await exists(twin.state)) await destroy({ dataDir, id, inputs });
-    await mkdir(twin.dir, { recursive: true, mode: 0o700 });
+    if (await readState(twin.state)) await destroy({ dataDir, id, inputs });
+    await privateDirectory(twin.dir, PRIVATE_STORAGE, { resolveAliases: false });
     const free: number[] = [], secrets = new Set<string>();
     const state: TwinState = { id, project: twin.project, owner: twin.owner, source, block: [], ports: {}, services: [], secrets: [] };
     const redact = (text: unknown) => redactor(secrets)(text);
-    const save = () => { state.secrets = [...secrets]; return writePrivate(twin.state, `${JSON.stringify(state, null, 2)}\n`); };
+    const save = async (failure?: Error & { cleanupIncomplete?: true }) => {
+      try {
+        state.secrets = [...secrets];
+        const content = `${JSON.stringify(state, null, 2)}\n`;
+        // Setup may already have created resources whose teardown needs these outputs. Keep all of
+        // them even when the read budget is exceeded, then require recovery instead of losing ownership.
+        await writeStateFile(twin.state, content, { removeTemporary: true });
+        if (Buffer.byteLength(content) > STATE_LIMIT) fail('Twin state exceeds 32 MiB; its complete teardown data is kept for manual recovery.');
+      } catch (error) {
+        if (!failure) throw error;
+        // A final save failure must report the storage problem without losing an owned process's
+        // unconfirmed cleanup. Its caller is already unwinding the service failure.
+        throw Object.assign(new Error(`${failure.message} Twin state could not be saved: ${redact((error as Error).message)}`, { cause: error }),
+          failure.cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
+      }
+    };
     const take = (key: string) => state.ports[key] ??= free.shift() ?? fail(`This twin needs more than ${PORT_BLOCK} host ports.`);
     // Service addresses are allocated before any setup, so a service may reference one whose setup needs its own variables.
     const addresses = [...placeholders(config.services, 'services'), ...placeholders(config.apps, APPS)].filter(ref => ref.addressOf !== undefined);
     const own = new Set<string>(); // ports services take themselves
-    await reserveInTurn(async () => {
+    await reservations.run(async () => {
       const reserved = await reservedPorts(dataDir, id);
       // Public URL relays share each app's network namespace with its own listener.
       for (const app of Object.values(config.apps)) reserved.add(app.port);
@@ -295,6 +340,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       const ctx = context(twin, { service: serviceId, options, inputs: values, outputs: {}, ports: state.ports, take: key => { own.add(key); return take(key); }, source, redact });
       const record: ServiceRecord = { id: serviceId, options, outputs: {} };
       state.services.push(record);
+      let failure: (Error & { cleanupIncomplete?: true }) | undefined;
       try {
         await mkdir(ctx.dir, { recursive: true, mode: 0o700 });
         await save();
@@ -305,15 +351,17 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         for (const container of containers) for (const name of Object.keys(container.ports ?? {})) ctx.port(name);
         [env, ...containers.map(container => container.env)].flatMap(secretValues).forEach(value => secrets.add(value));
         resolved[serviceId] = { ...base, status: 'ready', env, containers };
-      } catch (error) { throw Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {}); }
-      finally { await save(); }
+      } catch (error) {
+        failure = Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
+        throw failure;
+      } finally { await save(failure); }
       for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
     }
 
     const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage,
       services: Object.keys(config.services).map(serviceId => resolved[serviceId]), ports: state.ports });
-    await writePrivate(twin.env, formatEnv(result.env));
-    await writePrivate(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }));
+    await writeStateFile(twin.env, formatEnv(result.env), { removeTemporary: true });
+    await writeStateFile(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
     await save();
     // The shared package cache outlives every twin; creating it again is a no-op.
     if (result.compose.volumes?.[PACKAGE_CACHE] || config.fixtures.some(fixture => fixture.command)) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', PACKAGE_CACHE], { redact });
@@ -339,14 +387,17 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     for (const record of withAccounts) {
       const definition = services[record.id];
       const ctx = context(twin, { service: record.id, options: record.options, inputs: inputs[record.id] ?? {}, outputs: record.outputs, ports: state.ports, take, source, redact });
+      let failure: (Error & { cleanupIncomplete?: true }) | undefined;
       try {
         for (const account of testAccounts(await definition.accounts!(ctx), `${record.id} accounts`)) {
           secrets.add(account.password);
           if (state.accounts.some(item => item.id === account.id)) fail(`Test account "${account.id}" is defined twice.`);
           state.accounts.push({ service: record.id, ...account });
         }
-      } catch (error) { throw Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {}); }
-      finally { await save(); }
+      } catch (error) {
+        failure = Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
+        throw failure;
+      } finally { await save(failure); }
     }
     // Command fixtures, such as seed scripts, run with the workspace dependencies the install provides.
     if (config.install) {
@@ -381,7 +432,10 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       try { return await prepareTwin(options); }
       catch (error) { failed = true; throw error; }
       finally {
-        try { if (await exists(twin.dir)) await writePrivate(twin.log, setupLogs.get(twin.dir) ?? ''); }
+        try { if (await exists(twin.dir)) {
+          await privateDirectory(twin.dir, PRIVATE_STORAGE, { resolveAliases: false });
+          await writeStateFile(twin.log, setupLogs.get(twin.dir) ?? '', { removeTemporary: true });
+        } }
         catch (error) { if (!failed) throw error; } // A log write must not replace an owned-process cleanup failure.
       }
     });
