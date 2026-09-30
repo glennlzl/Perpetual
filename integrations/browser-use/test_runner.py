@@ -341,6 +341,15 @@ class LargeDiscoveryContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(references), 2)
             self.assertEqual(token_limits, [8192, 8192])
             for messages in references:
+                # Inspect actual model requests on both agent steps, not just the
+                # prompt constant: the task must retain its evidence policy.
+                instructions = json.dumps(messages, ensure_ascii=False)
+                for phrase in ["check could still pass if the intended action failed or never ran",
+                               "buttons, navigation tabs, headings and unchanged starting states",
+                               "terminal success state and goal-specific result contents",
+                               "whole operation", "individual step", "queued, running or accepted",
+                               "leave the unsupported checks empty", "evidence gap", "saving a draft", "persisted draft"]:
+                    self.assertIn(phrase, instructions)
                 reference = [message for message in messages if isinstance(message["content"], str) and source in message["content"]]
                 self.assertEqual(len(reference), 1)
                 self.assertEqual(reference[0]["role"], "user")
