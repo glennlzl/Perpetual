@@ -1,4 +1,4 @@
-import { Fragment, forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react';
+import { Fragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { GitBranch, LoaderCircle, LockKeyhole } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
+import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } from '@/lib/source-selection';
 import { BranchName, BranchOptions } from './BranchSwitcher';
 import GitHubConnectDialog from './GitHubConnectDialog';
@@ -67,6 +68,37 @@ function Section({ title, children }: { title?: string; children: ReactNode }) {
   </section>;
 }
 
+function SourceReadError({ error, label, disabled, onRetry, focusTarget }: {
+  error: string; label: string; disabled: boolean;
+  onRetry?: () => Promise<void>; focusTarget: () => FocusTarget | null;
+}) {
+  const button = useRef<HTMLButtonElement>(null);
+  const completed = useRef<HTMLButtonElement | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  useLayoutEffect(() => {
+    const origin = completed.current;
+    completed.current = null;
+    if (origin && (document.activeElement === origin || document.activeElement === document.body)) {
+      restoreFocus([button.current, focusTarget()]);
+    }
+  });
+  async function retry() {
+    if (disabled || retrying || !onRetry) return;
+    setRetrying(true);
+    await onRetry(); // The source reader owns the error and catches failed requests.
+    if (!button.current) return; // The inspector may have closed while reading.
+    completed.current = document.activeElement === button.current ? button.current : null;
+    setRetrying(false);
+  }
+  if (!error && !retrying) return null;
+  return <div className="space-y-2 text-sm text-destructive">
+    {error && <p className="break-all" role="alert">{error}</p>}
+    {(onRetry || retrying) && <Button ref={button} type="button" variant="outline" size="sm" aria-disabled={disabled || retrying} aria-busy={retrying} className="aria-disabled:opacity-50" onClick={() => void retry()}>
+      {retrying && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}{label}
+    </Button>}
+  </div>;
+}
+
 const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(function SourceSettings({ scan, busy = false, autoConnect = false, onSourceSave, onBusyChange, onStateChange }, ref) {
   const active = useRef(true);
   const connectionRequest = useRef(0);
@@ -76,6 +108,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const focusOrigin = useRef<Element | null>(null);
   const connectionButton = useRef<HTMLButtonElement>(null);
   const repositoryTrigger = useRef<HTMLButtonElement>(null);
+  const branchTrigger = useRef<HTMLButtonElement>(null);
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionAction, setConnectionAction] = useState('');
@@ -283,7 +316,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           </Button>
         </CardContent>
       </Card>
-      {connectionError && <div className="space-y-2 text-sm text-destructive" role="alert"><p className="break-all">{connectionError}</p>{!connection && <Button type="button" variant="outline" size="sm" disabled={busy || connectionLoading} onClick={readConnection}>Try again</Button>}</div>}
+      <SourceReadError error={connectionError} label="Try again" disabled={busy || connectionLoading} onRetry={!connection ? readConnection : undefined} focusTarget={() => connectionButton.current} />
     </Section>
 
     <Section>
@@ -308,7 +341,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           </SelectContent>
         </Select>
       </div>
-      {repositoriesError && <div className="space-y-2 text-sm text-destructive" role="alert"><p className="break-all">{repositoriesError}</p><Button type="button" variant="outline" size="sm" disabled={disableFields || repositoriesLoading} onClick={() => loadRepositories()}>Retry repositories</Button></div>}
+      <SourceReadError error={repositoriesError} label="Retry repositories" disabled={disableFields || repositoriesLoading} onRetry={() => loadRepositories()} focusTarget={() => repositoryTrigger.current} />
       {connected && !repositoriesLoading && !repositoriesError && !repositories.length && <p className="text-sm text-muted-foreground">No repositories</p>}
       {repositoryPage && <Button type="button" variant="ghost" size="sm" className="w-fit" disabled={disableFields || repositoriesLoading} onClick={() => loadRepositories(repositoryPage, true)}>{repositoriesLoading ? 'Loading…' : 'Load more repositories'}</Button>}
     </Section>
@@ -317,14 +350,14 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       <div className="grid gap-2">
         <Label htmlFor="source-branch">Branch</Label>
         <Select value={branch} disabled={disableFields || !repository || branchesLoading && !branches.length} onValueChange={value => { if (value) setBranch(value); }}>
-          <SelectTrigger id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
+          <SelectTrigger ref={branchTrigger} id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
           <SelectContent position="popper" align="start" collisionPadding={16} className={selectListClass}>
             <BranchOptions names={[savedBranch, ...branches.map(item => item.name)]} pinned={[branch, savedBranch, defaultBranch]} defaultBranch={defaultBranch} localBranch={savedLocalOnly ? savedBranch : ''} labelClassName="min-w-0 whitespace-normal [overflow-wrap:anywhere]" />
           </SelectContent>
         </Select>
         {branchMissing && <p id="source-branch-missing" className={`text-sm ${changed ? 'text-destructive' : 'text-muted-foreground'}`} aria-live="polite">{missingBranch}</p>}
       </div>
-      {branchesError && <div className="space-y-2 text-sm text-destructive" role="alert"><p className="break-all">{branchesError}</p><Button type="button" variant="outline" size="sm" disabled={disableFields || branchesLoading} onClick={() => loadBranches(repository)}>Retry branches</Button></div>}
+      <SourceReadError error={branchesError} label="Retry branches" disabled={disableFields || branchesLoading} onRetry={() => loadBranches(repository)} focusTarget={() => branchTrigger.current} />
       {connected && repository && !branchesLoading && !branchesError && !branches.length && <p className="text-sm text-muted-foreground">No branches</p>}
       {branchPage && <Button type="button" variant="ghost" size="sm" className="w-fit" disabled={disableFields || branchesLoading} onClick={() => loadBranches(repository, branchPage, true)}>{branchesLoading ? 'Loading…' : 'Load more branches'}</Button>}
     </Section>
