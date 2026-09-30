@@ -141,6 +141,33 @@ test('a test regression, a dependency mismatch and a compile error beside a netw
   assert.deepEqual(await triaged('FAIL src/db.test.ts > saves', 'Error: connect ECONNREFUSED 127.0.0.1:5432'), ['availability', 'rerun'], 'A test that failed on a refused connection reruns first.');
 });
 
+test('explicit assertion failures outrank unrelated timeout output from passing tests in either log order', async () => {
+  const incidental = ['stderr | src/cache.test.ts > handles a slow upstream', '[cache] Request timed out; using fallback', '✓ handles a slow upstream'];
+  for (const assertion of [
+    "AssertionError: expected 'draft' to be 'stored' // Object.is equality",
+    'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+    'TestingLibraryElementError: Unable to find an element with the text: Saved',
+  ]) {
+    const failed = ['FAIL src/report.test.ts > saves the completed result', assertion];
+    for (const lines of [[...incidental, ...failed], [...failed, ...incidental]]) {
+      assert.deepEqual(await triaged(...lines), ['test-regression', 'repair'], lines.join(' | '));
+    }
+  }
+});
+
+test('ordinary expected/received output and passing assertion-test titles do not turn a real network failure into code repair', async () => {
+  for (const error of ['Error: connect ECONNREFUSED 127.0.0.1:5432', 'Error: request timed out after 10000 ms']) {
+    assert.deepEqual(await triaged(
+      '✓ prints an AssertionError for a missing field',
+      'ok 4 - formats TestingLibraryElementError correctly',
+      'received: expected payload received from the test fixture',
+      'FAIL src/service.test.ts > fetches a record',
+      error,
+    ), ['availability', 'rerun']);
+  }
+  assert.deepEqual(await triaged('Error: Resource not accessible by integration', 'AssertionError: expected 1 to equal 2'), ['configuration', 'needs-person']);
+});
+
 test('a run outside the connected repository shape, or without a numeric id, is refused before gh runs', async () => {
   const gh = runner({ jobs: JOBS, log: LOG });
   for (const input of [{ repository: 'owner', runId: '1' }, { repository: 'owner/..', runId: '1' }, { repository: 'owner/app', runId: '1; rm -rf /' }, { repository: 'owner/app', runId: null }, { repository: null, runId: '1' }]) {

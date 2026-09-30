@@ -144,6 +144,18 @@ test('an availability failure reruns its failed jobs once, and a passing rerun i
   assert.deepEqual([a.contexts.length, h.calls.reruns], [0, ['2']]);
 });
 
+test('an assertion failure beside a negative-path timeout reaches repair without an automatic rerun', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = '[cache] Request timed out; using fallback\nFAIL src/report.test.ts > stores the report\nAssertionError: expected draft to equal stored';
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category], ['ready', 'test-regression']);
+  assert.deepEqual(h.calls.reruns, [], 'An assertion mismatch never spends the transient-failure rerun.');
+  assert.equal(a.contexts.length, 1);
+  assert.equal(a.contexts[0].repair.failures?.[0].diagnosis.category, 'test-regression');
+});
+
 test('a rerun that fails again goes to repair with the new attempt, and never reruns twice', async t => {
   const a = agent();
   const h = await harness(t, { steps: a.steps });
