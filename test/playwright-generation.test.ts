@@ -69,6 +69,42 @@ test('generation and repair identify the configured seed project for the setup t
   }
 });
 
+test('generation and repair receive the complete reviewed acceptance contract in their read-only plan',async t=>{
+  const f=await setup(t,{mode:'repair'});
+  await f.manager.saveCases(f.context,[{...journey,name:'Create and reopen a quote',
+    goal:'Create a new quote, reopen its saved details, and check the remaining budget.',
+    preconditions:['A dedicated buyer account with at least 10 credits.','The quote must be created during this run.'],
+    steps:[
+      {id:'budget',title:'Read the initial budget',checks:[{type:'read-number',label:'Budget',name:'before'},{type:'text-absent',value:'Account suspended'}]},
+      {id:'save-quote',title:'Save a new quote',checks:[{type:'text-visible',value:'Quote {run} saved'}]},
+      {id:'reopen-quote',title:'Reopen the saved quote',checks:[{type:'url-contains',value:'/quotes/'},{type:'compare-number',label:'Budget',name:'after',op:'<',than:'before'}]},
+    ],
+    expectedOutcomes:['The new quote retains its approved terms after reopening.','The remaining budget decreases only after the quote is saved.'],
+    assertions:[{type:'text-visible',value:'Payment terms: "net 30"\nApproved'},{type:'text-absent',value:'Unsaved changes'}],
+  }]);
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.ok((await settled(f))?.draft);
+  const calls=await lines(f.log);
+  assert.equal(calls.length,2,'An invalid first spec causes the existing grammar repair.');
+  for(const call of calls){
+    const serialized=call.plan.match(/\*\*Reviewed acceptance contract \(read-only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
+    assert.ok(serialized,'The actual harness input must include every reviewed expectation, not just milestone titles and {run} texts.');
+    assert.deepEqual(JSON.parse(serialized[1]),{
+      id:'rename',name:'Create and reopen a quote',goal:'Create a new quote, reopen its saved details, and check the remaining budget.',
+      preconditions:['A dedicated buyer account with at least 10 credits.','The quote must be created during this run.'],
+      steps:[
+        {id:'budget',title:'Read the initial budget',checks:[{type:'read-number',label:'Budget',name:'before'},{type:'text-absent',value:'Account suspended'}]},
+        {id:'save-quote',title:'Save a new quote',checks:[{type:'text-visible',value:'Quote {run} saved'}]},
+        {id:'reopen-quote',title:'Reopen the saved quote',checks:[{type:'url-contains',value:'/quotes/'},{type:'compare-number',label:'Budget',name:'after',op:'<',than:'before'}]},
+      ],
+      expectedOutcomes:['The new quote retains its approved terms after reopening.','The remaining budget decreases only after the quote is saved.'],
+      assertions:[{type:'text-visible',value:'Payment terms: "net 30"\nApproved'},{type:'text-absent',value:'Unsaved changes'}],
+    });
+    assert.equal((call.modes as {plan:number}).plan,0o444);
+    assert.ok(secretFree(call));
+  }
+});
+
 test('the generation rules keep navigation on the current run’s records',()=>{
   const rule="An entity or record URL observed during exploration belongs to that exploration, not to a future run. Reopen data created by this run through its visible links, using journey.run only where the rules allow it. Use `await page.reload();` to check persistence on the current record; never hard-code an explored record's URL in `page.goto`.";
   const rules=generationRules(journey,{signIn:true});

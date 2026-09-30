@@ -89,7 +89,7 @@ test('saving the public view of an owned legacy target keeps automatic retargeti
   assert.equal(current.config.scope,'Billing outcomes');
 });
 
-test('a twin run allows its apps and blocks a journey that does not pass on an unavailable service',async t=>{
+test('a twin run preserves a failed business check despite an unavailable service',async t=>{
   const events=(input:JourneyRunInput)=>input.mode!=='run'?[]:[
     {type:'journey-step',caseId:journey.id,stepId:'open',status:'running'},
     {type:'journey-step',caseId:journey.id,stepId:'open',status:'completed',evidence:'Actions completed; this milestone has no reviewed checks.'},
@@ -104,12 +104,12 @@ test('a twin run allows its apps and blocks a journey that does not pass on an u
   const {run}=await f.manager.run(beta,{},manual);
   const report=await finished(f,beta,run.id);
   assert.deepEqual(f.requests[0].allowedOrigins,[WEB,API,'https://checkout.stripe.com']);
-  // The code never learns which services are missing; only a journey that does not pass is blocked on them.
+  // The missing dependency is not evidence of what caused a confirmed business failure.
   assert.equal('unavailableServices' in f.requests[0],false);
-  assert.equal(report.run.status,'blocked');
-  assert.equal(report.results[0].status,'blocked');
-  assert.equal(report.results[0].error,'Blocked: Stripe unavailable. Milestone check failed: Pay for the Pro plan.');
-  assert.deepEqual(report.results[0].blockers,[{kind:'integration',evidence:'Stripe is unavailable: missing secretKey.'}]);
+  assert.equal(report.run.status,'failed');
+  assert.equal(report.results[0].status,'failed');
+  assert.equal(report.results[0].error,'Milestone check failed: Pay for the Pro plan.');
+  assert.equal(report.results[0].blockers,undefined);
 });
 
 test('a run outside a twin is blocked on no service',async t=>{
@@ -122,6 +122,32 @@ test('a run outside a twin is blocked on no service',async t=>{
   const report=await finished(f,beta,run.id);
   assert.deepEqual(f.requests[0].allowedOrigins,['http://localhost:3000']);
   assert.equal(report.results[0].status,'needs_review');assert.equal(report.results[0].blockers,undefined);
+});
+
+for(const scenario of [
+  {name:'passing checks',complete:true,stopCause:'none',assertions:[{type:'text-visible',value:'Pro',passed:true}],status:'passed',error:undefined},
+  {name:'a failed final assertion',complete:true,stopCause:'none',assertions:[{type:'text-visible',value:'Pro',passed:false}],status:'failed',error:'A final assertion failed.'},
+  {name:'an execution error',complete:false,stopCause:'exception',assertions:[],status:'failed',error:'Browser transport failed'},
+  {name:'an incomplete journey',complete:false,stopCause:'action',assertions:[],status:'needs_review',error:'Action could not finish.'},
+])test(`unavailable twin services preserve ${scenario.name}`,async t=>{
+  const f=await fixture(t,{events:input=>[
+    ...(scenario.complete?[
+      {type:'journey-step',caseId:input.case.id,stepId:'open',status:'running'},
+      {type:'journey-step',caseId:input.case.id,stepId:'open',status:'completed',evidence:'Actions completed; this milestone has no reviewed checks.'},
+      {type:'journey-step',caseId:input.case.id,stepId:'pay',status:'running'},
+      {type:'journey-step',caseId:input.case.id,stepId:'pay',status:'completed',evidence:'Reviewed check passed.',checks:[{type:'text-visible',value:'Pro plan active',passed:true}]},
+    ]:[]),
+    {type:'result',result:{caseId:input.case.id,stopCause:scenario.stopCause,assertions:scenario.assertions,error:scenario.stopCause==='exception'?'Browser transport failed':'Action could not finish.'}},
+  ]});
+  const beta=f.context('beta');
+  await f.manager.saveConfig(beta,{targetUrl:`${WEB}/billing`});
+  await f.manager.saveCases(beta,[journey]);await draftCode(f.manager,beta,[journey]);
+  const {run}=await f.manager.run(beta,{},manual);
+  const report=await finished(f,beta,run.id);
+  assert.equal(report.run.status,scenario.status);
+  assert.equal(report.results[0].status,scenario.status);
+  assert.equal(report.results[0].error,scenario.error);
+  assert.equal(report.results[0].blockers,undefined);
 });
 
 test('a twin ready while its stage is busy moves the target at once and prepares once the stage is idle',async t=>{

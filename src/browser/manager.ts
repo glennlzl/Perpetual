@@ -12,7 +12,6 @@ import {journeyResult,runStatus} from './results.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createEnvironmentUsage,scopeId} from '../environments/usage.ts';
 import {validateRunCredentials} from './run-credentials.ts';
-import {services as twinServices} from '../twin/registry.ts';
 import {appId} from '../twin/detect.ts';
 import {createTwinRuntime} from '../twin/runtime.ts';
 import {createPlaywrightRuntime} from '../journeys/playwright/runtime.ts';
@@ -23,7 +22,7 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
-import type {Blocker,JourneyResult,RunStatus} from './results.ts';
+import type {JourneyResult,RunStatus} from './results.ts';
 import type {ConcurrencyLimit} from './journey-scheduler.ts';
 import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
@@ -178,10 +177,6 @@ function applicationUrl(environment:TargetEnvironment,scan:StageScan){
   const frontends=apps.filter(app=>(scan.services||[]).some(service=>serves(app,service)&&webFrontend.test(service.framework||'')));
   return frontends.length===1?frontends[0].url:apps.length===1?apps[0].url:null;
 }
-// Twin services left out for missing test inputs. Nothing substitutes for them, so a journey that needs one is blocked.
-const unavailableServices=(environment:TargetEnvironment|null|undefined)=>(environment?.services??[]).filter((service):service is {id:string;missing?:unknown}=>isRecord(service)&&service.status==='blocked'&&typeof service.id==='string')
-  .map(({id,missing})=>({id,title:Object.hasOwn(twinServices,id)?twinServices[id].title:id,missing:(Array.isArray(missing)?missing:[]).filter(name=>typeof name==='string'&&name.trim()).slice(0,20)}));
-
 function externalOrigins(value:unknown,context:{controllerOrigin?:string}){
   if(!Array.isArray(value)||value.length>10)throw new Error('Add at most 10 external origins.');
   return [...new Set(value.map(item=>{
@@ -839,7 +834,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           // Runs may reach reviewed external origins (such as Stripe test checkout); discovery stays on
           // the target environment's apps and receives auth endpoints only with a supplied test account.
           // Validate worker input inside the terminal handler so refusal also settles the run and its lease.
-          const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)],unavailable=unavailableServices(environment);
+          const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)];
           const workerInput={mode,targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
             ...(mode==='discover'?{scope:config.scope,requirements:config.requirements,sourceContext,maxSteps:config.maxSteps,...(discoveryEndpoints?{authEndpoints:discoveryEndpoints}:{})}:{})};
           run.status='running';run.startedAt=now();await persist();
@@ -893,11 +888,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                   }else if(event.type==='discovery')throw new Error('Browser runtime returned unexpected discovery.');
                   else progressEvent(event,item.id);
                 };
-                // A missing service may not be needed: the code runs, and only a journey that does not pass is
-                // blocked on it, since nothing tells whether the missing service caused its failure.
-                const judged=(result:JourneyResult):JourneyResult=>unavailable.length&&result.status!=='passed'?{...result,status:'blocked',
-                  blockers:[...unavailable.map(({title,missing}):Blocker=>({kind:'integration',evidence:`${title} is unavailable${missing.length?`: missing ${missing.join(', ')}`:''}.`})),...(result.blockers||[])].slice(0,10),
-                  error:`Blocked: ${unavailable.map(({title})=>title).join(', ')} unavailable.${result.error?` ${result.error}`:''}`}:result;
+                // Service availability stays on the environment. It does not establish which dependency
+                // this journey used or why an action failed; only the journey's own evidence decides it.
                 // Journeys without code were settled before scheduling.
                 const {code,hash,checkVersion}=codes[item.id] as {code:string;hash:string;checkVersion:number};
                 // A control run blocks every state-changing request, so a reviewed check of a journey that keeps something fails.
@@ -905,12 +897,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const job=playwright.start({...workerInput,case:item,spec:{code,hash},checkVersion,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),...(videoDir?{videoDir}:{}),...(run.verification?.control?{blockWrites:true}:{})},onEvent);
                 return {cancel:()=>job.cancel(),promise:job.promise.then(()=>{
                   assertCurrent();if(!facts)throw new Error('Browser runtime did not return results.');
-                  return judged(journeyResult(item,facts,steps()));
+                  return journeyResult(item,facts,steps());
                 },(error:WorkerError|undefined)=>{
                   // The kill timer is the journey's deadline too; facts the worker reported before it still count.
                   if(!error?.timedOut||error.cleanupIncomplete)throw error;
                   assertCurrent();
-                  return judged(journeyResult(item,facts||{caseId:item.id,stopCause:'deadline'},steps()));
+                  return journeyResult(item,facts||{caseId:item.id,stopCause:'deadline'},steps());
                 })};
               },
             });

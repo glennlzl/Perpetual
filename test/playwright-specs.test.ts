@@ -372,21 +372,22 @@ test('code that signs in without a test account is blocked before launch',async 
   assert.deepEqual(report.results[0].blockers,[{kind:'account',evidence:'The code signs in, and no test account is available.'}]);
 });
 
-test('a missing twin service blocks only a journey that does not pass',async t=>{
+test('a missing twin service never overwrites a journey pass or failed check',async t=>{
   const environment={id:'twin-1',status:'ready',apps:[{id:'web',url:'http://localhost:3000'}],services:[{id:'stripe',title:'Stripe',status:'blocked',missing:['secretKey']},{id:'postgres',status:'ready'}]};
   let events=passing;
   const f=await fixture(t,{events:input=>events(input),environment});
   await f.manager.saveSpec(f.context,{caseId:journey.id,code:spec()});
   const passed=await completed(f,(await f.manager.run(f.context,{},{manual:true})).run.id);
   assert.equal(passed.run.status,'passed','a journey that never needed the missing service passes');
-  // The second milestone's reviewed check fails, as it would if it needed the missing service.
+  // A failed check is evidence; a missing service does not establish its cause.
   events=failingSecond;
   // The twin is released after the first result is saved, so the next run may briefly wait for it.
   const start=async()=>{for(let i=0;;i++){try{return await f.manager.run(f.context,{},{manual:true});}catch(error){if((error as HttpError).statusCode!==409||i>=200)throw error;await new Promise(resolve=>setTimeout(resolve,5));}}};
   const report=await completed(f,(await start()).run.id);
-  assert.equal(f.launches.length,2);assert.equal(report.run.status,'blocked');
-  assert.deepEqual(report.results[0].blockers,[{kind:'integration',evidence:'Stripe is unavailable: missing secretKey.'}]);
-  assert.match(report.results[0].error??'',/^Blocked: Stripe unavailable\. Milestone check failed: /);
+  assert.equal(f.launches.length,2);assert.equal(report.run.status,'failed');
+  assert.equal(report.results[0].status,'failed');
+  assert.equal(report.results[0].blockers,undefined);
+  assert.match(report.results[0].error??'',/^Milestone check failed: /);
 });
 
 test('generated code runs once with no retries, and a flaky pass fails',async t=>{
