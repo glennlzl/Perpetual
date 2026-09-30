@@ -54,7 +54,7 @@
   --muted: #f4f4f5; --muted-foreground: #6e6e77;
   --accent: #f4f4f5; --accent-foreground: var(--foreground);
   /* Field boundaries and the focus ring keep 3:1 on white, canvas and field surfaces; card borders stay quiet. */
-  --destructive: #dc2626; --border: #e4e4e7; --input: #8a8a93; --ring: #85858e;
+  --destructive: #b91c1c; --border: #e4e4e7; --input: #8a8a93; --ring: #85858e;
   --success: #047857; --warning: #92400e;
   --surface-canvas: #f5f5f6; --surface-panel: #ffffff; --surface-raised: #ffffff; --surface-field: #f5f5f6;
   color-scheme: light;
