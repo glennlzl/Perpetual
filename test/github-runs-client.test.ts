@@ -9,7 +9,7 @@ const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
 // Shapes returned by GET /api/github/runs (src/github-runs.ts).
 const step = (name: string, status: string, conclusion: string | null = null): GitHubStep => ({ number: 1, name, status, conclusion });
 const job = (name: string, status: string, conclusion: string | null, steps: GitHubStep[] = []): GitHubJob => ({ id: name, name, status, conclusion, startedAt: null, completedAt: null, url: null, steps });
-const run = (id: string, path: string | null, status: string, conclusion: string | null, jobs: GitHubJob[] | null = null): GitHubRun => ({ id, name: 'CI', path, event: 'push', status, conclusion, attempt: 1, sha: SHA, branch: null, url: null, createdAt: null, startedAt: null, updatedAt: null, jobs });
+const run = (id: string, path: string | null, status: string, conclusion: string | null, jobs: GitHubJob[] | null = null): GitHubRun => ({ id, workflowId: '7', name: 'CI', path, event: 'push', status, conclusion, attempt: 1, sha: SHA, branch: null, url: null, createdAt: null, startedAt: null, updatedAt: null, jobs });
 const result = (runs: GitHubRun[]): GitHubRuns => ({ repository: 'acme/storefront', sha: SHA, runs });
 // Scanned .github/workflows files, the same set the Build rail lists.
 const WORKFLOWS = ['.github/workflows/ci.yml', '.github/workflows/lint.yml', '.github/workflows/release.yml'];

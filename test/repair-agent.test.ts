@@ -27,7 +27,7 @@ const FIX: ScriptedStep[] = [
   { calls: [{ tool: 'done', input: { summary: 'add() subtracted; it adds now.' } }], cost: 0.01 },
 ];
 const run = (id: string, sha: string, conclusion: string | null, { branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, name: 'CI', path: '.github/workflows/ci.yml', event, status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+  ({ id, workflowId: '7', name: 'CI', path: '.github/workflows/ci.yml', event, status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 const failure = (runId: string, log = 'Error: add(2, 3) returned -1, expected 5') =>
   ({ runId, jobs: [{ id: `job-${runId}`, name: 'test', conclusion: 'failure', failedSteps: ['Check'] }], log, tail: log, diagnosis: diagnoseFailure(log), observedAt: '2026-09-25T10:00:00.000Z' });
 async function until(check: () => unknown, attempts = 2000) {

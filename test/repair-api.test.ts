@@ -17,7 +17,7 @@ import type { Repair } from '../src/repair/manager.ts';
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281', NEWER = 'd'.repeat(40);
 type AutopilotResponse = AutopilotView & { error?: string };
 const session = (login: string): GitHubSession => ({ available: true, authenticated: true, account: { login, name: null } });
-const run = (id: string, conclusion: string | null, sha = SHA): WorkflowRun => ({ id, name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+const run = (id: string, conclusion: string | null, sha = SHA): WorkflowRun => ({ id, workflowId: '7', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 const shown = (id: string) => ({ id, name: 'CI', path: '.github/workflows/ci.yml', url: null });
 // The Build stage's record, its newest change and the change's steps as [name, status].
 const build = (view: AutopilotResponse) => view.stages?.build;

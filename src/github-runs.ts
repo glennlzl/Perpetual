@@ -33,7 +33,8 @@ export function remember<K, V>(map: Map<K, V>, key: K, value: V, limit = 200) {
 // verifies the current source, so non-matching head SHAs are dropped.
 export function normalizeWorkflowRuns(data: GitHubJson, sha: string): WorkflowRun[] {
   return (Array.isArray(data?.workflow_runs) ? data.workflow_runs as GitHubJson[] : []).filter((run): run is NonNullable<GitHubJson> => Number.isSafeInteger(run?.id) && run!.head_sha === sha).map(run => ({
-    id: String(run.id), name: text(run.name), path: text(run.path)?.replace(/@.*$/, '') || null, event: text(run.event, 60), ...state(run),
+    id: String(run.id), workflowId: Number.isSafeInteger(run.workflow_id) && Number(run.workflow_id) > 0 ? String(run.workflow_id) : null,
+    name: text(run.name), path: text(run.path)?.replace(/@.*$/, '') || null, event: text(run.event, 60), ...state(run),
     attempt: Number.isSafeInteger(run.run_attempt) ? run.run_attempt as number : 1, sha, branch: text(run.head_branch, 255), url: link(run.html_url),
     createdAt: time(run.created_at), startedAt: time(run.run_started_at), updatedAt: time(run.updated_at), jobs: null,
   }));

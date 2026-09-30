@@ -7,7 +7,7 @@ export interface RunState { status: string | null; conclusion: string | null }
 export interface WorkflowStep extends RunState { number: number | null; name: string }
 export interface WorkflowJob extends RunState { id: string; name: string; startedAt: string | null; completedAt: string | null; url: string | null; steps: WorkflowStep[] }
 export interface WorkflowRun extends RunState {
-  id: string; name: string | null; path: string | null; event: string | null; attempt: number; sha: string; branch: string | null; url: string | null;
+  id: string; workflowId: string | null; name: string | null; path: string | null; event: string | null; attempt: number; sha: string; branch: string | null; url: string | null;
   createdAt: string | null; startedAt: string | null; updatedAt: string | null; jobs: WorkflowJob[] | null;
 }
 /** GET /api/github/runs: the Actions runs GitHub holds for the scanned commit. */
