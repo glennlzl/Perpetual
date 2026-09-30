@@ -11,7 +11,8 @@ import { Separator } from '@/components/ui/separator';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import PipelineDialogs from './PipelineDialogs';
 import PipelineLoading from './PipelineLoading';
-import AppSettings, { type SettingsDraft } from './AppSettings';
+import AppSettings from './AppSettings';
+import { createAppSettings } from '@/lib/app-settings';
 import GitHubActionsCard from './GitHubActionsCard';
 import BranchSwitcher from './BranchSwitcher';
 import NewTestDialog from './NewTestDialog';
@@ -643,12 +644,12 @@ class PageBoundary extends React.Component<{ children: ReactNode }, { failed: bo
 }
 
 function PipelineApp() {
-  const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null);
+  const [settings] = useState(() => createAppSettings({ controller: api }));
   useEffect(() => {
-    const guard = (event: BeforeUnloadEvent) => { if (settingsDraft || hasCaseDrafts()) { event.preventDefault(); event.returnValue = ''; } };
+    const guard = (event: BeforeUnloadEvent) => { if (settings.getSnapshot().draft || hasCaseDrafts()) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', guard);
     return () => window.removeEventListener('beforeunload', guard);
-  }, [settingsDraft]);
+  }, [settings]);
   const [workspace, tests] = useTestWorkspace();
   const [page, setPage] = useState<Page>(() => window.location.hash === '#settings' ? 'settings' : 'pipeline');
   const pageRef = useRef(page), settingsReturn = useRef<SettingsReturn | null>(null);
@@ -862,7 +863,7 @@ function PipelineApp() {
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
       <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Pipeline'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
-      {page === 'settings' ? <AppSettings draft={settingsDraft} onDraftChange={setSettingsDraft} /> : <main className="pipeline-page" id="pipeline">
+      {page === 'settings' ? <AppSettings settings={settings} /> : <main className="pipeline-page" id="pipeline">
         {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{error ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{error && <p role="alert">{error.message}</p>}<Button onClick={error ? load : () => openDialog({ type: 'source', connect: true })}>{error ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
     </div>

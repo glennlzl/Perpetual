@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -7,13 +7,10 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api } from '@/lib/api';
-import type { ModelSettingsReply, ModelSettingsView, OpenRouterModel, OpenRouterModelView } from '../../contract/settings.ts';
+import type { AppSettingsSession, SettingsDraft } from '@/lib/app-settings';
+import type { ModelSettingsView, OpenRouterModel } from '../../contract/settings.ts';
 
 type ModelGroup = { label: string; models: OpenRouterModel[] };
-/** Unsaved App Settings edits; they outlive the page until saved or discarded. escalationModel is what build repairs escalate to. */
-export type SettingsDraft = { model: string; apiKey: string; escalationModel: string };
-
 const openRouter = (capabilities: ModelSettingsView | null) => capabilities?.provider === 'openrouter';
 const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', 'meta-llama': 'Meta', 'x-ai': 'xAI', qwen: 'Qwen', mistralai: 'Mistral', nvidia: 'NVIDIA', openrouter: 'OpenRouter', rekaai: 'Reka' };
 const namePrefix = (name: string) => /^([^:]{1,48}):\s+\S/.exec(name)?.[1].trim();
@@ -76,92 +73,24 @@ function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading
   </Select>;
 }
 
-export default function AppSettings({ draft, onDraftChange }: { draft: SettingsDraft | null; onDraftChange: Dispatch<SetStateAction<SettingsDraft | null>> }) {
-  const [capabilities, setCapabilities] = useState<ModelSettingsView | null>(null);
-  const [models, setModels] = useState<OpenRouterModel[]>([]);
-  const [savedModel, setSavedModel] = useState('');
-  const [serverModel, setServerModel] = useState('');
-  const [savedEscalation, setSavedEscalation] = useState('');
-  const [serverEscalation, setServerEscalation] = useState('');
+export default function AppSettings({ settings }: { settings: AppSettingsSession }) {
+  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, loading, modelsLoading, modelsError, saving, saved, readError, saveError } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
   const model = draft?.model ?? savedModel;
   const escalationModel = draft?.escalationModel ?? savedEscalation;
   const apiKey = draft?.apiKey ?? '';
   const [showKey, setShowKey] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const dirty = Boolean(draft);
+  const dirty = Boolean(draft), error = saveError || readError;
   // An automatically chosen default is savable but is not an unsaved user edit.
   const suggested = !dirty && (Boolean(savedModel) && savedModel !== serverModel || Boolean(savedEscalation) && savedEscalation !== serverEscalation);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState('');
-  const active = useRef(true);
-  const loadingRef = useRef(false);
-  const modelsLoadingRef = useRef(false);
-  const savingRef = useRef(false);
   const hasSavedKey = openRouter(capabilities) && capabilities!.keyConfigured;
   const validModel = models.some(item => item.id === model);
-  const validEscalation = models.some(item => item.id === escalationModel);
   // The saved models, or the preselected defaults, stay pinned above the provider groups.
   const pinnedModel = models.find(item => item.id === savedModel);
   const pinnedEscalation = models.find(item => item.id === savedEscalation);
-
-  function acceptCatalog(catalog: OpenRouterModelView, preferred = '', preferredEscalation = '') {
-    setModels(catalog.models);
-    const listed = (id: string) => catalog.models.some(item => item.id === id);
-    const selected = listed(preferred) ? preferred : catalog.defaultModel;
-    setSavedModel(selected || '');
-    setSavedEscalation(listed(preferredEscalation) ? preferredEscalation : catalog.defaultEscalationModel || selected || '');
-  }
-  async function load() {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    setLoading(true); setError(''); setModelsError('');
-    const [settings, catalog] = await Promise.allSettled([api<ModelSettingsReply>('/api/settings/model'), api<OpenRouterModelView>('/api/settings/models')]);
-    loadingRef.current = false;
-    if (!active.current) return;
-    let preferred = '', preferredEscalation = '';
-    if (settings.status === 'fulfilled') {
-      const next = settings.value.capabilities;
-      setCapabilities(next);
-      preferred = openRouter(next) ? next.model : '';
-      preferredEscalation = openRouter(next) ? next.escalationModel || '' : '';
-      setServerModel(preferred);
-      setServerEscalation(preferredEscalation);
-    } else setError((settings.reason as Error).message);
-    if (catalog.status === 'fulfilled') acceptCatalog(catalog.value, preferred, preferredEscalation);
-    else { setSavedModel(preferred); setSavedEscalation(preferredEscalation); setModelsError((catalog.reason as Error).message); }
-    setLoading(false);
-  }
-  async function reloadModels() {
-    if (modelsLoadingRef.current) return;
-    modelsLoadingRef.current = true; setModelsLoading(true); setModelsError('');
-    try {
-      const catalog = await api<OpenRouterModelView>('/api/settings/models');
-      if (active.current) acceptCatalog(catalog, model, escalationModel);
-    } catch (failure) { if (active.current) setModelsError((failure as Error).message); }
-    finally { modelsLoadingRef.current = false; if (active.current) setModelsLoading(false); }
-  }
-  useEffect(() => { active.current = true; void load(); return () => { active.current = false; }; }, []);
-  function changed(values: Partial<SettingsDraft>) {
-    onDraftChange({ model, apiKey, escalationModel, ...values });
-    setSaved(false);
-  }
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (savingRef.current || !validModel || !capabilities) return;
-    const submittedDraft = draft;
-    savingRef.current = true; setSaving(true); setError(''); setSaved(false);
-    try {
-      const { capabilities: next } = await api<ModelSettingsReply>('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) });
-      // A completed save may outlive this page; retain any newer edits.
-      onDraftChange(current => current === submittedDraft ? null : current);
-      if (!active.current) return;
-      setCapabilities(next); setSavedModel(next.model); setServerModel(next.model); setSavedEscalation(next.escalationModel || escalationModel); setServerEscalation(next.escalationModel || ''); setShowKey(false); setSaved(true);
-    } catch (failure) { if (active.current) setError((failure as Error).message); }
-    finally { savingRef.current = false; if (active.current) setSaving(false); }
-  }
+  useEffect(() => { void settings.load(); }, [settings]);
+  useEffect(() => { if (saved) setShowKey(false); }, [saved]);
+  const changed = (values: Partial<SettingsDraft>) => settings.edit(values);
+  const save = (event: FormEvent) => { event.preventDefault(); void settings.save(); };
 
   return <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings">
     <section className="mx-auto w-full max-w-2xl" aria-labelledby="openrouter-heading">
@@ -187,7 +116,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
             <Label htmlFor="openrouter-model" className="sm:self-start sm:pt-3">Model</Label>
             <div className="min-w-0 space-y-3">
               <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
-              {modelsError && <div className="space-y-2"><p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p><Button type="button" variant="outline" size="sm" disabled={modelsLoading || saving} onClick={reloadModels}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
+              {modelsError && <div className="space-y-2"><p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p><Button type="button" variant="outline" size="sm" disabled={modelsLoading || saving} onClick={() => void settings.reloadModels()}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
             </div>
           </div>
           <Separator />
@@ -197,7 +126,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
           </div>
         </fieldset>
         <Separator />
-        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { onDraftChange(null); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" onClick={load}>Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
+        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { settings.discard(); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" onClick={() => void settings.load()}>Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
       </form>}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
     </section>
