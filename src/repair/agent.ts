@@ -8,7 +8,7 @@
 // input. An attempt reproduced the failure only when a failing step's own command failed before it changed a file. The
 // OpenRouter key reaches only the model provider, never the box, a command, a log or a report.
 import { createHash } from 'node:crypto';
-import { readdir, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { APICallError, RetryError, generateText, hasToolCall, stepCountIs, type LanguageModel, type StepResult, type ToolSet } from 'ai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
@@ -159,7 +159,7 @@ async function passes(box: RepairBox, checks: readonly FailingCheck[], signal: A
   return true;
 }
 
-/** The agent step and its companions for createRepairManager: repair(context, signal), state(repair), close(repair) and recover(). */
+/** The agent step and its companions for createRepairManager: repair(context, signal), cleanup({ repair, directory }), state(repair), close(repair) and recover(). */
 export function createRepairAgent(options: RepairAgentOptions) {
   const budget = { ...BUDGET, ...options.budget }, ci = { ...CI, ...options.ci };
   const now = options.now ?? (() => new Date().toISOString()), clock = options.clock ?? Date.now, model = options.model ?? openrouterModels();
@@ -218,7 +218,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
     const models = await options.models();
     if (!models) return { status: 'needs-person', reason: 'Add an OpenRouter API key in Settings.' };
     const deployFiles = options.deployFiles?.(repair) ?? [], attempts: RepairAttempt[] = [];
-    let box: RepairBox | null = null, spent = 0, pushed: string | null = null, pullRequest: RepairPullRequest | null = null;
+    let spent = 0, pushed: string | null = null, pullRequest: RepairPullRequest | null = null;
     let holds: string[] = [], ciRuns: string[] = [], feedback = '', summary = '', check: Pick<ChangeCheck, 'paths' | 'added' | 'removed'> | null = null;
     // The pull request is labelled once it opens, and again after each later push and at the end until GitHub takes the
     // label; one still missing when the repair ends is named in its reason.
@@ -235,115 +235,114 @@ export function createRepairAgent(options: RepairAgentOptions) {
       const missing = `Could not label the pull request ${LABEL}: ${unlabelled}`;
       return { ...outcome, reason: outcome.reason ? `${outcome.reason} ${missing}` : missing };
     };
-    try {
-      await rm(clone, { recursive: true, force: true });
-      await host.clone({ repair, directory: clone });
+    // Cleanup belongs to the manager, separately from the repair's business outcome.
+    await rm(clone, { recursive: true, force: true });
+    await host.clone({ repair, directory: clone });
+    signal.throwIfAborted();
+    const original = await describeFailures(clone, repair.runs, repair.failures ?? []);
+    let workflows: FailedWorkflow[] = original;
+    const box = await boxes.create({ id: repair.id, image: await chooseImage(clone, original), source: clone, signal });
+    const digest = await repositoryDigest(clone), title = pullRequestTitle(repair, original);
+    const body = () => pullRequestBody({ repair, workflows: original, summary, attempts, holds, check, spent });
+    const record = async (ids: string[]) => { ciRuns = [...ciRuns, ...ids].slice(-100); await context.report({ ciRuns }); };
+    // CI at a head the merge step made by updating the pull request's branch.
+    const ci = async (head: string, stop: AbortSignal): Promise<CiVerdict> => {
+      const verdict = await verify(repair, head, stop, record);
+      if (verdict.status === 'passed') return verdict;
+      if (verdict.status === 'none') return { status: 'failed', reason: NO_CI };
+      if (verdict.status === 'other') return { status: 'failed', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` };
+      return { status: 'failed', reason: `The updated pull request failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.` };
+    };
+    for (let number = 1; number <= budget.attempts && spent < budget.cost; number += 1) {
+      const id = number <= budget.escalateAfter ? models.model : models.escalationModel || models.model;
+      const attempt: RepairAttempt = { number, model: id, startedAt: now() };
+      attempts.push(attempt);
+      await context.report({ status: 'repairing', attempts });
+      const result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
+        signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
+        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
+      spent += result.cost;
+      Object.assign(attempt, { completedAt: now(), reproduced: result.reproduced, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost });
+      const fail = async (reason: string, next = reason) => { attempt.failure = reason; feedback = next; await context.report({ attempts }); };
+      if (result.refusal) { await fail(result.refusal); return await finish({ status: 'needs-person', reason: result.refusal }); }
+      if (result.end !== 'done') { await fail(ended[result.end](result)); continue; }
+      summary = result.summary;
+      let diff: Buffer;
+      try { diff = await box.diff(repair.sha); }
+      catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
+      if (!diff.toString('utf8').trim()) { await fail('The attempt changed no file.'); continue; }
+      const first = checkChanges(diff.toString('utf8'), { deployFiles });
+      if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
+      // What git staged is checked again, whatever the box's diff said: its own paths, and its text diff with the
+      // content of files it treats as binary. Holds and the change's size stay the box diff's, where a binary file
+      // counts no lines.
+      let staged: { paths: string[]; text: string };
+      try { staged = await host.stage({ directory: clone, diff, base: repair.sha }); }
+      catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
+      const { paths } = staged, rules = pathRules(paths, deployFiles), checked = checkChanges(staged.text, { deployFiles });
+      const refused = [...new Set([...rules.rejected, ...checked.rejected])];
+      if (refused.length) { await fail(refused.join(' ')); continue; }
+      await connected(repair);
+      const account = await pulls.account();
+      if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);
+      const sha = await host.commit({ directory: clone, parent: pushed ?? repair.sha, message: commitMessage(title, summary), author: { name: account.login, email: `${account.id}+${account.login}@users.noreply.github.com` } });
+      if (!sha) { await fail('The attempt made no change since the last push.'); continue; }
+      holds = [...new Set([...first.holds, ...rules.holds])];
+      check = { paths, added: first.added, removed: first.removed };
       signal.throwIfAborted();
-      const original = await describeFailures(clone, repair.runs, repair.failures ?? []);
-      let workflows: FailedWorkflow[] = original;
-      box = await boxes.create({ id: repair.id, image: await chooseImage(clone, original), source: clone, signal });
-      const digest = await repositoryDigest(clone), title = pullRequestTitle(repair, original);
-      const body = () => pullRequestBody({ repair, workflows: original, summary, attempts, holds, check, spent });
-      const record = async (ids: string[]) => { ciRuns = [...ciRuns, ...ids].slice(-100); await context.report({ ciRuns }); };
-      // CI at a head the merge step made by updating the pull request's branch.
-      const ci = async (head: string, stop: AbortSignal): Promise<CiVerdict> => {
-        const verdict = await verify(repair, head, stop, record);
-        if (verdict.status === 'passed') return verdict;
-        if (verdict.status === 'none') return { status: 'failed', reason: NO_CI };
-        if (verdict.status === 'other') return { status: 'failed', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` };
-        return { status: 'failed', reason: `The updated pull request failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.` };
-      };
-      for (let number = 1; number <= budget.attempts && spent < budget.cost; number += 1) {
-        const id = number <= budget.escalateAfter ? models.model : models.escalationModel || models.model;
-        const attempt: RepairAttempt = { number, model: id, startedAt: now() };
-        attempts.push(attempt);
-        await context.report({ status: 'repairing', attempts });
-        const result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
-          signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
-          checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
-        spent += result.cost;
-        Object.assign(attempt, { completedAt: now(), reproduced: result.reproduced, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost });
-        const fail = async (reason: string, next = reason) => { attempt.failure = reason; feedback = next; await context.report({ attempts }); };
-        if (result.refusal) { await fail(result.refusal); return await finish({ status: 'needs-person', reason: result.refusal }); }
-        if (result.end !== 'done') { await fail(ended[result.end](result)); continue; }
-        summary = result.summary;
-        let diff: Buffer;
-        try { diff = await box.diff(repair.sha); }
-        catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
-        if (!diff.toString('utf8').trim()) { await fail('The attempt changed no file.'); continue; }
-        const first = checkChanges(diff.toString('utf8'), { deployFiles });
-        if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
-        // What git staged is checked again, whatever the box's diff said: its own paths, and its text diff with the
-        // content of files it treats as binary. Holds and the change's size stay the box diff's, where a binary file
-        // counts no lines.
-        let staged: { paths: string[]; text: string };
-        try { staged = await host.stage({ directory: clone, diff, base: repair.sha }); }
-        catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
-        const { paths } = staged, rules = pathRules(paths, deployFiles), checked = checkChanges(staged.text, { deployFiles });
-        const refused = [...new Set([...rules.rejected, ...checked.rejected])];
-        if (refused.length) { await fail(refused.join(' ')); continue; }
-        await connected(repair);
-        const account = await pulls.account();
-        if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);
-        const sha = await host.commit({ directory: clone, parent: pushed ?? repair.sha, message: commitMessage(title, summary), author: { name: account.login, email: `${account.id}+${account.login}@users.noreply.github.com` } });
-        if (!sha) { await fail('The attempt made no change since the last push.'); continue; }
-        holds = [...new Set([...first.holds, ...rules.holds])];
-        check = { paths, added: first.added, removed: first.removed };
+      let lease = pushed;
+      if (!lease) {
+        // The first push leases the branch as Perpetual last left it, such as a stopped repair of this commit did; a
+        // branch holding commits Perpetual did not push is a person's, and is never overwritten.
+        const remote = await host.remote({ directory: clone, repository: repair.repository, branch, signal }).catch(error => { signal.throwIfAborted(); throw error; });
         signal.throwIfAborted();
-        let lease = pushed;
-        if (!lease) {
-          // The first push leases the branch as Perpetual last left it, such as a stopped repair of this commit did; a
-          // branch holding commits Perpetual did not push is a person's, and is never overwritten.
-          const remote = await host.remote({ directory: clone, repository: repair.repository, branch, signal }).catch(error => { signal.throwIfAborted(); throw error; });
-          signal.throwIfAborted();
-          if (remote && remote !== repair.pushed) return { status: 'needs-person', reason: `${branch} has commits Perpetual did not push. Merge or close its pull request and delete the branch, then start the repair again.` };
-          lease = remote ?? '';
-        }
-        // The push is recorded before anything else, even when the repair stopped while it ran, and nothing follows it then.
-        await host.push({ directory: clone, repository: repair.repository, branch, sha, lease });
-        pushed = sha;
-        await context.report({ pushed: sha });
-        if (!pullRequest) {
-          const existing = await pulls.find({ repository: repair.repository, branch });
-          signal.throwIfAborted();
-          const opened = existing ?? await pulls.create({ repository: repair.repository, base: repair.branch, branch, title, body: body() });
-          if (existing) await pulls.update({ repository: repair.repository, number: existing.number, body: body() });
-          pullRequest = { number: opened.number, url: opened.url, branch, draft: opened.draft };
-        } else await pulls.update({ repository: repair.repository, number: pullRequest.number, body: body() });
-        await label();
-        await context.report({ status: 'verifying-ci', pullRequest, attempts, diffHash: createHash('sha256').update(diff).digest('hex'), holds });
-        const verdict = await verify(repair, sha, signal, record);
-        if (verdict.status === 'passed') {
-          // A pull request GitHub refuses to mark ready still goes through the gates, and the merge step marks it ready.
-          const number = pullRequest.number, readied = await connected(repair).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
-          if (readied) { pullRequest = { ...pullRequest, draft: false }; await context.report({ pullRequest }); }
-          if (!options.merge) return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY });
-          // The box has no more work; the gates rebuild twins meanwhile.
-          await box.remove().catch(() => {});
-          box = null;
-          return await finish(await options.merge.merge({ repair, pullRequest, sha, holds, directory: context.directory, clone, title,
-            autoMerge: () => context.autoMerge(), report: progress => context.report(progress), ci }, signal));
-        }
-        if (verdict.status === 'none') return await finish({ status: 'ready', reason: NO_CI });
-        if (verdict.status === 'other') return await finish({ status: 'ready', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` });
-        // A failed run whose log cannot be read is still named to the next attempt.
-        const failures = await Promise.all(verdict.runs.slice(0, 5).map(run => github.failure({ repository: repair.repository, runId: run.id }).catch(() => null)));
-        workflows = await describeFailures(clone, verdict.runs, failures.filter(failure => failure !== null));
-        const failed = `The pushed change failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.`;
-        await fail(failed, `${failed} The failed runs above are the pull request's; fix them on top of the pushed change.`);
+        if (remote && remote !== repair.pushed) return { status: 'needs-person', reason: `${branch} has commits Perpetual did not push. Merge or close its pull request and delete the branch, then start the repair again.` };
+        lease = remote ?? '';
       }
-      if (pullRequest) await pulls.update({ repository: repair.repository, number: pullRequest.number, body: body() }).catch(() => {});
-      return await finish({ status: 'failed', reason: spent >= budget.cost ? capped : `The build was not fixed in ${budget.attempts} attempts.` });
-    } finally {
-      await box?.remove().catch(() => {});
-      await rm(clone, { recursive: true, force: true }).catch(() => {});
-      await rm(join(context.directory, 'change.diff'), { force: true }).catch(() => {});
-      for (const entry of await readdir(context.directory).catch(() => [] as string[])) if (entry.startsWith('gate-')) await rm(join(context.directory, entry), { recursive: true, force: true }).catch(() => {});
+      // The push is recorded before anything else, even when the repair stopped while it ran, and nothing follows it then.
+      await host.push({ directory: clone, repository: repair.repository, branch, sha, lease });
+      pushed = sha;
+      await context.report({ pushed: sha });
+      if (!pullRequest) {
+        const existing = await pulls.find({ repository: repair.repository, branch });
+        signal.throwIfAborted();
+        const opened = existing ?? await pulls.create({ repository: repair.repository, base: repair.branch, branch, title, body: body() });
+        if (existing) await pulls.update({ repository: repair.repository, number: existing.number, body: body() });
+        pullRequest = { number: opened.number, url: opened.url, branch, draft: opened.draft };
+      } else await pulls.update({ repository: repair.repository, number: pullRequest.number, body: body() });
+      await label();
+      await context.report({ status: 'verifying-ci', pullRequest, attempts, diffHash: createHash('sha256').update(diff).digest('hex'), holds });
+      const verdict = await verify(repair, sha, signal, record);
+      if (verdict.status === 'passed') {
+        // A pull request GitHub refuses to mark ready still goes through the gates, and the merge step marks it ready.
+        const number = pullRequest.number, readied = await connected(repair).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
+        if (readied) { pullRequest = { ...pullRequest, draft: false }; await context.report({ pullRequest }); }
+        if (!options.merge) return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY });
+        // The box has no more work; the gates rebuild twins meanwhile.
+        await box.remove();
+        return await finish(await options.merge.merge({ repair, pullRequest, sha, holds, directory: context.directory, clone, title,
+          autoMerge: () => context.autoMerge(), report: progress => context.report(progress), ci }, signal));
+      }
+      if (verdict.status === 'none') return await finish({ status: 'ready', reason: NO_CI });
+      if (verdict.status === 'other') return await finish({ status: 'ready', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` });
+      // A failed run whose log cannot be read is still named to the next attempt.
+      const failures = await Promise.all(verdict.runs.slice(0, 5).map(run => github.failure({ repository: repair.repository, runId: run.id }).catch(() => null)));
+      workflows = await describeFailures(clone, verdict.runs, failures.filter(failure => failure !== null));
+      const failed = `The pushed change failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.`;
+      await fail(failed, `${failed} The failed runs above are the pull request's; fix them on top of the pushed change.`);
     }
+    if (pullRequest) await pulls.update({ repository: repair.repository, number: pullRequest.number, body: body() }).catch(() => {});
+    return await finish({ status: 'failed', reason: spent >= budget.cost ? capped : `The build was not fixed in ${budget.attempts} attempts.` });
+  }
+
+  async function cleanup({ repair, directory }: { repair: Repair; directory: string }) {
+    await boxes.remove(repair.id);
+    // The host clone is useful recovery evidence until all guest resources are confirmed absent.
+    await rm(directory, { recursive: true, force: true });
   }
 
   return {
-    repair,
+    repair, cleanup,
     /**
      * A finished repair's pull request as GitHub has it, read as the account that opened it; a person may have merged or
      * closed it. A merged one's read names its merge commit.

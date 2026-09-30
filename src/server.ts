@@ -428,7 +428,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     },
     steps:{
       async unavailable(){return await repairModels()?repairBoxes.available():'Add an OpenRouter API key in Settings.';},
-      repair:repairAgent.repair,state:repairAgent.state,close:repairAgent.close,recover:repairAgent.recover,
+      repair:repairAgent.repair,state:repairAgent.state,close:repairAgent.close,recover:repairAgent.recover,cleanup:repairAgent.cleanup,
     },
   });
   onCleanup(()=>repairs.close());

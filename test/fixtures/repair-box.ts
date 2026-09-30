@@ -36,9 +36,11 @@ export async function hostBox(source: string, { image = 'host' }: { image?: stri
 export function hostBoxes({ unavailable = null as string | null } = {}) {
   const created: Awaited<ReturnType<typeof hostBox>>[] = [], images: string[] = [];
   let leftovers = 0;
+  const owned = new Map<string, RepairBox>();
   const boxes: RepairBoxes = {
     async available() { return unavailable; },
-    async create({ image, source }) { images.push(image); const made = await hostBox(source, { image }); created.push(made); return made.box; },
+    async create({ id, image, source }) { images.push(image); const made = await hostBox(source, { image }); created.push(made); owned.set(id, made.box); return made.box; },
+    async remove(id) { await owned.get(id)?.remove(); owned.delete(id); },
     async removeLeftovers() { leftovers += 1; },
   };
   return { boxes, created, images, leftovers: () => leftovers };

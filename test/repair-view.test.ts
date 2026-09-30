@@ -110,3 +110,16 @@ test('Repair is a Button on the failed workflow row, Stop a Button on the change
   assert.doesNotMatch(await source('pipeline.css'), /stage-setting-footer/);
   for (const retired of ['AutoMergeFixes.tsx', 'lib/repairs.ts']) assert.equal(await access(new URL(`../client/src/${retired}`, import.meta.url)).then(() => true, () => false), false, `${retired} is retired.`);
 });
+
+test("cleanup is shown independently of a confirmed merge and preserves the manager's admission decision", () => {
+  const held = repair('merged', { merged: MERGED, reason: 'The label needs attention.', cleanup: { status: 'failed', reason: 'Docker is unavailable.' } });
+  const change = repairChange(held, 'build');
+  assert.equal(change.status, 'merged');
+  assert.match(change.reason ?? '', /The label needs attention/);
+  assert.match(change.reason ?? '', /Docker is unavailable/);
+  assert.deepEqual(change.steps.at(-1), { id: 'cleanup', name: 'Clean up', status: 'waiting', detail: ['Docker is unavailable.'] });
+  const view = { repairs: [], autoMerge: true, head: { sha: HEAD, branch: 'main', failed: [] }, watchError: 'Repair cleanup must finish before another repair can start. Docker is unavailable.' };
+  const projected = autopilotView(view, { repoPath: '/work/app', stageId: 'build' });
+  assert.deepEqual(projected.stages!.build.failed?.runs, []);
+  assert.equal(projected.watchError, view.watchError, "A global cleanup reason is visible without copying another source's repair into this stage.");
+});

@@ -74,9 +74,14 @@ function steps(repair: PublicRepair, names: Names, reason: string | undefined): 
 /** A repair as one change of the Build stage. */
 export function repairChange(repair: PublicRepair, stageId: string, names: Names = id => id): AutopilotChange {
   const rerun = repair.category === 'availability' && (repair.status === 'rerunning' || repair.status === 'flaky');
-  const reason = repair.reason ?? (repair.status === 'cancelled' ? 'Stopped.' : undefined);
+  const businessReason = repair.reason ?? (repair.status === 'cancelled' ? 'Stopped.' : undefined);
+  const cleanupReason = repair.cleanup?.status === 'failed' ? `Cleanup incomplete: ${repair.cleanup.reason || 'Resource deletion could not be confirmed.'}` : repair.cleanup && !ACTIVE.includes(repair.status) ? 'Cleanup pending.' : undefined;
+  const reason = [businessReason, cleanupReason].filter(Boolean).join(' ') || undefined;
+  const progress = steps(repair, names, businessReason);
+  if (repair.cleanup && (!ACTIVE.includes(repair.status) || repair.cleanup.status === 'failed')) progress.push({ id: 'cleanup', name: 'Clean up', status: repair.cleanup.status === 'failed' ? 'waiting' : 'active',
+    ...(repair.cleanup.reason ? { detail: [repair.cleanup.reason] } : {}) });
   return {
-    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: steps(repair, names, reason), sha: repair.sha,
+    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha,
     ...(repair.pullRequest ? { pullRequest: { number: repair.pullRequest.number, url: repair.pullRequest.url } } : {}), ...(reason ? { reason } : {}),
     startedAt: repair.createdAt, ...(repair.completedAt ? { endedAt: repair.completedAt } : {}),
   };

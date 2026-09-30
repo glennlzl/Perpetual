@@ -61,7 +61,7 @@ async function start(t: TestContext, { connection = { login: 'developer', connec
   before(seams);
   await beforeStart(dataDir, dir);
   // The repair box answers from a fixture: no Docker runs, and no repair reaches a model.
-  const boxes = { async available() { return docker; }, async create(): Promise<never> { throw new Error('unused'); }, async removeLeftovers() {} };
+  const boxes = { async available() { return docker; }, async create(): Promise<never> { throw new Error('unused'); }, async removeLeftovers() {}, async remove() {} };
   const app = await startServer({ port: 0, repo: dir, dataDir, github: seams, repair: { boxes } });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const { token } = await (await fetch(`${app.url}/api/session`)).json();

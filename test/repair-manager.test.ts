@@ -567,7 +567,7 @@ test('a controller start removes the directories of repairs that no longer run, 
 test('a saved repair that is not a complete record makes the state unsupported, never a later TypeError', async t => {
   const at = '2026-09-25T09:00:00.000Z';
   const valid = { id: 'r', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [], createdAt: at, updatedAt: at };
-  for (const repairs of [[null], [{ id: 'r', status: 'ready' }], [{ ...valid, status: 'shipped' }], [{ ...valid, sha: 'main' }], [{ ...valid, runs: [{ id: 'x' }] }], [{ ...valid, pullRequest: { ...PULL, url: 'https://evil.example/pull/7' } }], [{ ...valid, failures: [{ runId: '1' }] }]]) {
+  for (const repairs of [[{ ...valid, id: '../outside' }], [{ ...valid, cleanup: { status: 'gone' } }], [{ ...valid, cleanup: { status: 'failed', reason: 42 } }], [null], [{ id: 'r', status: 'ready' }], [{ ...valid, status: 'shipped' }], [{ ...valid, sha: 'main' }], [{ ...valid, runs: [{ id: 'x' }] }], [{ ...valid, pullRequest: { ...PULL, url: 'https://evil.example/pull/7' } }], [{ ...valid, failures: [{ runId: '1' }] }]]) {
     const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-')); t.after(() => rm(dataDir, { recursive: true, force: true }));
     await mkdir(join(dataDir, 'repairs')); await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs }));
     await assert.rejects(harness(t, { dataDir }), /Unsupported repair state/);
@@ -1182,4 +1182,156 @@ test('loop guard: a repair of the repository under a name the connected account 
   await h.failHead([run('3', C, 'failure')], C);
   await h.manager.idle();
   assert.deepEqual([h.repair(C)?.status, a.contexts.length, reads], ['ready', 1, []]);
+});
+
+test('cleanup ownership is durable before work, and failed cleanup preserves a merged result until retry', async t => {
+  let cleans = 0, failed = true, owned = false;
+  const a = agent(async context => {
+    const saved = JSON.parse(await readFile(join(context.directory, '..', 'state.json'), 'utf8'));
+    owned = saved.repairs.find((repair: Repair) => repair.id === context.repair.id)?.cleanup?.status === 'pending';
+    await mkdir(join(context.directory, 'clone'));
+    await writeFile(join(context.directory, 'clone', 'evidence'), 'keep until resources are absent');
+    await context.report({ merged: E });
+    return { status: 'merged', merged: E, reason: 'The pull request label needs attention.' };
+  }, { async cleanup({ directory }) { cleans++; if (failed) throw new Error('Docker removal failed'); await rm(directory, { recursive: true, force: true }); } });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  assert.equal(owned, true, 'Resources are owned durably before the agent can allocate them.');
+  const saved = (await h.saved()).repairs[0];
+  assert.deepEqual([saved.status, saved.merged, saved.reason, saved.cleanup], ['merged', E, 'The pull request label needs attention.', { status: 'failed', reason: 'Docker removal failed' }]);
+  assert.equal(await readFile(join(h.dataDir, 'repairs', saved.id, 'clone', 'evidence'), 'utf8'), 'keep until resources are absent');
+  await h.failHead([run('3', C, 'failure')], C); await h.manager.idle();
+  assert.equal(a.contexts.length, 1, 'Unresolved resources hold new work.');
+  failed = false;
+  h.github.connection = null; // Cleanup does not need GitHub or a source selection.
+  await h.poll();
+  assert.equal((await h.saved()).repairs.find(repair => repair.id === saved.id)?.cleanup, undefined);
+  assert.equal(a.contexts.length, 1, 'Retry only cleans; it never reruns the merged repair.');
+  assert.ok(cleans >= 2);
+});
+
+test('a restart retains terminal repair resources until recovery confirms deletion and never resumes paid work', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs', 'finished', 'clone'), { recursive: true });
+  await writeFile(join(dataDir, 'repairs', 'finished', 'clone', 'evidence'), 'retained');
+  const at = '2026-09-25T09:00:00.000Z';
+  const record = { id: 'finished', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'merged', merged: E, runs: [], createdAt: at, updatedAt: at };
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [record] }));
+  let recoveries = 0, failed = true, cleans = 0;
+  const a = agent(undefined, {
+    async recover() { recoveries++; if (failed) throw new Error('Docker unavailable'); },
+    async cleanup({ directory }) { cleans++; await rm(directory, { recursive: true, force: true }); },
+  });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  assert.equal(await readFile(join(dataDir, 'repairs', 'finished', 'clone', 'evidence'), 'utf8'), 'retained');
+  h.manager.start(); await h.manager.idle();
+  assert.deepEqual([recoveries, cleans, a.contexts.length], [1, 0, 0]);
+  const held = (await h.saved()).repairs[0];
+  assert.deepEqual([held.status, held.merged, held.cleanup], ['merged', E, { status: 'failed', reason: 'Docker unavailable' }]);
+  failed = false; await h.poll();
+  assert.deepEqual([recoveries, cleans, a.contexts.length, (await h.saved()).repairs[0].cleanup], [2, 1, 0, undefined]);
+  await assert.rejects(stat(join(dataDir, 'repairs', 'finished')), { code: 'ENOENT' });
+});
+
+test('a known merge survives an agent failure and Stop retains cleanup until the aborted agent ends', async t => {
+  const ended = deferred(); let cleaning = 0;
+  const a = agent(async (context, signal) => {
+    await context.report({ merged: E });
+    await aborted(signal); await ended.promise;
+    throw new Error('The agent ended after GitHub merged.');
+  }, { async cleanup() { cleaning++; throw new Error('Still attached'); } });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.merged === E);
+  await h.manager.stop({ id: h.repair(B)!.id });
+  assert.equal(cleaning, 0, 'Stop does not race cleanup with a live agent.');
+  ended.resolve(); await h.manager.idle();
+  const saved = (await h.saved()).repairs[0];
+  assert.deepEqual([saved.status, saved.merged, saved.cleanup], ['merged', E, { status: 'failed', reason: 'Still attached' }]);
+});
+
+test('startup recovery is an admission barrier and runs once before a new agent owns resources', async t => {
+  let failed = true;
+  const previous = agent(async () => ({ status: 'failed', reason: 'No fix.' }), { async cleanup() { if (failed) throw new Error('Docker unavailable'); } });
+  const h = await harness(t, { steps: previous.steps });
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle(); await h.manager.close();
+  const release = deferred(), entered = deferred(); let recoveries = 0;
+  const next = agent(async () => ({ status: 'ready' }), {
+    async recover() { recoveries++; entered.resolve(); await release.promise; },
+    async cleanup() {},
+  });
+  const restarted = await harness(t, { dataDir: h.dataDir, steps: next.steps });
+  restarted.github.head = B; restarted.github.runs[B] = [run('2', B, 'failure')];
+  restarted.manager.start(); await entered.promise;
+  const manual = restarted.manager.repair({ runId: '2' });
+  await new Promise(done => setTimeout(done, 5));
+  assert.equal(next.contexts.length, 0);
+  assert.equal((await restarted.saved()).repairs[0].cleanup?.status, 'failed');
+  failed = false; release.resolve();
+  await manual; await restarted.manager.idle();
+  assert.deepEqual([recoveries, next.contexts.length, (await restarted.saved()).repairs[0].cleanup], [1, 1, undefined]);
+  await restarted.poll(); assert.equal(recoveries, 1, 'A later check cannot sweep a different live repair.');
+});
+
+test('legacy merged history without its clone still recovers Docker ownership before admission', async t => {
+  const previous = agent(async () => ({ status: 'merged', merged: E }));
+  const h = await harness(t, { steps: previous.steps });
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle(); await h.manager.close();
+  const saved = (await h.saved()).repairs[0];
+  await rm(join(h.dataDir, 'repairs', saved.id), { recursive: true, force: true });
+  let failed = true, recovered = 0;
+  const next = agent(undefined, { async recover() { recovered++; if (failed) throw new Error('Docker list failed'); }, async cleanup() {} });
+  const restarted = await harness(t, { dataDir: h.dataDir, steps: next.steps });
+  restarted.manager.start(); await restarted.manager.idle();
+  assert.deepEqual([recovered, next.contexts.length], [1, 0]);
+  assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.status, repair.merged, repair.cleanup]), [['merged', E, { status: 'failed', reason: 'Docker list failed' }]]);
+  failed = false; await restarted.poll();
+  assert.deepEqual([recovered, next.contexts.length, (await restarted.saved()).repairs[0].cleanup], [2, 0, undefined]);
+});
+
+test('cleanup held by another source stays visible and withholds Repair until cleanup succeeds', async t => {
+  let failed = true;
+  const secret = `sk-or-v1-${'a'.repeat(600)}`;
+  const a = agent(async () => ({ status: 'failed', reason: 'No fix.' }), {
+    async cleanup() { if (failed) throw new Error(`Docker refused token ${secret}`); },
+  });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  Object.assign(h.current, { key: 'github:acme/beta:/', repository: 'acme/beta', checkoutPath: '/data/sources/github-2/beta' });
+  h.github.connection = { login: 'developer', repository: 'acme/beta' };
+  h.github.head = C; h.github.runs[C] = [run('3', C, 'failure')];
+  await h.poll();
+  const held = h.manager.view();
+  assert.deepEqual(held.repairs, [], 'Another source\'s history is not copied into this stage.');
+  assert.deepEqual(held.head?.failed, [], 'Global cleanup admission holds apply even with no visible repair.');
+  assert.match(held.watchError ?? '', /cleanup/i);
+  assert.match(held.watchError ?? '', /Docker refused token \[REDACTED\]/);
+  assert.ok(!held.watchError?.includes('sk-or-v1-'), 'The complete secret is redacted before any limit.');
+  h.github.headError = new Error('GitHub is temporarily unavailable.'); await h.poll();
+  assert.match(h.manager.view().watchError ?? '', /GitHub is temporarily unavailable/);
+  assert.match(h.manager.view().watchError ?? '', /cleanup/i, 'A normal watch error does not hide the cleanup hold.');
+  failed = false; await h.poll();
+  assert.equal(h.manager.view().watchError, 'GitHub is temporarily unavailable.', 'Cleanup success preserves an independent watch error.');
+  h.github.headError = null; await h.poll();
+  assert.equal(h.manager.view().watchError, undefined);
+  assert.deepEqual(h.manager.view().head?.failed, [shown('3')], 'The current source offers Repair again after cleanup succeeds.');
+  assert.deepEqual(h.manager.view().repairs, []);
+  assert.equal(a.contexts.length, 1, 'Cleanup recovery did not run another agent.');
+});
+
+test('successful cleanup in progress withholds another source\'s Repair without reporting an error', async t => {
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const a = agent(async () => ({ status: 'ready' }), { async cleanup() { entered.resolve(); await release.promise; } });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]); await entered.promise;
+  Object.assign(h.current, { key: 'github:acme/beta:/', repository: 'acme/beta', checkoutPath: '/data/sources/github-2/beta' });
+  h.github.connection = { login: 'developer', repository: 'acme/beta' };
+  h.github.head = C; h.github.runs[C] = [run('3', C, 'failure')];
+  await h.manager.check();
+  const held = h.manager.view();
+  assert.deepEqual([held.repairs, held.head?.failed, held.watchError], [[], [], undefined]);
+  release.resolve(); await h.manager.idle(); await h.poll();
+  assert.deepEqual(h.manager.view().head?.failed, [shown('3')]);
+  assert.equal(h.manager.view().watchError, undefined);
 });

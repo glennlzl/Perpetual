@@ -142,7 +142,7 @@ test('a repair fixes a real type error end to end: its box reproduces and fixes 
     failure: async ({ runId }) => failure(runId),
     async rerun() { throw new Error('unused'); },
   };
-  const manager = await createRepairManager({ dataDir, source: () => current, github, steps: { unavailable: () => boxes.available(), repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover } });
+  const manager = await createRepairManager({ dataDir, source: () => current, github, steps: { unavailable: () => boxes.available(), repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover, cleanup: agent.cleanup } });
   t.after(async () => {
     await manager.close();
     for (const id of ids) cleanup(id);
