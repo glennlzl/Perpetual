@@ -28,6 +28,22 @@ export function combinedMark(marks: (GitHubMark | null)[]) {
 }
 
 const workflowPath = (value: unknown) => String(value || '').replace(/@.*$/, '');
+/**
+ * Build and its workflow/job/step rail share the branch's latest push/manual runs, as gate admission selects them.
+ * Preserve the raw reply for other readers. This is display evidence, never authorization: the gate reads all pages
+ * independently before admitting a twin. Without a known branch or matching commit the display stays unverified.
+ */
+export function githubBranchBuild(result: GitHubRuns | null | undefined, sha: string | null | undefined, branch: string | null | undefined): GitHubRuns | null {
+  if (!result || !sha || result.sha !== sha || !branch) return null;
+  const latest = new Map<string, GitHubRun>();
+  for (const run of result.runs) {
+    if (run.sha !== sha || run.branch !== branch || !['push', 'workflow_dispatch'].includes(String(run.event))
+      || !workflowPath(run.path).startsWith('.github/workflows/') || !run.workflowId) continue;
+    const previous = latest.get(run.workflowId);
+    if (!previous || Number(run.id) > Number(previous.id) || run.id === previous.id && run.attempt > previous.attempt) latest.set(run.workflowId, run);
+  }
+  return { ...result, runs: [...latest.values()] };
+}
 // The rail lists the scanned .github/workflows files only. Dynamic runs such as
 // Pages, CodeQL default setup or Dependabot have no row, so they never set the
 // Build status, its inbound flow, or the GitHub pulse.

@@ -94,7 +94,7 @@ const FIX: ScriptedStep[] = [
   { calls: [{ tool: 'done', input: { summary: 'add() returned a string where its type says number; it returns the sum. npm run typecheck passes.' } }] },
 ];
 const run = (id: string, sha: string, conclusion: string, { branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, name: 'CI', path: '.github/workflows/ci.yml', event, status: 'completed', conclusion, attempt: 1, sha, branch, url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+  ({ id, workflowId: '7', name: 'CI', path: '.github/workflows/ci.yml', event, status: 'completed', conclusion, attempt: 1, sha, branch, url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 const failure = (runId: string) => ({ runId, jobs: [{ id: `job-${runId}`, name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log: TYPE_ERROR, tail: TYPE_ERROR, diagnosis: diagnoseFailure(TYPE_ERROR), observedAt: '2026-09-25T10:00:00.000Z' });
 
 test('a repair fixes a real type error end to end: its box reproduces and fixes it, the host copy pushes the fix, and green CI readies the pull request', { skip, timeout: 20 * 60_000 }, async t => {

@@ -44,10 +44,17 @@ test('normalizes only current-commit runs with their workflow path and attempt',
     workflowRun(12, { head_sha: '0a1b2c3d4e5f60718293a4b5c6d7e8f901234567' }),
     workflowRun(13, { status: 'surprising', conclusion: 'also-surprising', html_url: 'javascript:alert(1)' }),
   ]), SHA);
-  assert.deepEqual(runs[0], { id: '11', name: 'CI', path: '.github/workflows/deploy.yml', event: 'push', status: 'in_progress', conclusion: null, attempt: 1, sha: SHA, branch: 'main', url: `https://github.com/${REPO}/actions/runs/11`, createdAt: '2026-09-23T10:00:00Z', startedAt: '2026-09-23T10:00:05Z', updatedAt: '2026-09-23T10:04:00Z', jobs: null });
+  assert.deepEqual(runs[0], { id: '11', workflowId: '9001', name: 'CI', path: '.github/workflows/deploy.yml', event: 'push', status: 'in_progress', conclusion: null, attempt: 1, sha: SHA, branch: 'main', url: `https://github.com/${REPO}/actions/runs/11`, createdAt: '2026-09-23T10:00:00Z', startedAt: '2026-09-23T10:00:05Z', updatedAt: '2026-09-23T10:04:00Z', jobs: null });
   assert.deepEqual(runs.map(run => run.id), ['11', '13'], 'A run for another commit never verifies the current one.');
   assert.equal(runs[1].status, null); assert.equal(runs[1].conclusion, null); assert.equal(runs[1].url, null);
   assert.deepEqual(normalizeWorkflowRuns({}, SHA), []);
+});
+
+test('workflow identities are validated independently of the display path', () => {
+  const ids = [9001, null, undefined, '9001', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1];
+  const runs = normalizeWorkflowRuns(runsPage(ids.map((workflow_id, index) => workflowRun(index + 1, { workflow_id }))), SHA);
+  assert.deepEqual(runs.map(run => run.workflowId), ['9001', null, null, null, null, null, null, null]);
+  assert.equal(runs.length, ids.length, 'An unreadable workflow identity does not remove the raw run from the reply.');
 });
 
 test('normalizes jobs and steps without runner metadata', () => {

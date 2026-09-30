@@ -29,7 +29,7 @@ import { hasCaseDrafts, newTestDraftKey } from '@/lib/case-drafts';
 import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
 import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
-import { createGitHubRunsPoller, githubBuildStatus, githubBuildSummary, type GitHubRuns } from '@/lib/pipeline-github.ts';
+import { createGitHubRunsPoller, githubBranchBuild, githubBuildStatus, githubBuildSummary, type GitHubRuns } from '@/lib/pipeline-github.ts';
 import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
 import { autopilotChanges, createAutopilotPoller, shareAutopilot, stageActive, type AutopilotView } from '@/lib/pipeline-autopilot.ts';
@@ -437,7 +437,9 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   // The workflow files the Actions rail lists; other runs never set its status.
   const workflows = useMemo(() => (scan?.workflows || []).map(workflow => workflow.file).filter((file): file is string => typeof file === 'string'), [scan]);
   const githubSource = Boolean(scan?.delivery?.build?.some(service => service.kind === 'github-actions'));
-  const github = useGitHubRuns(scan?.repo?.path, sha, workflows, githubSource);
+  const branch = scan?.repo?.branch;
+  const githubRuns = useGitHubRuns(scan?.repo?.path, sha, workflows, githubSource);
+  const github = useMemo(() => githubBranchBuild(githubRuns, sha, branch), [githubRuns, sha, branch]);
   const build = useMemo(() => githubBuildSummary(github, sha, workflows), [github, sha, workflows]);
   const buildStatus = useMemo(() => githubBuildStatus(github, sha, workflows), [github, sha, workflows]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);

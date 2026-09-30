@@ -21,7 +21,7 @@ const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: 'p
 type HttpError = Error & { statusCode?: number };
 type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean> };
 const run = (id: string, sha: string, conclusion: string | null, { status = conclusion ? 'completed' : 'in_progress', attempt = 1, path = CI, branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+  ({ id, workflowId: '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 // A failed run as the view names it.
 const shown = (id: string, path = CI) => ({ id, name: 'CI', path, url: `https://github.com/owner/app/actions/runs/${id}` });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
