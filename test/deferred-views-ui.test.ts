@@ -109,6 +109,30 @@ test('unopened views load on demand without trapping navigation or losing drafts
     await expect(sheet).toBeHidden();
     await expect(page.getByRole('button', { name: 'Git graph', exact: true })).toBeFocused();
   });
+  await t.test('manual Fit view wins over a queued desktop resize frame', async t => {
+    const page = await newPage(1600); t.after(() => page.close());
+    await page.clock.install({ time: new Date('2025-01-01T00:00:00Z') });
+    await page.goto(app.url);
+    await expect(page.getByRole('button', { name: 'Fit view', exact: true })).toBeVisible();
+    await page.clock.pauseAt(new Date('2025-01-01T01:00:00Z'));
+    await page.clock.runFor(200);
+    await page.setViewportSize({ width: 1200, height: 900 });
+    await page.getByRole('button', { name: 'Fit view', exact: true }).click();
+    await page.clock.runFor(16);
+    const viewport = page.locator('.react-flow__viewport');
+    const fitted = await viewport.getAttribute('style');
+    await page.clock.runFor(500);
+    assert.equal(await viewport.getAttribute('style'), fitted, 'A pending automatic frame must not replace the frame the user just chose.');
+    await page.clock.resume();
+    const opener = page.getByRole('button', { name: 'Integration tests, 0', exact: true });
+    await opener.click();
+    await expect(page.getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(opener).toBeFocused();
+    await expect(viewport).toHaveAttribute('style', fitted!);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await expect(viewport, 'A later window resize still frames the canvas.').not.toHaveAttribute('style', fitted!);
+  });
   await t.test('a failed view stays local and navigating away preserves the Settings draft', async t => {
     const page = await newPage(); t.after(() => page.close());
     await page.route(`**${chunks.GitGraphPanel}`, route => route.abort('failed'));
