@@ -57,8 +57,8 @@ function fakeGitHub(sha: string, { remote, next }: { remote?: string; next?: str
   const branch = `perpetual/repair/${sha.slice(0, 7)}`, updates: string[] = [];
   const pushed = () => updates.at(-1) ?? commits.at(-1);
   let target = sha;
-  const run = { id: 2, name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'failure', head_sha: sha, head_branch: 'main', run_attempt: 1, html_url: 'https://github.com/owner/app/actions/runs/2', created_at: '2026-09-25T10:00:00Z', run_started_at: '2026-09-25T10:00:00Z', updated_at: '2026-09-25T10:05:00Z' };
-  const jobs = { jobs: [{ id: 11, name: 'test', status: 'completed', conclusion: 'failure', html_url: 'https://github.com/owner/app/actions/runs/2/job/11', steps: [{ number: 1, name: 'Set up job', status: 'completed', conclusion: 'success' }, { number: 2, name: 'Check', status: 'completed', conclusion: 'failure' }] }] };
+  const run = { id: 2, workflow_id: 1, name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'failure', head_sha: sha, head_branch: 'main', run_attempt: 1, html_url: 'https://github.com/owner/app/actions/runs/2', created_at: '2026-09-25T10:00:00Z', run_started_at: '2026-09-25T10:00:00Z', updated_at: '2026-09-25T10:05:00Z' };
+  const jobs = { total_count: 1, jobs: [{ id: 11, name: 'test', status: 'completed', conclusion: 'failure', html_url: 'https://github.com/owner/app/actions/runs/2/job/11', steps: [{ number: 1, name: 'Set up job', status: 'completed', conclusion: 'success' }, { number: 2, name: 'Check', status: 'completed', conclusion: 'failure' }] }] };
   const log = ['> node check.js', 'env GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123', 'Error: add(2, 3) returned -1, expected 5', 'Error: reporting failed with token ghp_abcdefghijklmnopqrstuvwxyz0123', '##[error]Process completed with exit code 1.']
     .map((line, index) => `test\tCheck\t2026-09-25T10:04:0${index}.0000000Z ${line}`).join('\n');
   const answer = (data: unknown, etag?: string) => ({ stdout: etag ? `HTTP/2.0 200 OK\r\nEtag: "${etag}"\r\n\r\n${JSON.stringify(data)}` : JSON.stringify(data) });
@@ -68,15 +68,15 @@ function fakeGitHub(sha: string, { remote, next }: { remote?: string; next?: str
     const endpoint = args.find(arg => arg.startsWith('repos/') || arg === 'user'), method = args[args.indexOf('--method') + 1], included = args.includes('--include');
     if (args[0] === 'run' && args.includes('--log-failed')) return { stdout: log };
     if (endpoint === 'repos/owner/app/branches/main') return answer({ commit: { sha: target } }, 'head');
-    if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=50`) return answer({ workflow_runs: [run] }, included ? 'runs' : undefined);
+    if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=50`) return answer({ total_count: 1, workflow_runs: [run] }, included ? 'runs' : undefined);
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=100&page=1`) return answer({ total_count: 1, workflow_runs: [{ ...run, workflow_id: 1 }] });
-    if (endpoint === 'repos/owner/app/actions/runs/2/jobs?per_page=100') return answer(jobs, included ? 'jobs' : undefined);
+    if (endpoint === 'repos/owner/app/actions/runs/2/jobs?per_page=100' || endpoint === 'repos/owner/app/actions/runs/2/attempts/1/jobs?per_page=100') return answer(jobs, included ? 'jobs' : undefined);
     if (endpoint === 'user') return answer({ login: 'glennlzl', id: 1234 });
     if (endpoint?.startsWith('repos/owner/app/pulls?state=open&')) return answer([]);
     if (endpoint === 'repos/owner/app/pulls' && method === 'POST') return answer({ number: 7, html_url: 'https://github.com/owner/app/pull/7', draft: true });
     if (endpoint === 'repos/owner/app/issues/7/labels' && method === 'POST') return answer([{ name: 'perpetual-repair' }]);
     const head = /^repos\/owner\/app\/actions\/runs\?head_sha=([a-f\d]{40})&per_page=50$/.exec(endpoint ?? '')?.[1];
-    if (head && (commits.includes(head) || updates.includes(head))) return answer({ workflow_runs: [{ ...run, id: 101, event: 'pull_request', conclusion: 'success', head_sha: head, head_branch: branch, html_url: 'https://github.com/owner/app/actions/runs/101' }] }, included ? 'pull-runs' : undefined);
+    if (head && (commits.includes(head) || updates.includes(head))) return answer({ total_count: 1, workflow_runs: [{ ...run, id: 101, event: 'pull_request', conclusion: 'success', head_sha: head, head_branch: branch, html_url: 'https://github.com/owner/app/actions/runs/101' }] }, included ? 'pull-runs' : undefined);
     if (args[0] === 'pr' && args[1] === 'ready') return { stdout: '' };
     if (endpoint === 'repos/owner/app/pulls/7' && method === 'GET') return answer({ number: 7, state: 'open', merged: false, draft: false, head: { sha: pushed(), ref: branch, repo: { full_name: 'owner/app' } }, base: { sha, ref: 'main' } });
     if (endpoint === `repos/owner/app/commits/${pushed()}/check-runs?per_page=100&page=1`) {

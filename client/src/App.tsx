@@ -29,7 +29,7 @@ import { hasCaseDrafts, newTestDraftKey } from '@/lib/case-drafts';
 import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
 import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
-import { createGitHubRunsPoller, githubBranchBuild, githubBuildStatus, githubBuildSummary, type GitHubRuns } from '@/lib/pipeline-github.ts';
+import { buildChanges, buildForSource, createGitHubBuildPoller, watchedBuildStatus, watchedBuildSummary, type BuildRead } from '@/lib/pipeline-github.ts';
 import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
 import { autopilotChanges, createAutopilotPoller, shareAutopilot, stageActive, type AutopilotView } from '@/lib/pipeline-autopilot.ts';
@@ -299,7 +299,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
         {(services.length > 0 || changes.length > 0) && <StepList className="stage-actions" label={`${stage.name} steps`}>
           {services.map(service => <StepItem key={service.id} icon={<ProviderMark provider={service.provider} active={service.kind === 'github-actions' && ['running', 'queued'].includes(build?.status ?? '')} />}>
             {service.kind === 'github-actions'
-              ? <GitHubActionsCard repoPath={repoPath} scannedAt={scannedAt} runs={github} stageId={stage.id} autopilot={autopilot} />
+              ? <GitHubActionsCard repoPath={repoPath} scannedAt={scannedAt} scannedSha={sha} runs={github} readError={data.buildReadError} stageId={stage.id} autopilot={autopilot} />
               : isDeploymentGroup(service)
               ? <DeploymentGroup service={service} repoPath={repoPath} stageId={stage.id} selection={selection} openDialog={openDialog} />
               : <Button variant="ghost" size="sm" className="stage-step-action nodrag nopan h-auto min-h-8 w-full justify-between whitespace-normal aria-pressed:bg-accent" onClick={() => openDialog({ type: stage.kind === 'source' ? 'source' : 'service', nodeId: service.id, stageId: stage.id })} aria-pressed={selection?.nodeId === service.id || (stage.kind === 'source' && selection?.type === 'source')} aria-label={`Configure ${service.label}`}>
@@ -345,16 +345,17 @@ function TransitionEdge({ id, sourceX, sourceY, targetX, targetY, markerEnd }: E
 
 // Current-commit Actions runs, polled faster only while a run of a listed
 // workflow is queued or running.
-function useGitHubRuns(repoPath: string | undefined, sha: string | null, workflows: string[], enabled: boolean) {
-  const [result, setResult] = useState<GitHubRuns | null>(null);
-  const workflowKey = JSON.stringify(workflows);
+function useGitHubBuild(repoPath: string | undefined, scannedSha: string | null, branch: string | null, enabled: boolean, refreshKey: string) {
+  const key = JSON.stringify([repoPath, scannedSha, branch, enabled, refreshKey]);
+  const [read, setRead] = useState<{ key: string; result: BuildRead | null } | null>(null);
   useEffect(() => {
-    if (!repoPath || !sha || !enabled) return undefined;
-    // The key is the list serialized above, so the effect runs only when its contents change.
-    const poller = createGitHubRunsPoller({ controller: api, repoPath, workflows: JSON.parse(workflowKey) as string[], onChange: setResult });
-    return () => poller.stop();
-  }, [repoPath, sha, workflowKey, enabled]);
-  return enabled && result?.sha === sha ? result : null;
+    if (!repoPath || !enabled) return undefined;
+    const poller = createGitHubBuildPoller({ controller: api, repoPath, branch, onChange: result => setRead({ key, result }) });
+    const unsubscribe = buildChanges.subscribe(() => poller.refresh());
+    return () => { unsubscribe(); poller.stop(); };
+  }, [repoPath, branch, enabled, key]);
+  const current = read?.key === key ? read.result : null;
+  return { view: enabled ? buildForSource(current?.view, { repoPath, branch, scannedSha }) : null, error: enabled ? current?.error : null };
 }
 
 // The deployments GitHub records for the current commit, polled faster only
@@ -434,14 +435,13 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   }, []);
   const selectedStageId = selection?.stageId || selection?.sourceStageId || selection?.afterStageId || (selection?.type === 'source' ? 'source' : null);
   const sha = scan?.repo?.sha || null;
-  // The workflow files the Actions rail lists; other runs never set its status.
-  const workflows = useMemo(() => (scan?.workflows || []).map(workflow => workflow.file).filter((file): file is string => typeof file === 'string'), [scan]);
   const githubSource = Boolean(scan?.delivery?.build?.some(service => service.kind === 'github-actions'));
-  const branch = scan?.repo?.branch;
-  const githubRuns = useGitHubRuns(scan?.repo?.path, sha, workflows, githubSource);
-  const github = useMemo(() => githubBranchBuild(githubRuns, sha, branch), [githubRuns, sha, branch]);
-  const build = useMemo(() => githubBuildSummary(github, sha, workflows), [github, sha, workflows]);
-  const buildStatus = useMemo(() => githubBuildStatus(github, sha, workflows), [github, sha, workflows]);
+  const branch = scan?.repo?.branch ?? null;
+  // A newly observed gate commit triggers an immediate Build read, not a guessed Build verdict.
+  const buildRefresh = JSON.stringify(Object.values(gates?.stages ?? {}).map(gate => gate.sha));
+  const { view: github, error: buildReadError } = useGitHubBuild(scan?.repo?.path, sha, branch, githubSource, buildRefresh);
+  const build = useMemo(() => watchedBuildSummary(github), [github]);
+  const buildStatus = useMemo(() => watchedBuildStatus(github, buildReadError), [github, buildReadError]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);
   const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
@@ -474,7 +474,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const [healthBeat] = useState(createHealthBeats);
   const nodes = useMemo(() => {
     let x = 0;
-    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, gates, production, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
+    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, buildReadError, gates, production, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
     return (pipeline?.stages || []).map((stage): StageFlowNode => {
       const position = { x, y: 0 };
       const measured = stageSizes[stage.id];
@@ -486,7 +486,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
         className: 'nopan', style: STAGE_STYLE, data: reuseStageData(stage.id, stageNodeData(stage, context)) as StageData,
       };
     });
-  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, gates, production, releases, releaseReadError, autopilot]);
+  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, gates, production, releases, releaseReadError, autopilot]);
   const edges = useMemo(() => (pipeline?.transitions || []).map((edge): Edge => {
     const flow = transitionFlow(edge, { stages: pipeline.stages, snapshot: activitySnapshot, build, latest, sha, gates });
     const sourceName = pipeline.stages.find(stage => stage.id === edge.source)?.name, targetName = pipeline.stages.find(stage => stage.id === edge.target)?.name;

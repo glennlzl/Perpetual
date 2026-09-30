@@ -19,6 +19,8 @@ const text = (value: unknown, limit = 300) => typeof value === 'string' ? value.
 const time = (value: unknown) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : null;
 const link = (value: unknown) => typeof value === 'string' && value.startsWith('https://github.com/') ? value.slice(0, 500) : null;
 const known = (values: Set<string>, value: unknown): value is string => typeof value === 'string' && values.has(value);
+const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 const state = (item: GitHubJson): RunState => ({ status: known(STATUSES, item?.status) ? item.status : null, conclusion: known(CONCLUSIONS, item?.conclusion) ? item.conclusion : null });
 /** A GitHub read that failed upstream, answered as 502; shared with the deployments reader. */
 export const failure = (message: string) => Object.assign(new Error(message), { statusCode: 502 });
@@ -45,6 +47,18 @@ export function normalizeWorkflowJobs(data: GitHubJson): WorkflowJob[] {
     id: String(job.id), name: text(job.name) || '', ...state(job), startedAt: time(job.started_at), completedAt: time(job.completed_at), url: link(job.html_url),
     steps: (Array.isArray(job.steps) ? job.steps as GitHubJson[] : []).slice(0, 200).map(step => ({ number: Number.isSafeInteger(step?.number) ? step!.number as number : null, name: text(step?.name) || '', ...state(step) })),
   }));
+}
+
+/** The same branch/event/workflow identity boundary used by Build admission; no scan-file filter. */
+export function latestBranchBuildRuns(runs: readonly WorkflowRun[], sha: string | null, branch: string | null): WorkflowRun[] {
+  if (!sha || !branch) return [];
+  const latest = new Map<string, WorkflowRun>();
+  for (const run of runs) {
+    if (run.sha !== sha || run.branch !== branch || !['push', 'workflow_dispatch'].includes(String(run.event)) || !run.path?.startsWith('.github/workflows/') || !run.workflowId) continue;
+    const previous = latest.get(run.workflowId);
+    if (!previous || Number(run.id) > Number(previous.id) || run.id === previous.id && run.attempt > previous.attempt) latest.set(run.workflowId, run);
+  }
+  return [...latest.values()];
 }
 
 // The failure's kind comes from github-cli; the words for it, per subject, are this reader's.
@@ -84,12 +98,32 @@ export function createGitHubRunsReader({ request = githubRequest, session = getG
     return response.data as GitHubJson;
   }
   async function load(login: string, repository: string, sha: string): Promise<CommitRuns> {
-    const runs = normalizeWorkflowRuns(await conditional(login, `repos/${repository}/actions/runs?head_sha=${sha}&per_page=50`), sha);
+    async function pages(endpoint: string, field: 'workflow_runs' | 'jobs', size: number): Promise<Record<string, unknown>[]> {
+      const rows: Record<string, unknown>[] = [], ids = new Set<number>();
+      let total: number | undefined;
+      for (let page = 1; page <= 1000 / size; page++) {
+        const data = await conditional(login, `${endpoint}${page === 1 ? '' : `&page=${page}`}`);
+        if (!record(data) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0 || !Array.isArray(data[field])) throw failure('GitHub did not return complete workflow evidence. Try again.');
+        if (total !== undefined && total !== data.total_count) throw failure('GitHub changed its workflow evidence while reading it. Try again.');
+        total = Number(data.total_count);
+        if (total > 1000) throw failure('GitHub workflow evidence exceeds the 1,000-record reading limit.');
+        const values = data[field];
+        if (values.length > size) throw failure('GitHub did not return complete workflow evidence. Try again.');
+        for (const value of values) {
+          if (!record(value) || !positive(value.id) || ids.has(value.id) || field === 'workflow_runs' && (!positive(value.workflow_id) || typeof value.head_sha !== 'string' || !SHA.test(value.head_sha) || value.run_attempt !== undefined && !positive(value.run_attempt))) throw failure('GitHub did not return complete workflow evidence. Try again.');
+          ids.add(value.id); rows.push(value);
+        }
+        if (rows.length === total) return rows;
+        if (rows.length > total || values.length < size) throw failure('GitHub did not return complete workflow evidence. Try again.');
+      }
+      throw failure('GitHub did not return complete workflow evidence. Try again.');
+    }
+    const runs = normalizeWorkflowRuns({ workflow_runs: await pages(`repos/${repository}/actions/runs?head_sha=${sha}&per_page=50`, 'workflow_runs', 50) }, sha);
     // Jobs of queued or running runs are re-read; a completed attempt is read once.
     await Promise.all(runs.map(async run => {
       const key = `${login}:${repository}:${run.id}:${run.attempt}:${run.updatedAt}`;
       if (run.status === 'completed' && finished.has(key)) { run.jobs = finished.get(key)!; return; }
-      try { run.jobs = normalizeWorkflowJobs(await conditional(login, `repos/${repository}/actions/runs/${run.id}/jobs?per_page=100`)); }
+      try { run.jobs = (await pages(`repos/${repository}/actions/runs/${run.id}/attempts/${run.attempt}/jobs?per_page=100`, 'jobs', 100)).flatMap(job => normalizeWorkflowJobs({ jobs: [job] })); }
       catch { run.jobs = null; return; }
       if (run.status === 'completed') remember(finished, key, run.jobs);
     }));

@@ -310,7 +310,7 @@ test('the watcher reads the branch head with its ETag; the first head is a basel
   assert.deepEqual([queued.stageId, queued.sha, queued.context], ['beta', B, 'perpetual/Beta']);
   release.resolve();
   await h.manager.idle();
-  assert.deepEqual((await h.saved()).heads[KEY], { branch: 'main', login: 'glennlzl', sha: B, etag: '"e2"', checkedAt: (await h.saved()).heads[KEY].checkedAt });
+  assert.deepEqual((await h.saved()).heads[KEY], { repository: 'owner/app', branch: 'main', login: 'glennlzl', sha: B, etag: '"e2"', checkedAt: (await h.saved()).heads[KEY].checkedAt });
 });
 
 test('the watcher keeps its ETag across restarts, drops it for another account, and skips unmanaged or unconnected sources', async t => {
@@ -321,6 +321,7 @@ test('the watcher keeps its ETag across restarts, drops it for another account, 
   const h = await harness(t, { dataDir, connection: () => ({ login, repository: 'owner/app' }), heads: [{ status: 304 }, { status: 200, sha: A, etag: '"other"' }, { status: 200, sha: C, etag: '"e3"' }] });
   await h.manager.watch();
   assert.equal(h.headCalls[0].etag, '"e1"', 'The saved ETag survives a restart.');
+  assert.deepEqual(h.manager.watchedHead({ key: KEY, repository: 'owner/app', branch: 'main', login }), { key: KEY, branch: 'main', sha: A }, 'A verified 304 makes a legacy baseline available for Build.');
   login = 'someone-else';
   await h.manager.watch();
   assert.equal(h.headCalls[1].etag, null, 'Another account never reuses a cached response.');

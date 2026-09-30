@@ -16,6 +16,35 @@ async function storage(t: TestContext) {
 const source = (): GateSource => ({ key: 'github:acme/app:/', branch: 'main', sha: A, repository: 'acme/app', stages: [{ id: 'beta', name: 'Beta', kind: 'sandbox' }] });
 const noJourneys = { prepare: async (gate: unknown) => gate, journeys: () => 0, rebuild: async () => null, run: async () => null };
 
+test('watched Build heads require the current source, repository, branch and verified account', async t => {
+  let current = source(), fail = false;
+  const manager = await createGateManager({ dataDir: await storage(t), source: () => current,
+    github: { connection: async () => ({ login: 'tester', repository: 'acme/app' }), head: async () => { if (fail) throw new Error('Cannot read branch head.'); return { status: 200, sha: B, etag: null }; }, post: async () => {} }, steps: noJourneys,
+  });
+  t.after(() => manager.close());
+  const scope = { key: current.key, repository: 'acme/app', branch: 'main', login: 'tester' };
+  assert.equal(manager.watchedHead(scope), null);
+  await manager.watch();
+  assert.deepEqual(manager.watchedHead(scope), { key: current.key, branch: 'main', sha: B });
+  for (const changed of [{ login: 'other' }, { repository: 'acme/other' }, { branch: 'other' }, { key: '/other' }]) assert.equal(manager.watchedHead({ ...scope, ...changed }), null);
+  current = { ...current, repository: null };
+  assert.equal(manager.watchedHead(scope), null, 'A local source never borrows a managed head.');
+  current = source(); fail = true; await manager.watch();
+  assert.throws(() => manager.watchedHead(scope), /Cannot read branch head/, 'A failed watch must not fall back to an older green commit.');
+});
+
+test('a failed watcher account read does not expose the previously successful head', async t => {
+  const current = source(); let failed = false;
+  const manager = await createGateManager({ dataDir: await storage(t), source: () => current,
+    github: { connection: async () => { if (failed) throw new Error('Cannot verify the GitHub account.'); return { login: 'tester', repository: 'acme/app' }; }, head: async () => ({ status: 200, sha: B, etag: null }), post: async () => {} }, steps: noJourneys,
+  });
+  t.after(() => manager.close());
+  const scope = { key: current.key, repository: 'acme/app', branch: 'main', login: 'tester' };
+  await manager.watch(); assert.equal(manager.watchedHead(scope)?.sha, B);
+  failed = true; await manager.watch();
+  assert.throws(() => manager.watchedHead(scope), /Cannot verify the GitHub account/);
+});
+
 test('Run now refuses a branch switch while it reads the requested source head', async t => {
   let current = source();
   const reading = deferred(), head = deferred(), prepared: unknown[] = [];
