@@ -13,6 +13,7 @@ export const LIMITS = {
 };
 type Refusal = { ok: false; error: string };
 type Result = { ok: true; [key: string]: unknown } | Refusal;
+type FileObservation = { ok: true; raw: string[]; redacted: string[] } | Refusal;
 /** What the loop learns from the tools: each command's exit code, and each file a tool changed. */
 export interface ToolEvents { run?(command: string, exitCode: number): void; change?(path: string): void }
 
@@ -75,20 +76,27 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const entries = redact(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
     return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
   }
+  /** Redact the complete bounded file before selecting lines; a fragment may have lost its credential's context. */
+  async function observeFile(found: { full: string; name: string }): Promise<FileObservation> {
+    const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; cat "$1"', 'sh', found.full], { limit: 4 * LIMITS.readBytes });
+    if (result.truncated) return unavailable(result);
+    if (result.exitCode === 3) return refused(`${found.name} is not a file; list it instead.`);
+    if (result.exitCode !== 0 || result.timedOut) return refused(`${found.name} could not be read completely.`);
+    if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
+    const lines = (text: string) => { const values = text.split('\n'); if (values.at(-1) === '') values.pop(); return values; };
+    const raw = lines(result.stdout), redacted = lines(redact(result.stdout));
+    if (raw.length !== redacted.length) return refused(`${found.name} cannot be shown with accurate line numbers after redaction.`);
+    return { ok: true, raw, redacted };
+  }
   async function read(input: unknown): Promise<Result> {
     const found = await locate(field(input, 'path'));
     if (found.error !== undefined) return refused(found.error);
     const offset = field(input, 'offset') ?? 1, limit = field(input, 'limit') ?? LIMITS.lines;
     if (!whole(offset) || !whole(limit)) return refused('offset and limit are whole numbers from 1.');
-    // One line past the limit tells whether more follow.
     const wanted = Math.min(limit, LIMITS.lines);
-    const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; sed -n "$2,$3p" "$1"', 'sh', found.full, String(offset), String(offset + wanted)], { limit: 4 * LIMITS.readBytes });
-    if (result.truncated) return unavailable(result);
-    if (result.exitCode === 3) return refused(`${found.name} is not a file; list it instead.`);
-    if (result.exitCode !== 0) return refused(`${found.name} could not be read.`);
-    if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
-    const lines = redact(result.stdout).split('\n');
-    if (lines.at(-1) === '') lines.pop();
+    const file = await observeFile(found);
+    if (!file.ok) return file;
+    const lines = file.redacted.slice(offset - 1);
     if (offset > 1 && !lines.length) return refused(`${found.name} has fewer than ${offset} lines.`);
     const content: string[] = [];
     let size = 0;
@@ -98,7 +106,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       size += numbered.length + 1;
       content.push(numbered);
     }
-    const truncated = content.length < lines.length || result.truncated;
+    const truncated = content.length < lines.length;
     return { ok: true, path: found.name, content: content.join('\n'), truncated, ...(truncated ? { next: offset + content.length } : {}) };
   }
   async function grep(input: unknown): Promise<Result> {
@@ -111,12 +119,32 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.truncated) return unavailable(result);
     if (result.timedOut) return refused(`The search took over ${LIMITS.searchSeconds} seconds; use a narrower path or an include glob.`);
     if (result.exitCode > 1) return refused(`The search failed: ${oneLine(result.stderr || 'grep error', 300)}`);
-    const lines = redact(result.stdout).split('\n').filter(Boolean);
-    const matches = lines.slice(0, LIMITS.matches).map(line => {
-      const [file, rest = ''] = line.split('\0');
-      return `${file.startsWith(`${root}/`) ? shown(file) : file === root ? '.' : file}:${clip(rest.trim(), LIMITS.matchChars)}`;
-    });
-    return { ok: true, path: found.name, matches, truncated: lines.length > LIMITS.matches || result.truncated };
+    // Keep grep's native ERE and match order. Its text is evidence for a complete-file read, never model output.
+    const selected: { file: string; line: number; text: string }[] = [];
+    let cursor = 0, count = 0;
+    while (cursor < result.stdout.length) {
+      const separator = result.stdout.indexOf('\0', cursor), end = result.stdout.indexOf('\n', separator + 1);
+      const colon = result.stdout.indexOf(':', separator + 1), number = result.stdout.slice(separator + 1, colon);
+      if (separator < cursor || end < 0 || colon < separator || colon > end || !/^[1-9]\d*$/.test(number) || !Number.isSafeInteger(Number(number))) return refused('The search returned an unreadable match.');
+      if (count < LIMITS.matches) selected.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
+      count += 1;
+      cursor = end + 1;
+    }
+    const files = new Map<string, FileObservation>(), matches: string[] = [];
+    for (const match of selected) {
+      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
+      let file = files.get(match.file);
+      if (!file) {
+        const located = await locate(shown(match.file));
+        if (located.error !== undefined) return refused(located.error);
+        file = await observeFile(located);
+        files.set(match.file, file);
+      }
+      if (!file.ok) return file;
+      if (file.raw[match.line - 1] !== match.text) return refused(`${shown(match.file)} changed after the search; search again.`);
+      matches.push(`${shown(match.file)}:${clip(`${match.line}:${file.redacted[match.line - 1]}`.trim(), LIMITS.matchChars)}`);
+    }
+    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches };
   }
   async function write(found: { full: string; name: string }, text: string) {
     const result = await exec(['sh', '-c', '[ -d "$1" ] && exit 3; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', found.full], { stdin: text });
@@ -168,12 +196,12 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
   return {
     list: tool({ description: `Lists a folder of /workspace, at most ${LIMITS.entries} entries; folders end in / and links in @.`, inputSchema: schema({ path: PATH }, []), execute: guarded('list', list) }),
     read: tool({
-      description: `Reads a text file of /workspace, its lines numbered: at most ${LIMITS.lines} lines or ${LIMITS.readBytes / 1024} KB from offset. When truncated, next is the line to read on from.`,
+      description: `Reads a text file of /workspace after redacting its complete contents (at most ${4 * LIMITS.readBytes / 1024} KB), with accurate line numbers: at most ${LIMITS.lines} lines or ${LIMITS.readBytes / 1024} KB from offset. When truncated, next is the line to read on from.`,
       inputSchema: schema({ path: PATH, offset: { type: 'integer', minimum: 1 }, limit: { type: 'integer', minimum: 1, maximum: LIMITS.lines } }, ['path']),
       execute: guarded('read', read),
     }),
     grep: tool({
-      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text. Pass a narrow path and an include glob.`,
+      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). Pass a narrow path and an include glob.`,
       inputSchema: schema({ pattern: { type: 'string', maxLength: LIMITS.pattern }, path: PATH, include: { type: 'string', description: 'A file name glob, such as *.ts.' } }, ['pattern']),
       execute: guarded('grep', grep),
     }),

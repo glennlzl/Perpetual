@@ -124,6 +124,7 @@ test('tool replies redact filenames and refused paths but internal file operatio
   const read = await f.call('read', { path: name });
   assert.equal(read.path, '[REDACTED].txt');
   assert.equal(read.content, '1\tAPI_KEY=[REDACTED]');
+  assert.deepEqual((await f.call('grep', { pattern: 'synthetic-file-value', include: '*.txt' })).matches, ['[REDACTED].txt:1:API_KEY=[REDACTED]']);
   const refused = await f.call('read', { path: `../${name}` });
   assert.ok(!refused.error?.includes('ghp_'));
   assert.match(refused.error ?? '', /\[REDACTED\]/);
@@ -143,4 +144,82 @@ test('tools withhold a capture already truncated by the box and preserve its exe
     assert.match(result.error ?? '', /narrow/i);
     assert.ok(!JSON.stringify(result).includes('unredactable-fragment'), 'An unknown prefix or suffix is never treated as redacted text.');
   });
+});
+
+test('read offsets and grep matches redact a PEM using the complete file context', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'config.txt'), `before\n-----BEGIN PRIVATE KEY-----\n${'QUJD'.repeat(20)}\n-----END PRIVATE KEY-----\nafter\n`);
+  const read = await f.call('read', { path: 'config.txt', offset: 3, limit: 1 });
+  assert.deepEqual([read.content, read.truncated, read.next], ['3\t[REDACTED]', true, 4]);
+  assert.deepEqual((await f.call('grep', { pattern: '^QUJD', include: 'config.txt' })).matches, ['config.txt:3:[REDACTED]']);
+  assert.equal((await f.call('read', { path: 'config.txt', offset: 5, limit: 1 })).content, '5\tafter');
+});
+
+test('line-addressed observations refuse a redaction that changes the source line count', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'config.txt'), 'before\nPASSWORD="synthetic first\nsynthetic second"\nafter\n');
+  for (const [name, input] of [
+    ['read', { path: 'config.txt', offset: 4, limit: 1 }],
+    ['grep', { pattern: 'after', include: 'config.txt' }],
+  ] as const) await t.test(name, async () => {
+    const result = await f.call(name, input);
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /line (?:numbers|mapping)/i);
+    assert.ok(!JSON.stringify(result).includes('synthetic'));
+  });
+});
+
+test('a small selected line does not bypass the complete-file observation limit', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'large.txt'), `needle\n${'x\n'.repeat(140_000)}`);
+  for (const [name, input] of [
+    ['read', { path: 'large.txt', offset: 1, limit: 1 }],
+    ['grep', { pattern: '^needle$', include: 'large.txt' }],
+  ] as const) await t.test(name, async () => {
+    const result = await f.call(name, input);
+    assert.equal(result.ok, false);
+    assert.equal(result.truncated, true);
+    assert.match(result.error ?? '', /observation unavailable/i);
+  });
+});
+
+test('grep refuses a file changed after its native match was observed', async t => {
+  const f = await tools(t), file = join(f.root, 'race.txt');
+  await writeFile(file, 'original match\n');
+  const exec = f.box.exec;
+  f.box.exec = async (argv, options) => {
+    const result = await exec(argv, options);
+    if (argv[0] === 'grep') await writeFile(file, 'different line\n');
+    return result;
+  };
+  const result = await f.call('grep', { pattern: 'original', include: 'race.txt' });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /changed/i);
+  assert.equal(result.matches, undefined);
+});
+
+test('grep rechecks matched file ownership before reading its complete contents', async t => {
+  const f = await tools(t), file = join(f.root, 'race.txt');
+  await writeFile(file, 'original match\n');
+  const exec = f.box.exec;
+  f.box.exec = async (argv, options) => {
+    const result = await exec(argv, options);
+    if (argv[0] === 'grep') { await rm(file); await symlink(join(f.outside, 'secret.txt'), file); }
+    return result;
+  };
+  const result = await f.call('grep', { pattern: 'original', include: 'race.txt' });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /outside \/workspace/);
+  assert.equal(result.matches, undefined);
+});
+
+test('grep retains native ERE order and match limits while reading each matched file only once', async t => {
+  const f = await tools(t), file = join(f.root, 'numbers.txt');
+  await writeFile(file, Array.from({ length: 101 }, (_, index) => `match ${index + 1}`).join('\n') + '\n');
+  const result = await f.call('grep', { pattern: '^match [[:digit:]]{1,3}$', include: 'numbers.txt' });
+  assert.equal(result.ok, true);
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.matches, Array.from({ length: 100 }, (_, index) => `numbers.txt:${index + 1}:match ${index + 1}`));
+  const contents = f.outputs.filter(output => output.startsWith('match 1\n'));
+  assert.equal(contents.length, 1, 'One bounded file observation supports every matching line.');
 });
