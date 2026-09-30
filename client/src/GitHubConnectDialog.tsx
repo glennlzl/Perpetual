@@ -14,7 +14,7 @@ type AuthSession = { id?: string; status?: string; userCode?: string; error?: st
 const DEVICE_URL = 'https://github.com/login/device';
 const pending = (session: AuthSession | null) => ['starting', 'pending'].includes(session?.status ?? '');
 
-export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose, focusTarget }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void; focusTarget: () => FocusTarget | null }) {
+export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose, focusTargets }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void; focusTargets: () => readonly (FocusTarget | null | undefined)[] }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [starting, setStarting] = useState(false);
   const [attaching, setAttaching] = useState(false);
@@ -120,7 +120,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
   return <Dialog open onOpenChange={open => { if (!open && !submitting.current) onClose(); }}>
     <DialogContent aria-describedby={undefined} showCloseButton={!attaching} className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-md" onInteractOutside={event => event.preventDefault()} onCloseAutoFocus={event => {
       event.preventDefault();
-      restoreFocus([focusTarget()]);
+      restoreFocus(focusTargets());
     }}>
       <DialogHeader><DialogTitle className="flex items-center gap-3"><img src="/assets/providers/github.svg" className="provider-logo" data-monochrome="true" width={24} height={24} alt="" />Connect GitHub</DialogTitle></DialogHeader>
       {checking ? <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 motion-safe:animate-spin" />Checking GitHub…</p> : waiting ? <div className="grid gap-4">
