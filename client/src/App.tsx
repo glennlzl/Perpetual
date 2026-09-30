@@ -42,7 +42,7 @@ import { GateActions, GateBadge, useStageGates } from './StageGate';
 import { ProductionRelease, useReleases } from './ProductionRelease';
 import { releaseBadge } from '@/lib/production-release';
 import { isStageGate, productionStatus } from '@/lib/stage-gate.ts';
-import type { BrowserView, Environment, StageRemoval, WorkspaceSnapshot } from '@/lib/test-workspace';
+import type { BrowserView, Environment, PipelineAction, StageRemoval, WorkspaceSnapshot } from '@/lib/test-workspace';
 import type { GitHubSource, SourceSelection } from './SourceSettings';
 
 // The pipeline as GET /api/state reports it. Scans may predate the current discovery shape, so their fields are optional.
@@ -62,11 +62,6 @@ export type PipelineDialog = {
   connect?: boolean; connectRequest?: number; tab?: string; runId?: string; watch?: boolean; caseId?: string; caseRequestKey?: number; error?: string;
 };
 export type OpenDialog = (next: PipelineDialog | null) => void;
-export type PipelineAction =
-  | { action: 'add-stage'; afterStageId: string; name: string }
-  | { action: 'rename-stage'; stageId: string; name: string }
-  | { action: 'set-transition'; sourceStageId?: string; targetStageId?: string; blocked: boolean };
-export type PipelineActionResult = { pipeline: PipelineView };
 export type SourceResult = { scan: Scan; source: GitHubSource; pipeline: PipelineView; environments?: Environment[] };
 type Page = 'pipeline' | 'settings';
 /** The dialog Settings was opened from, handed back on return to the Pipeline. */
@@ -659,10 +654,7 @@ function PipelineApp() {
   const pageRef = useRef(page), settingsReturn = useRef<SettingsReturn | null>(null);
   useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Pipeline'}`; }, [page]);
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
-  const [pipeline, setPipeline] = useState<PipelineView | null | undefined>(null);
-  useEffect(() => {
-    if (tests.pipeline?.repoPath === state.scan?.repo.path && tests.branch === (state.scan?.repo.branch || '')) setPipeline(tests.pipeline);
-  }, [tests.pipeline, tests.branch, state.scan?.repo.path, state.scan?.repo.branch]);
+  const pipeline = tests.pipeline;
   const [loading, setLoading] = useState(true);
   // A failure the canvas reports, with the operation that can repeat it, if any.
   const [error, setFailure] = useState<CanvasFailure | null>(null);
@@ -682,9 +674,6 @@ function PipelineApp() {
   const [newTest, setNewTest] = useState('');
   const newTestReturn = useRef('');
   const mutation = useRef(false);
-  const pipelineRevision = useRef(0);
-  const toggles = useRef(0);
-  const toggleRevision = useRef(0);
   const connectRequest = useRef(0);
   const caseRequest = useRef(0);
   const [theme, setTheme] = useState<Theme>(() => { try { return localStorage.getItem('perpetual-theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; } });
@@ -765,7 +754,6 @@ function PipelineApp() {
       const fresh = await api<PipelineState>('/api/state');
       workspace.activate(fresh.scan?.repo, fresh);
       setState(fresh);
-      setPipeline(fresh.pipeline);
     } catch (failure) { setError((failure as Error).message); }
     finally { setLoading(false); }
   }, [workspace]);
@@ -773,26 +761,17 @@ function PipelineApp() {
 
   const refreshPipeline = useCallback(async () => {
     if (mutation.current) return;
-    const source = workspace.stage('source');
-    const revision = pipelineRevision.current, toggled = toggleRevision.current;
-    const fresh = await workspace.refreshSource<PipelineState>();
-    if (fresh && source.isCurrent() && revision === pipelineRevision.current && toggled === toggleRevision.current && !toggles.current && !mutation.current) setPipeline(fresh.pipeline);
+    await workspace.refreshSource();
   }, [workspace]);
   // A gate moved the managed source to another commit in place; the workspace and its drafts stay.
   const refreshScan = useCallback(async () => {
     if (mutation.current) return;
     const source = workspace.stage('source');
-    const revision = pipelineRevision.current, toggled = toggleRevision.current;
     try {
       const fresh = await api<PipelineState>('/api/state');
-      if (!source.isCurrent() || mutation.current || revision !== pipelineRevision.current || fresh.scan?.repo?.path !== state.scan?.repo?.path || fresh.scan?.repo?.branch !== state.scan?.repo?.branch) return;
-      setState(fresh);
-      if (toggled === toggleRevision.current && !toggles.current) {
-        if (fresh.pipeline) workspace.updatePipeline(fresh.pipeline);
-        setPipeline(fresh.pipeline);
-      }
-    } catch (failure) { setError((failure as Error).message); }
-  }, [state.scan, workspace]);
+      if (source.isCurrent() && !mutation.current && fresh.scan?.repo?.path === state.scan?.repo?.path && fresh.scan?.repo?.branch === state.scan?.repo?.branch) setState(fresh);
+    } catch (failure) { if (source.isCurrent()) setError((failure as Error).message); }
+  }, [state.scan, workspace, setError]);
   const gates = useStageGates(state.scan?.repo, refreshScan);
   const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
   useEffect(() => {
@@ -820,41 +799,27 @@ function PipelineApp() {
 
   const onAction = useCallback(async (input: PipelineAction) => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
-    mutation.current = true; pipelineRevision.current++; setBusy(true); setError('');
-    const release = workspace.holdPipeline();
-    try { const result = await api<PipelineActionResult>('/api/pipeline/action', { repoPath: state.scan!.repo.path, ...input }); workspace.updatePipeline(result.pipeline); setPipeline(result.pipeline); return result; }
-    finally { release(); mutation.current = false; setBusy(false); }
-  }, [state.scan, workspace]);
+    mutation.current = true; setBusy(true); setError('');
+    try { return await workspace.changePipeline(input); }
+    finally { mutation.current = false; setBusy(false); }
+  }, [workspace]);
   // Collapsing is a saved view preference, not a release change: it applies at
   // once without the global busy lock and rolls back only if saving fails.
   const toggleStage = useCallback(async (stageId: string) => {
-    const repoPath = state.scan?.repo?.path;
-    if (mutation.current || !repoPath) return;
-    const base = pipelineRevision.current, request = ++toggleRevision.current;
-    const flip = (current: PipelineView | null | undefined) => current?.repoPath === repoPath ? { ...current, stages: current.stages.map(stage => stage.id === stageId ? { ...stage, collapsed: !stage.collapsed } : stage) } : current;
-    toggles.current++;
-    const release = workspace.holdPipeline();
+    if (mutation.current) return;
     setError('');
-    setPipeline(flip);
-    try {
-      const result = await api<PipelineActionResult>('/api/pipeline/action', { repoPath, action: 'toggle-stage', stageId });
-      // The server applies toggles in order, so the latest response includes earlier ones.
-      if (request === toggleRevision.current && base === pipelineRevision.current) { workspace.updatePipeline(result.pipeline); setPipeline(result.pipeline); }
-    } catch (failure) {
-      // Only a rolled-back toggle can be repeated as it was.
-      const rolledBack = base === pipelineRevision.current;
-      if (rolledBack) setPipeline(flip);
-      setError((failure as Error).message, rolledBack ? () => toggleStage(stageId) : null);
-    } finally { release(); toggles.current--; }
-  }, [state.scan, workspace]);
+    try { await workspace.changePipeline({ action: 'toggle-stage', stageId }); }
+    catch (failure) {
+      if ((failure as Error).name !== 'AbortError') setError((failure as Error).message, () => toggleStage(stageId));
+    }
+  }, [workspace, setError]);
   const onSourceSave = useCallback(async (selection: SourceSelection) => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
-    mutation.current = true; pipelineRevision.current++; setBusy(true);
+    mutation.current = true; setBusy(true);
     try {
       const result = await api<SourceResult>('/api/source/github', selection);
       workspace.activate(result.scan.repo, result);
       setState(previous => ({ ...previous, scan: result.scan, source: result.source, providers: [], environments: result.environments || [], browserTests: {} }));
-      setPipeline(result.pipeline);
       setError('');
       return result;
     } catch (failure) { setError((failure as Error).message); throw failure; }
@@ -871,13 +836,12 @@ function PipelineApp() {
   // Returns to the original local checkout; the scan only reads it and clears the managed source.
   const scanLocal = useCallback(async (path: string) => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
-    mutation.current = true; pipelineRevision.current++; setBusy(true);
+    mutation.current = true; setBusy(true);
     try {
       await api('/api/scan', { path });
       const fresh = await api<PipelineState>('/api/state');
       workspace.activate(fresh.scan?.repo, fresh);
       setState(fresh);
-      setPipeline(fresh.pipeline);
       setError('');
       setDialog(null);
       setNewTest('');

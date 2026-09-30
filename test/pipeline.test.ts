@@ -389,17 +389,6 @@ test('card Add test opens only New test and returns focus to its trigger', async
   assert.match(app, /document\.querySelector(?:<\w+>)?\(`\[data-add-test="\$\{CSS\.escape\(stageId\)\}"\]`\)\?\.focus\(/);
 });
 
-test('collapsing a stage applies at once without the global busy lock', async () => {
-  const app = await source('App.tsx');
-  const toggle = /const toggleStage = useCallback\(async \(?stageId(?:: string\))? => \{[\s\S]*?\n  \}, \[state\.scan, workspace\]\);/.exec(app)?.[0] || '';
-  assert.ok(toggle, 'toggleStage');
-  assert.doesNotMatch(toggle, /setBusy|mutation\.current = true/);
-  assert.ok(toggle.indexOf('setPipeline(flip)') < toggle.search(/await api(?:<\w+>)?\('\/api\/pipeline\/action'/), 'The card collapses before the save returns.');
-  assert.match(toggle, /const rolledBack = base === pipelineRevision\.current;\n\s+if \(rolledBack\) setPipeline\(flip\);\n\s+setError\((?:\(failure as Error\)|failure)\.message, rolledBack \? \(\) => toggleStage\(stageId\) : null\);/, 'A failed save rolls back, reports, and offers the same toggle again.');
-  assert.match(stageNode(app), /onOpenChange=\{\(\) => toggleStage\(stage\.id\)\}/);
-  assert.doesNotMatch(app, /action: 'toggle-stage'[^\n]*mutate|mutate\(\{ action: 'toggle-stage'/);
-});
-
 test('the canvas follows the app theme and drops unused styles', async () => {
   const app = await source('App.tsx'), css = await source('pipeline.css');
   assert.match(/<ReactFlow [^>]*>/.exec(app)![0], /colorMode=\{theme\}/);

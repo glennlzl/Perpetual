@@ -38,12 +38,11 @@ test('source polling publishes stages added or renamed in another tab without re
 test('pipeline writes keep earlier polls from restoring the graph before the write', async t => {
   const initial = defaultPipeline(source.path), saved = applyPipelineAction(initial, { action: 'add-stage', name: 'Beta' });
   const old = deferred();
-  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => old.promise });
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async (_path, input) => input ? { pipeline: saved } : old.promise });
   t.after(() => workspace.dispose());
   workspace.activate(source, { pipeline: initial, browserTests: {} });
-  const reading = workspace.refreshSource(), release = workspace.holdPipeline();
-  workspace.updatePipeline(saved);
-  release();
+  const reading = workspace.refreshSource();
+  await workspace.changePipeline({ action: 'add-stage', afterStageId: 'build', name: 'Beta' });
   old.resolve({ scan: { repo: source }, pipeline: initial, browserTests: {} });
   await reading;
   assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Beta', 'Production']);

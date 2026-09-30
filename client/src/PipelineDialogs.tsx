@@ -15,7 +15,9 @@ import EnvironmentSettings from './EnvironmentSettings';
 import StageSettingsDialog from './StageSettingsDialog';
 import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
 import type { PipelineView } from '@/lib/pipeline-nodes.ts';
-import type { PipelineAction, PipelineActionResult, PipelineDialog, Scan } from './App';
+import type { PipelineDialog, Scan } from './App';
+import type { PipelineAction } from './lib/test-workspace';
+import type { PipelineActionReply as PipelineActionResult } from '../../contract/pipeline.ts';
 
 type OnAction = (input: PipelineAction) => Promise<PipelineActionResult>;
 

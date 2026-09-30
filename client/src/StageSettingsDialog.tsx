@@ -9,7 +9,9 @@ import { useTestStage } from '@/lib/use-test-workspace';
 import { environmentHasResources } from './EnvironmentSettings';
 import type { StageRemoval } from '@/lib/test-workspace';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
-import type { PipelineAction, PipelineActionResult, PipelineDialog } from './App';
+import type { PipelineDialog } from './App';
+import type { PipelineAction } from './lib/test-workspace';
+import type { PipelineActionReply as PipelineActionResult } from '../../contract/pipeline.ts';
 
 type StageSettingsDialogProps = {
   // tests: a legacy stage field the controller no longer writes.
