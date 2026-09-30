@@ -15,7 +15,7 @@ import { HELD } from '../src/repair/changes.ts';
 const B = 'b'.repeat(40), P = 'f'.repeat(40), U = 'e'.repeat(40), T = 'c'.repeat(40), M = 'd'.repeat(40);
 const KEY = 'github:owner/app:/', BRANCH = 'perpetual/repair/bbbbbbb';
 const at = '2026-09-25T10:00:00.000Z';
-const REPAIR = { id: 'r1', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'glennlzl', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', status: 'verifying-ci', runs: [], createdAt: at, updatedAt: at } as Repair;
+const REPAIR = { id: 'r1', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', status: 'verifying-ci', runs: [], createdAt: at, updatedAt: at } as Repair;
 const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: BRANCH, draft: false };
 const passed = (run = 'CI'): CheckRun => ({ name: run, status: 'completed', conclusion: 'success' });
 const status = (context: string, state = 'success'): StatusCheck => ({ context, state });
@@ -41,7 +41,7 @@ async function harness(t: TestContext, { holds = [] as string[], behind = [] as 
   const calls = { checkouts: [] as { directory: string; sha: string; branch: string; clone: string }[], gates: [] as RepairGateRequest[], checks: [] as string[], compares: [] as { base: string; head: string }[], updates: [] as { number: number; sha: string }[], merges: [] as { number: number; sha: string; title: string }[], ci: [] as string[], snapshots: [] as string[][], readied: [] as number[], order: [] as string[] };
   const merges = new Map<string, string[]>();
   const reports: RepairProgress[] = [];
-  let connection: { login: string; repository: string } | null = { login: 'glennlzl', repository: 'owner/app' }, reads = 0, autoMerge = true;
+  let connection: { login: string; repository: string } | null = { login: 'developer', repository: 'owner/app' }, reads = 0, autoMerge = true;
   const github: MergeGitHub = {
     async connection() { connectionRead?.(); return connection; },
     async head() { calls.order.push('head'); return { status: 200, sha: T, etag: null }; },
@@ -121,7 +121,7 @@ test('only a pass merges: a gate that failed, needs release or was released leav
   for (const [name, judged, reason] of [
     ['failed', gate('Beta', P, 'failed', { reason: 'Saving the workflow did not keep it.' }), 'Beta failed: Saving the workflow did not keep it.'],
     ['no reviewed journeys', gate('Beta', P, 'needs-release', { reason: 'No reviewed journeys.' }), 'Beta needs release: No reviewed journeys.'],
-    ['released', gate('Beta', P, 'released', { releasedBy: 'glennlzl' }), 'Beta was released by glennlzl.'],
+    ['released', gate('Beta', P, 'released', { releasedBy: 'developer' }), 'Beta was released by developer.'],
   ] as const) {
     await t.test(name, async t => {
       const h = await harness(t, { gates: async () => [gate('Alpha', P), judged] });
@@ -263,7 +263,7 @@ test('a gate budget that runs out while a gate is at work never merges without t
   // Beta's run ends only once the budget ran out, so it passes after that.
   const manager = await createGateManager({ dataDir, retryInterval: 5,
     source: () => ({ key: KEY, branch: 'main', sha: B, repository: 'owner/app', stages }),
-    github: { connection: async () => ({ login: 'glennlzl', repository: 'owner/app' }), head: async () => ({ status: 304 }), post: async () => {} },
+    github: { connection: async () => ({ login: 'developer', repository: 'owner/app' }), head: async () => ({ status: 304 }), post: async () => {} },
     steps: {
       async prepare(gate) { log.push(`prepare ${gate.stageId}`); return gate.stageId; },
       journeys: () => 1,

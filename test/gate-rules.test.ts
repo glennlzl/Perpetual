@@ -28,7 +28,7 @@ test('commit statuses: pending while running, success for passed or released, fa
   assert.deepEqual(status('passed'), { state: 'success', context: 'perpetual/Beta', description: 'Passed' });
   assert.deepEqual(status('failed'), { state: 'failure', context: 'perpetual/Beta', description: 'Failed' });
   assert.deepEqual(status('needs-release'), { state: 'pending', context: 'perpetual/Beta', description: 'Needs release' });
-  assert.deepEqual(status('released', { releasedBy: 'glennlzl' }), { state: 'success', context: 'perpetual/Beta', description: 'Released by glennlzl' });
+  assert.deepEqual(status('released', { releasedBy: 'developer' }), { state: 'success', context: 'perpetual/Beta', description: 'Released by developer' });
   assert.equal(sameStatus(status('rebuilding'), status('running')), true, 'Rebuilding and running report one pending status.');
   assert.equal(sameStatus(status('running'), status('passed')), false);
   assert.equal(sameStatus(status('running'), undefined), false);

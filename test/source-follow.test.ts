@@ -28,7 +28,7 @@ async function harness(t: TestContext, { stages = PLAIN, heads = [], saved, outc
     // A fresh record per read, as the controller's is, so a change during a watch is visible to it.
     dataDir, source: () => ({ ...current }), retryInterval: 5,
     github: {
-      connection: async () => (connected ? { login: 'glennlzl', repository: 'owner/app' } : null),
+      connection: async () => (connected ? { login: 'developer', repository: 'owner/app' } : null),
       async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 304 as const }; return typeof next === 'function' ? next(input) : next; },
       async post() {},
       async build() { return { status: 'passed' as const }; },
@@ -58,7 +58,7 @@ test('without a Sandbox stage the source follows each watched head that differs 
 });
 
 test('after a restart the saved head is followed although GitHub answers 304 for it', async t => {
-  const h = await harness(t, { saved: { version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'glennlzl', sha: B, etag: '"1"' } } } });
+  const h = await harness(t, { saved: { version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'developer', sha: B, etag: '"1"' } } } });
   await h.manager.watch();
   assert.equal(h.headCalls[0].etag, '"1"', 'The saved ETag is sent.');
   assert.deepEqual(h.follows, [{ key: KEY, branch: 'main', sha: B }]);
@@ -116,7 +116,7 @@ test('a source that changed, or gained a Sandbox stage, while its head was read 
 
 // The controller as it runs: a managed copy under the data directory at commit A, its branch main at a later commit on
 // GitHub, and the copy's move injected as a local reset; the account, head and statuses are fakes.
-const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'glennlzl', name: null } };
+const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'developer', name: null } };
 async function controller(t: TestContext, { stages, head, failing = false }: { stages?: GateStage[]; head?: 'saved'; failing?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-follow-controller-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
@@ -129,11 +129,11 @@ async function controller(t: TestContext, { stages, head, failing = false }: { s
   const next = fixtureGit(checkoutPath, 'rev-parse', 'HEAD');
   fixtureGit(checkoutPath, 'reset', '--quiet', '--hard', sha);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: checkoutPath, name: 'app', sha, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
-  const source = { scanPath: checkoutPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: '/', sha, connectedAccount: 'glennlzl', savedAt: '2026-09-25T09:00:00.000Z' };
+  const source = { scanPath: checkoutPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: '/', sha, connectedAccount: 'developer', savedAt: '2026-09-25T09:00:00.000Z' };
   const pipelines = stages ? { [KEY]: { repoPath: checkoutPath, stages: stages.map(stage => ({ ...stage, collapsed: false })) } } : {};
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
   // The head the watcher saved before a restart, whose ETag GitHub answers with 304.
-  if (head === 'saved') { await mkdir(join(dataDir, 'gates')); await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'glennlzl', sha: next, etag: `"${next}"` } } })); }
+  if (head === 'saved') { await mkdir(join(dataDir, 'gates')); await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'developer', sha: next, etag: `"${next}"` } } })); }
   const moves: string[] = [], heads: BranchHeadInput[] = [];
   app = await startServer({
     port: 0, repo: dir, dataDir, gate: { pollInterval: 20 },

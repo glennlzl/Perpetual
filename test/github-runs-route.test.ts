@@ -13,7 +13,7 @@ type RunsRead = { repository?: unknown; sha?: unknown; login?: unknown };
 
 // Injected GitHub seams: a sign-in manager and a runs reader that record calls
 // instead of spawning gh.
-function github({ pending = false, sessions = [session('glennlzl')] }: { pending?: boolean; sessions?: GitHubSession[] } = {}) {
+function github({ pending = false, sessions = [session('developer')] }: { pending?: boolean; sessions?: GitHubSession[] } = {}) {
   const calls: { session: number; reads: RunsRead[] } = { session: 0, reads: [] };
   let index = 0;
   return {
@@ -40,7 +40,7 @@ async function start(t: TestContext, { connection, seams = github() }: { connect
   };
   return { read, calls: seams.calls };
 }
-const connected = { login: 'glennlzl', connectedAt: '2026-09-23T09:00:00.000Z' };
+const connected = { login: 'developer', connectedAt: '2026-09-23T09:00:00.000Z' };
 
 test('the runs route is scoped to the active source before any GitHub read', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-github-runs-'));
@@ -56,7 +56,7 @@ test('a connected account reads runs for the scanned commit as that account', as
   const result = await f.read();
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { repository: 'acme/storefront', sha: SHA, runs: [] });
-  assert.deepEqual(f.calls.reads, [{ repository: 'acme/storefront', sha: SHA, login: 'glennlzl' }]);
+  assert.deepEqual(f.calls.reads, [{ repository: 'acme/storefront', sha: SHA, login: 'developer' }]);
   assert.equal((await f.read('/another/checkout')).status, 409);
   assert.equal(f.calls.reads.length, 1);
 });
@@ -81,7 +81,7 @@ test('a gh account other than the connected login is refused', async t => {
 
 test('the account is re-verified on every read, so gh auth switch or logout stops the next read', async t => {
   const signedOut: GitHubSession = { available: true, authenticated: false, account: null, message: 'Sign in with gh auth login --hostname github.com.' };
-  const f = await start(t, { connection: connected, seams: github({ sessions: [session('glennlzl'), session('someone-else'), signedOut] }) });
+  const f = await start(t, { connection: connected, seams: github({ sessions: [session('developer'), session('someone-else'), signedOut] }) });
   assert.equal((await f.read()).status, 200);
   assert.equal((await f.read()).status, 400, 'After gh auth switch the next read is refused.');
   const loggedOut = await f.read();
@@ -103,5 +103,5 @@ test('a pending GitHub sign-in answers 409 before any session or runs read', asy
 test('a legacy state without a connection record reuses the verified local session', async t => {
   const f = await start(t);
   assert.equal((await f.read()).status, 200);
-  assert.deepEqual(f.calls.reads, [{ repository: 'acme/storefront', sha: SHA, login: 'glennlzl' }]);
+  assert.deepEqual(f.calls.reads, [{ repository: 'acme/storefront', sha: SHA, login: 'developer' }]);
 });

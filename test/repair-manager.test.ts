@@ -39,7 +39,7 @@ function agent(behaviour: (context: RepairContext, signal: AbortSignal) => Promi
 }
 
 // Injected source and GitHub record what the manager read; nothing reaches the network, a model or Docker.
-async function harness(t: TestContext, { dataDir, steps, connection = { login: 'glennlzl', repository: 'owner/app' } }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null } = {}) {
+async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' } }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null } = {}) {
   const dir = dataDir ?? await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   let tick = 0;
   const now = () => new Date(Date.UTC(2026, 8, 25, 10, 0, 0, tick++)).toISOString();
@@ -190,7 +190,7 @@ test('the agent step gets the failure, the account, the managed source copy and 
   await h.failHead([run('2', B, 'failure')]);
   await until(() => h.repair(B)?.status === 'verifying-ci');
   const [context] = a.contexts;
-  assert.deepEqual([context.repair.sha, context.repair.branch, context.repair.repository, context.repair.login, context.repair.checkoutPath, context.repair.rootDirectory], [B, 'main', 'owner/app', 'glennlzl', '/data/sources/github-1/app', '/']);
+  assert.deepEqual([context.repair.sha, context.repair.branch, context.repair.repository, context.repair.login, context.repair.checkoutPath, context.repair.rootDirectory], [B, 'main', 'owner/app', 'developer', '/data/sources/github-1/app', '/']);
   assert.equal(context.repair.status, 'repairing');
   assert.deepEqual(context.repair.failures?.map(failure => [failure.runId, failure.diagnosis.category, failure.jobs[0].failedSteps]), [['2', 'build', ['Typecheck']]]);
   assert.equal(context.directory, join(await realpath(h.dataDir), 'repairs', context.repair.id));
@@ -401,7 +401,7 @@ test('one repair runs at a time: another source\'s failed head waits until the a
   await until(() => h.repair(B)?.status === 'repairing');
   // The connected repository follows the managed source.
   Object.assign(h.current, { key: 'github:owner/other:/', repository: 'owner/other' });
-  h.github.connection = { login: 'glennlzl', repository: 'owner/other' };
+  h.github.connection = { login: 'developer', repository: 'owner/other' };
   await h.manager.check(); // the other source's first head is its baseline
   h.github.head = C;
   h.github.runs[C] = [run('3', C, 'failure')];
@@ -424,7 +424,7 @@ test('a person repairs the failed baseline head, may start a finished repair aga
   await h.manager.idle();
   assert.deepEqual([h.repair(A)?.status, h.repair(A)?.reason], ['needs-person', NO_AGENT]);
   const [first] = (await h.saved()).repairs;
-  assert.equal(first.login, 'glennlzl');
+  assert.equal(first.login, 'developer');
   await h.manager.repair({ runId: 1 });
   await h.manager.idle();
   const saved = (await h.saved()).repairs;
@@ -500,7 +500,7 @@ test('a controller restart ends active repairs as needing a person, keeps finish
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));
   const at = '2026-09-25T09:00:00.000Z';
-  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'glennlzl', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', createdAt: at, updatedAt: at };
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', createdAt: at, updatedAt: at };
   await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [
     { ...base, id: 'r1', sha: B, status: 'verifying-ci', runs: [{ id: '2', name: 'CI', path: CI, attempt: 1, url: null }], pullRequest: PULL },
     { ...base, id: 'r2', sha: A, status: 'rerunning', runs: [{ id: '1', name: 'CI', path: CI, attempt: 1, url: null }], reruns: [{ id: '1', attempt: 1 }] },
@@ -526,7 +526,7 @@ test('a controller start removes the directories of repairs that no longer run, 
   await writeFile(join(dataDir, 'repairs', 'r1', 'change.diff'), 'diff --git a/add.js b/add.js\n');
   await mkdir(join(dataDir, 'repairs', 'pruned-long-ago'));
   const at = '2026-09-25T09:00:00.000Z';
-  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'r1', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'glennlzl', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'repairing', runs: [], createdAt: at, updatedAt: at }] }));
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'r1', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'repairing', runs: [], createdAt: at, updatedAt: at }] }));
   const h = await harness(t, { dataDir });
   assert.deepEqual((await readdir(join(dataDir, 'repairs'))).sort(), ['state.json']);
   assert.equal((await h.saved()).repairs[0].status, 'needs-person');
@@ -534,7 +534,7 @@ test('a controller start removes the directories of repairs that no longer run, 
 
 test('a saved repair that is not a complete record makes the state unsupported, never a later TypeError', async t => {
   const at = '2026-09-25T09:00:00.000Z';
-  const valid = { id: 'r', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'glennlzl', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [], createdAt: at, updatedAt: at };
+  const valid = { id: 'r', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [], createdAt: at, updatedAt: at };
   for (const repairs of [[null], [{ id: 'r', status: 'ready' }], [{ ...valid, status: 'shipped' }], [{ ...valid, sha: 'main' }], [{ ...valid, runs: [{ id: 'x' }] }], [{ ...valid, pullRequest: { ...PULL, url: 'https://evil.example/pull/7' } }], [{ ...valid, failures: [{ runId: '1' }] }]]) {
     const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-')); t.after(() => rm(dataDir, { recursive: true, force: true }));
     await mkdir(join(dataDir, 'repairs')); await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs }));
@@ -546,7 +546,7 @@ test('without a connected account or a managed source nothing is read', async t 
   const h = await harness(t, { connection: null });
   await h.poll();
   assert.deepEqual(h.calls.heads, []);
-  h.github.connection = { login: 'glennlzl', repository: 'owner/app' };
+  h.github.connection = { login: 'developer', repository: 'owner/app' };
   h.current.repository = null;
   const connections = h.calls.connections;
   await h.poll();
@@ -691,7 +691,7 @@ test('the rerun is sent only while the account and repository that opened the re
   for (const [name, connection, reason] of [
     ['disconnected', null, 'Connect GitHub to repair builds.'],
     ['another account', { login: 'someone-else', repository: 'owner/app' }, 'The GitHub connection changed. Start the repair again.'],
-    ['another repository', { login: 'glennlzl', repository: 'owner/other' }, 'The GitHub connection changed. Start the repair again.'],
+    ['another repository', { login: 'developer', repository: 'owner/other' }, 'The GitHub connection changed. Start the repair again.'],
   ] as const) {
     await t.test(name, async t => {
       const h = await harness(t, { steps: agent().steps });
@@ -741,7 +741,7 @@ test('the view names the watched head of a connected, managed source, and a pers
   h.github.connection = null;
   await h.poll();
   assert.equal(h.manager.view().head, undefined, 'Without a connected account no head is watched.');
-  h.github.connection = { login: 'glennlzl', repository: 'owner/app' };
+  h.github.connection = { login: 'developer', repository: 'owner/app' };
   await h.poll();
   h.current.repository = null;
   assert.equal(h.manager.view().head, undefined, 'A local checkout has no watched head.');
@@ -773,7 +773,7 @@ test('a start after a restart interrupted a repair recovers its leftovers once; 
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));
   const at = '2026-09-25T09:00:00.000Z';
-  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'glennlzl', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', createdAt: at, updatedAt: at };
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', createdAt: at, updatedAt: at };
   await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ ...base, id: 'r1', sha: B, status: 'repairing', runs: [], holds: ['The change touches tests.'] }] }));
   let recovered = 0;
   const h = await harness(t, { dataDir, steps: { ...agent().steps, async recover() { recovered++; } } });
@@ -853,7 +853,7 @@ test('open pull requests of failed, stopped and interrupted repairs close as sup
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));
   const at = '2026-09-25T09:00:00.000Z', E = 'e'.repeat(40), F = 'f'.repeat(40);
-  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'glennlzl', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at };
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at };
   const pull = (number: number) => ({ number, url: `https://github.com/owner/app/pull/${number}`, branch: `perpetual/repair/${number}${'0'.repeat(6)}` });
   await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [
     { ...base, id: 'failed', sha: B, status: 'failed', reason: 'The build was not fixed in 4 attempts.', pullRequest: pull(7) },
@@ -940,7 +940,7 @@ test('a merge reported while a stopped repair unwinds makes it merged, and a res
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));
   const at = '2026-09-25T09:00:00.000Z';
-  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'glennlzl', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at, pullRequest: PULL };
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at, pullRequest: PULL };
   await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ ...base, id: 'r1', sha: B, status: 'verifying-gates' }, { ...base, id: 'r2', sha: C, status: 'verifying-gates', merged: D }] }));
   const restarted = await harness(t, { dataDir });
   assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.id, repair.status, repair.reason]), [['r1', 'needs-person', 'Interrupted by a controller restart.'], ['r2', 'merged', undefined]]);
@@ -1139,7 +1139,7 @@ test('loop guard: a repair of the repository under a name the connected account 
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));
   const at = '2026-09-25T09:00:00.000Z', reads: string[] = [];
-  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'renamed', key: KEY, repository: 'Owner/App', branch: 'main', sha: B, login: 'glennlzl', checkoutPath: '/c', rootDirectory: '/',
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'renamed', key: KEY, repository: 'Owner/App', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/',
     trigger: 'push', status: 'ready', runs: [], pullRequest: PULL, createdAt: at, updatedAt: at }] }));
   // As the agent step reads it: another repository than the connected one's is refused before GitHub is read.
   const a = agent(async () => ({ status: 'ready' }), {

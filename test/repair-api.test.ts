@@ -32,7 +32,7 @@ function github() {
     calls, commits, logs, branch,
     auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
     runs: {
-      async session() { return session('glennlzl'); },
+      async session() { return session('developer'); },
       async read(input: { repository?: unknown; sha?: unknown; login?: unknown }) { calls.reads.push(input); return { repository: String(input.repository), sha: String(input.sha), runs: structuredClone(commits[String(input.sha)] ?? []) }; },
     },
     async head(input: BranchHeadInput) { calls.heads.push(input); const etag = `"${branch.head.slice(0, 7)}"`; return input.etag === etag ? { status: 304 as const } : { status: 200 as const, sha: branch.head, etag }; },
@@ -49,11 +49,11 @@ function github() {
 const MODEL = { apiKey: 'sk-or-v1-0123456789abcdef', model: 'openai/gpt-6-luna', baseUrl: 'https://openrouter.ai/api/v1' };
 
 // before() sets GitHub up as the controller will first read it.
-async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {}, beforeStart = async () => {} }: { connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void; beforeStart?: (dataDir: string, repoPath: string) => Promise<void> } = {}) {
+async function start(t: TestContext, { connection = { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {}, beforeStart = async () => {} }: { connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void; beforeStart?: (dataDir: string, repoPath: string) => Promise<void> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-repair-api-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
-  const source = { scanPath: dir, checkoutPath: dir, repository: 'owner/app', branch: 'main', rootDirectory: '/', sha: SHA, connectedAccount: 'glennlzl', savedAt: '2026-09-25T09:00:00.000Z' };
+  const source = { scanPath: dir, checkoutPath: dir, repository: 'owner/app', branch: 'main', rootDirectory: '/', sha: SHA, connectedAccount: 'developer', savedAt: '2026-09-25T09:00:00.000Z' };
   await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: {}, githubConnection: connection, ...(managed ? { source } : {}) } }));
   // App Settings as saved: an empty record configures no model, whatever this machine's environment holds.
   await writeFile(join(dataDir, 'browser-model.json'), JSON.stringify(model));
@@ -87,7 +87,7 @@ test('the Autopilot view names the active source, carries Build alone, starts em
   await f.until(() => f.seams.calls.reads.length);
   assert.deepEqual(await f.view(), { repoPath: f.dir, stages: { build: { mode: 'merge', changes: [], failed: { sha: SHA, runs: [] } } } });
   assert.deepEqual(f.seams.calls.heads, [{ repository: 'owner/app', branch: 'main', etag: null }]);
-  assert.deepEqual(f.seams.calls.reads, [{ repository: 'owner/app', sha: SHA, login: 'glennlzl' }], 'A baseline head\'s runs are read as the connected account, only to offer a Repair.');
+  assert.deepEqual(f.seams.calls.reads, [{ repository: 'owner/app', sha: SHA, login: 'developer' }], 'A baseline head\'s runs are read as the connected account, only to offer a Repair.');
   const other = await f.get(`/api/autopilot?${new URLSearchParams({ repoPath: '/another/checkout' })}`);
   assert.equal(other.status, 409);
   assert.deepEqual((await f.get('/api/state')).body.autopilot, await f.view(), 'The state carries the same view.');
@@ -101,7 +101,7 @@ test('the Autopilot APIs show actual Sandbox names for repair gates, follow rena
     const saved = JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf8'));
     saved.state.pipelines['github:owner/app:/'] = pipeline;
     await writeFile(join(dataDir, 'state.json'), JSON.stringify(saved));
-    const repair: Repair = { id: 'finished-repair', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'glennlzl', checkoutPath: repoPath, rootDirectory: '/', trigger: 'person', status: 'ready', runs: [],
+    const repair: Repair = { id: 'finished-repair', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'developer', checkoutPath: repoPath, rootDirectory: '/', trigger: 'person', status: 'ready', runs: [],
       gates: [{ gateId: 'known-gate', stageId, sha: NEWER, status: 'passed' }, { gateId: 'unknown-gate', stageId: missingId, sha: NEWER, status: 'passed' }], createdAt: '2026-09-25T10:00:00.000Z', updatedAt: '2026-09-25T10:01:00.000Z' };
     await mkdir(join(dataDir, 'repairs'));
     await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [repair] }));
@@ -127,7 +127,7 @@ test('a person\'s Repair triages the failed head and, without an OpenRouter API 
   assert.deepEqual([change(settled)?.steps[1].detail, change(settled)?.steps[2].detail], [['The build does not compile.'], ['Add an OpenRouter API key in Settings.']]);
   assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
   const saved = JSON.parse(await readFile(join(f.dataDir, 'repairs', 'state.json'), 'utf8'));
-  assert.deepEqual([saved.repairs[0].login, saved.repairs[0].trigger, saved.repairs[0].status, saved.repairs[0].category], ['glennlzl', 'person', 'needs-person', 'build']);
+  assert.deepEqual([saved.repairs[0].login, saved.repairs[0].trigger, saved.repairs[0].status, saved.repairs[0].category], ['developer', 'person', 'needs-person', 'build']);
   assert.deepEqual(build(settled)?.failed, { sha: SHA, runs: [shown('41')] }, 'A repair that needed a person may start again.');
 });
 

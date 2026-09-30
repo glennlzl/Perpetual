@@ -15,7 +15,7 @@ type GateResponse = GateView & { repoPath: string; sha: string | null; error?: s
 const session = (login: string): GitHubSession => ({ available: true, authenticated: true, account: { login, name: null } });
 
 // Injected GitHub seams record commit statuses and head reads instead of spawning gh.
-function github({ login = 'glennlzl' } = {}) {
+function github({ login = 'developer' } = {}) {
   const calls: { statuses: CommitStatusPost[]; heads: BranchHeadInput[] } = { statuses: [], heads: [] };
   return {
     calls,
@@ -27,13 +27,13 @@ function github({ login = 'glennlzl' } = {}) {
   };
 }
 
-async function start(t: TestContext, { connection = { login: 'glennlzl', connectedAt: '2026-09-23T09:00:00.000Z' }, seams = github(), managed = false }: { connection?: { login: string; connectedAt: string } | null; seams?: ReturnType<typeof github>; managed?: boolean } = {}) {
+async function start(t: TestContext, { connection = { login: 'developer', connectedAt: '2026-09-23T09:00:00.000Z' }, seams = github(), managed = false }: { connection?: { login: string; connectedAt: string } | null; seams?: ReturnType<typeof github>; managed?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-gate-api-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
   const stages = [{ id: 'source', name: 'Source', kind: 'source', collapsed: false }, { id: 'build', name: 'Build', kind: 'build', collapsed: false }, { id: 'beta', name: 'Beta', kind: 'sandbox', collapsed: false }, { id: 'production', name: 'Production', kind: 'production', collapsed: false }];
   const state = { scan, providers: [], pipelines: { [managed ? 'github:owner/app:/' : dir]: { repoPath: dir, stages } }, githubConnection: connection,
-    ...(managed ? { source: { repository: 'owner/app', branch: 'main', rootDirectory: '/', scanPath: dir, sha: SHA, connectedAccount: 'glennlzl', savedAt: '2026-09-23T10:00:00.000Z' } } : {}) };
+    ...(managed ? { source: { repository: 'owner/app', branch: 'main', rootDirectory: '/', scanPath: dir, sha: SHA, connectedAccount: 'developer', savedAt: '2026-09-23T10:00:00.000Z' } } : {}) };
   await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state }));
   const app = await startServer({ port: 0, repo: dir, dataDir, github: seams });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -59,7 +59,7 @@ test('managed Run now waits on the connected Build reader before reaching journe
   assert.equal((await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' })).status, 202);
   const waiting = await f.until(view => view.stages.beta?.status === 'waiting-build');
   assert.equal(waiting.stages.beta.reason, 'CI is still running.');
-  assert.deepEqual(builds, [{ repository: 'owner/app', branch: 'main', sha: SHA, login: 'glennlzl' }]);
+  assert.deepEqual(builds, [{ repository: 'owner/app', branch: 'main', sha: SHA, login: 'developer' }]);
   assert.equal((await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA })).status, 409);
   assert.equal(waiting.production, null);
 });
@@ -87,10 +87,10 @@ test('Run now on a stage without reviewed journeys needs release and reports it;
 
   const released = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
   assert.equal(released.status, 200);
-  assert.deepEqual([released.body.stages.beta.status, released.body.stages.beta.releasedBy], ['released', 'glennlzl']);
+  assert.deepEqual([released.body.stages.beta.status, released.body.stages.beta.releasedBy], ['released', 'developer']);
   assert.deepEqual(released.body.production, { sha: SHA, status: 'ready' });
   await f.until(() => f.calls.statuses.length === 2);
-  assert.deepEqual(f.calls.statuses[1], { repository: 'owner/app', sha: SHA, state: 'success', context: 'perpetual/Beta', description: 'Released by glennlzl' });
+  assert.deepEqual(f.calls.statuses[1], { repository: 'owner/app', sha: SHA, state: 'success', context: 'perpetual/Beta', description: 'Released by developer' });
   const again = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
   assert.equal(again.status, 409);
   const saved = JSON.parse(await readFile(join(f.dataDir, 'gates', 'state.json'), 'utf8'));
@@ -118,7 +118,7 @@ test('release refuses a source change while verifying the account, before releas
   let verified!: () => void, resume!: () => void;
   const reading = new Promise<void>(resolve => { verified = resolve; });
   const waiting = new Promise<void>(resolve => { resume = resolve; });
-  seams.runs.session = async () => { verified(); await waiting; return session('glennlzl'); };
+  seams.runs.session = async () => { verified(); await waiting; return session('developer'); };
   const releasing = f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
   await reading;
   // The source action is a read-only scan of a disposable local directory, never a real repository selection.

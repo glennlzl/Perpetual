@@ -48,7 +48,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   const { checkoutPath, sha: B } = await managedCopy(dataDir);
   const current: RepairSource = { key: 'github:owner/app:/', branch: 'main', repository: 'owner/app', checkoutPath, rootDirectory: '/' };
   const pull: PullRequestRef = { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true };
-  const github = { head: A, connection: { login: 'glennlzl', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
+  const github = { head: A, connection: { login: 'developer', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
     remote: null as string | null, openPull: null as PullRequestRef | null, pullState: 'open' as 'open' | 'closed' | 'merged', blips: 0, labelErrors: 0, closeErrors: 0, readyErrors: 0 };
   const pushes: { sha: string; lease: string; branch: string; author: string; files: string }[] = [], remoteReads: (AbortSignal | undefined)[] = [];
   const runner: CommandRunner = async (file, args, options) => {
@@ -65,7 +65,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   };
   const records = { created: [] as { title: string; body: string; branch: unknown; base: string }[], updated: [] as string[], ready: [] as number[], labels: [] as string[], labelCalls: 0, comments: [] as string[], closed: [] as number[], states: 0 };
   const pullRequests = {
-    async account() { return { login: 'glennlzl', id: 1234 }; },
+    async account() { return { login: 'developer', id: 1234 }; },
     async find() { return github.openPull; },
     async create(input: { title: string; body: string; branch: unknown; base: string }) { records.created.push(input); github.openPull = pull; return pull; },
     async update({ body }: { body: string }) { records.updated.push(body); },
@@ -138,7 +138,7 @@ test('a failed head gets a draft pull request; a CI failure becomes the second a
   assert.deepEqual([view.status, view.reason, view.pullRequest], ['ready', undefined, { number: 7, url: 'https://github.com/owner/app/pull/7', draft: false }]);
   const branch = `perpetual/repair/${h.B.slice(0, 7)}`;
   assert.deepEqual(h.pushes.map(push => [push.branch, push.lease]), [[branch, ''], [branch, h.pushes[0].sha]], 'The first push leases a missing branch, the next the commit it pushed.');
-  assert.deepEqual(h.pushes.map(push => push.author), ['glennlzl <1234+glennlzl@users.noreply.github.com>', 'glennlzl <1234+glennlzl@users.noreply.github.com>']);
+  assert.deepEqual(h.pushes.map(push => push.author), ['developer <1234+developer@users.noreply.github.com>', 'developer <1234+developer@users.noreply.github.com>']);
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js', 'test/add.test.js'], 'A later attempt pushes a new commit on top of the last.');
   assert.equal(h.records.created.length, 1);
   assert.deepEqual([h.records.created[0].branch, h.records.created[0].base, h.records.created[0].title], [branch, 'main', `Fix the failed CI build at ${h.B.slice(0, 7)}`]);

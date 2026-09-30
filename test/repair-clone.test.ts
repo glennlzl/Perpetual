@@ -61,7 +61,7 @@ test('the host copy stages a diff against the failing commit, and commits each a
   const repair = { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair;
   const host = createRepairHost({ dataDir: f.dataDir });
   await host.clone({ repair, directory });
-  const author = { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' };
+  const author = { name: 'developer', email: '1234+developer@users.noreply.github.com' };
   const diff = (from: string, to: string, path = 'add.js') => Buffer.from(`diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${from}\n+${to}\n`);
   assert.deepEqual((await host.stage({ directory, diff: diff('module.exports = (a, b) => a - b;', 'module.exports = (a, b) => a + b;'), base: f.sha })).paths, ['add.js']);
   const first = await host.commit({ directory, parent: f.sha, message: 'Fix the failed CI build', author });
@@ -90,7 +90,7 @@ test('the host copy stages a case-only rename into its index, whatever the host 
     'diff --git a/Add.js b/Add.js', 'new file mode 100644', '--- /dev/null', '+++ b/Add.js', '@@ -0,0 +1 @@', '+module.exports = (a, b) => a + b;', ''].join('\n');
   const staged = await host.stage({ directory, diff: Buffer.from(rename), base: f.sha });
   assert.deepEqual([...staged.paths].sort(), ['Add.js', 'add.js']);
-  const sha = await host.commit({ directory, parent: f.sha, message: 'Rename', author: { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' } });
+  const sha = await host.commit({ directory, parent: f.sha, message: 'Rename', author: { name: 'developer', email: '1234+developer@users.noreply.github.com' } });
   assert.deepEqual(fixtureGit(directory, 'ls-tree', '--name-only', sha!).split('\n').filter(name => name.endsWith('.js')), ['Add.js', 'check.js']);
   const children = (await readFile(trace, 'utf8')).trim().split('\n').flatMap(line => {
     const event: unknown = JSON.parse(line);
@@ -111,7 +111,7 @@ test('the box\'s change reaches the host copy byte for byte, even in a file that
   await writeFile(join(made.root, 'messages.properties'), latin1);
   const staged = await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha });
   assert.deepEqual(staged.paths, ['messages.properties']);
-  const sha = await host.commit({ directory, parent: f.sha, message: 'Messages', author: { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' } });
+  const sha = await host.commit({ directory, parent: f.sha, message: 'Messages', author: { name: 'developer', email: '1234+developer@users.noreply.github.com' } });
   const committed = await promisify(execFile)('git', ['-C', directory, 'cat-file', 'blob', `${sha}:messages.properties`], { encoding: 'buffer' });
   assert.deepEqual(committed.stdout, latin1);
 });
@@ -146,7 +146,7 @@ test('a pull request head is checked out for its gates from the host copy, or fr
   const host = createRepairHost({ dataDir: f.dataDir, run: (file, args, options) => { calls.push(args); return exec(file, args.map(arg => arg === 'https://github.com/owner/app.git' ? bare : arg === 'protocol.file.allow=never' ? 'protocol.file.allow=always' : arg), options) as Promise<{ stdout: string }>; } });
   await host.clone({ repair, directory: clone });
   await host.stage({ directory: clone, diff: Buffer.from('diff --git a/add.js b/add.js\n--- a/add.js\n+++ b/add.js\n@@ -1 +1 @@\n-module.exports = (a, b) => a - b;\n+module.exports = (a, b) => a + b;\n'), base: f.sha });
-  const pushed = (await host.commit({ directory: clone, parent: f.sha, message: 'Fix', author: { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' } }))!;
+  const pushed = (await host.commit({ directory: clone, parent: f.sha, message: 'Fix', author: { name: 'developer', email: '1234+developer@users.noreply.github.com' } }))!;
   assert.equal(await readFile(join(clone, 'add.js'), 'utf8'), 'module.exports = (a, b) => a - b;\n', 'The host copy\'s worktree stays at the failing commit.');
   const gate = join(f.dataDir, 'repairs', 'r1', `gate-${pushed.slice(0, 7)}`);
   assert.equal(await host.checkout({ directory: gate, clone, repository: 'owner/app', branch, sha: pushed, rootDirectory: '/' }), gate);
@@ -182,7 +182,7 @@ test('a pull request checkout returns its root directory, refuses one that is mi
   assert.equal(await host.checkout({ directory: gate, clone, repository: 'owner/app', branch, sha: f.sha, rootDirectory: '/.github' }), join(gate, '.github'), 'A checkout replaces the one before it.');
   // A root directory that is a link in the pull request head is refused, wherever it points.
   await host.stage({ directory: clone, diff: Buffer.from('diff --git a/web b/web\nnew file mode 120000\n--- /dev/null\n+++ b/web\n@@ -0,0 +1 @@\n+.github\n\\ No newline at end of file\n'), base: f.sha });
-  const linked = (await host.commit({ directory: clone, parent: f.sha, message: 'Link', author: { name: 'glennlzl', email: '1234+glennlzl@users.noreply.github.com' } }))!;
+  const linked = (await host.commit({ directory: clone, parent: f.sha, message: 'Link', author: { name: 'developer', email: '1234+developer@users.noreply.github.com' } }))!;
   await assert.rejects(host.checkout({ directory: gate, clone, repository: 'owner/app', branch, sha: linked, rootDirectory: '/web' }), /root directory is not in the pull request head/);
   const before = calls.length;
   for (const input of [{ branch: 'main' }, { sha: 'main' }, { repository: 'owner/..' }]) {

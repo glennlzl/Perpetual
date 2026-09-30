@@ -30,7 +30,7 @@ import { scriptedModel, type ScriptedStep } from './fixtures/scripted-model.ts';
 const KEY = 'sk-or-v1-fedcba9876543210fedcba9876543210';
 const MODEL = 'openai/gpt-6-luna', ESCALATION = 'anthropic/claude-sonnet-5';
 const exec = promisify(execFile) as CommandRunner;
-const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'glennlzl', name: null } };
+const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'developer', name: null } };
 const FIX: ScriptedStep[] = [
   { calls: [{ tool: 'run', input: { command: 'node check.js' } }] },
   { calls: [{ tool: 'edit', input: { path: 'add.js', old: 'a - b', new: 'a + b' } }] },
@@ -71,7 +71,7 @@ function fakeGitHub(sha: string, { remote, next }: { remote?: string; next?: str
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=50`) return answer({ total_count: 1, workflow_runs: [run] }, included ? 'runs' : undefined);
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=100&page=1`) return answer({ total_count: 1, workflow_runs: [{ ...run, workflow_id: 1 }] });
     if (endpoint === 'repos/owner/app/actions/runs/2/jobs?per_page=100' || endpoint === 'repos/owner/app/actions/runs/2/attempts/1/jobs?per_page=100') return answer(jobs, included ? 'jobs' : undefined);
-    if (endpoint === 'user') return answer({ login: 'glennlzl', id: 1234 });
+    if (endpoint === 'user') return answer({ login: 'developer', id: 1234 });
     if (endpoint?.startsWith('repos/owner/app/pulls?state=open&')) return answer([]);
     if (endpoint === 'repos/owner/app/pulls' && method === 'POST') return answer({ number: 7, html_url: 'https://github.com/owner/app/pull/7', draft: true });
     if (endpoint === 'repos/owner/app/issues/7/labels' && method === 'POST') return answer([{ name: 'perpetual-repair' }]);
@@ -145,9 +145,9 @@ async function controller(t: TestContext, { build = brokenRepository, root = '/'
   }
   const scanPath = join(checkoutPath, ...root.split('/').filter(Boolean));
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: scanPath, name: 'app', sha, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes, edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
-  const source = { scanPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: root, sha, connectedAccount: 'glennlzl', savedAt: '2026-09-25T09:00:00.000Z' };
+  const source = { scanPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: root, sha, connectedAccount: 'developer', savedAt: '2026-09-25T09:00:00.000Z' };
   const pipelines = stages ? { [`github:owner/app:${root}`]: { repoPath: scanPath, stages } } : {};
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
   // App Settings as the Settings page saves them: the OpenRouter key, the model and, once chosen, the escalation model.
   await writeFile(join(dataDir, 'browser-model.json'), JSON.stringify({ apiKey: KEY, model: MODEL, baseUrl: 'https://openrouter.ai/api/v1', ...(escalation ? { escalationModel: escalation } : {}) }));
   const github = fakeGitHub(sha, { remote, next }), request = (endpoint: string, etag: string | null) => githubRequest(endpoint, etag, { run: github.gh }), pulls = createRepairPullRequests({ run: github.gh });
