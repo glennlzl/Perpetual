@@ -314,8 +314,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     if (closed) return Promise.resolve();
     let scope: typeof watchErrorScope = null;
     watching ??= Promise.resolve().then(async () => {
-      const current = active();
-      if (!current?.repository) return;
+      const selected = active();
+      if (!selected?.repository) return;
+      // Keep the response under the source it was requested for, even if the selection changes meanwhile.
+      const current = { ...selected, repository: selected.repository };
       const identity = sourceIdentity(current);
       scope = { identity, login: null };
       const connection = await github.connection();
@@ -324,7 +326,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       const previous = state.heads[current.key];
       const known = previous?.branch === current.branch && previous.login === connection.login;
       const head = await github.head({ repository: current.repository, branch: current.branch, etag: known ? previous.etag : null });
-      if (closed || sourceIdentity(active()) !== scope.identity) return;
+      if (closed) return;
       if (head.status !== 304) {
         state.heads[current.key] = { repository: current.repository, branch: current.branch, login: connection.login, sha: head.sha, etag: head.etag, checkedAt: now() };
         const first = sandboxes(current)[0];

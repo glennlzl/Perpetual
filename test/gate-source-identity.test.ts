@@ -45,6 +45,24 @@ test('a failed watcher account read does not expose the previously successful he
   assert.throws(() => manager.watchedHead(scope), /Cannot verify the GitHub account/);
 });
 
+test('a head read during a branch switch is saved only for its original source and account', async t => {
+  const current = { ...source(), stages: [] };
+  const followed: string[] = [];
+  const manager = await createGateManager({ dataDir: await storage(t), source: () => current,
+    github: { connection: async () => ({ login: 'tester', repository: 'acme/app' }), head: async () => { current.branch = 'release'; return { status: 200, sha: B, etag: null }; }, post: async () => {} },
+    steps: noJourneys, follow: async head => { followed.push(head.sha); },
+  });
+  t.after(() => manager.close());
+  await manager.watch();
+  const scope = { key: current.key, repository: 'acme/app', branch: 'main', login: 'tester' };
+  assert.equal(manager.watchedHead(scope), null, 'The selected release branch cannot show the old main head.');
+  assert.equal(manager.watchedHead({ ...scope, branch: 'release' }), null, 'The response must not be stored under the branch selected later.');
+  assert.deepEqual(followed, [], 'Reading another branch never moves this source.');
+  current.branch = 'main';
+  assert.equal(manager.watchedHead(scope)?.sha, B, 'Returning to the original source can use its saved baseline.');
+  assert.equal(manager.watchedHead({ ...scope, login: 'someone-else' }), null);
+});
+
 test('Run now refuses a branch switch while it reads the requested source head', async t => {
   let current = source();
   const reading = deferred(), head = deferred(), prepared: unknown[] = [];
