@@ -383,14 +383,14 @@ function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusF
     catch (failure) { setError((failure as Error).message); setSaving(false); }
   }
   return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
-    <DialogContent aria-describedby={undefined} className="sm:max-w-3xl" onCloseAutoFocus={returnFocus}>
+    <DialogContent aria-describedby={undefined} className="code-review sm:max-w-3xl" onCloseAutoFocus={returnFocus}>
       <DialogHeader><DialogTitle>Approve code</DialogTitle></DialogHeader>
       {/* A blank line keeps its row height; each row's text sits in its own span beside the gutter. */}
-      {code ? <pre aria-label={`${item.name} code`} tabIndex={0} className="max-h-[60vh] min-w-0 overflow-auto rounded-md border bg-muted/40 py-2 font-mono text-xs leading-5">{lines.map((line, index) => <span key={index} className={`flex min-h-5 whitespace-pre pr-3 ${line.kind === 'added' ? 'bg-accent text-accent-foreground' : line.kind === 'removed' ? 'text-muted-foreground' : ''}`}>
+      {code ? <pre aria-label={`${item.name} code`} tabIndex={0} className="max-h-[60vh] min-h-0 min-w-0 overflow-auto rounded-md border bg-muted/40 py-2 font-mono text-xs leading-5">{lines.map((line, index) => <span key={index} className={`flex min-h-5 whitespace-pre pr-3 ${line.kind === 'added' ? 'bg-accent text-accent-foreground' : line.kind === 'removed' ? 'text-muted-foreground' : ''}`}>
         <span aria-hidden="true" className="w-6 shrink-0 select-none text-center text-muted-foreground">{line.kind === 'added' ? '+' : line.kind === 'removed' ? '-' : ''}</span>
         <span>{line.kind !== 'same' && <span className="sr-only">{line.kind === 'added' ? 'Added: ' : 'Removed: '}</span>}{line.text}</span>
       </span>)}</pre> : !error && <Skeleton className="h-40 w-full" />}
-      <ErrorText>{error}</ErrorText>
+      {error && <div className="code-review-error"><ErrorText>{error}</ErrorText></div>}
       <DialogFooter><Button type="button" variant="outline" disabled={saving} onClick={onClose}>Cancel</Button><Button type="button" disabled={!code?.draft || saving} onClick={approve}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}Approve</Button></DialogFooter>
     </DialogContent>
   </Dialog>;

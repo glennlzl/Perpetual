@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
+import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 import type { GitHubConnection } from './SourceSettings';
 
 /** A GitHub device sign-in as /api/github/auth/start and /status report it. */
@@ -13,7 +14,7 @@ type AuthSession = { id?: string; status?: string; userCode?: string; error?: st
 const DEVICE_URL = 'https://github.com/login/device';
 const pending = (session: AuthSession | null) => ['starting', 'pending'].includes(session?.status ?? '');
 
-export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void }) {
+export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose, focusTarget }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void; focusTarget: () => FocusTarget | null }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [starting, setStarting] = useState(false);
   const [attaching, setAttaching] = useState(false);
@@ -117,7 +118,10 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
   const waiting = starting || pending(session);
   const existingAccount = session?.status === 'complete' ? session.account?.login : connection?.authenticated ? connection.account?.login : null;
   return <Dialog open onOpenChange={open => { if (!open && !submitting.current) onClose(); }}>
-    <DialogContent aria-describedby={undefined} showCloseButton={!attaching} className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-md" onInteractOutside={event => event.preventDefault()}>
+    <DialogContent aria-describedby={undefined} showCloseButton={!attaching} className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-md" onInteractOutside={event => event.preventDefault()} onCloseAutoFocus={event => {
+      event.preventDefault();
+      restoreFocus([focusTarget()]);
+    }}>
       <DialogHeader><DialogTitle className="flex items-center gap-3"><img src="/assets/providers/github.svg" className="provider-logo" data-monochrome="true" width={24} height={24} alt="" />Connect GitHub</DialogTitle></DialogHeader>
       {checking ? <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 motion-safe:animate-spin" />Checking GitHub…</p> : waiting ? <div className="grid gap-4">
         {session?.userCode && <div className="grid gap-2">
