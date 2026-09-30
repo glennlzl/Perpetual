@@ -59,6 +59,16 @@ async function settled({manager,context}:{manager:BrowserManager;context:Browser
 const userHome=process.env.HOME||homedir();
 const secretFree=(value:unknown)=>!JSON.stringify(value).includes(key)&&!JSON.stringify(value).includes(password);
 
+// Notify the test when its seed actually starts; workspace preparation has no one-second deadline.
+function heldSeed(){
+  const started=Promise.withResolvers<(error:Error)=>void>();
+  const runtime:JourneyRuntime={capabilities:async()=>({browserInstalled:true}),start(){
+    const worker=Promise.withResolvers<void>();started.resolve(worker.reject);
+    return {promise:worker.promise,cancel(){worker.reject(new Error('Cancelled.'));}};
+  }};
+  return {runtime,started:started.promise};
+}
+
 test('the default harness is OpenCode running Playwright’s generator agent against OpenRouter',()=>{
   assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
 });
@@ -312,12 +322,10 @@ test('saving code or replacing its reviewed case removes an obsolete generation 
   });
 });
 
-test('an in-flight generation failure cannot attach itself to a replacement case',async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+test('an in-flight generation failure cannot attach itself to a replacement case',{timeout:30000},async t=>{
+  const seed=heldSeed(),f=await setup(t,{playwright:seed.runtime});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   rejectSeed(new Error('The original seed failed.'));
   assert.equal(await settled(f),undefined);
@@ -342,12 +350,10 @@ test('discovery replacing a case cannot attach its old generation failure to the
   assert.equal((await restarted.view(f.context)).specs[journey.id],undefined);
 });
 
-test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',{timeout:30000},async t=>{
+  const seed=heldSeed(),f=await setup(t,{playwright:seed.runtime});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
   try{
@@ -361,20 +367,19 @@ test('a generation failure that cannot be saved keeps its original cause and an 
   }finally{await rm(file,{recursive:true});await writeFile(file,saved);}
 });
 
-test('a refused generation cannot restore an unsaved old failure onto a replacement case',async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined,refuseNext=false,refuse:((value:{browserInstalled:boolean})=>void)|undefined;
-  const f=await setup(t,{playwright:{capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refuse=resolve;}):{browserInstalled:true},start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+test('a refused generation cannot restore an unsaved old failure onto a replacement case',{timeout:30000},async t=>{
+  let refuseNext=false;
+  const refusing=Promise.withResolvers<(value:{browserInstalled:boolean})=>void>();
+  const seed=heldSeed(),f=await setup(t,{playwright:{...seed.runtime,capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refusing.resolve(resolve);}):{browserInstalled:true}}});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  for(let i=0;i<100&&!rejectSeed;i++)await wait(10);
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
   try{rejectSeed(new Error('The original seed failed.'));assert.match((await settled(f))?.generation?.error??'',/could not be saved/);}
   finally{await rm(file,{recursive:true});await writeFile(file,saved);}
   refuseNext=true;
   const rejected=assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/Install Chromium/);
-  for(let i=0;i<100&&!refuse;i++)await wait(10);
-  assert.ok(refuse);
+  const refuse=await refusing.promise;
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   refuse({browserInstalled:false});await rejected;
   assert.equal((await f.manager.view(f.context)).specs[journey.id],undefined);
