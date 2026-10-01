@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile, writeFile, mkdir, rename, readdir, realpath } from 'node:fs/promises';
+import { readFile, readdir, realpath } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
@@ -9,9 +9,11 @@ import { scanRepository, createPreviewPlan, DISCOVERY_VERSION } from './scanner.
 import { getProviderStatus, parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
+import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
 import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
-import { readGitHubActions, readServiceConfig, type ConfigFile } from './service-config.ts';
+import { readGitHubActions, readServiceConfig } from './service-config.ts';
+import type { ConfigFile } from '../contract/service-config.ts';
 import { withDeliveryGraph } from './delivery.ts';
 import { readGitHistory } from './git-history.ts';
 import { createGitHubAuthManager } from './github-auth.ts';
@@ -33,7 +35,10 @@ import { readBranchHead, postCommitStatus } from './gate/github.ts';
 import { readBuild } from './gate/build.ts';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub } from './releases/manager.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
-import type { BuildReply } from '../contract/github.ts';
+import type { BuildReply, GitHubConnection, GitHubSource as PublicGitHubSource } from '../contract/github.ts';
+import type { PipelineStateReply, SourceReply } from '../contract/pipeline.ts';
+import type { GitHistory } from '../contract/git-history.ts';
+import type { TwinService, TwinServiceInputView, TwinInputsReply, TwinServicesReply } from '../contract/twin.ts';
 import { createRepairManager, type Repair } from './repair/manager.ts';
 import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs } from './repair/github.ts';
 import { createRepairAgent, type CI, type ModelFactory, type RepairAgentGitHub } from './repair/agent.ts';
@@ -56,7 +61,7 @@ import type { GitHubDeploymentsReader } from './github-deployments.ts';
  * its rescan read, which is null when Git could not read one. */
 export interface GitHubSource extends Omit<PreparedGitHubSource, 'sha'> { sha: string | null; connectedAccount: string; savedAt: string }
 /** The account the user connected; a null record is a deliberate Disconnect. */
-export interface GitHubConnectionRecord { login: string; connectedAt: string }
+export type GitHubConnectionRecord = NonNullable<PipelineStateReply['githubConnection']>;
 /** state.json (schema 1). Saved pipelines are normalized again on every read. */
 export interface ControllerState {
   scan: Scan | null; providers: ProviderStatus[]; pipelines: Record<string, Pipeline>;
@@ -92,7 +97,6 @@ type HttpError = Error & { statusCode?: number };
 type RequestInput = { readonly [key: string]: unknown };
 type Transaction<R> = { state?: ControllerState; commit?(): void; result?: R };
 type SavedStage = Stage & { tests?: unknown };
-type ConnectionSource = GitHubSource | { repository: string; branch: string | null; rootDirectory: string };
 /** A Sandbox stage's context. A repair gate's names its repair, and its scan is of the pull request checkout. */
 type StageContext = EnvironmentContext;
 /** A request's text field. Any other value names nothing, which each lookup then rejects as it would an unknown name. */
@@ -100,6 +104,9 @@ const text=(value: unknown)=>typeof value==='string'?value:'';
 
 const defaultPublicDir=resolve(dirname(fileURLToPath(import.meta.url)),'../public');
 const staticFiles: Record<string, [string, string]>={'/':['build/index.html','text/html']};
+// A controller snapshot includes repository discovery and saved pipeline definitions.
+const CONTROLLER_STATE_LIMIT=32*1024*1024;
+const INVALID_STATE='Cannot load saved state; preserve it and use a different --data directory.';
 // Exact style-block hash from the embedded preview's reported CSP violation.
 // Its injection source is unverified; this grants no other inline CSS or script access.
 const reportedPreviewStyleHash="'sha256-UjmwW5hqkbmZat2z0a4MIudqMdHHunQ57o+t2nldQPQ='";
@@ -133,7 +140,7 @@ async function localCheckout(repo: string) {
 // A Sandbox stage's twin services and the inputs each still needs; views never carry values.
 // A service that can be provisioned adds its provision inputs and, once provisioned, its expiry, claim link and the
 // keys that replace it (from the inputs view `stored`).
-function twinServiceView(config: EnvironmentPlan | null | undefined,values: Record<string, Record<string, unknown> | undefined>,stored: Awaited<ReturnType<ReturnType<typeof createTwinInputs>['view']>>=[]) {
+function twinServiceView(config: EnvironmentPlan | null | undefined,values: Record<string, Record<string, unknown> | undefined>,stored: TwinServiceInputView[]=[]): TwinService[] {
   const field=({name,label,secret}: {name: string; label?: string; secret?: boolean})=>({name,label:label??name,secret:Boolean(secret)});
   return Object.entries(config?.services??{}).filter(([id])=>Object.hasOwn(twinServices,id)).map(([id,options])=>{
     const service=twinServices[id],missing=missingInputs(service,values[id]),settings=fromAppSettings(id,options),entry=settings?null:stored.find(item=>item.id===id);
@@ -169,6 +176,8 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   const dataDir=resolve(options.dataDir??'.perpetual');
   const release=await acquireControllerOwnership(dataDir),cleanup: (() => unknown)[]=[];
   try {
+    // Secure the owned directory without changing the configured path that existing runtime resource labels use.
+    await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
     const app=await createController({...options,dataDir},dispose=>cleanup.push(dispose));
     let closing;
     return {...app,close(){return closing??=(async()=>{await app.close();await release();})();}};
@@ -181,7 +190,6 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
 }
 
 async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
-  await mkdir(dataDir,{recursive:true,mode:0o700});
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
@@ -189,7 +197,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const stateFile=join(dataDir,'state.json');
   let state: ControllerState={scan:null,providers:[],pipelines:{}};
   // The controller's own state file: a JSON null or a schema 1 file without a state object cannot be read; any other file without schema 1 starts afresh.
-  try {const saved: unknown=JSON.parse(await readFile(stateFile,'utf8'));if(saved===null)throw new Error('Invalid state.');if(typeof saved==='object'&&'schema' in saved&&saved.schema===1){const stored='state' in saved?saved.state:undefined;if(!stored||typeof stored!=='object')throw new Error('Invalid state.');state=stored as ControllerState;}}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw new Error('Cannot load saved state; preserve it and use a different --data directory.');}
+  try {
+    const saved=await readStateFile(stateFile,{limit:CONTROLLER_STATE_LIMIT,invalid:INVALID_STATE});
+    if(saved===null)throw new Error(INVALID_STATE);
+    if(typeof saved==='object'&&'schema' in saved&&saved.schema===1) {
+      const stored='state' in saved?saved.state:undefined;
+      if(!stored||typeof stored!=='object'||Array.isArray(stored))throw new Error(INVALID_STATE);
+      state=stored as ControllerState;
+    }
+  }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
   // Retired repair reports, HTTP checks and their stage drafts; the next save omits them.
   delete state.runs;delete state.checks;
@@ -203,11 +219,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const browser=await createBrowserManager({dataDir,usage,...journeys,resolveEnvironment:url=>environments?.resolveTarget(url),onEnvironmentUncertain:(id,error)=>environments!.markUsageUncertain(id,error)});
   onCleanup(()=>browser.close());
   // `twin` lets tests supply provisioning's docker and git email; no container runs for them.
-  const twinInputs=createTwinInputs({dataDir,...twin});
+  const twinInputs=createTwinInputs({dataDir:await realpath(dataDir),...twin});
   const twinsReady=createReadiness();
   environments=await createEnvironmentManager<StageContext>({dataDir,usage,...runtimes,interruptedEnvironmentIds:browser.interruptedEnvironmentIds(),onReady:(context,environment)=>browser.prepareEnvironment(context,environment,{isCurrent:()=>isPreparationSourceCurrent(context)}).finally(()=>twinsReady.done(environment.id))});
   onCleanup(()=>environments.close());
-  let saving: Promise<unknown>=Promise.resolve(),tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
+  const saves=createSaveQueue();
+  let tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
   // A fresh checkout must not reset stage definitions for the same repository/root.
   const sourceKey=(source: {repository: string; rootDirectory: string})=>`github:${source.repository.toLowerCase()}:${source.rootDirectory}`;
   // Every caller has a scanned repository, so a key always exists.
@@ -248,7 +265,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   function sandboxStage(stageId: unknown){const stage=currentPipeline(state).stages.find(item=>item.id===stageId);if(!stage||stage.kind!=='sandbox')throw new Error('Choose a Sandbox stage.');return stage;}
   /** A stage's context for the environments and browser managers. */
   const stageContext=(scan: Scan,stageId: string,port: number | undefined)=>({key:pipelineKey(state),stageId,scan,controllerOrigin:`http://127.0.0.1:${port}`});
-  async function githubConnection(knownSession?: GitHubSession) {
+  async function githubConnection(knownSession?: GitHubSession): Promise<GitHubConnection> {
     const session=knownSession ?? await getGitHubSession();
     const detected=parseGitHubRemote(state.scan?.repo?.remote);
     // A local GitHub project already has a source. Reuse its verified CLI
@@ -256,7 +273,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     // record is a deliberate Disconnect, whereas an absent record is legacy.
     const reuseLocalSession=Boolean(detected) && !Object.hasOwn(state,'githubConnection');
     const connected=!githubAuth.isPending() && session.authenticated && (reuseLocalSession || state.githubConnection?.login===session.account.login);
-    const source: ConnectionSource | null=state.source ?? (detected ? {
+    const source: PublicGitHubSource | null=state.source ?? (detected ? {
       repository:detected,branch:state.scan!.repo.branch,rootDirectory:'/',
     } : null);
     // Connected only with the session's account, so a connected result always names it.
@@ -269,15 +286,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return connection;
   }
   function save<R>(prepare?: (current: ControllerState) => Transaction<R>): Promise<R | undefined> {
-    const operation=saving.then(async()=>{
+    return saves.run(async()=>{
       const transaction=prepare?.(state);
       const content=JSON.stringify({schema:1,state:transaction?.state ?? state},null,2);
-      const temp=stateFile+'.tmp';await writeFile(temp,content,{mode:0o600});await rename(temp,stateFile);
+      if(Buffer.byteLength(content)>CONTROLLER_STATE_LIMIT)throw new Error('Controller state exceeds the 32 MiB storage limit.');
+      await writeStateFile(stateFile,content,{removeTemporary:true});
       transaction?.commit?.();
       return transaction?.result;
     });
-    saving=operation.catch(()=>{});
-    return operation;
   }
   // Refresh older discovery snapshots without resetting the user's stages or source.
   if (state.scan && (state.scan.discoveryVersion ?? 0) < DISCOVERY_VERSION) {
@@ -415,7 +431,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     },
     steps:{
       async unavailable(){return await repairModels()?repairBoxes.available():'Add an OpenRouter API key in Settings.';},
-      repair:repairAgent.repair,state:repairAgent.state,close:repairAgent.close,recover:repairAgent.recover,
+      repair:repairAgent.repair,state:repairAgent.state,close:repairAgent.close,recover:repairAgent.recover,cleanup:repairAgent.cleanup,
     },
   });
   onCleanup(()=>repairs.close());
@@ -482,14 +498,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/twin/inputs/provision'){
         const input=await body(req,16384);
         // The store looks a service up by its name and rejects any other.
-        return reply(res,200,{services:await twinInputs.provision(String(input.service),input.inputs)});
+        return reply(res,200,{services:await twinInputs.provision(String(input.service),input.inputs)} satisfies TwinInputsReply);
       }
       if(path==='/api/twin/inputs') {
-        if(req.method==='GET')return reply(res,200,{services:await twinInputs.view()});
+        if(req.method==='GET')return reply(res,200,{services:await twinInputs.view()} satisfies TwinInputsReply);
         if(req.method!=='PUT')return reply(res,404,{error:'Not found.'});
         if(req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
         const input=await body(req,16384);
-        return reply(res,200,{services:await twinInputs.set(String(input.service),input.inputs)});
+        return reply(res,200,{services:await twinInputs.set(String(input.service),input.inputs)} satisfies TwinInputsReply);
       }
       if(req.method==='GET'&&path==='/api/twin/services') {
         requireSourceIdle();
@@ -499,10 +515,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           // A view never renews a provision; only creating a twin does. It reads the controller's store, whose docker tests supply.
           const services=twinServiceView(plan,await environmentInputs({dataDir,config:plan,refresh:false,store:twinInputs}),await twinInputs.view());
           // generated: an agent wrote the stage's plan (its provenance is in GET /api/environments).
-          return {services,generated:'provenance' in plan};
+          return {services,generated:'provenance' in plan} satisfies TwinServicesReply;
         }));
       }
-      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan),pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo,capabilities:{modelConfigured:!!((process.env.PERPETUAL_MODEL_API_KEY&&process.env.PERPETUAL_MODEL)||process.env.OPENROUTER_API_KEY),browserAgent:true,localBrowser:true,cloudProvisioning:false,businessDiscovery:true}});
+      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo,capabilities:{modelConfigured:!!((process.env.PERPETUAL_MODEL_API_KEY&&process.env.PERPETUAL_MODEL)||process.env.OPENROUTER_API_KEY),browserAgent:true,localBrowser:true,cloudProvisioning:false,businessDiscovery:true}} satisfies PipelineStateReply);
       if(path==='/api/stages/remove'||path==='/api/stages/removal'){
         requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
@@ -628,7 +644,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/api/github/connection'){
         const [connection,local]=await Promise.all([githubConnection(),localCheckout(repo)]);
-        return reply(res,200,{...connection,localCheckout:local});
+        return reply(res,200,{...connection,localCheckout:local} satisfies GitHubConnection);
       }
       if(req.method==='POST'&&path==='/api/github/auth/start') {
         await body(req);
@@ -685,7 +701,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             pipelines[key]=pipeline;
             return {state:{...current,scan,source,providers:[],pipelines},
               commit(){state.scan=scan;state.source=source;state.providers=[];state.pipelines=pipelines;},
-              result:{scan,source,pipeline}};
+              result:{scan,source,pipeline} satisfies SourceReply};
           });
           return reply(res,200,result);
         });
@@ -714,7 +730,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             limit:Number(requestUrl.searchParams.get('limit')??100),
             ...(sync ? {currentRef:`refs/remotes/origin/${source!.branch}`} : {}),
           });
-          return {...history,...sync};
+          return {...history,...sync} satisfies GitHistory;
         },'The active repository changed. Reopen its Git graph.'));
       }
       if(req.method==='GET'&&path==='/api/github-actions') {
@@ -823,6 +839,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
-    closing=(async()=>{const results=await Promise.allSettled(draining);await saving;const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
+    closing=(async()=>{const results=await Promise.allSettled(draining);await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }

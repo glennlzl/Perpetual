@@ -1,14 +1,10 @@
-import { githubEnvironment } from './github-cli.ts';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { startGitHubLogin } from './github-cli.ts';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { getGitHubSession, type GitHubAccount, type GitHubSession } from './github-source.ts';
+import { getGitHubSession } from './github-source.ts';
+import type { GitHubSession, SignInStatus, SignInSnapshot } from '../contract/github.ts';
+export type { SignInStatus, SignInSnapshot } from '../contract/github.ts';
 
-export type SignInStatus = 'starting' | 'pending' | 'complete' | 'error' | 'expired' | 'cancelled';
-/** What the browser may see of one device sign-in: never CLI output or credentials. */
-export interface SignInSnapshot {
-  id: string; status: SignInStatus; userCode: string | null; verificationUrl: string | null;
-  expiresAt: string; account: GitHubAccount | null; error: string | null;
-}
 interface SignIn extends SignInSnapshot {
   output: string; child: ChildProcess | null;
   startupTimer?: NodeJS.Timeout; expiryTimer?: NodeJS.Timeout; killTimer?: NodeJS.Timeout;
@@ -27,9 +23,6 @@ const PENDING = new Set<SignInStatus>(['starting', 'pending']);
 function authError(message: string, statusCode = 409) {
   return Object.assign(new Error(message), { statusCode });
 }
-
-// gh's output is parsed here, so colour, debugging and clipboard settings are pinned too.
-const loginEnvironment = () => githubEnvironment({ strip: ['DEBUG', 'CLICOLOR_FORCE', 'SSH_ASKPASS'], set: { NO_COLOR: '1', CLICOLOR: '0', GIT_TERMINAL_PROMPT: '0' } });
 
 /**
  * Local GitHub CLI device login. Only start() launches authorization; imports,
@@ -90,7 +83,7 @@ export function createGitHubAuthManager(): GitHubAuthManager {
       finish(session, 'error', 'GitHub sign-in returned an unsupported response. Update GitHub CLI and try again.');
       return;
     }
-    // NO_COLOR is set above. Do not return any other CLI output, even on error.
+    // The shared login runner sets NO_COLOR. Do not return any other CLI output, even on error.
     const code = /First copy your one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})\b/.exec(session.output);
     // Wait for the complete line so a split pipe chunk cannot look like an
     // unexpected/truncated authorization URL.
@@ -165,15 +158,9 @@ export function createGitHubAuthManager(): GitHubAuthManager {
     session.startupTimer.unref();
     session.expiryTimer.unref();
 
-    // Omit --git-protocol: in non-interactive mode it is optional, and specifying
-    // it would change the user's global GitHub protocol preference. No extra
-    // scopes or SSH keys are requested; gh uses its own default OAuth scopes.
     let child;
     try {
-      child = spawn('gh', ['auth', 'login', '--web', '--hostname', 'github.com',
-        '--skip-ssh-key', '--clipboard=false'], {
-        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: loginEnvironment(),
-      });
+      child = startGitHubLogin();
     } catch {
       finish(session, 'error', 'Could not launch GitHub CLI. Install or update gh and try again.');
       return snapshot(session);

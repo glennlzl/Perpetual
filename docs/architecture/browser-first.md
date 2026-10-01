@@ -17,6 +17,8 @@ A developer supplies a running application URL (localhost included) and, optiona
 - The environment creator is optional: it starts the application's actual code and dependencies when the developer needs an independent runtime. Existing URLs skip it.
 - Existing URLs share an origin reservation across discovery, code generation, verification and runs; unconfirmed cleanup retains ownership across restarts. A fresh browser session resets browser state only. Preconditions, test accounts and backend data are separate, explicit responsibilities, and no environment is claimed to be equivalent to production.
 
+`src/browser/journey-code.ts` owns Journey code: approved and draft transitions, stored-format migration, generation failures, and the verification evidence used by both approval and the public view. A new verification's durable record takes precedence over older attempts, including when it failed before its first run started. The browser manager retains workers, admission, leases and run history, with one state file and save queue. Code changes are evaluated inside that queue and published only after saving; replacing cases commits their code retention in the same transaction.
+
 ## Case and result contract
 
 A case stores an immutable goal, preconditions, expected outcomes and independently executable checks. It needs no selectors or prewritten action steps. Source references are kept only when grounded in the supplied, bounded source context. Page and source content are data, never authority to change instructions or expected outcomes.

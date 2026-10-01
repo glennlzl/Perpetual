@@ -45,6 +45,76 @@ test('a failed watcher account read does not expose the previously successful he
   assert.throws(() => manager.watchedHead(scope), /Cannot verify the GitHub account/);
 });
 
+test('Run now refuses unavailable head evidence instead of running a previously watched commit', async t => {
+  for (const failure of ['head', 'account'] as const) await t.test(failure, async t => {
+    const current = source(), prepared: unknown[] = [];
+    let failed = false;
+    const message = failure === 'head' ? 'Cannot read branch head.' : 'Cannot verify the GitHub account.';
+    const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-source-'));
+    const manager = await createGateManager({ dataDir, source: () => current,
+      github: {
+        connection: async () => { if (failed && failure === 'account') throw new Error(message); return { login: 'tester', repository: 'acme/app' }; },
+        head: async () => { if (failed && failure === 'head') throw new Error(message); return { status: 200, sha: B, etag: null }; },
+        build: async () => ({ status: 'passed' }), post: async () => {},
+      }, steps: { ...noJourneys, prepare: async gate => { prepared.push(gate); return gate; } },
+    });
+    t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+    await manager.watch();
+    failed = true;
+    await assert.rejects(manager.run({ stageId: 'beta' }), (error: Error) => error.message === message);
+    await manager.idle();
+    assert.deepEqual(prepared, [], 'A failed fresh read must not move the source or prepare an older commit.');
+    assert.deepEqual(manager.view().stages, {});
+    assert.equal(manager.view().watchError, message);
+  });
+});
+
+test('Run now refuses a head observed before the connected account changed', async t => {
+  const current = source(), prepared: unknown[] = [];
+  let login = 'tester';
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-source-'));
+  const manager = await createGateManager({ dataDir, source: () => current,
+    github: { connection: async () => ({ login, repository: 'acme/app' }), head: async () => { login = 'other'; return { status: 200, sha: B, etag: null }; }, build: async () => ({ status: 'passed' }), post: async () => {} },
+    steps: { ...noJourneys, prepare: async gate => { prepared.push(gate); return gate; } },
+  });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  await assert.rejects(manager.run({ stageId: 'beta' }), /connection changed/i);
+  await manager.idle();
+  assert.deepEqual([prepared, manager.view().stages], [[], {}]);
+});
+
+test('Run now cannot treat an unchanged response without a saved head as the scanned commit', async t => {
+  const current = source(), prepared: unknown[] = [];
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-source-'));
+  const manager = await createGateManager({ dataDir, source: () => current,
+    github: { connection: async () => ({ login: 'tester', repository: 'acme/app' }), head: async () => ({ status: 304 }), build: async () => ({ status: 'passed' }), post: async () => {} },
+    steps: { ...noJourneys, prepare: async gate => { prepared.push(gate); return gate; } },
+  });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  await assert.rejects(manager.run({ stageId: 'beta' }), /Could not read the branch head/);
+  await manager.idle();
+  assert.deepEqual([prepared, manager.view().stages], [[], {}]);
+});
+
+test('Run now cannot borrow an in-flight watch of the branch selected before it', async t => {
+  let current = source();
+  const reading = deferred(), head = deferred(), prepared: unknown[] = [];
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-source-'));
+  const manager = await createGateManager({ dataDir, source: () => current,
+    github: { connection: async () => ({ login: 'tester', repository: 'acme/app' }), head: async () => { reading.resolve(); await head.promise; return { status: 200, sha: A, etag: null }; }, build: async () => ({ status: 'passed' }), post: async () => {} },
+    steps: { ...noJourneys, prepare: async gate => { prepared.push(gate); return gate; } },
+  });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const watching = manager.watch();
+  await reading.promise;
+  current = { ...current, branch: 'release', sha: B };
+  const running = manager.run({ stageId: 'beta' });
+  head.resolve();
+  await assert.rejects(running, /source changed/i);
+  await watching; await manager.idle();
+  assert.deepEqual([prepared, manager.view().stages], [[], {}]);
+});
+
 test('a head read during a branch switch is saved only for its original source and account', async t => {
   const current = { ...source(), stages: [] };
   const followed: string[] = [];

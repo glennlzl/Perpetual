@@ -1,7 +1,9 @@
 import { useRef, useState, type SyntheticEvent } from 'react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import type { PipelineView } from '@/lib/pipeline-nodes.ts';
-import type { PipelineAction, PipelineActionResult, PipelineDialog } from './App';
+import type { PipelineDialog } from './App';
+import type { PipelineAction } from './lib/test-workspace';
+import type { PipelineActionReply as PipelineActionResult } from '../../contract/pipeline.ts';
 
 type TransitionConfirmationProps = { dialog: PipelineDialog; pipeline: PipelineView | null | undefined; onAction: (input: PipelineAction) => Promise<PipelineActionResult>; onClose: () => void; busy: boolean };
 

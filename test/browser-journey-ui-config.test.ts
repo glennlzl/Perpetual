@@ -104,7 +104,7 @@ test('journey time limit is 1–30 minutes', () => {
   assert.equal(settings({ targetUrl:'javascript:alert(1)' }).errors.targetUrl, 'Enter an HTTP or HTTPS target URL.');
 });
 test('generation preselects only legacy step-less cases and drafts', () => {
-  const cases = [{ id:'legacy', steps:[] }, { id:'reviewed', steps:[{ id:'a', title:'A' }, { id:'b', title:'B' }] }, { id:'draft', needsReview:true, steps:[{ id:'a', title:'A' }] }, { id:'old' }];
+  const cases = [{ id:'legacy', needsReview:false, steps:[] }, { id:'reviewed', needsReview:false, steps:[{ id:'a', title:'A' }, { id:'b', title:'B' }] }, { id:'draft', needsReview:true, steps:[{ id:'a', title:'A' }] }, { id:'old', needsReview:false, steps:[] }];
   assert.deepEqual(defaultReplaceIds(cases), ['legacy', 'draft', 'old']);
   assert.equal(generateRoom(60, 0), 0);
   assert.equal(generateRoom(60, 3), 3);
@@ -121,7 +121,7 @@ test('generation at the case limit needs room for a full discovery result', () =
 });
 test('stale case drafts are pruned when their case changes or disappears', () => {
   const drafts = new Map<string, { original: string; draft: unknown }>();
-  const kept = { id:'a', name:'Checkout', selected:true }, changed = { id:'b', name:'Refund' };
+  const kept = { id:'a', name:'Checkout', selected:true }, changed = { id:'b', name:'Refund', selected:false };
   drafts.set(caseDraftKey('/repo', 'beta', 'a'), { original:caseDraftOriginal({ ...kept, selected:false }), draft:{} });
   drafts.set(caseDraftKey('/repo', 'beta', 'b'), { original:caseDraftOriginal(changed), draft:{} });
   drafts.set(caseDraftKey('/repo', 'beta', 'gone'), { original:'{}', draft:{} });

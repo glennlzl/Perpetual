@@ -8,8 +8,11 @@ import { api } from '@/lib/api';
 import { useTestStage } from '@/lib/use-test-workspace';
 import { environmentHasResources } from '@/lib/environment-view';
 import type { StageRemoval } from '@/lib/test-workspace';
+import type { StageRemovalReply } from '../../contract/environment.ts';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
-import type { PipelineAction, PipelineActionResult, PipelineDialog } from './App';
+import type { PipelineDialog } from './App';
+import type { PipelineAction } from './lib/test-workspace';
+import type { PipelineActionReply as PipelineActionResult } from '../../contract/pipeline.ts';
 
 type StageSettingsDialogProps = {
   // tests: a legacy stage field the controller no longer writes.
@@ -61,7 +64,7 @@ export default function StageSettingsDialog({ dialog, stage, repoPath, onAction,
       if (!saving.current) {
         const epoch = requestEpoch.current;
         try {
-          const result = await api<{ removal: StageRemoval | null }>(`/api/stages/removal?${new URLSearchParams({ repoPath: repoPath!, stageId: stage!.id })}`);
+          const result = await api<StageRemovalReply>(`/api/stages/removal?${new URLSearchParams({ repoPath: repoPath!, stageId: stage!.id })}`);
           if (!stopped && workspaceStage.isCurrent() && epoch === requestEpoch.current) {
             setRemoval(result.removal);
             setReadError('');
@@ -104,7 +107,7 @@ export default function StageSettingsDialog({ dialog, stage, repoPath, onAction,
     try {
       if (!live.current || !workspaceStage.isCurrent()) throw new Error('The source changed. Reopen this stage.');
       if (removing) {
-        const result = await api<{ removal: StageRemoval | null }>('/api/stages/remove', { repoPath, stageId: stage!.id });
+        const result = await api<StageRemovalReply>('/api/stages/remove', { repoPath, stageId: stage!.id });
         if (live.current && workspaceStage.isCurrent()) { setRemoval(result.removal); setReadError(''); }
       } else {
         await onAction({ action: 'rename-stage', stageId: stage!.id, name: trimmedName });

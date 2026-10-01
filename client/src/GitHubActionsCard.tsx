@@ -9,6 +9,7 @@ import { repairOffer, startRepair, type StageAutopilot } from '@/lib/pipeline-au
 import { GITHUB_MARK_LABELS, actionLabel, actionText, buildChanges, buildWorkflowRows, combinedMark, githubMark, type BuildReply, type ConfiguredWorkflow, type GitHubMark, type GitHubRun } from '@/lib/pipeline-github.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import { StepItem, StepList } from './StepList';
+import type { GitHubActionsReply } from '../../contract/github.ts';
 
 const MARKS: Record<Exclude<GitHubMark, 'running'>, LucideIcon> = { queued: CircleDashed, waiting: CircleDashed, passed: CircleCheck, failed: CircleX, cancelled: CircleSlash, skipped: CircleMinus };
 const withMark = (label: string, mark: GitHubMark | null) => mark ? `${label}, ${GITHUB_MARK_LABELS[mark]}` : label;
@@ -101,7 +102,7 @@ export default function GitHubActionsCard({ repoPath, scannedAt, scannedSha, run
   useEffect(() => {
     let active = true;
     const params = new URLSearchParams({ repoPath: repoPath! });
-    api<{ workflows: ConfiguredWorkflow[] }>(`/api/github-actions?${params}`).then(result => {
+    api<GitHubActionsReply>(`/api/github-actions?${params}`).then(result => {
       if (active) setConfig({ key: configKey, workflows: result.workflows, error: '' });
     }).catch(failure => {
       if (active) setConfig({ key: configKey, workflows: [], error: failure instanceof Error ? failure.message : 'Could not load actions.' });

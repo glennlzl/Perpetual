@@ -51,11 +51,22 @@ FIND_FORM = r"""() => {
   return {};
 }"""
 # Visible alerts and live regions, plus the browser's own messages for fields it rejected.
+# Keep their raw text: rendered innerText or whitespace folding can change an echoed account value before redaction.
 MESSAGES = r"""() => {
   const selector = '[role=alert], [role=status], [aria-live=assertive], [aria-live=polite]';
   const texts = [];
-  const add = text => { text = (text || '').replace(/\s+/g, ' ').trim(); if (text && !texts.includes(text)) texts.push(text); };
-  document.querySelectorAll(selector).forEach(node => { if (!node.parentElement?.closest(selector) && node.checkVisibility()) add(node.innerText); });
+  const add = text => { if (text && text.trim() && !texts.includes(text)) texts.push(text); };
+  const visibleText = node => {
+    if (node.nodeType === Node.TEXT_NODE) return getComputedStyle(node.parentElement).visibility === 'visible' ? node.textContent || '' : '';
+    if (node.nodeType !== Node.ELEMENT_NODE || ['SCRIPT', 'STYLE'].includes(node.tagName)) return '';
+    // A boxless wrapper can contain rendered text; visibility can also be restored by a descendant.
+    // Check the rendered ancestor for hidden layout/opacity, and each text node for its own visibility.
+    let box = node;
+    while (box && getComputedStyle(box).display === 'contents') box = box.parentElement;
+    if (!box || getComputedStyle(box).contentVisibility === 'hidden' || !box.checkVisibility({opacityProperty: true})) return '';
+    return Array.from(node.childNodes, visibleText).join('');
+  };
+  document.querySelectorAll(selector).forEach(node => { if (!node.parentElement?.closest(selector)) add(visibleText(node)); });
   document.querySelectorAll('input:user-invalid').forEach(node => add(node.validationMessage));
   return texts.join(' | ');
 }"""
@@ -132,8 +143,8 @@ async def settled(page, credentials, allowed, seconds):
     message = ""
     with contextlib.suppress(Exception):
         message = await asyncio.wait_for(page.main_frame.evaluate(MESSAGES), 3)
-    # Redact before truncating, so a cut can never leave part of a value.
-    message = redact(" ".join(str(message).split()), credentials)[:MESSAGE_LIMIT].strip()
+    # Redact before whitespace folding or truncation, so neither can leave a changed or partial account value.
+    message = " ".join(redact(str(message), credentials).split())[:MESSAGE_LIMIT].strip()
     return {"result": "still_on_sign_in", "code": "browser_action_failed", **({"message": message} if message else {})}
 
 

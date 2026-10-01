@@ -147,6 +147,26 @@ class SignInForms(unittest.IsolatedAsyncioTestCase):
         for value in ACCOUNT.values():
             self.assertNotIn(value, json.dumps(result) + reply)
 
+    async def test_visible_diagnostics_traverse_boxless_and_visibility_overridden_elements_before_redaction(self):
+        account = {"username": "owner@example.invalid", "password": "fixture  spaced-password"}
+        async with self.browser("/none") as owned:
+            page = await owned.active_page()
+            for diagnostic in [
+                '<div role="alert">Rejected: <span style="display:contents"><span data-account></span></span></div>',
+                '<div role="alert" style="display:contents">Rejected: <span data-account></span></div>',
+                '<div role="alert" style="visibility:hidden">Hidden text<span style="visibility:visible">Rejected: <span data-account></span></span></div>',
+            ]:
+                with self.subTest(diagnostic=diagnostic):
+                    await page.set_content('<form onsubmit="event.preventDefault()"><input type="email"><input type="password"><button>Sign in</button></form>' + diagnostic +
+                                           '<div role="alert"><span hidden>Hidden child</span><span style="opacity:0">Transparent child</span>'
+                                           '<span style="visibility:hidden">Invisible child</span><script>"Script data"</script><style>.private {color:red}</style></div>' +
+                                           '<div hidden><div role="alert" style="display:contents">Hidden ancestor</div></div>')
+                    await page.locator('[data-account]').evaluate('(node, value) => node.textContent = value', account["password"])
+                    result = await sign_in.sign_in_on_page(page, account, lambda _url: True, lambda _url: True, seconds=0)
+                    self.assertEqual(result, {"result": "still_on_sign_in", "code": "browser_action_failed", "message": "Rejected: [REDACTED]"})
+                    self.assertEqual(await page.input_value('input[type=password]'), account["password"])
+            self.assertEqual(self.app.posts, [])
+
     async def test_account_values_stay_on_the_application_origin(self):
         async with self.browser("/email", allowedOrigins=[self.url, self.other_url]) as owned:
             page = await owned.active_page()

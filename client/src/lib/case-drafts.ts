@@ -2,7 +2,7 @@ import type { BrowserCase, CaseAssertion } from './browser-test-ui.ts';
 import type { StepRow } from './journey-steps.ts';
 
 /** The case editor's fields: preconditions and outcomes as text, one per line, and milestones as rows. */
-export type CaseForm = Omit<BrowserCase, 'goal' | 'preconditions' | 'expectedOutcomes' | 'assertions' | 'isolation'> & { goal: string; preconditions: string; expectedOutcomes: string; assertions: CaseAssertion[]; isolation: string; stepRows: StepRow[] };
+export type CaseForm = Omit<BrowserCase, 'goal' | 'preconditions' | 'expectedOutcomes' | 'assertions' | 'isolation'> & { goal: string; preconditions: string; expectedOutcomes: string; assertions: CaseAssertion[]; isolation: BrowserCase['isolation']; stepRows: StepRow[] };
 /** An edit of a case: the definition it started from (caseDraftOriginal) and the edited fields. */
 export interface CaseDraft { original: string; draft: CaseForm }
 // Ephemeral edits survive closing a dialog; never persist test inputs in browser storage.

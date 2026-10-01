@@ -228,12 +228,12 @@ test('pull requests open as drafts of the repair branch against the target branc
   const calls: string[][] = [];
   const run: CommandRunner = async (_file, args) => {
     calls.push(args);
-    if (args.includes('user')) return { stdout: JSON.stringify({ login: 'glennlzl', id: 1234 }) };
+    if (args.includes('user')) return { stdout: JSON.stringify({ login: 'developer', id: 1234 }) };
     if (args.some(arg => arg.startsWith('repos/owner/app/pulls?'))) return { stdout: '[]' };
     return { stdout: JSON.stringify({ number: 7, html_url: 'https://github.com/owner/app/pull/7', draft: true }) };
   };
   const pulls = createRepairPullRequests({ run });
-  assert.deepEqual(await pulls.account(), { login: 'glennlzl', id: 1234 });
+  assert.deepEqual(await pulls.account(), { login: 'developer', id: 1234 });
   assert.equal(await pulls.find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c' }), null);
   assert.deepEqual(await pulls.create({ repository: 'owner/app', base: 'main', branch: 'perpetual/repair/cb9292c', title: 'Fix the failed CI build at cb9292c', body: '@owner token=[REDACTED]' }), { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true });
   await pulls.ready({ repository: 'owner/app', number: 7 });

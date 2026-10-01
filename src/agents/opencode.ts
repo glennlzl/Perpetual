@@ -34,6 +34,9 @@ export const opencodeSettings = ({ model, permission }: { model: string; permiss
 
 const exec = promisify(execFile);
 const TAIL = 4000;
+// Observe complete bounded streams before retaining their tails. An overflow loses the context needed for redaction.
+const CAPTURE_CHARS = 256 * 1024;
+const OUTPUT_WITHHELD = 'Agent output exceeded the capture limit; output text withheld.';
 /** Added to a use's own reason for a failed run, which replaces the worker's, when its processes may remain. */
 const INCOMPLETE = 'Cleanup incomplete; the agent’s processes could not be confirmed stopped.';
 // OpenRouter refusals OpenCode reports as `Error: <message>` before it exits, and what a person does about each.
@@ -106,25 +109,35 @@ export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeou
   async function run(prompt: string): Promise<{ output: string }> {
     if (abort.signal.aborted) throw new Error(messages.cancelled);
     const { command, args, env: own } = harness({ model: `openrouter/${model}`, prompt, cwd });
-    const tails = { stdout: '', stderr: '' };
-    job = superviseWorker({ command, args, cwd, env: { ...env, ...own }, timeoutMs, cleanupGraceMs, settleMs, secrets: hidden, unavailable: messages.unavailable,
-      // Redacted before clipping, so a clipped tail never keeps part of a secret.
-      onOutput(chunk, stream) { tails[stream] = hide(tails[stream] + chunk).slice(-TAIL); } });
+    const childEnv = { ...env, ...own };
+    const captures = { stdout: { text: '', truncated: false }, stderr: { text: '', truncated: false } };
+    const tail = (stream: 'stdout' | 'stderr') => {
+      const capture = captures[stream];
+      // browserError owns the environment's model keys and text redaction. Let it see the complete capture first.
+      return capture.truncated ? OUTPUT_WITHHELD : capture.text ? browserError(hide(capture.text), childEnv, Infinity).slice(-TAIL).trim() : '';
+    };
+    job = superviseWorker({ command, args, cwd, env: childEnv, timeoutMs, cleanupGraceMs, settleMs, secrets: hidden, unavailable: messages.unavailable,
+      onOutput(chunk, stream) {
+        const capture = captures[stream];
+        if (capture.truncated) return;
+        if (capture.text.length + chunk.length > CAPTURE_CHARS) { capture.text = ''; capture.truncated = true; }
+        else capture.text += chunk;
+      } });
     try {
       await job.promise;
-      const output = [tails.stdout.trim(), tails.stderr.trim()].filter(Boolean).join('\n');
-      return { output: output && browserError(output, env, TAIL) };
+      const output = [tail('stdout'), tail('stderr')].filter(Boolean).join('\n');
+      return { output: output && browserError(output, childEnv, TAIL) };
     }
     catch (caught) {
       const error = caught as WorkerError, incomplete = error.cleanupIncomplete ? { cleanupIncomplete: true } : {};
       const said = (reason: string) => error.cleanupIncomplete && !reason.includes('Cleanup incomplete') ? `${reason} ${INCOMPLETE}` : reason;
       if (abort.signal.aborted) throw Object.assign(new Error(said(messages.cancelled)), { reason: said(messages.cancelled), output: '' }, incomplete);
-      const output = (tails.stderr.trim() || tails.stdout.trim()).split('\n').slice(-6).join(' ').slice(-500);
+      const output = (tail('stderr') || tail('stdout')).split('\n').slice(-6).join(' ').slice(-500);
       const stopped = /exited before completing/.test(error.message);
       const refusal = stopped && !error.timedOut ? openrouterRefusal(output) : undefined;
       const reason = said(error.timedOut ? messages.timedOut : stopped ? refusal ?? messages.stopped : error.message);
-      throw Object.assign(new Error(browserError(hide(`${reason}${output && !refusal ? ` ${output}` : ''}`), env, 800)),
-        { reason: browserError(hide(reason), env, 800), output: output && browserError(hide(output), env, 800) }, error.timedOut ? { timedOut: true } : {}, incomplete);
+      throw Object.assign(new Error(browserError(hide(`${reason}${output && !refusal ? ` ${output}` : ''}`), childEnv, 800)),
+        { reason: browserError(hide(reason), childEnv, 800), output: output && browserError(hide(output), childEnv, 800) }, error.timedOut ? { timedOut: true } : {}, incomplete);
     } finally { job = null; }
   }
   return { run, hide, signal: abort.signal, cancel() { abort.abort(); job?.cancel(); } };

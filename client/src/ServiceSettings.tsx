@@ -6,11 +6,8 @@ import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
 import { branchMismatchNote } from '@/lib/journey-config';
+import type { ConfigField as ConfigFieldValue, ServiceConfiguration } from '../../contract/service-config.ts';
 
-// GET /api/service-config: a scanned node's configuration files and its read-only sections.
-type ConfigFieldValue = { key: string; label: string; type: 'list'; value: string[] } | { key: string; label: string; type: 'boolean' | 'number' | 'text'; value: string | number | boolean };
-type ConfigFile = { path: string; editUrl?: string; local?: boolean };
-type ServiceConfiguration = { nodeId: string; provider: string | null; files?: ConfigFile[]; sections?: { id: string; title: string; fields: ConfigFieldValue[] }[] };
 type Mismatch = { branches: string[]; branch: string };
 
 // Scanned values are read-only text. Commands, paths and identifiers stay mono;
@@ -49,7 +46,7 @@ function ConfigField({ field, mismatch }: { field: ConfigFieldValue; mismatch: M
 }
 
 // A service dialog always names its node.
-export default function ServiceSettings({ nodeId, repoPath, deployBranches, branch }: { nodeId?: string; repoPath?: string; deployBranches?: unknown; branch?: string }) {
+export default function ServiceSettings({ nodeId, repoPath, deployBranches, branch }: { nodeId?: string; repoPath?: string; deployBranches?: unknown; branch?: string | null }) {
   const isWorkflow = nodeId!.startsWith('workflow:') || nodeId!.startsWith('job:');
   const branches = Array.isArray(deployBranches) ? [...new Set(deployBranches.filter((value): value is string => typeof value === 'string' && Boolean(value)))] : [];
   const mismatch = branch && branches.length && !branches.includes(branch) ? { branches, branch } : null;

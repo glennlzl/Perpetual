@@ -45,6 +45,10 @@ class ProtocolModelHandler(BaseHTTPRequestHandler):
         latest = request["messages"][-1]["content"]
         text = latest if isinstance(latest, str) else "\n".join(part.get("text", "") for part in latest)
         observation = text.split("<browser_state>")[-1]
+        if not self.server.observations:
+            # Keep discovery alive for a real frame before this immediate loopback model
+            # can finish the agent loop and trigger cleanup of its independent frame stream.
+            self.server.frame_wait_timed_out = not self.server.first_frame.wait(timeout=5)
         self.server.observations.append(observation)
         if "<button" in observation and len(self.server.observations) == 1:
             # One read-only action first, so the loop observes the page it acted on.
@@ -154,13 +158,22 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
     async def test_real_agent_loop_with_protocol_fixture_and_reviewable_discovery(self):
         model_server = ThreadingHTTPServer(("127.0.0.1", 0), ProtocolModelHandler)
         model_server.observations = []
+        model_server.first_frame = threading.Event()
+        model_server.frame_wait_timed_out = False
         threading.Thread(target=model_server.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{self.server.server_port}"
         payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 30})
         events = []
+
+        def emitted(event):
+            events.append(event)
+            if event["type"] == "frame":
+                model_server.first_frame.set()
+
         try:
-            with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model_server.server_port}/v1"}), patch.object(runner, "emit", events.append):
+            with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model_server.server_port}/v1"}), patch.object(runner, "emit", emitted):
                 discovered = await asyncio.wait_for(runner.discover(payload), 35)
+                self.assertFalse(model_server.frame_wait_timed_out, "Discovery did not emit a real browser frame within 5 seconds.")
                 self.assertGreaterEqual(len(model_server.observations), 2)
                 self.assertTrue(any(event.get("actions") and event["actions"][0] == {"type": "scroll", "status": "passed"} for event in events))
                 self.assertTrue(any(event["type"] == "frame" for event in events))

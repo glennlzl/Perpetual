@@ -1,19 +1,9 @@
 import {browserError} from './runtime.ts';
 import {RUN,resolvedFrom} from '../journeys/playwright/checks.ts';
-import type {BrowserCase,FinalAssertion} from '../business/browser-cases.ts';
+import type {BrowserCase} from '../business/browser-cases.ts';
 
-export type BlockerKind='account'|'fixture'|'integration'|'permission'|'environment';
-/** A missing prerequisite: an account, fixture, integration, permission or environment. */
-export type Blocker={stepId?:string;kind:BlockerKind;evidence:string};
-/**
- * A final assertion's independent result; reached false when the journey stopped short of the end state. resolved is the
- * text it looked for when its value names the run's token as {run}.
- */
-export type AssertionResult=FinalAssertion&{passed:boolean;resolved?:string;reached?:false};
-export type JourneyVerdict='passed'|'failed'|'blocked'|'needs_review';
-/** A journey's result row: a verdict, or a journey that was skipped or cancelled and has none. */
-export type JourneyResult={caseId:string;status:JourneyVerdict|'skipped'|'cancelled';engine?:'playwright';assertions:AssertionResult[];blockers?:Blocker[];error?:string};
-export type RunStatus=JourneyVerdict|'cancelled'|'completed';
+import type { BlockerKind, Blocker, AssertionResult, JourneyVerdict, JourneyResult, RunStatus } from '../../contract/browser.ts';
+export type { BlockerKind, Blocker, AssertionResult, JourneyVerdict, JourneyResult, RunStatus } from '../../contract/browser.ts';
 /** A milestone's progress as the controller accepted it. */
 export type MilestoneState={id:string;title:string;status:string};
 /** What a verdict reads of the approved case snapshot. */

@@ -1,30 +1,14 @@
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { parse, stringify } from 'yaml';
-import { withDeliveryGraph, type Delivery } from './delivery.ts';
+import { withDeliveryGraph } from './delivery.ts';
 import { redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { hasRepositoryFile, readRepositoryFile } from './repository-files.ts';
+import type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflow, ScanRepo, Scan, PreviewPlan } from '../contract/scanner.ts';
+export type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflowJob, ScanWorkflow, ScanRepo, ScanPlan, Scan, PreviewPlan } from '../contract/scanner.ts';
 
-export const DISCOVERY_VERSION = 4;
-
-export type Confidence = 'configured' | 'inferred';
-export interface Evidence { file: string; line?: number; summary: string }
-export interface ScanNode {
-  id: string; label: string; kind: string; provider: string | null; status: string; detail: string; evidence: Evidence[];
-  projectName?: string | null; previewAlias?: string; deployBranches?: string[]; configFile?: string | null;
-}
-export interface ScanEdge { source: string; target: string; label: string; confidence: Confidence }
-export interface ScanService { id: string; name: string; path: string; framework: string; provider: string | null; commands: Record<string, string> }
-export interface ScanWorkflowJob { id: string; name: string; needs: string[] }
-export interface ScanWorkflow { file: string; name: string; triggers: string[]; jobs: ScanWorkflowJob[] }
-export interface ScanRepo { name: string; path: string; branch: string | null; sha: string | null; remote: string | null }
-export interface ScanPlan { summary: string; steps: string[]; workflow?: string }
-export interface Scan {
-  discoveryVersion: number; repo: ScanRepo; nodes: ScanNode[]; edges: ScanEdge[]; services: ScanService[]; workflows: ScanWorkflow[];
-  warnings: string[]; plan: ScanPlan; scannedAt: string; delivery: Delivery<ScanNode>;
-}
-export interface PreviewPlan { title: string; steps: string[]; workflow?: string }
+export const DISCOVERY_VERSION = 5;
 
 // Parsed repository files are untrusted: these describe only the fields read below, and each is still checked where used.
 /** A repository's package.json as parsed JSON: only these fields are read, and each is checked where it is used. */
@@ -37,7 +21,6 @@ interface WorkflowYaml { name?: unknown; on?: string | string[] | { push?: { bra
 interface RailwayConfig { build?: { dockerfilePath?: unknown } | null; deploy?: { healthcheckPath?: unknown } | null }
 interface PackageManager { name: string; version: string | undefined; lock: string | null }
 interface WorkflowStep { name?: string; uses?: string; run?: string; with?: Record<string, string | boolean>; env?: Record<string, string>; 'working-directory'?: string }
-interface VercelProject { id: string; projectName: string; previewAlias: string; configFile: string; evidence: Evidence[]; workflowIds: Set<string> }
 
 const SKIP = new Set(['node_modules', 'dist', 'build', 'coverage', 'vendor', 'graphify-out']);
 const SCRIPT_NAMES = ['build', 'test', 'lint', 'typecheck', 'check', 'test:changed', 'test:related'];
@@ -244,12 +227,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     }
   } catch { /* Workflows are optional. */ }
   const vercelEvidence: Evidence[] = [];
-  const vercelProjects = new Map<string, VercelProject>();
-  const vercelProjectNames = new Set<string>();
   const vercelConfigurations: { file: string; location: string }[] = [];
-  const namedVercelWorkflows = new Set<string>();
-  // Literal push branch filters say which branch a workflow deploys; globs and unfiltered pushes stay unknown.
-  const pushBranches = new Map<string, string[]>();
   for (const file of workflowFiles) {
     const raw = await safeFile(root, file);
     if (!raw) continue;
@@ -261,11 +239,6 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     const workflow: ScanWorkflow = { file, name: clean(data.name || path.basename(file)), triggers: triggers.map(clean), jobs };
     workflows.push(workflow);
     const workflowId = `workflow:${id(file)}`;
-    const pushFilter: unknown[] = data.on && typeof data.on === 'object' && !Array.isArray(data.on) && Array.isArray(data.on.push?.branches) ? data.on.push.branches : [];
-    const branches = pushFilter.filter((branch): branch is string => typeof branch === 'string' && /^[\w./-]{1,255}$/.test(branch));
-    // Pull request runs deploy the PR's ref, so the push filter no longer names every deployed branch.
-    const otherRefs = triggers.some(trigger => ['pull_request', 'pull_request_target'].includes(trigger));
-    if (branches.length && branches.length === pushFilter.length && !otherRefs) pushBranches.set(workflowId, branches);
     node({ id: workflowId, label: workflow.name, kind: 'workflow', provider: 'GitHub', status: 'configured', detail: `Triggers: ${workflow.triggers.join(', ') || 'not detected'} · execution status unknown.`, evidence: [evidence(file, 'Existing GitHub Actions workflow.', 1)] });
     edge('repository', workflowId, 'existing automation');
     for (const job of jobs) {
@@ -277,28 +250,6 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     if (/vercel/i.test(raw)) {
       const workflowEvidence = evidence(file, 'Vercel-related automation found; provider connection is not verified.', lineOf(raw.toLowerCase(), 'vercel'));
       appendEvidence(vercelEvidence, workflowEvidence);
-      // A bounded, referenced alias helper is configuration evidence, not executable input.
-      for (const match of raw.matchAll(/\bnode\s+(scripts\/vercel[\w/-]*alias[\w-]*\.m?js)\b/g)) {
-        const helper = await safeFile(root, match[1]);
-        if (!helper) continue;
-        for (const object of helper.matchAll(/\{[^{}]{0,1500}\}/g)) {
-          const name = object[0].match(/\bname\s*:\s*["']([\w.-]+)["']/)?.[1];
-          const alias = object[0].match(/\bpreviewAlias\s*:\s*["']([\w.-]+\.vercel\.app)["']/)?.[1];
-          if (name && alias) {
-            const identity = `${name}:${alias}`;
-            const project = vercelProjects.get(identity) || {
-              id: vercelProjectNames.has(name) ? `vercel:${id(name)}:${id(alias)}` : `vercel:${id(name)}`,
-              projectName: name, previewAlias: alias, configFile: match[1], evidence: [], workflowIds: new Set(),
-            };
-            appendEvidence(project.evidence, evidence(match[1], `Named Vercel project ${name} has a preview alias mapping.`, lineOf(helper, object[0])));
-            appendEvidence(project.evidence, workflowEvidence);
-            project.workflowIds.add(workflowId);
-            vercelProjects.set(identity, project);
-            vercelProjectNames.add(name);
-            namedVercelWorkflows.add(file);
-          }
-        }
-      }
     }
   }
 
@@ -331,15 +282,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
   }
 
   const frontend = services.filter(s => ['Next.js', 'Nuxt', 'Vite', 'React'].includes(s.framework));
-  for (const project of vercelProjects.values()) {
-    const targetId = project.id;
-    const deployBranches = [...project.workflowIds].every(workflowId => pushBranches.has(workflowId)) ? [...new Set([...project.workflowIds].flatMap(workflowId => pushBranches.get(workflowId)!))] : [];
-    node({ id: targetId, label: `${project.projectName} preview`, kind: 'deployment', provider: 'Vercel', status: 'configured', projectName: project.projectName, previewAlias: project.previewAlias, ...(deployBranches.length ? { deployBranches } : {}), configFile: project.configFile, detail: 'Preview alias configuration; account authorization and deployed commit are unverified.', evidence: project.evidence });
-    edge('repository', targetId, 'preview alias configuration');
-    for (const workflowId of project.workflowIds) edge(workflowId, targetId, 'preview alias configuration');
-  }
-  // Independent configuration files remain visible even when other named targets
-  // are discovered through workflows. Their project identity is not guessed.
+  // Standard configuration keeps its own identity; workflow clues never name a project.
   for (const config of vercelConfigurations) {
     const targetId = `vercel:config:${id(config.file)}`;
     const service = services.find(item => item.path === config.location);
@@ -353,12 +296,11 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
       if (serviceNode && !serviceNode.provider) serviceNode.provider = 'Vercel';
     }
   }
-  const unassignedVercelEvidence = vercelEvidence.filter(item => !namedVercelWorkflows.has(item.file));
-  if (unassignedVercelEvidence.length) {
-    const targetId = vercelProjectNames.has('Vercel') ? 'vercel:unassigned:workflows' : 'vercel:Vercel';
-    node({ id: targetId, label: 'Vercel deployment', kind: 'deployment', provider: 'Vercel', status: 'configured', projectName: null, configFile: null, detail: 'Vercel-related workflow configuration; the deployment target and cloud connection are unverified.', evidence: unassignedVercelEvidence });
+  if (vercelEvidence.length) {
+    const targetId = 'vercel:Vercel';
+    node({ id: targetId, label: 'Vercel deployment', kind: 'deployment', provider: 'Vercel', status: 'configured', projectName: null, configFile: null, detail: 'Vercel-related workflow configuration; the deployment target and cloud connection are unverified.', evidence: vercelEvidence });
     edge('repository', targetId, 'provider configuration');
-    for (const source of unassignedVercelEvidence) edge(`workflow:${id(source.file)}`, targetId, 'provider configuration');
+    for (const source of vercelEvidence) edge(`workflow:${id(source.file)}`, targetId, 'provider configuration');
   }
   const backend = services.filter(s => ['Hono', 'Express', 'Fastify'].includes(s.framework));
   for (const web of frontend) for (const api of backend) edge(web.id, api.id, 'Likely API dependency; verify URL wiring', 'inferred');

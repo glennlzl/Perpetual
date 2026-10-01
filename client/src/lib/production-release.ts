@@ -1,6 +1,7 @@
 import type { ReleaseRecord, ReleaseReply, ReleaseTarget, ReleaseView } from '../../../contract/releases.ts';
 import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
+import { createVisiblePoller } from './visible-poller.ts';
 
 export interface ReleaseConfirmation { sha: string; target: ReleaseTarget }
 /** The managed checkout keeps its path when a gate advances it to a new commit. */
@@ -34,30 +35,15 @@ export const releaseChanges = {
 
 /** Source-bound reads clear stale deployment eligibility when the controller cannot be read. */
 export function createReleasePoller({ repoPath, controller, onChange, onError, interval = 3000, document = globalThis.document, timers = globalThis }: { repoPath: string; controller: Controller; onChange: (view: ReleaseReply | null) => void; onError?: (message: string | null) => void; interval?: number; document?: PageVisibility | null; timers?: Timers }) {
-  let timer: unknown, stopped = false, loading = false, again = false;
-  const schedule = () => { timers.clearTimeout(timer); if (!stopped && !document?.hidden) timer = timers.setTimeout(poll, interval); };
-  async function poll() {
-    if (stopped || document?.hidden) return;
-    if (loading) { again = true; return; }
-    loading = true;
-    let next: ReleaseReply | null = null, error: string | null = null;
-    try {
+  return createVisiblePoller({ document, timers, interval: () => interval,
+    async read() {
       const reply = await controller(`/api/releases?${new URLSearchParams({ repoPath })}`) as ReleaseReply;
-      if (reply?.repoPath === repoPath) next = reply;
-      else error = 'The source changed. Reload the pipeline.';
-    } catch (failure) { error = failure instanceof Error ? failure.message : 'Release status unavailable. Check status to retry.'; }
-    loading = false;
-    if (stopped) return;
-    onChange(next);
-    onError?.(error);
-    if (again) { again = false; void poll(); return; }
-    schedule();
-  }
-  const visibility = () => { if (!document?.hidden && !stopped) { timers.clearTimeout(timer); void poll(); } };
-  document?.addEventListener?.('visibilitychange', visibility);
-  void poll();
-  return {
-    refresh() { timers.clearTimeout(timer); void poll(); },
-    stop() { stopped = true; timers.clearTimeout(timer); document?.removeEventListener?.('visibilitychange', visibility); },
-  };
+      if (reply?.repoPath !== repoPath) throw new Error('The source changed. Reload the pipeline.');
+      return reply;
+    },
+    onResult(result) {
+      onChange(result.ok ? result.value : null);
+      onError?.(result.ok ? null : result.error instanceof Error ? result.error.message : 'Release status unavailable. Check status to retry.');
+    },
+  });
 }

@@ -5,7 +5,8 @@ export const NONE = 'none';
 const TWIN = 'twin:';
 
 /** A twin test account as the controller lists it, without its password. */
-export interface TestAccount { id: string; label: string; username: string }
+import type { EnvironmentAccount } from '../../../contract/environment.ts';
+export type TestAccount = EnvironmentAccount;
 /** The dialog's account choice: `twin:<id>`, MANUAL or NONE, and manual entry's values. */
 export interface AccountChoice { choice: string; username: string; password: string }
 /** Fields a run or exploration request carries for its account. */

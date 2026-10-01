@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createStageDataCache, stageNodeData, stageServices } from '../client/src/lib/pipeline-nodes.ts';
 import { createHealthBeats } from '../client/src/lib/pipeline-health.ts';
 import type { BuildSummary, BuildReply } from '../client/src/lib/pipeline-github.ts';
+import { browserCaseFixture, browserRunFixture } from './fixtures/browser-view.ts';
 import type { BrowserView, Environment } from '../client/src/lib/test-workspace.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
@@ -17,8 +18,8 @@ type Row = { id: string; label?: string; kind?: string; provider?: string };
 type Scan = { repo: { path: string; sha: string }; scannedAt: string; workflows: { file: string }[]; delivery: { source: Row[]; build: Row[]; production: Row[] } };
 const scanFixture = (): Scan => ({ repo: { path: '/work/storefront', sha: SHA }, scannedAt: '2026-09-23T10:00:00.000Z', workflows: [{ file: '.github/workflows/ci.yml' }], delivery: { source: [{ id: 'repo', label: 'storefront' }], build: [{ id: 'github', kind: 'github-actions', provider: 'GitHub' }], production: [] } });
 const betaEnvironment: Environment = { id: 'env-beta', stageId: 'beta', status: 'ready', step: 'Ready', sourceRevision: SHA, health: { checkedAt: '2026-09-23T10:00:30.000Z', ok: true, consecutiveFailures: 0 } };
-const betaTests: Partial<BrowserView> = { cases: [{ id: 'create-and-run', name: 'Create, save and run a workflow' }], runs: [], preparation: { status: 'completed' } };
-const gammaTests = (progress: number): Partial<BrowserView> => ({ cases: [{ id: 'checkout', name: 'Buy credits and run a workflow' }], runs: [{ id: 'run-gamma', mode: 'run', status: 'running', progress: { revision: progress, cases: [{ id: 'checkout', status: 'running' }] } }], preparation: null });
+const betaTests: Partial<BrowserView> = { cases: [browserCaseFixture({ id: 'create-and-run', name: 'Create, save and run a workflow' })], runs: [], preparation: { environmentId: 'env-beta', createdAt: '2026-01-01T00:00:00Z', status: 'completed' } };
+const gammaTests = (progress: number): Partial<BrowserView> => ({ cases: [browserCaseFixture({ id: 'checkout', name: 'Buy credits and run a workflow' })], runs: [browserRunFixture({ id: 'run-gamma', stageId: 'gamma', mode: 'run', status: 'running', progress: { revision: progress, cases: [{ id: 'checkout', status: 'running' }] } })], preparation: null });
 
 function context({ scan = scanFixture(), environments = [betaEnvironment], browserTests = { beta: betaTests, gamma: gammaTests(1) }, build = null, github = null, arrivals = {}, healthBeat = createHealthBeats() }: {
   scan?: Scan; environments?: Environment[]; browserTests?: Record<string, Partial<BrowserView>>; build?: BuildSummary | null; github?: BuildReply | null; arrivals?: Record<string, string>; healthBeat?: (environment: Environment | undefined) => string;
@@ -66,7 +67,7 @@ test('a sandbox gets new node data when its own records change', () => {
   assert.notEqual(next, first);
   assert.equal(next.beat, '2026-09-23T10:01:00.000Z');
   assert.equal(reuse('beta', stageNodeData(beta, context({ environments: [checked], healthBeat }))), next, 'The same check does not change the data again.');
-  const running = reuse('beta', stageNodeData(beta, context({ environments: [checked], browserTests: { beta: { ...betaTests, runs: [{ id: 'run-beta', mode: 'run', status: 'running' }] } }, healthBeat })));
+  const running = reuse('beta', stageNodeData(beta, context({ environments: [checked], browserTests: { beta: { ...betaTests, runs: [browserRunFixture({ id: 'run-beta', mode: 'run', status: 'running' })] } }, healthBeat })));
   assert.notEqual(running, next);
   assert.equal(running.activity, 'testing');
 });

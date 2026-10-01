@@ -12,7 +12,7 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { SHA } from '../github-cli.ts';
 import { dockerEngineEnvironment } from '../process.ts';
-import { redact } from '../redaction.ts';
+import { failureText } from '../redaction.ts';
 import { EGRESS, EGRESS_SCRIPT, egressEnvironment } from './egress.ts';
 
 export interface BoxResult { exitCode: number; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }
@@ -26,13 +26,15 @@ export interface RepairBox {
   /** `git diff --binary` of the workspace against base, untracked files included and ignored ones not, as git wrote it. */
   diff(base: string): Promise<Buffer>;
   remove(): Promise<void>;
-  /** Aborts, with why, once the box was removed for writing too much; its commands then reject with that reason. */
+  /** Aborts when cleanup is requested; commands remain stopped even if deletion needs retrying. */
   readonly signal?: AbortSignal;
 }
 export interface RepairBoxes {
   /** Why no box can start, such as Docker not running; null when one can. */
   available(): Promise<string | null>;
   create(input: { id: string; image: string; source: string; signal?: AbortSignal }): Promise<RepairBox>;
+  /** Confirms the resources owned by one repair are absent, including a partially created box. */
+  remove(id: string): Promise<void>;
   /** Removes this controller's repair boxes that outlived their repair. */
   removeLeftovers(): Promise<void>;
 }
@@ -112,7 +114,7 @@ export async function capture(file: string, args: readonly string[], options: Ca
   return { ...result, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') };
 }
 
-const firstLine = (value: string) => redact(value.trim().split('\n')[0] ?? '').slice(0, 300);
+const firstLine = (value: string) => failureText(value, 300).trim().split('\n')[0] ?? '';
 
 /**
  * Repair boxes through the docker CLI. The box, its egress proxy and its network are labelled perpetual.owner=<owner>,
@@ -126,14 +128,38 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
   const dataScope = () => scope ??= realpath(dataDir).then(path => createHash('sha256').update(path).digest('hex').slice(0, 16));
   const docker = (args: readonly string[], options: Capture = {}) => capture(program, args, { env: dockerEngineEnvironment(), timeoutMs: 60_000, ...options });
   const dockerBytes = (args: readonly string[], options: Capture = {}) => captureBytes(program, args, { env: dockerEngineEnvironment(), timeoutMs: 60_000, ...options });
-  async function removeLeftovers() {
-    const filters = ['--filter', `label=perpetual.owner=${owner}`, '--filter', `label=perpetual.data=${await dataScope()}`];
-    const ids = (listed: BoxResult) => listed.exitCode === 0 ? listed.stdout.split(/\s+/).filter(id => /^[a-f\d]{12,64}$/.test(id)) : [];
-    const containers = ids(await docker(['ps', '-aq', '--no-trunc', ...filters], { timeoutMs: 20_000 }));
-    if (containers.length) await docker(['rm', '-f', '-v', ...containers], { timeoutMs: 60_000 });
-    const networks = ids(await docker(['network', 'ls', '-q', '--no-trunc', ...filters], { timeoutMs: 20_000 }));
-    if (networks.length) await docker(['network', 'rm', ...networks], { timeoutMs: 60_000 });
+  const live = new Map<string, () => Promise<void>>();
+  const cleanupError = (error: unknown) => Object.assign(new Error(`Repair box cleanup is incomplete: ${firstLine(error instanceof Error ? error.message : String(error))}`), { cleanupIncomplete: true });
+  async function removeOwned(id?: string) {
+    const filters = ['--filter', `label=perpetual.owner=${owner}`, '--filter', `label=perpetual.data=${await dataScope()}`,
+      ...(id ? ['--filter', `label=perpetual.repair=${id}`] : [])];
+    const list = async (kind: 'containers' | 'networks') => {
+      const result = await docker(kind === 'containers' ? ['ps', '-aq', '--no-trunc', ...filters] : ['network', 'ls', '-q', '--no-trunc', ...filters], { timeoutMs: 20_000 });
+      const ids = result.stdout.trim() ? result.stdout.trim().split(/\s+/) : [];
+      if (result.exitCode !== 0 || result.timedOut || result.truncated || ids.some(value => !/^[a-f\d]{12,64}$/.test(value))) throw new Error(firstLine(result.stderr) || `Could not list Docker ${kind}.`);
+      return ids;
+    };
+    try {
+      const containers = await list('containers'), networks = await list('networks');
+      // An already removed resource may make rm fail. Only a complete, successful observation of absence confirms cleanup.
+      let failure = '';
+      for (const args of [containers.length ? ['rm', '-f', '-v', ...containers] : [], networks.length ? ['network', 'rm', ...networks] : []]) {
+        if (!args.length) continue;
+        try { const result = await docker(args); if (result.exitCode !== 0) failure = firstLine(result.stderr); }
+        catch (error) { failure = firstLine(error instanceof Error ? error.message : String(error)); }
+      }
+      const remainingContainers = await list('containers'), remainingNetworks = await list('networks');
+      if (remainingContainers.length || remainingNetworks.length) throw new Error(failure || 'Docker resources remain after removal.');
+    } catch (error) { throw cleanupError(error); }
   }
+  const remove = async (id: string) => {
+    if (!ID.test(id)) throw new Error('Invalid repair box.');
+    await (live.get(id)?.() ?? removeOwned(id));
+  };
+  const removeLeftovers = async () => {
+    for (const remove of live.values()) await remove();
+    await removeOwned();
+  };
   return {
     async available() {
       try {
@@ -141,19 +167,25 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
         return result.exitCode === 0 && result.stdout.trim() ? null : 'Start Docker to repair builds.';
       } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'Install Docker to repair builds.' : 'Start Docker to repair builds.'; }
     },
-    removeLeftovers,
+    removeLeftovers, remove,
     async create({ id, image, source, signal }) {
       if (!ID.test(id) || !IMAGE.test(image) || !isAbsolute(source) || source.includes('\0')) throw new Error('Invalid repair box.');
-      await removeLeftovers().catch(() => {});
+      await removeLeftovers();
       const name = `perpetual-${owner}-${id}`, proxy = `${name}-proxy`, network = name, scope = await dataScope();
       const labels = [`perpetual.owner=${owner}`, `perpetual.repair=${id}`, `perpetual.data=${scope}`].flatMap(label => ['--label', label]);
       const stopped = new AbortController();
-      let watchdog: NodeJS.Timeout | undefined, removing: Promise<void> = Promise.resolve();
-      const remove = async () => {
+      let watchdog: NodeJS.Timeout | undefined, removing: Promise<void> | null = null, removed = false;
+      const remove = () => {
         clearInterval(watchdog);
-        await docker(['rm', '-f', '-v', name, proxy], { timeoutMs: 60_000 }).catch(() => {});
-        await docker(['network', 'rm', network], { timeoutMs: 60_000 }).catch(() => {});
+        if (!stopped.signal.aborted) stopped.abort(new Error('Repair box cleanup was requested; commands are stopped.'));
+        if (removed) return Promise.resolve();
+        if (removing) return removing;
+        const attempt = removeOwned(id).then(() => { removed = true; live.delete(id); });
+        removing = attempt;
+        void attempt.finally(() => { if (removing === attempt) removing = null; }).catch(() => {});
+        return attempt;
       };
+      live.set(id, remove);
       const step = async (args: readonly string[], failure: string, timeoutMs = 10 * 60_000) => {
         const result = await docker(args, { timeoutMs, signal });
         if (result.exitCode !== 0) throw new Error(`${failure}: ${firstLine(result.stderr) || `docker ${args[0]} failed`}.`);
@@ -172,7 +204,10 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
         // The copy keeps host owners on some engines; the workspace is root's, as a runner's is its user's, so git and
         // package managers running as root treat it as their own.
         for (const args of [['start', name], ['cp', `${source}/.`, `${name}:${ROOT}`], ['exec', name, 'chown', '-R', '0:0', ROOT]]) await step(args, 'Could not start the repair box');
-      } catch (error) { await remove(); throw error; }
+      } catch (error) {
+        try { await remove(); } catch (cleanup) { throw cleanupError(`${firstLine(error instanceof Error ? error.message : String(error))}; ${String(cleanup)}`); }
+        throw error;
+      }
       // While the box works, what it wrote and Docker's free space are read; past either bound the box is removed, and
       // its commands reject with why once it is gone.
       let busy = 0, used = false, checking = false;
@@ -188,7 +223,11 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
           const written = size.exitCode === 0 ? Number(size.stdout.trim()) : NaN, available = free.exitCode === 0 ? Number(free.stdout.trim().split('\n').at(-1)?.split(/\s+/)[3]) * 1024 : NaN;
           const reason = written > disk.limit ? `The repair box wrote more than ${measure(disk.limit)} and was removed.`
             : available < disk.floor ? `Docker has less than ${measure(disk.floor)} of disk space left, so the repair box was removed. Free space in Docker, then start the repair again.` : null;
-          if (reason && !stopped.signal.aborted) { removing = remove(); stopped.abort(new Error(reason)); await removing; }
+          if (reason && !stopped.signal.aborted) {
+            const failure = new Error(reason.replace('was removed', 'was stopped; cleanup is pending'));
+            stopped.abort(failure);
+            try { await remove(); failure.message = reason; } catch (error) { failure.message = `${failure.message} ${String(error)}`; throw error; }
+          }
         } finally { checking = false; }
       }
       watchdog = setInterval(() => { void check().catch(() => {}); }, disk.checkMs);

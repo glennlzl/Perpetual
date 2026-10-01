@@ -5,22 +5,30 @@ import type { BrowserCapabilities, BrowserCase, BrowserRun, JourneySpecs, RunPro
 import type { TestAccount } from './test-accounts.ts';
 import type { PageVisibility } from './utils.ts';
 import type { PipelineView } from './pipeline-nodes.ts';
-import type { Environment } from '../../../contract/environment.ts';
+import type { Environment, StageRemoval as PublicStageRemoval } from '../../../contract/environment.ts';
+import type { BrowserConfig as PublicBrowserConfig, BrowserAnalysis, BrowserViewReply } from '../../../contract/browser.ts';
+export type { BrowserPreparation, BrowserAnalysis } from '../../../contract/browser.ts';
+import type { PipelineActionReply } from '../../../contract/pipeline.ts';
 export type { Environment, EnvironmentHealth, EnvironmentService } from '../../../contract/environment.ts';
 
 export type Resource = 'browser' | 'environment';
-/** A stage's test settings; signInUrl is the sign-in page, where the test account signs in when the target URL shows no sign-in form. */
-export interface BrowserConfig { targetUrl: string; signInUrl?: string; scope: string; requirements: string; maxSteps: number; journeyTimeoutSeconds?: number; externalOrigins?: string[]; authEndpoints?: string[] }
-/** Integration-test drafts a new ready environment prepares; preparing never approves or runs them. */
-export interface BrowserPreparation { status: string; environmentId?: string; targetUrl?: string; runId?: string; error?: string; createdAt?: string; completedAt?: string }
-/** The last journey exploration: its summary and whether it ran signed in. */
-export interface BrowserAnalysis { summary?: string; authenticated?: boolean; createdAt?: string; sourceRevision?: string | null; error?: string }
-/** A Sandbox stage's browser tests. The source summary carries cases, runs and preparation; the inspector's read carries the rest. */
-export interface BrowserView { cases: BrowserCase[]; runs: BrowserRun[]; capabilities: BrowserCapabilities | null; preparation: BrowserPreparation | null; config: BrowserConfig; specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[] }
+/** The pipeline edits this workspace offers; collapsing is applied locally while its save is queued. */
+export type PipelineAction =
+  | { action: 'add-stage'; afterStageId: string; name: string }
+  | { action: 'rename-stage'; stageId: string; name: string }
+  | { action: 'set-transition'; sourceStageId?: string; targetStageId?: string; blocked: boolean }
+  | { action: 'toggle-stage'; stageId: string };
+/** Unsaved/loading settings may not have received all normalized controller defaults yet. */
+export type BrowserConfig = Pick<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'> & Partial<Omit<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'>>;
+/** The workspace starts from source summaries before the inspector has loaded its full view. */
+export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
+  runs: BrowserRun[]; capabilities: BrowserCapabilities | null; config: BrowserConfig;
+  specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[];
+};
 /** A stage's sandboxes and its twin config, which this UI passes through to the controller unread. */
 export interface EnvironmentView { environments: Environment[]; plan: unknown }
 /** A confirmed stage removal and the sandbox cleanup it owns. */
-export interface StageRemoval { id?: string; stageId: string; status: string; environmentIds?: string[]; completedEnvironmentIds?: string[]; error?: string; createdAt?: string; updatedAt?: string }
+export type StageRemoval = Pick<PublicStageRemoval, 'stageId'> & Partial<Omit<PublicStageRemoval, 'stageId' | 'status'>> & { status: string };
 /** A source's pipeline, as far as draft pruning reads it. */
 export interface PipelineStages { repoPath?: string; stages?: { id: string }[] }
 /** The source summary GET /api/state returns, as far as the workspace reads it; an activation seed has the same fields. */
@@ -71,7 +79,11 @@ const active = (entry: StageEntry) => entry.view.environment.environments.some(i
   || Object.values(entry.view.browser.specs || {}).some(spec => spec?.generation?.status === 'running' || spec?.draft?.verification?.status === 'running');
 // Browser progress with an unchanged revision and case states is reused whole;
 // scheduler states and frame times stay part of the key.
-const progressKey = (progress: RunProgress | null | undefined) => typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray(item.actions)])]) : null;
+const progressKey = (value: unknown) => {
+  // share calls this only for the controller's progress field; old saved progress could also carry status.
+  const progress = value as (RunProgress & { status?: string }) | null | undefined;
+  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined)])]) : null;
+};
 // Structural sharing: unchanged records keep their identity across polls.
 // A record reused in place of next has next's fields and values, so it stands for next's type.
 function share<T>(previous: unknown, next: T, key?: string): T {
@@ -91,7 +103,8 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
   let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [];
-  let pipeline: PipelineView | null = null, pipelineRevision = 0, pipelineWrites = 0;
+  let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
+  let pipelineChanges: { input: PipelineAction }[] = [], pipelineQueue: Promise<unknown> = Promise.resolve();
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
   // their failures, such as a poll that raced the deletion, are not the page's errors.
   let listed: Set<string> | null = null;
@@ -134,6 +147,42 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     entry.view.pollError = entry.view.pollErrors.browser || entry.view.pollErrors.environment;
     publish(entry);
   }
+  // Only saved definitions prune stage drafts. Pending preferences overlay that definition, in click order.
+  function projectPipeline() {
+    let next = confirmedPipeline;
+    for (const { input } of pipelineChanges) if (input.action === 'toggle-stage' && next) {
+      next = { ...next, stages: next.stages.map(stage => stage.id === input.stageId ? { ...stage, collapsed: !stage.collapsed } : stage) };
+    }
+    pipeline = share(pipeline, next);
+  }
+  function changePipeline(input: PipelineAction): Promise<PipelineActionReply> {
+    const ownGeneration = generation, repoPath = source?.path;
+    const isCurrent = () => !disposed && generation === ownGeneration;
+    const assertSource = () => { if (!isCurrent()) throw Object.assign(new Error('The source changed. Reopen this stage.'), { name: 'AbortError' }); };
+    if (disposed || !repoPath || !confirmedPipeline) return Promise.reject(new Error('Connect a repository first.'));
+    const change = { input: { ...input } };
+    pipelineChanges.push(change); pipelineRevision++; projectPipeline(); publish();
+    const operation = pipelineQueue.then(async () => {
+      assertSource();
+      try {
+        const result = await controller('/api/pipeline/action', { ...change.input, repoPath }) as PipelineActionReply;
+        assertSource();
+        if (result.pipeline.repoPath !== repoPath) throw new Error('The saved pipeline belongs to another repository.');
+        confirmedPipeline = result.pipeline;
+        prunePipeline(confirmedPipeline);
+        return result;
+      } catch (failure) { assertSource(); throw failure; }
+      finally {
+        if (isCurrent()) {
+          pipelineChanges = pipelineChanges.filter(item => item !== change);
+          pipelineRevision++; projectPipeline(); publish();
+        }
+      }
+    });
+    // A rejected save is still reported to its caller; it does not discard later clicks.
+    pipelineQueue = operation.catch(() => {});
+    return operation;
+  }
   function ensure(id: string): StageEntry {
     if (!entries.has(id)) entries.set(id, {
       id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {},
@@ -164,7 +213,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   // T is the full /api/state reply a caller reads beyond the fields the workspace reads.
   async function refreshSource<T extends SourceState = SourceState>(): Promise<T | undefined> {
     if (disposed || !source?.path) return;
-    const ownGeneration = generation, request = ++summaryRevision, graphRevision = pipelineRevision, graphIdle = pipelineWrites === 0;
+    const ownGeneration = generation, request = ++summaryRevision, graphRevision = pipelineRevision, graphIdle = pipelineChanges.length === 0;
     const revisions = new Map([...entries].map(([id, entry]) => [id, { ...entry.revisions }]));
     try {
       const next = await controller('/api/state') as T;
@@ -172,9 +221,10 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       sourceError = '';
       stageRemovals = share(stageRemovals, next.stageRemovals || []);
       previews = share(previews, previewTargets(next.scan));
-      if (graphIdle && !pipelineWrites && graphRevision === pipelineRevision && next.pipeline?.repoPath === source?.path) {
-        pipeline = share(pipeline, next.pipeline);
-        prunePipeline(pipeline);
+      if (graphIdle && !pipelineChanges.length && graphRevision === pipelineRevision && next.pipeline?.repoPath === source?.path) {
+        confirmedPipeline = next.pipeline;
+        projectPipeline();
+        prunePipeline(confirmedPipeline);
       }
       const ids = new Set([...entries.keys(), ...Object.keys(next.browserTests || {}), ...(next.environments || []).map(item => item.stageId).filter(Boolean)]);
       for (const id of ids) {
@@ -291,27 +341,14 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     stage,
     refreshSource,
-    // Pipeline edits retain their optimistic view until the request settles. Reads already in flight must not undo
-    // the saved result; other workspace resources continue to refresh while only the graph is held.
-    holdPipeline() {
-      const ownGeneration = generation;
-      pipelineWrites++; pipelineRevision++;
-      let released = false;
-      return () => { if (released) return; released = true; if (ownGeneration === generation) { pipelineWrites--; pipelineRevision++; } };
-    },
-    updatePipeline(next: PipelineView) {
-      if (disposed || next.repoPath !== source?.path) return;
-      pipelineRevision++;
-      pipeline = share(pipeline, next);
-      prunePipeline(pipeline);
-      publish();
-    },
+    changePipeline,
     activate(nextSource: { path?: string; branch?: string | null } | null | undefined, seed: SourceState = {}) {
       if (disposed) throw new Error('The test workspace is closed.');
       const nextIdentity = sourceKey(nextSource);
       generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; listed = null;
-      pipelineWrites = 0; pipelineRevision++;
-      pipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? share(pipeline, seed.pipeline) : null;
+      pipelineChanges = []; pipelineQueue = Promise.resolve(); pipelineRevision++;
+      confirmedPipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? seed.pipeline : null;
+      projectPipeline();
       stageRemovals = seed.stageRemovals || [];
       previews = share(previews, previewTargets(seed.scan));
       prunePipeline(seed.pipeline);

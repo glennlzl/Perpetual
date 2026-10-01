@@ -2,44 +2,20 @@ const LABELS: Record<string, string> = { queued: 'Queued', pending: 'Queued', ru
 export const ACTIONS: Record<string, string> = { navigate: 'Navigate', go_to_url: 'Navigate', click: 'Click', click_element: 'Click', fill: 'Enter text', input: 'Enter text', input_text: 'Enter text', type: 'Enter text', scroll: 'Scroll', search: 'Search', search_page: 'Search page', search_google: 'Search', observe: 'Observe page', screenshot: 'Observe page', wait: 'Wait', done: 'Finish', extract: 'Read page', extract_content: 'Read page', switch_tab: 'Switch tab', open_tab: 'Open tab', go_back: 'Go back', send_keys: 'Press key', upload_file: 'Upload file', evaluate: 'Inspect page', check: 'Check outcome', report_journey_step: 'Report milestone', sign_in_with_test_account: 'Sign in', reload_page: 'Reload' };
 import { diffLines } from 'diff';
 
-// The controller's browser test records as this UI reads them. Statuses are the controller's own strings; unknown
-// ones are shown as they are.
-/** A reviewed milestone check: text and URL checks use value; number checks use label and name, comparisons op and than. */
-export interface StepCheck { type: string; value?: string; label?: string; name?: string; op?: string; than?: string }
-/** A business milestone of a journey. Its ID stays stable so results keep matching it. */
-export interface JourneyStep { id: string; title: string; checks?: StepCheck[] }
-/** A final check on the journey's end state. */
-export interface CaseAssertion { type: string; value: string }
-/** A reviewed journey (a browser test case) or an unreviewed draft. */
-export interface BrowserCase {
-  id: string; name: string; goal?: string; preconditions?: string[]; expectedOutcomes?: string[]; assertions?: CaseAssertion[];
-  steps?: JourneyStep[]; isolation?: string; selected?: boolean; needsReview?: boolean; evidence?: { path: string; line: number }[];
-}
-/** A check as a run evaluated it; values are observed by the runner, never the model. */
+import type { BrowserCase, CaseSummary, MilestoneCheck, JourneyStep, AssertionResult, StepProgress, BrowserAction, JourneyResult, PublicRun, RunSummary, RunProgress as FullRunProgress, SummaryProgress, CaseProgress as FullCaseProgress, SummaryCaseProgress, BrowserCapabilities, SpecSummary, JourneySpecs } from '../../../contract/browser.ts';
+export type { BrowserCase, CaseSummary, JourneyStep, AssertionResult, StepProgress, BrowserAction, BrowserCapabilities, JourneySpecs } from '../../../contract/browser.ts';
+export type { MilestoneCheck as StepCheck, FinalAssertion as CaseAssertion, JourneyResult as CaseResult, SpecSummary as JourneySpec, SpecVerification as CodeVerification } from '../../../contract/browser.ts';
+type StepCheck = MilestoneCheck;
+type CaseResult = JourneyResult;
+type JourneySpec = SpecSummary;
+/** Views consume either graph summaries or full inspector reads without inventing absent action history. */
+export type BrowserRun = PublicRun | RunSummary;
+export type RunProgress = FullRunProgress | SummaryProgress;
+export type CaseProgress = SummaryCaseProgress & Partial<Pick<FullCaseProgress, 'actions'>>;
+/** Display checks may not have been evaluated yet; this is never a wire result. */
 interface CheckOutcome { passed?: boolean; observed?: number; error?: string; reached?: boolean }
-export interface CheckResult extends Partial<StepCheck>, CheckOutcome {}
-/** A final assertion's result. reached: false marks an end state the journey never reached. */
-export type AssertionResult = CheckResult;
-/** A milestone as a run reported it. Older runs also recorded a provenance, which is never shown. */
-export interface StepProgress { id: string; title?: string; status: string; evidence?: string; checks?: CheckResult[]; provenance?: string }
-export interface BrowserAction { index?: number; type?: string; status?: string; errorCode?: string }
-/** One journey's live progress in a run. */
-export interface CaseProgress {
-  id?: string; caseId?: string; name?: string; status: string; queueReason?: string; startedAt?: string; completedAt?: string; error?: string;
-  frameUpdatedAt?: string; frameCapturedAt?: string; actionCount?: number; actions?: BrowserAction[]; lastAction?: BrowserAction; steps?: StepProgress[]; videos?: string[];
-}
-export interface RunProgress { revision?: number; status?: string; cases?: CaseProgress[] }
-export interface JourneyBlocker { kind?: string; stepId?: string; evidence?: string }
-/** The controller's verdict for one journey of a run. */
-export interface CaseResult { caseId: string; status: string; error?: string; engine?: string; blockers?: JourneyBlocker[]; assertions?: AssertionResult[] }
-/** A browser run: a discovery, or a run of selected journeys (a verification attempt or its control run). */
-export interface BrowserRun {
-  id: string; mode: 'run' | 'discover'; status: string; createdAt?: string; startedAt?: string; completedAt?: string; error?: string;
-  stageId?: string; environmentId?: string; engine?: string; targetUrl?: string; sourceRevision?: string | null;
-  caseIds?: string[]; caseSummaries?: BrowserCase[]; results?: CaseResult[]; progress?: RunProgress; verification?: { id?: string; attempt?: number; control?: boolean };
-  discovery?: { summary?: string; authenticated?: boolean; cases?: BrowserCase[] };
-  frameUpdatedAt?: string; frameCapturedAt?: string; concurrency?: number; effectiveConcurrency?: number; concurrencyLimit?: string | null;
-}
+/** The definition a card displays, from an editable case or an immutable run snapshot. */
+export type JourneyDefinition = CaseSummary & Partial<Pick<BrowserCase, 'needsReview'>>;
 /** A run as the viewer opens it: live when it opens while the run is queued or running, as Watch live does. */
 export function watchedRun<T extends Pick<BrowserRun, 'status'>>(run: T): T & { live: boolean } { return { ...run, live: ['queued', 'running'].includes(run.status) }; }
 /**
@@ -52,16 +28,6 @@ export function verificationAttempt(watched: { id?: string | null; live?: boolea
   if (!shown || !id || active(shown)) return null;
   return runs.find(run => run.id !== shown.id && run.verification?.id === id && active(run)) ?? null;
 }
-/** What this machine can run, with the App Settings model view the controller merges in. An absent field is unknown, not missing. */
-export interface BrowserCapabilities {
-  runtimeInstalled?: boolean; browserInstalled?: boolean; runtimeProject?: string; modelConfigured?: boolean; modelError?: string; playwright?: { browserInstalled?: boolean } | null;
-  provider?: 'openrouter' | 'custom'; model?: string; baseUrl?: string; keyConfigured?: boolean;
-}
-export interface CodeVersion { hash?: string; stale?: boolean; code?: string }
-export interface CodeVerification { status?: string; passes?: number; control?: string | null; error?: string }
-/** A journey's code: the approved code, the draft beside it and a code generation. */
-export interface JourneySpec { approved?: CodeVersion | null; draft?: (CodeVersion & { verification?: CodeVerification }) | null; generation?: { status?: string; step?: string; error?: string } | null }
-export type JourneySpecs = Record<string, JourneySpec | undefined>;
 export type BadgeTone = 'destructive' | 'secondary' | 'outline';
 
 export const CHECKS: Record<string, string> = { 'text-visible': 'Text visible', 'text-absent': 'Text absent', 'url-contains': 'URL contains', 'read-number': 'Read number', 'compare-number': 'Compare number' };
@@ -96,7 +62,7 @@ export function journeyRevision(progress: Partial<CaseProgress> | null | undefin
 const RUNTIME_PROJECT = /^\/[\w./-]+$/;
 // The runtime and its Chromium install with the documented commands (docs/journeys.md),
 // relative to the Perpetual source unless the controller names its path.
-export function browserInstallCommand(capabilities: BrowserCapabilities | null | undefined) {
+export function browserInstallCommand(capabilities: Pick<BrowserCapabilities, 'runtimeInstalled' | 'browserInstalled' | 'runtimeProject'> | null | undefined) {
   if (!capabilities || (capabilities.runtimeInstalled && capabilities.browserInstalled !== false)) return '';
   const project = typeof capabilities.runtimeProject === 'string' && RUNTIME_PROJECT.test(capabilities.runtimeProject) ? capabilities.runtimeProject : 'integrations/browser-use';
   const chromium = `uv run --project ${project} python -m playwright install chromium`;
@@ -110,7 +76,8 @@ export interface ReadinessItem { id: ReadinessId; label: string; ready: boolean;
 // Every prerequisite of Generate and Run, in fix order, each with its own fix. Unknown capabilities
 // are not missing; the panel re-checks once the full view loads. App Settings fixes only the key.
 // Generate needs the browser agent's runtime and the key; a run executes Playwright code in Playwright's Chromium.
-export function browserReadiness(capabilities: BrowserCapabilities | null | undefined, validTarget = false) {
+type ReadinessCapabilities = Pick<BrowserCapabilities, 'runtimeInstalled' | 'browserInstalled' | 'runtimeProject' | 'modelError'> & Partial<Pick<BrowserCapabilities, 'modelConfigured' | 'playwright'>>;
+export function browserReadiness(capabilities: ReadinessCapabilities | null | undefined, validTarget = false) {
   const items: ReadinessItem[] = [{ id: 'target', label: 'Target URL', ready: Boolean(validTarget), blocker: 'Set a target URL' }];
   if (!capabilities) return items;
   const runtime = Boolean(capabilities.runtimeInstalled);
@@ -125,7 +92,7 @@ export function browserReadiness(capabilities: BrowserCapabilities | null | unde
 const GENERATE: ReadinessId[] = ['target', 'runtime', 'model'], RUN: ReadinessId[] = ['target', 'playwright'];
 const blockersOf = (items: ReadinessItem[], ids: ReadinessId[]) => items.filter(item => !item.ready && ids.includes(item.id)).map(item => item.blocker);
 // Every missing capability of Generate, one per line; the target URL is checked on its own.
-export const browserUnavailable = (capabilities: BrowserCapabilities | null | undefined) => blockersOf(browserReadiness(capabilities, true), GENERATE).join('\n');
+export const browserUnavailable = (capabilities: Parameters<typeof browserReadiness>[0] | null | undefined) => blockersOf(browserReadiness(capabilities, true), GENERATE).join('\n');
 
 // The first unmet prerequisite is the primary action (target → runtime → key → Playwright → tests → run);
 // every disabled action lists all of its blockers, one per line. runnable: every selected test has code to run.
@@ -154,7 +121,7 @@ export function browserRunLabel(run: string | Pick<BrowserRun, 'mode' | 'status'
 
 // A case's latest run of its current definition. A verification's control run, with every change blocked, never
 // counts as the journey's status, except when that run itself is shown (control: true).
-export function browserCaseRun(item: BrowserCase, runs: BrowserRun[] = [], { control = false }: { control?: boolean } = {}) {
+export function browserCaseRun(item: JourneyDefinition, runs: BrowserRun[] = [], { control = false }: { control?: boolean } = {}) {
   if (item.needsReview) return null;
   const run = [...runs].filter(value => value.mode === 'run' && (control || !value.verification?.control) && value.caseIds?.includes(item.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
   if (!run) return null;
@@ -168,8 +135,8 @@ export function browserCaseRun(item: BrowserCase, runs: BrowserRun[] = [], { con
 // A draft awaiting approval and a finished run awaiting judgement share a status, not a label.
 export interface CaseState { status: string; label: string; variant: BadgeTone }
 /** No code can prove this journey until a person supplies an independent check. */
-export const journeyNeedsChecks = (item: Pick<BrowserCase, 'steps' | 'assertions'>) => !item.assertions?.length && !item.steps?.some(step => step.checks?.length);
-export function browserCaseState(item: BrowserCase, runs: BrowserRun[] = [], options: { control?: boolean } = {}): CaseState {
+export const journeyNeedsChecks = (item: Pick<JourneyDefinition, 'steps' | 'assertions'>) => !item.assertions?.length && !item.steps?.some(step => step.checks?.length);
+export function browserCaseState(item: JourneyDefinition, runs: BrowserRun[] = [], options: { control?: boolean } = {}): CaseState {
   const state = (status: string, label = browserRunLabel(status)): CaseState => ({ status, label, variant: status === 'failed' ? 'destructive' : ['running', 'passed'].includes(status) ? 'secondary' : 'outline' });
   if (item.needsReview) return state('needs_review', journeyNeedsChecks(item) ? 'Needs checks' : undefined);
   const run = browserCaseRun(item, runs, options);
@@ -183,16 +150,17 @@ export function browserCaseState(item: BrowserCase, runs: BrowserRun[] = [], opt
 
 const finite = (value: unknown): value is number => Number.isFinite(value);
 function checkText(check: StepCheck & CheckOutcome, captures: Record<string, number>) {
-  const observed = check.observed, than = String(check.than);
+  const observed = check.observed;
   if (check.type === 'read-number') return finite(observed) ? `${check.label} ${number(observed)}` : check.label;
-  if (check.type === 'compare-number') return finite(observed) && finite(captures[than]) ? `${check.label} ${number(captures[than])} → ${number(observed)}` : finite(observed) ? `${check.label} → ${number(observed)}` : `${check.label} ${OPS[check.op ?? ''] || check.op} ${check.than}`;
+  if (check.type === 'compare-number') { const than = String(check.than); return finite(observed) && finite(captures[than]) ? `${check.label} ${number(captures[than])} → ${number(observed)}` : finite(observed) ? `${check.label} → ${number(observed)}` : `${check.label} ${OPS[check.op ?? ''] || check.op} ${check.than}`; }
   return `${CHECKS[check.type] || check.type}: ${check.value}`;
 }
 
-export interface CheckView extends StepCheck, CheckOutcome { text: string | undefined; result: 'Passed' | 'Failed' | 'Not checked' }
+export type CheckView = StepCheck & CheckOutcome & { text: string | undefined; result: 'Passed' | 'Failed' | 'Not checked' }
 export interface JourneyStepView extends JourneyStep { status: string; evidence?: string; checks: CheckView[] }
 // Merges reviewed milestone checks with independent results; values are observed by the runner, never the model.
-export function browserJourneySteps(item: BrowserCase, progress: Pick<CaseProgress, 'steps'> | null | undefined, status: string): JourneyStepView[] {
+type DisplayStepProgress = Omit<StepProgress, 'checks'> & { checks?: (MilestoneCheck & CheckOutcome)[] };
+export function browserJourneySteps(item: Pick<JourneyDefinition, 'steps'>, progress: { steps?: DisplayStepProgress[] } | null | undefined, status: string): JourneyStepView[] {
   const captures: Record<string, number> = {};
   return (item.steps || []).map(step => {
     const observed = progress?.steps?.find(value => value.id === step.id);
@@ -211,11 +179,11 @@ export function browserJourneySteps(item: BrowserCase, progress: Pick<CaseProgre
   });
 }
 
-const current = (code: CodeVersion | null | undefined) => typeof code?.hash === 'string' && code.stale === false;
+const current = (code: Pick<NonNullable<SpecSummary['draft']>, 'hash' | 'stale'> | null | undefined) => typeof code?.hash === 'string' && code.stale === false;
 // A person's run executes each journey's current approved code, else its current draft.
-export const runnableCode = (cases: Pick<BrowserCase, 'id'>[], specs: JourneySpecs | null | undefined) => cases.length > 0 && cases.every(item => current(specs?.[item.id]?.approved) || current(specs?.[item.id]?.draft));
+export const runnableCode = (cases: Pick<BrowserCase, 'id'>[], specs: Partial<JourneySpecs> | null | undefined) => cases.length > 0 && cases.every(item => current(specs?.[item.id]?.approved) || current(specs?.[item.id]?.draft));
 // Runs need Playwright's Chromium and code for every chosen journey, not the browser agent or a model.
-export const runReady = (capabilities: BrowserCapabilities | null | undefined, cases: Pick<BrowserCase, 'id'>[], specs: JourneySpecs | null | undefined) => capabilities?.playwright?.browserInstalled !== false && runnableCode(cases, specs);
+export const runReady = (capabilities: Partial<Pick<BrowserCapabilities, 'playwright'>> | null | undefined, cases: Pick<BrowserCase, 'id'>[], specs: Partial<JourneySpecs> | null | undefined) => capabilities?.playwright?.browserInstalled !== false && runnableCode(cases, specs);
 /**
  * A case's code: the approved code (Approved, or Stale once the reviewed journey changed) and the draft beside it
  * (Draft, Verifying n/3, Verified, Verification failed, Stale draft), and a running or failed generation. A current
@@ -241,7 +209,7 @@ export function codeLines(draft: string, approved?: string | null): CodeLine[] {
 }
 // A Playwright journey has no agent: its expected outcomes are backed by its reviewed checks alone. Only a final
 // assertion evaluated on the reached end state fails them; a journey that stopped earlier never reached them.
-export function checkedOutcome(result: Pick<CaseResult, 'status' | 'assertions'> | null | undefined): { label: string; variant: BadgeTone } {
+export function checkedOutcome(result: { status: CaseResult['status']; assertions?: Pick<AssertionResult, 'passed' | 'reached'>[] } | null | undefined): { label: string; variant: BadgeTone } {
   if (result?.status === 'passed') return { label: 'Checks · Passed', variant: 'outline' };
   if (result?.assertions?.some(check => check.passed === false && check.reached !== false)) return { label: 'Checks · Failed', variant: 'destructive' };
   return { label: result?.status === 'failed' || result?.assertions?.some(check => check.reached === false) ? 'Checks · Not reached' : 'Checks · Not confirmed', variant: 'outline' };
@@ -275,13 +243,13 @@ export const journeyQueueLabel = (reason: string | undefined) => own(QUEUES, rea
 
 // Graph summaries carry only actionCount and lastAction; the watch dialog's run progress keeps the full list.
 export function journeyActions(progress: Partial<CaseProgress> | null | undefined) {
-  const items = Array.isArray(progress?.actions) ? progress.actions : progress?.lastAction ? [progress.lastAction] : [];
+  const items: BrowserAction[] = Array.isArray(progress?.actions) ? progress.actions : progress?.lastAction ? [progress.lastAction] : [];
   return { items, count: progress?.actionCount ?? items.length };
 }
 
 // The controller marks a final check on an end state the journey never reached; it is context, never a failure.
-export const journeyCheckFailed = (check: AssertionResult | null | undefined) => check?.passed === false && check.reached !== false;
-export function journeyCheckState(check: AssertionResult | null | undefined): { label: string; variant: BadgeTone } {
+export const journeyCheckFailed = (check: Partial<Pick<AssertionResult, 'passed' | 'reached'>> | null | undefined) => check?.passed === false && check.reached !== false;
+export function journeyCheckState(check: Partial<Pick<AssertionResult, 'passed' | 'reached'>> | null | undefined): { label: string; variant: BadgeTone } {
   if (check?.reached === false) return { label: 'Not reached', variant: 'outline' };
   if (check?.passed === true) return { label: 'Passed', variant: 'outline' };
   return check?.passed === false ? { label: 'Failed', variant: 'destructive' } : { label: 'Not checked', variant: 'outline' };
@@ -295,9 +263,9 @@ export function journeyLastAction(progress: Partial<CaseProgress> | null | undef
 export const browserActionLabel = (type: string | undefined) => own(ACTIONS, type) || String(type || 'Action').replaceAll('_', ' ');
 export const browserActionError = (code: string | undefined) => own(ACTION_ERRORS, code);
 // A failed action always names its failure in text, not only with an icon.
-export const browserActionFailure = (action: BrowserAction | null | undefined) => action?.status === 'failed' ? browserActionError(action.errorCode) || browserRunLabel('failed') : '';
+export const browserActionFailure = (action: Partial<Pick<BrowserAction, 'status' | 'errorCode'>> | null | undefined) => action?.status === 'failed' ? browserActionError(action.errorCode) || browserRunLabel('failed') : '';
 
-export function browserBlockers(result: Pick<CaseResult, 'blockers'> | null | undefined, steps: Pick<JourneyStep, 'id' | 'title'>[] = []) {
+export function browserBlockers(result: { blockers?: { kind?: string; stepId?: string; evidence?: string }[] } | null | undefined, steps: Pick<JourneyStep, 'id' | 'title'>[] = []) {
   return (Array.isArray(result?.blockers) ? result.blockers : []).map(blocker => ({ kind: own(BLOCKERS, blocker.kind) || 'Blocker', step: steps.find(step => step.id === blocker.stepId)?.title || '', evidence: String(blocker.evidence || '') }));
 }
 
@@ -314,7 +282,7 @@ const ATTENTION = ['failed', 'blocked', 'needs_review'];
 const journeyPriority = (status: string) => ATTENTION.includes(status) ? ATTENTION.indexOf(status) : ATTENTION.length;
 
 // Finished runs lead with what needs attention; active runs keep their queue order.
-export function orderJourneys<T extends BrowserCase>(items: T[], run: BrowserRun) {
+export function orderJourneys<T extends JourneyDefinition>(items: T[], run: BrowserRun) {
   const entries = items.map(item => { const state = browserCaseState(item, [run], { control: true }); return { item, status: state.status, label: state.label, result: run.results?.find(value => value.caseId === item.id) }; });
   if (['queued', 'running'].includes(run.status)) return entries;
   return entries.map((entry, index) => ({ entry, index, rank: journeyPriority(entry.status) })).sort((a, b) => a.rank - b.rank || a.index - b.index).map(({ entry }) => entry);
@@ -345,7 +313,7 @@ export function journeyRequest(value = ''): { kind: 'new' | 'generate' | 'run' |
   return { kind: value && !value.startsWith('!') ? 'case' : '', caseId: value.startsWith('!') ? '' : value };
 }
 
-export function browserRunTitle(run: Pick<BrowserRun, 'mode' | 'caseIds' | 'caseSummaries'>) {
+export function browserRunTitle(run: Pick<BrowserRun, 'mode'> & { caseIds?: string[]; caseSummaries?: Pick<CaseSummary, 'id' | 'name'>[] }) {
   if (run.mode === 'discover') return 'Explore product';
   const summaries = run.caseSummaries || [];
   const count = run.caseIds?.length || summaries.length;

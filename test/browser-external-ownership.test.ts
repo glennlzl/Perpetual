@@ -40,6 +40,16 @@ async function fixture(t: TestContext) {
 }
 const account = { credentials: { username: 'tester@example.test', password: 'temporary-password' } };
 
+test('each supported local address keeps the same external application reservation', async t => {
+  const f = await fixture(t);
+  await f.manager.run(f.context('beta'), {}, { manual: true }); await f.started(1);
+  for (const host of ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal']) {
+    await f.manager.saveConfig(f.context('gamma'), { targetUrl: `http://${host}:31001/other?screen=tests` });
+    await assert.rejects(f.manager.discover(f.context('gamma')), { statusCode: 409 });
+  }
+  assert.equal(f.workers.length, 1, 'Changing a local alias cannot admit a second worker against the held application.');
+});
+
 test('external code generation reserves its origin against generation, discovery, run and verification in another stage', async t => {
   const f = await fixture(t);
   await f.manager.generateSpec(f.context('beta'), { caseId: journey.id, ...account }); await f.started(1);

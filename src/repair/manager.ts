@@ -44,6 +44,8 @@ export interface Repair {
   holds?: string[];
   /** The journey gates at the pull request head, and the merge commit once the pull request merged. */
   gates?: RepairGate[]; merged?: string;
+  /** Resource ownership survives every business outcome until cleanup confirms absence. */
+  cleanup?: { status: 'pending' | 'failed'; reason?: string };
   /** startedAt: when triage handed the failure to the agent step, whether or not the agent could start. */
   createdAt: string; updatedAt: string; startedAt?: string; completedAt?: string;
 }
@@ -64,7 +66,7 @@ export interface RepairOutcome { status: 'ready' | 'merged' | 'failed' | 'needs-
 /**
  * The agent step's input. repair is a copy as stored when the step starts: the failing sha, its failed runs with the
  * triage failures (jobs, failed steps, redacted log and diagnosis), the account and the managed source copy.
- * directory is <dataDir>/repairs/<id> (0700), owned by this repair, and removed at the next controller start. report()
+ * directory is <dataDir>/repairs/<id> (0700), owned until resource cleanup succeeds. report()
  * rejects once the repair stopped; a push or pull request it names is still recorded first, and the pull request stays
  * open, and so is a merge. repair.pushed is what an earlier repair of the same commit last pushed. autoMerge() reads the
  * pipeline's auto-merge switch, the Build stage's Autopilot mode, when it is called.
@@ -86,14 +88,16 @@ export interface RepairSteps {
    * merged one names its merge commit, which the loop guard knows the merge by.
    */
   state?(repair: Repair): Promise<PullRequestRead>;
-  /** Cleans up after repairs a controller restart interrupted, such as their boxes; asked at start when there were any. */
+  /** Confirms this repair's resources are gone before releasing its host workspace. Never resumes repair work. */
+  cleanup?(input: { repair: Repair; directory: string }): Promise<void>;
+  /** Confirms old controller resources are gone, before any new repair starts. */
   recover?(): Promise<void>;
 }
 export interface RepairManagerOptions { dataDir: string; source: () => RepairSource | null; github: RepairGitHub; steps?: RepairSteps; now?: () => string; pollInterval?: number }
 /** A workflow run as Build shows it. */
 export type PublicRun = Pick<RepairRun, 'id' | 'name' | 'path' | 'url'>;
 /** A repair as the pipeline's Autopilot shows it (src/repair/view.ts): its record without the logs, redacted. */
-export type PublicRepair = Pick<Repair, 'id' | 'branch' | 'sha' | 'status' | 'reason' | 'trigger' | 'category' | 'merged' | 'holds' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt'>
+export type PublicRepair = Pick<Repair, 'id' | 'branch' | 'sha' | 'status' | 'reason' | 'trigger' | 'category' | 'merged' | 'holds' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'cleanup'>
   & { runs: PublicRun[]; pullRequest?: Pick<RepairPullRequest, 'number' | 'url' | 'draft' | 'closed'>; attempts?: Pick<RepairAttempt, 'number' | 'model' | 'reproduced' | 'failure' | 'cost'>[]; gates?: Pick<RepairGate, 'stageId' | 'sha' | 'status'>[] };
 /**
  * head is the watched head of a connected, managed source's target branch, with the branch's own failed workflow runs
@@ -147,11 +151,12 @@ const validAutoMerge = (value: unknown): value is Record<string, boolean> => isR
 /** A stored repair with every field detection, triage and the view read. */
 const validRepair = (value: unknown): value is Repair => isRecord(value)
   && (['id', 'key', 'repository', 'branch', 'sha', 'login', 'checkoutPath', 'rootDirectory', 'createdAt', 'updatedAt'] as const).every(field => isText(value[field]))
-  && SHA.test(value.sha as string) && (value.trigger === 'push' || value.trigger === 'person') && isText(value.status) && Object.hasOwn(STATUSES, value.status)
+  && /^[\w-]{1,64}$/.test(value.id as string) && SHA.test(value.sha as string) && (value.trigger === 'push' || value.trigger === 'person') && isText(value.status) && Object.hasOwn(STATUSES, value.status)
   && Array.isArray(value.runs) && value.runs.every(validRun)
   && (['reason', 'category', 'closeError', 'startedAt', 'completedAt'] as const).every(field => optionalText(value[field]))
   && (value.failures === undefined || Array.isArray(value.failures) && value.failures.every(validFailure))
   && (value.reruns === undefined || Array.isArray(value.reruns) && value.reruns.every(item => isRecord(item) && isText(item.id) && count(item.attempt)))
+  && (value.cleanup === undefined || isRecord(value.cleanup) && (value.cleanup.status === 'pending' || value.cleanup.status === 'failed') && optionalText(value.cleanup.reason))
   && (value.pullRequest === undefined || validPullRequest(value.pullRequest))
   && (value.attempts === undefined || Array.isArray(value.attempts) && value.attempts.every(validAttempt))
   && (value.diffHash === undefined || validDiffHash(value.diffHash)) && (value.ciRuns === undefined || validCiRuns(value.ciRuns)) && (value.holds === undefined || validHolds(value.holds))
@@ -167,8 +172,9 @@ function pullRead(value: unknown): { state: PullRequestRead['state']; merged?: s
 }
 // Stored logs are scrubbed again, whatever the reader did.
 const scrubbed = (failure: GitHubFailure): GitHubFailure => ({ ...failure, log: redact(failure.log), tail: redact(failure.tail), diagnosis: { ...failure.diagnosis } });
-const publicRepair = ({ id, branch, sha, status, reason, trigger, category, runs, pullRequest, attempts, holds, gates, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
+const publicRepair = ({ id, branch, sha, status, reason, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
   id, branch, sha, status, ...(reason ? { reason: redact(reason) } : {}), trigger, ...(category ? { category } : {}), ...(merged ? { merged } : {}),
+  ...(cleanup ? { cleanup: { status: cleanup.status, ...(cleanup.reason ? { reason: text(cleanup.reason) } : {}) } } : {}),
   runs: runs.map(publicRun),
   ...(pullRequest ? { pullRequest: { number: pullRequest.number, url: pullRequest.url, ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }), ...(pullRequest.closed ? { closed: true as const } : {}) } } : {}),
   ...(attempts?.length ? { attempts: attempts.map(({ number, model, reproduced, failure, cost }) => ({ number, model, ...(reproduced === undefined ? {} : { reproduced }), ...(failure ? { failure: redact(failure) } : {}), ...(cost === undefined ? {} : { cost }) })) } : {}),
@@ -182,7 +188,7 @@ const publicRepair = ({ id, branch, sha, status, reason, trigger, category, runs
  * source() -> { key, branch, repository|null, checkoutPath|null, rootDirectory|null } | null.
  * github: connection(), head({ repository, branch, etag }), runs({ repository, sha, login }), failure({ repository, runId }),
  *   rerun({ repository, runId }).
- * steps: unavailable() -> reason, repair(context, signal) -> outcome, close(repair), state(repair), recover(): see RepairSteps.
+ * steps: unavailable() -> reason, repair(context, signal) -> outcome, close(repair), state(repair), cleanup({ repair, directory }), recover(): see RepairSteps.
  */
 export async function createRepairManager({ dataDir, source, github, steps = {}, now = () => new Date().toISOString(), pollInterval = 60_000 }: RepairManagerOptions) {
   const root = await privateDirectory(resolve(dataDir, 'repairs'), 'Repair storage must not be a symbolic link.');
@@ -195,16 +201,21 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   }
   // Work the controller stopped during is never resumed: a restart starts no paid work, and its pull request stays open.
   // One whose pull request merged before the restart is merged.
-  const interrupted = state.repairs.some(repair => ACTIVE.includes(repair.status));
+  const directories = (await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name);
+  // Older controllers could lose a terminal repair's host directory before confirming its Docker cleanup.
+  let recovering = Boolean(steps.recover && (state.repairs.length || directories.length));
+  if (steps.cleanup) for (const repair of state.repairs) {
+    if (ACTIVE.includes(repair.status) || directories.includes(repair.id)) repair.cleanup ??= { status: 'pending' };
+  }
   for (const repair of state.repairs) {
     if (!ACTIVE.includes(repair.status)) continue;
-    if (repair.merged) { Object.assign(repair, { status: 'merged', completedAt: now(), updatedAt: now() } satisfies Partial<Repair>); delete repair.reason; }
+    if (repair.merged) Object.assign(repair, { status: 'merged', completedAt: now(), updatedAt: now() } satisfies Partial<Repair>);
     else Object.assign(repair, { status: 'needs-person', reason: 'Interrupted by a controller restart.', completedAt: now(), updatedAt: now() } satisfies Partial<Repair>);
   }
-  // No repair runs yet, so every repair's directory is a leftover, such as the host copy of one a restart interrupted.
-  for (const entry of await readdir(root, { withFileTypes: true })) if (entry.isDirectory()) await rm(join(root, entry.name), { recursive: true, force: true });
+  // Adapters with no external resources retain their original directory-only recovery. Real boxes must confirm deletion first.
+  if (!steps.cleanup && !steps.recover) for (const name of directories) await rm(join(root, name), { recursive: true, force: true });
   const saves = createSaveQueue();
-  let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, reads = 0;
+  let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, recoveryError: string | null = null, reads = 0;
   const tasks = new Set<Promise<unknown>>(), controllers = new Map<string, AbortController>();
   // The head each source was last read at with its ETag (reads counts the reads that succeeded), the branch's own failed
   // runs of that head as last read, the first head seen since start (a baseline that opens nothing by itself), a head
@@ -224,7 +235,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   };
   // One repair at a time: an active repair, or a stopped or superseded one whose aborted step has not settled yet.
   const running = () => state.repairs.some(repair => ACTIVE.includes(repair.status));
-  const busy = () => running() || controllers.size > 0;
+  const busy = () => running() || controllers.size > 0 || recovering || state.repairs.some(repair => repair.cleanup);
   const scoped = (current: Managed) => state.repairs.filter(repair => repair.key === current.key && repair.branch === current.branch);
   const track = <T>(promise: Promise<T>) => { tasks.add(promise); void promise.finally(() => tasks.delete(promise)).catch(() => {}); return promise; };
   // A repair's pull request open on GitHub as far as Perpetual knows: not merged, closed, closing, or refused a close.
@@ -244,7 +255,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const repair: Repair = { id: randomUUID(), key: current.key, repository: current.repository, branch: current.branch, sha, login, checkoutPath: current.checkoutPath, rootDirectory: current.rootDirectory,
       trigger, status: 'triaging', runs: runs.slice(0, 20).map(runOf), ...(pushed ? { pushed } : {}), createdAt: time, updatedAt: time };
     state.repairs.unshift(repair);
-    state.repairs = state.repairs.filter((item, index) => index < LIMIT || ACTIVE.includes(item.status));
+    state.repairs = state.repairs.filter((item, index) => index < LIMIT || ACTIVE.includes(item.status) || item.cleanup);
     return repair;
   }
   async function transition(repair: Repair, status: RepairStatus, fields: Partial<Repair> = {}) {
@@ -253,9 +264,38 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   }
   async function settle(repair: Repair, status: RepairStatus, reason?: string) {
     const time = now();
+    if (repair.merged) status = 'merged';
     Object.assign(repair, { status, updatedAt: time, completedAt: time } satisfies Partial<Repair>);
-    if (reason) repair.reason = text(reason); else delete repair.reason;
+    if (reason) repair.reason = text(reason); else if (status !== 'merged') delete repair.reason;
     await persist();
+  }
+  async function cleanup(repair: Repair) {
+    if (!repair.cleanup || !steps.cleanup) return;
+    try {
+      await steps.cleanup({ repair: structuredClone(repair), directory: join(root, repair.id) });
+      delete repair.cleanup;
+    } catch (error) { repair.cleanup = { status: 'failed', reason: text(error) }; }
+    repair.updatedAt = now();
+    await persist();
+  }
+  async function cleanupOutstanding() {
+    // A global legacy sweep must finish before admission, and must never race any still-unwinding agent.
+    if (controllers.size) return;
+    if (recovering) {
+      try {
+        await steps.recover!();
+        for (const name of directories) {
+          if (steps.cleanup && state.repairs.some(repair => repair.id === name && repair.cleanup)) continue;
+          await rm(join(root, name), { recursive: true, force: true });
+        }
+        recovering = false;
+      } catch (error) {
+        if (steps.cleanup) for (const repair of state.repairs) repair.cleanup = { status: 'failed', reason: text(error) };
+        await persist();
+        throw error;
+      }
+    }
+    for (const repair of state.repairs) if (repair.cleanup) await cleanup(repair);
   }
   // One close for every repair that shares the pull request. One a person merged on GitHub is the fix itself, never a
   // superseded one, and records the merge commit the close's read named. A close GitHub refused is recorded and not tried
@@ -375,19 +415,23 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       const agent = steps.repair, blocked = await steps.unavailable?.() || (agent ? null : NO_AGENT);
       if (!live()) return;
       if (blocked || !agent) return await settle(repair, 'needs-person', text(blocked || NO_AGENT));
+      if (steps.cleanup) { repair.cleanup = { status: 'pending' }; await persist(); }
       const directory = await workspace(repair.id);
       if (!live() || !await connected()) return;
       await transition(repair, 'repairing');
       const outcome: unknown = await agent({ repair: structuredClone(repair), directory, report: progress => report(repair, signal, progress), autoMerge: () => autoMerge(repair.key) }, signal);
+      if (isRecord(outcome) && outcome.status === 'merged' && validSha(outcome.merged)) repair.merged = outcome.merged.toLowerCase();
       if (!live()) return;
       if (!isRecord(outcome) || !isText(outcome.status) || !OUTCOMES.has(outcome.status) || outcome.status === 'merged' && !validSha(outcome.merged)) return await settle(repair, 'needs-person', 'The repair ended without a result.');
-      if (outcome.status === 'merged') repair.merged = (outcome.merged as string).toLowerCase();
       await settle(repair, outcome.status as RepairStatus, isText(outcome.reason) ? outcome.reason : undefined);
       // A verified fix supersedes the verified fixes of older commits.
       if (verified(repair)) { prune(repair); await persist(); }
     } catch (error) {
       // Stopped or superseded work keeps the status that ended it; shutdown is recorded at the next start.
       if (live()) await settle(repair, 'needs-person', text(error));
+    } finally {
+      if (repair.merged && repair.status !== 'merged') await settle(repair, 'merged');
+      await cleanup(repair);
     }
   }
   function begin(repair: Repair) {
@@ -505,6 +549,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function check() {
     if (closed) return Promise.resolve();
     checking ??= Promise.resolve().then(async () => {
+      // Cleanup can recover without a connected source; only it clears its earlier failure.
+      try { await cleanupOutstanding(); recoveryError = null; }
+      catch (error) { recoveryError = text(error); return; }
+      if (closed) return;
       const current = managed();
       if (!current && !state.repairs.some(repair => repair.status === 'rerunning')) return;
       const connection = await github.connection();
@@ -524,8 +572,14 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function view(): RepairView {
     const current = source(), watched = managed(), head = watched && heads.get(watched.key), read = watched && failing.get(watched.key);
     const repairs = current?.key ? state.repairs.filter(repair => repair.key === current.key && repair.branch === current.branch).slice(0, 20).map(publicRepair) : [];
-    const failed = head && read?.branch === head.branch && read.login === head.login && read.sha === head.sha ? read.runs.map(publicRun) : [];
-    return { repairs, ...(head && head.branch === watched.branch ? { head: { sha: head.sha, branch: head.branch, failed } } : {}), ...(watched ? { autoMerge: autoMerge(watched.key) } : {}), ...(watchError ? { watchError } : {}) };
+    // Resource ownership holds the whole controller, even when its repair belongs to another source or is outside the visible history.
+    const cleanup = state.repairs.find(repair => repair.cleanup?.status === 'failed')?.cleanup ?? state.repairs.find(repair => repair.cleanup)?.cleanup;
+    const held = recovering || Boolean(cleanup);
+    const cleanupReason = cleanup?.status === 'failed' ? cleanup.reason ? text(cleanup.reason) : 'Resource deletion could not be confirmed.' : recoveryError;
+    const cleanupError = cleanupReason ? `Repair cleanup must finish before another repair can start. ${cleanupReason}` : null;
+    const error = [cleanupError, watchError].filter(Boolean).join(' ');
+    const failed = !held && head && read?.branch === head.branch && read.login === head.login && read.sha === head.sha ? read.runs.map(publicRun) : [];
+    return { repairs, ...(head && head.branch === watched.branch ? { head: { sha: head.sha, branch: head.branch, failed } } : {}), ...(watched ? { autoMerge: autoMerge(watched.key) } : {}), ...(error ? { watchError: error } : {}) };
   }
   const guard = () => { if (closed) throw conflict('The controller is shutting down.'); };
   return {
@@ -543,15 +597,25 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (!source()?.key) throw new Error('Scan a repository first.');
       const current = managed();
       if (!current) throw new Error('Connect a GitHub repository to repair its builds.');
-      const connection = await github.connection();
-      if (!connection) throw new Error('Connect GitHub to repair builds.');
+      const unchanged = () => {
+        guard();
+        const latest = managed();
+        if (!latest || (['key', 'repository', 'branch', 'checkoutPath', 'rootDirectory'] as const).some(field => latest[field] !== current[field])) throw conflict('The active source changed. Reload the pipeline.');
+      };
+      const verified = await github.connection();
+      unchanged();
+      if (!verified) throw new Error('Connect GitHub to repair builds.');
+      const connection = { ...verified };
+      if (connection.repository !== current.repository) throw conflict('The GitHub connection changed. Start the repair again.');
       // A check under way may have read the head before this request, so a check of its own follows it.
       if (checking) await checking;
+      unchanged();
       const read = reads;
       await check();
-      const latest = managed(), head = heads.get(current.key);
-      if (latest?.key !== current.key || latest.branch !== current.branch) throw conflict('The active source changed. Reload the pipeline.');
-      if (reads === read || head?.branch !== current.branch) throw conflict(watchError || `Could not read the head of ${current.branch}. Try again.`);
+      unchanged();
+      const head = heads.get(current.key);
+      if (reads === read || head?.branch !== current.branch) throw conflict(recoveryError || watchError || `Could not read the head of ${current.branch}. Try again.`);
+      if (head.login !== connection.login) throw conflict('The GitHub connection changed. Start the repair again.');
       // True when this commit's repair is already running; a held or other active repair refuses.
       const started = () => {
         const existing = scoped(current).find(repair => repair.sha === head.sha);
@@ -563,9 +627,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       };
       // The named run is a failed build of the branch at its head, even when that head's repair already runs.
       const { runs } = await github.runs({ repository: current.repository, sha: head.sha, login: connection.login });
-      guard();
+      unchanged();
+      const connected = await github.connection();
+      unchanged();
+      if (connected?.login !== connection.login || connected.repository !== connection.repository) throw conflict('The GitHub connection changed. Start the repair again.');
       // A repair of a commit the head moved past while its runs were read would be superseded at once.
-      if (heads.get(current.key)?.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
+      const latestHead = heads.get(current.key);
+      if (latestHead?.branch !== head.branch || latestHead.login !== head.login || latestHead.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
       const id = String(runId), own = branchRuns(runs, current.branch), failed = own.filter(failedRun);
       if (!failed.some(run => run.id === id)) {
         throw conflict(!runs.some(run => run.id === id) ? `This run is not at the head of ${current.branch}.` : own.some(run => run.id === id) ? 'Choose a failed workflow run.' : `This run is not a build of ${current.branch}.`);
@@ -573,6 +641,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (started()) return view();
       const repair = open(current, connection.login, head.sha, failed, 'person');
       await persist();
+      try { unchanged(); } catch (error) { await settle(repair, 'needs-person', text(error)); throw error; }
       begin(repair);
       return view();
     },
@@ -604,7 +673,6 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (closed || timer) return;
       timer = setInterval(() => { void check(); }, pollInterval);
       timer.unref?.();
-      if (interrupted && steps.recover) track(steps.recover().catch(error => { process.stderr.write(`Repair: ${text(error)}\n`); }));
       void check();
     },
     /** Resolves once checks, repairs and reports have settled. */

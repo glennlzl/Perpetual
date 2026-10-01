@@ -4,6 +4,7 @@ import { createGitHubPoller, type GitHubPollerOptions } from './pipeline-github.
 
 // The shapes are the controller's contract (contract/github.ts): GET /api/github/deployments as the controller replies.
 import type { CommitDeployments, DeploymentRecord } from '../../../contract/github.ts';
+import type { ScanNode, DeploymentGroup } from '../../../contract/scanner.ts';
 export type GitHubDeployment = DeploymentRecord;
 export type GitHubDeployments = CommitDeployments;
 export type DeploymentMark = 'deploying' | 'queued' | 'deployed' | 'failed' | 'inactive';
@@ -14,11 +15,11 @@ export const deploymentMark = (deployment: Pick<GitHubDeployment, 'state'> | nul
 export const deploymentsActive = (result: GitHubDeployments | null | undefined) => (result?.deployments || []).some(item => ['queued', 'deploying'].includes(String(deploymentMark(item))));
 
 /** A Production target as the delivery projection supplies it. */
-export interface DiscoveredTarget { id: string; kind?: string; provider?: string; label?: string }
+export type DiscoveredTarget = Pick<ScanNode, 'id'> & Partial<Pick<ScanNode, 'kind' | 'provider' | 'label'>>;
 /** A Production row for a recorded deployment, beside the targets discovery found. */
 export interface RecordedDeployment { id: string; kind: 'github-deployment'; provider: string; label: string; deployment: GitHubDeployment }
 /** A provider's group of Production rows: discovered targets and recorded deployments. */
-export interface DeploymentGroupRow<T extends DiscoveredTarget = DiscoveredTarget> { id: string; kind: 'deployment-group'; provider: string; label: string; deployments: (T | RecordedDeployment)[] }
+export type DeploymentGroupRow<T extends DiscoveredTarget = DiscoveredTarget> = DeploymentGroup<T | RecordedDeployment>;
 const isGroup = <T extends DiscoveredTarget>(row: T | DeploymentGroupRow<T>): row is DeploymentGroupRow<T> => row.kind === 'deployment-group' && Array.isArray((row as DeploymentGroupRow<T>).deployments);
 export const isRecordedDeployment = (row: DiscoveredTarget | RecordedDeployment): row is RecordedDeployment => row.kind === 'github-deployment' && 'deployment' in row;
 

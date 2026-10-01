@@ -59,6 +59,16 @@ async function settled({manager,context}:{manager:BrowserManager;context:Browser
 const userHome=process.env.HOME||homedir();
 const secretFree=(value:unknown)=>!JSON.stringify(value).includes(key)&&!JSON.stringify(value).includes(password);
 
+// Notify the test when its seed actually starts; workspace preparation has no one-second deadline.
+function heldSeed(){
+  const started=Promise.withResolvers<(error:Error)=>void>();
+  const runtime:JourneyRuntime={capabilities:async()=>({browserInstalled:true}),start(){
+    const worker=Promise.withResolvers<void>();started.resolve(worker.reject);
+    return {promise:worker.promise,cancel(){worker.reject(new Error('Cancelled.'));}};
+  }};
+  return {runtime,started:started.promise};
+}
+
 test('the default harness is OpenCode running Playwright’s generator agent against OpenRouter',()=>{
   assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
 });
@@ -313,12 +323,9 @@ test('saving code or replacing its reviewed case removes an obsolete generation 
 });
 
 test('an in-flight generation failure cannot attach itself to a replacement case',{timeout:30000},async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined;
-  const seedStarted=Promise.withResolvers<void>();
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  const seed=heldSeed(),f=await setup(t,{playwright:seed.runtime});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  await seedStarted.promise;
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   rejectSeed(new Error('The original seed failed.'));
   assert.equal(await settled(f),undefined);
@@ -344,12 +351,9 @@ test('discovery replacing a case cannot attach its old generation failure to the
 });
 
 test('a generation failure that cannot be saved keeps its original cause and an explicit storage error',{timeout:30000},async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined;
-  const seedStarted=Promise.withResolvers<void>();
-  const f=await setup(t,{playwright:{capabilities:async()=>({browserInstalled:true}),start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  const seed=heldSeed(),f=await setup(t,{playwright:seed.runtime});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  await seedStarted.promise;
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
   try{
@@ -364,20 +368,18 @@ test('a generation failure that cannot be saved keeps its original cause and an 
 });
 
 test('a refused generation cannot restore an unsaved old failure onto a replacement case',{timeout:30000},async t=>{
-  let rejectSeed:((error:Error)=>void)|undefined,refuseNext=false,refuse:((value:{browserInstalled:boolean})=>void)|undefined;
-  const seedStarted=Promise.withResolvers<void>(),capabilityRequested=Promise.withResolvers<void>();
-  const f=await setup(t,{playwright:{capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refuse=resolve;capabilityRequested.resolve();}):{browserInstalled:true},start(){return {promise:new Promise<void>((_,reject)=>{rejectSeed=reject;seedStarted.resolve();}),cancel(){rejectSeed?.(new Error('Cancelled.'));}};}}});
+  let refuseNext=false;
+  const refusing=Promise.withResolvers<(value:{browserInstalled:boolean})=>void>();
+  const seed=heldSeed(),f=await setup(t,{playwright:{...seed.runtime,capabilities:async()=>refuseNext?new Promise(resolve=>{refuseNext=false;refusing.resolve(resolve);}):{browserInstalled:true}}});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  await seedStarted.promise;
-  assert.ok(rejectSeed);
+  const rejectSeed=await seed.started;
   const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
   await rm(file);await mkdir(file);
   try{rejectSeed(new Error('The original seed failed.'));assert.match((await settled(f))?.generation?.error??'',/could not be saved/);}
   finally{await rm(file,{recursive:true});await writeFile(file,saved);}
   refuseNext=true;
   const rejected=assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/Install Chromium/);
-  await capabilityRequested.promise;
-  assert.ok(refuse);
+  const refuse=await refusing.promise;
   await f.manager.saveCases(f.context,[{...journey,expectedOutcomes:['A different reviewed outcome.']}]);
   refuse({browserInstalled:false});await rejected;
   assert.equal((await f.manager.view(f.context)).specs[journey.id],undefined);
@@ -479,13 +481,28 @@ test('code generation for an existing URL accepts a temporary test account witho
 
 test('code generation validates explicit account choices and can opt out of a twin account',async t=>{
   const f=await setup(t);
-  for(const input of [{accountId:'missing'},{accountId:1},{credentials:{username:'u',password:'p'},accountId:'owner'}]) {
+  for(const input of [{accountId:'missing'},{accountId:1},{credentials:{username:'u',password:'p'},accountId:'owner'},{credentials:{username:'u',password:'p'},accountId:null}]) {
     await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id,...input}),/account/i);
     assert.equal(f.manager.isActive(f.context),false,'Invalid account input must release its reservation.');
   }
   await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
   assert.equal((await settled(f))?.draft?.stale,false);
   assert.equal(f.launches.length,0,'No sign-in seed is run when the person chooses no account.');
+});
+
+test('generation keeps the entered account selected before runtime preflight awaits',async t=>{
+  const f=await setup(t),runtime=f.options().playwright!;
+  let resume!:()=>void;
+  runtime.capabilities=()=>new Promise(resolve=>{resume=()=>resolve({browserInstalled:true});});
+  const credentials={username:'chosen@example.test',password:'chosen-fixture-password'};
+  const input={caseId:journey.id,credentials,accountId:undefined as string|undefined};
+  const pending=f.manager.generateSpec(f.context,input);
+  credentials.username='changed@example.test';credentials.password='changed-fixture-password';input.accountId='owner';
+  resume();await pending;
+  runtime.capabilities=async()=>({browserInstalled:true});
+  assert.equal((await settled(f))?.draft?.stale,false);
+  assert.deepEqual(f.launches.map(input=>input.credentials),[{username:'chosen@example.test',password:'chosen-fixture-password'}]);
+  assert.doesNotMatch(await readFile(join(f.dataDir,'browser','state.json'),'utf8'),/chosen@example\.test|chosen-fixture-password|changed-fixture-password/);
 });
 
 test('stored journeys without checks refuse code generation and verification before starting work',async t=>{

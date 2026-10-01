@@ -1,4 +1,5 @@
 import type { BrowserCase } from './browser-test-ui.ts';
+import type { ScanNode } from '../../../contract/scanner.ts';
 
 export const MAX_CASES = 60;
 // The controller keeps at most MAX_CASES and discovery returns up to four journeys.
@@ -14,7 +15,7 @@ const BRANCH = /^[\w./-]{1,255}$/;
 // Only literal branch names reported by the scan or the sandbox record; nothing is inferred from a URL.
 const branchesOf = (values: unknown) => [...new Set((Array.isArray(values) ? values : [values]).filter((value): value is string => typeof value === 'string' && BRANCH.test(value)))];
 /** A scanned node's fields that can name a preview; each is checked before use. */
-export interface PreviewNode { provider?: string; previewAlias?: unknown; label?: unknown; projectName?: unknown; deployBranches?: unknown }
+export type PreviewNode = Partial<Pick<ScanNode, 'provider'>> & { previewAlias?: unknown; label?: unknown; projectName?: unknown; deployBranches?: unknown };
 /** A scanned preview URL and, when the scan reports them, the branches it deploys. */
 export interface PreviewTarget { url: string; label: string; branches?: string[] }
 // Scanned Vercel preview aliases are real application URLs; account access stays unverified.

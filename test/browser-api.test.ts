@@ -119,7 +119,9 @@ test('HTTP verification carries the temporary account through three real browser
   const item={id:'notes',name:'Create a note',goal:'Save a note and see its count increase after reload',isolation:'shared',needsReview:false,selected:true,expectedOutcomes:['A saved note'],steps:[{id:'open',title:'Sign in',checks:[{type:'read-number',label:'Notes',name:'before'}]},{id:'save',title:'Save and reload',checks:[{type:'compare-number',label:'Notes',name:'after',op:'>',than:'before'}]}]};
   await post('/api/browser/config',{...context,config:{targetUrl:`http://127.0.0.1:${address.port}/notes`,journeyTimeoutSeconds:60}});
   assert.equal((await post('/api/browser/cases',{...context,cases:[item]})).status,200);
-  const code="import { test } from 'perpetual'; test('Create a note', async ({ page, journey }) => { await journey.milestone('open', async () => { await journey.signIn(); }); await journey.milestone('save', async () => { await page.getByRole('button', { name: 'Add note' }).click(); await page.reload(); }); });";
+  // Clicking commits the form's navigation before its document finishes loading. Finish that navigation before
+  // reloading; the write-blocked control keeps its already-loaded document and still fails the same reviewed check.
+  const code="import { test } from 'perpetual'; test('Create a note', async ({ page, journey }) => { await journey.milestone('open', async () => { await journey.signIn(); }); await journey.milestone('save', async () => { await page.getByRole('button', { name: 'Add note' }).click(); await page.waitForLoadState('load'); await page.reload(); }); });";
   const saved=await post('/api/browser/specs',{...context,caseId:item.id,code}),hash=saved.body.spec.draft.hash;
   const credentials={username:'tester@example.test',password:'account-fixture-only'};
   const accepted=await post('/api/browser/specs/verify',{...context,caseId:item.id,hash,credentials});assert.equal(accepted.status,202);

@@ -24,7 +24,7 @@ type Options = {
 type Holds = { prepare?: (gate: GateRef) => Error | null; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
 
 // Injected source, GitHub and steps record what the gate asked for; nothing reaches the network or Docker.
-async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'glennlzl', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post }: Options = {}) {
+async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post }: Options = {}) {
   dataDir ??= await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   let tick = 0;
   const now = () => new Date(Date.UTC(2026, 8, 23, 10, 0, 0, tick++)).toISOString();
@@ -33,7 +33,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
   const github: GateGitHub = {
     build: async () => ({ status: 'passed' }),
     connection: async () => (typeof connection === 'function' ? connection() : connection),
-    async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 304 as const }; if (next instanceof Error) throw next; return next; },
+    async head(input) { headCalls.push(input); const next = heads.shift() ?? { status: 200 as const, sha: current.sha, etag: null }; if (next instanceof Error) throw next; return next; },
     async post(status) { if (post) await post(status); posts.push(status); },
   };
   const steps: GateSteps<Context, { id: string }> = {
@@ -104,7 +104,7 @@ test('a run that stopped on a runtime error without a failed journey needs relea
   const view = h.manager.view().stages.beta;
   assert.deepEqual([view.status, view.reason], ['needs-release', 'Browser runtime did not return results.']);
   assert.deepEqual([h.posts.at(-1)?.state, h.posts.at(-1)?.description], ['pending', 'Needs release']);
-  assert.equal((await h.manager.release({ stageId: 'beta', sha: A, login: 'glennlzl' })).stages.beta.status, 'released');
+  assert.equal((await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' })).stages.beta.status, 'released');
 });
 
 test('a stage without reviewed, selected journeys needs release without rebuilding or running', async t => {
@@ -153,17 +153,17 @@ test('only a gate that needs release can be released, by a GitHub login, and nev
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   await assert.rejects(h.manager.release({ stageId: 'beta', sha: A }), /Connect GitHub/);
-  await assert.rejects(h.manager.release({ stageId: 'beta', sha: B, login: 'glennlzl' }), (error: HttpError) => error.statusCode === 404);
-  const view = await h.manager.release({ stageId: 'beta', sha: A, login: 'glennlzl' });
-  assert.deepEqual([view.stages.beta.status, view.stages.beta.releasedBy], ['released', 'glennlzl']);
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: B, login: 'developer' }), (error: HttpError) => error.statusCode === 404);
+  const view = await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' });
+  assert.deepEqual([view.stages.beta.status, view.stages.beta.releasedBy], ['released', 'developer']);
   await h.manager.idle();
-  assert.deepEqual([h.posts.at(-1)?.state, h.posts.at(-1)?.description], ['success', 'Released by glennlzl']);
-  await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'glennlzl' }), (error: HttpError) => error.statusCode === 409 && /does not need release/.test(error.message));
+  assert.deepEqual([h.posts.at(-1)?.state, h.posts.at(-1)?.description], ['success', 'Released by developer']);
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'developer' }), (error: HttpError) => error.statusCode === 409 && /does not need release/.test(error.message));
   h.current.sha = B;
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   assert.equal(h.manager.view().stages.beta.status, 'failed');
-  await assert.rejects(h.manager.release({ stageId: 'beta', sha: B, login: 'glennlzl' }), (error: HttpError) => error.statusCode === 409 && /failed gate cannot be released/.test(error.message));
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: B, login: 'developer' }), (error: HttpError) => error.statusCode === 409 && /failed gate cannot be released/.test(error.message));
 });
 
 test('a passed or released gate starts the next Sandbox stage at the same commit, and Production is Ready once all pass', async t => {
@@ -171,7 +171,7 @@ test('a passed or released gate starts the next Sandbox stage at the same commit
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   assert.equal(h.manager.view().stages.gamma, undefined, 'A gate that needs release promotes nothing.');
-  await h.manager.release({ stageId: 'beta', sha: A, login: 'glennlzl' });
+  await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' });
   await h.manager.idle();
   assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta a twin-beta', 'run gamma a twin-gamma']);
   const view = h.manager.view();
@@ -201,7 +201,7 @@ test('an older commit released after a newer one reached the next stage is recor
   await h.manager.idle();
   await h.manager.watch(); // push B: Beta and Gamma pass B
   await h.manager.idle();
-  await h.manager.release({ stageId: 'beta', sha: A, login: 'glennlzl' });
+  await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' });
   await h.manager.idle();
   const gamma = await h.gates('gamma');
   assert.deepEqual(gamma.map(item => [item.sha[0], item.status]).sort(), [['a', 'superseded'], ['b', 'passed']]);
@@ -263,12 +263,11 @@ test('a local checkout gate still runs without a GitHub connection and shows tha
   assert.deepEqual(h.headCalls, [], 'The branch head is read only for a connected account.');
 });
 
-test('a managed source without its GitHub connection cannot bypass Build admission', async t => {
+test('a managed source without its GitHub connection cannot admit a new manual gate', async t => {
   const h = await harness(t, { connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
-  await h.manager.run({ stageId: 'beta' });
+  await assert.rejects(h.manager.run({ stageId: 'beta' }), /Connect GitHub/);
   await h.manager.idle();
-  assert.equal(h.manager.view().stages.beta.status, 'waiting-build');
-  assert.match(h.manager.view().stages.beta.reason!, /Connect GitHub/);
+  assert.deepEqual(h.manager.view().stages, {});
   assert.deepEqual(h.log, []);
   assert.equal(h.manager.view().production, null);
 });
@@ -310,14 +309,14 @@ test('the watcher reads the branch head with its ETag; the first head is a basel
   assert.deepEqual([queued.stageId, queued.sha, queued.context], ['beta', B, 'perpetual/Beta']);
   release.resolve();
   await h.manager.idle();
-  assert.deepEqual((await h.saved()).heads[KEY], { repository: 'owner/app', branch: 'main', login: 'glennlzl', sha: B, etag: '"e2"', checkedAt: (await h.saved()).heads[KEY].checkedAt });
+  assert.deepEqual((await h.saved()).heads[KEY], { repository: 'owner/app', branch: 'main', login: 'developer', sha: B, etag: '"e2"', checkedAt: (await h.saved()).heads[KEY].checkedAt });
 });
 
 test('the watcher keeps its ETag across restarts, drops it for another account, and skips unmanaged or unconnected sources', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   await mkdir(join(dataDir, 'gates'));
-  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'glennlzl', sha: A, etag: '"e1"' } } }));
-  let login = 'glennlzl';
+  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'developer', sha: A, etag: '"e1"' } } }));
+  let login = 'developer';
   const h = await harness(t, { dataDir, connection: () => ({ login, repository: 'owner/app' }), heads: [{ status: 304 }, { status: 200, sha: A, etag: '"other"' }, { status: 200, sha: C, etag: '"e3"' }] });
   await h.manager.watch();
   assert.equal(h.headCalls[0].etag, '"e1"', 'The saved ETag survives a restart.');
@@ -354,15 +353,15 @@ test('a gate queued again or released after fifty newer gates still reports its 
   assert.deepEqual(postsOf(A, from), ['pending/Running', 'failure/Failed']);
   // Releasing an older gate that needs release reports it released.
   from = h.posts.length;
-  await h.manager.release({ stageId: 'beta', sha: B, login: 'glennlzl' });
+  await h.manager.release({ stageId: 'beta', sha: B, login: 'developer' });
   await h.manager.idle();
-  assert.deepEqual(postsOf(B, from), ['success/Released by glennlzl']);
+  assert.deepEqual(postsOf(B, from), ['success/Released by developer']);
 });
 
 test('the first head another account reads is a baseline, never a push', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   await mkdir(join(dataDir, 'gates'));
-  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'glennlzl', sha: A, etag: '"e1"' } } }));
+  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, gates: [], heads: { [KEY]: { branch: 'main', login: 'developer', sha: A, etag: '"e1"' } } }));
   const h = await harness(t, { dataDir, connection: { login: 'someone-else', repository: 'owner/app' }, heads: [{ status: 200, sha: C, etag: '"e3"' }, { status: 200, sha: D, etag: '"e4"' }] });
   await h.manager.watch();
   assert.deepEqual([await h.gates(), h.log], [[], []], 'Nothing moves the source or rebuilds.');

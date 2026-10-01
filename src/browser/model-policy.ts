@@ -1,4 +1,5 @@
 import {DEFAULT_MODEL,OPENROUTER_BASE_URL,isOpenRouterEndpoint} from './openrouter-models.ts';
+import type {BrowserModelView} from '../../contract/settings.ts';
 
 const OPENAI_URL='https://api.openai.com/v1';
 
@@ -8,8 +9,6 @@ export type BrowserModelSettings={apiKey:string;model:string;baseUrl:string};
 export type BrowserModelInput={apiKey?:unknown;model?:unknown;baseUrl?:unknown;escalationModel?:unknown};
 /** Only checked settings configure a model; otherwise modelError says why, and each field keeps only text, for a view. */
 export type BrowserModelConfiguration=BrowserModelSettings&({modelConfigured:true;modelError?:undefined}|{modelConfigured:false;modelError:string});
-/** What a view may show: never the key itself. */
-export type BrowserModelView={provider:'openrouter'|'custom';model:string;baseUrl:string;keyConfigured:boolean;modelConfigured:boolean;modelError?:string};
 export type BrowserModelEnvironment={PERPETUAL_MODEL_API_KEY:string;PERPETUAL_MODEL:string;PERPETUAL_MODEL_BASE_URL:string};
 
 const validUrl=(value:string)=>{try{const url=new URL(value);return value.length<=2048&&['https:','http:'].includes(url.protocol)&&!url.username&&!url.password;}catch{return false;}};

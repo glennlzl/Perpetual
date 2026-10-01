@@ -30,8 +30,8 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, runs = {}, he
   const holds: { prepare?: (gate: GateRef) => Promise<void>; run?: (context: Context) => Promise<void> } = {};
   const github: GateGitHub = {
     build: async () => ({ status: 'passed' }),
-    connection: async () => ({ login: 'glennlzl', repository: 'owner/app' }),
-    async head() { return heads.shift() ?? { status: 304 }; },
+    connection: async () => ({ login: 'developer', repository: 'owner/app' }),
+    async head() { return heads.shift() ?? { status: 200, sha: current.sha, etag: null }; },
     async post(status) { posts.push(status); },
   };
   const steps: GateSteps<Context, { id: string }> = {
@@ -112,12 +112,12 @@ test('a passed repair gate enqueues no target-branch gate, and a repair gate a p
   const h = await harness(t, { runs: { 'beta f': { status: 'blocked' } } });
   const result = await h.manager.runRepair(request());
   assert.deepEqual(result.gates.map(gate => [gate.stageId, gate.status, gate.reason]), [['beta', 'needs-release', 'A journey is blocked.']]);
-  const view = await h.manager.release({ stageId: 'beta', sha: P, login: 'glennlzl' });
+  const view = await h.manager.release({ stageId: 'beta', sha: P, login: 'developer' });
   await h.manager.idle();
   assert.deepEqual(view, { stages: {}, production: null });
-  assert.deepEqual((await h.gates()).map(gate => [gate.stageId, gate.status, gate.releasedBy]), [['beta', 'released', 'glennlzl']], 'No Gamma gate is queued.');
-  assert.deepEqual(h.posted(P).at(-1), ['perpetual/Beta', 'success', 'Released by glennlzl']);
-  await assert.rejects(h.manager.release({ stageId: 'beta', sha: P, login: 'glennlzl' }), (error: HttpError) => error.statusCode === 409);
+  assert.deepEqual((await h.gates()).map(gate => [gate.stageId, gate.status, gate.releasedBy]), [['beta', 'released', 'developer']], 'No Gamma gate is queued.');
+  assert.deepEqual(h.posted(P).at(-1), ['perpetual/Beta', 'success', 'Released by developer']);
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: P, login: 'developer' }), (error: HttpError) => error.statusCode === 409);
 });
 
 test('a repair that stops ends its queued gate as superseded with nothing reported, and a gate at work still reaches its verdict', async t => {
@@ -235,7 +235,7 @@ test('a repair that stops after the queue chose its gate, before the gate starts
     return stages;
   } };
   const manager = await createGateManager({ dataDir, source: () => current, retryInterval: 5,
-    github: { connection: async () => ({ login: 'glennlzl', repository: 'owner/app' }), head: async () => ({ status: 304 }), async post(status) { posts.push(status); } },
+    github: { connection: async () => ({ login: 'developer', repository: 'owner/app' }), head: async () => ({ status: 304 }), async post(status) { posts.push(status); } },
     steps: { async prepare(gate) { prepared.push(gate.stageId); return gate; }, journeys: () => 1, async rebuild() { return { id: 'twin' }; }, async run() { return { status: 'passed' }; } },
   });
   t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });

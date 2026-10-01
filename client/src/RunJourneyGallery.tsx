@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { api } from '@/lib/api';
 import { useNow } from '@/lib/use-now';
-import { browserJourneySteps, journeyActive, journeyElapsed, journeyErrorTone, journeyProgress, journeyQueueLabel, journeyRecordings, journeyRevision, journeyStreaming, journeySummary, orderJourneys, type BrowserCase, type BrowserRun } from '@/lib/browser-test-ui';
+import { browserJourneySteps, journeyActive, journeyElapsed, journeyErrorTone, journeyProgress, journeyQueueLabel, journeyRecordings, journeyRevision, journeyStreaming, journeySummary, orderJourneys, type CaseSummary, type BrowserRun } from '@/lib/browser-test-ui';
 import { createViewFocus } from '@/lib/journey-focus';
 import BrowserLiveFrame from './BrowserLiveFrame';
 import JourneyCard from './JourneyCard';
@@ -13,7 +13,7 @@ import JourneyEvidence, { hasJourneyEvidence } from './JourneyEvidence';
 import JourneyRecording from './JourneyRecording';
 import JourneySteps, { JourneyBlockers, JourneyMark, JourneySegments } from './JourneySteps';
 
-type JourneyEntry = ReturnType<typeof orderJourneys<BrowserCase>>[number];
+type JourneyEntry = ReturnType<typeof orderJourneys<CaseSummary>>[number];
 type JourneyFocusProps = {
   entry: JourneyEntry; entries: JourneyEntry[]; run: BrowserRun; repoPath: string; stageId: string;
   onSkip?: () => void; skipping: boolean; onSelect: (id: string) => void; onBack: () => void; headingRef: Ref<HTMLHeadingElement>;

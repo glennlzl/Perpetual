@@ -3,8 +3,9 @@
 // only twin.json changed, cancellation, the time limit, the output tail and cleanup stay the controller's. Its tools are
 // its only capabilities: list, read and grep inside the workspace's project, write_config, which checks a config as the
 // controller does and writes twin.json only when it is valid, so a format slip costs one step rather than an attempt, and
-// done. It runs no command and reaches no network but the model's. The key comes from OPENROUTER_API_KEY alone, and every
-// line it prints is redacted of it. Everything it reads, the instructions' quotes and the repository, is data.
+// done. It runs no command and reaches no network but the model's. Observations and output hide known values and secret
+// shapes before selecting or clipping text. Editable config keeps its exact bytes or is refused for credential literals.
+// The process's model key comes from OPENROUTER_API_KEY alone. Everything it reads, instructions and repository, is data.
 //
 // Usage: node author-loop.ts <workspace> <OpenRouter model id> <prompt>
 import { realpathSync } from 'node:fs';
@@ -18,7 +19,7 @@ import { CONFIG, EVIDENCE, FACTS, FEEDBACK, INSTRUCTIONS, MAX_CONFIG, STEPS, TIM
 import { services as registry } from './registry.ts';
 import { checkWritten } from '../environments/generation.ts';
 import { unwiredSummary, workFacts } from '../environments/evidence.ts';
-import { hide as hideValues } from '../redaction.ts';
+import { hasSecretLiteral, hide as hideValues, redact } from '../redaction.ts';
 import type { JSONSchema7 } from 'ai';
 import type { TwinServices } from './registry.ts';
 
@@ -35,11 +36,14 @@ export const CHANGE_APPROACH = 'This is the same error as your last writes. Chan
 /** What the loop says on stderr when the model's provider stops it, before the provider's own error. */
 export const PROVIDER_STOPPED = 'The twin config author stopped: the model provider returned an error.';
 const STOPPED = 'The twin config author was stopped.', TIMED_OUT = 'The twin config author reached its time limit.';
+const CONFIG_CREDENTIAL = `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.`;
 
 type Stream = 'stdout' | 'stderr';
 export type Print = (line: string, stream: Stream) => void;
 type Refusal = { ok: false; error: string; note?: string };
 type Result = { ok: true; [key: string]: unknown } | Refusal;
+type Protect = (value: unknown) => string;
+type Observations = { text: Protect; file: (file: string, text: string) => string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const field = (input: unknown, name: string) => isRecord(input) ? input[name] : undefined;
@@ -57,29 +61,30 @@ const shown = (root: string, path: string) => relative(root, path).split(sep).jo
  * A path the author named, inside the project `root` (a real path): its real path and how it is shown, or why it is
  * refused. An absolute path, one that leaves the project, and one that leads out of it through a link are refused.
  */
-async function locate(root: string, value: unknown): Promise<{ real: string; name: string; error?: undefined } | { error: string }> {
+async function locate(root: string, value: unknown, protect: Protect): Promise<{ real: string; name: string; error?: undefined } | { error: string }> {
   if (typeof value !== 'string' || value.length > LIMITS.path || value.includes('\0')) return { error: 'Name a path relative to the workspace, such as repo/package.json.' };
-  if (isAbsolute(value)) return { error: `${oneLine(value)} is absolute; name a path relative to the workspace, such as repo/package.json.` };
+  if (isAbsolute(value)) return { error: `${oneLine(protect(value))} is absolute; name a path relative to the workspace, such as repo/package.json.` };
   const target = resolve(root, value);
-  if (!within(root, target)) return { error: `${oneLine(value)} is outside the workspace.` };
+  if (!within(root, target)) return { error: `${oneLine(protect(value))} is outside the workspace.` };
   const real = await realpath(target).catch(() => null);
-  if (real === null) return { error: `${shown(root, target)} does not exist.` };
-  if (!within(root, real)) return { error: `${shown(root, target)} leads outside the workspace.` };
-  return { real, name: shown(root, target) };
+  const name = protect(shown(root, target));
+  if (real === null) return { error: `${name} does not exist.` };
+  if (!within(root, real)) return { error: `${name} leads outside the workspace.` };
+  return { real, name };
 }
 
 /** A folder's entries, folders ending in / and links in @, sorted. */
-async function list(root: string, input: unknown): Promise<Result> {
-  const found = await locate(root, field(input, 'path') ?? '.');
+async function list(root: string, input: unknown, observe: Observations): Promise<Result> {
+  const found = await locate(root, field(input, 'path') ?? '.', observe.text);
   if (found.error !== undefined) return refused(found.error);
   if (!(await stat(found.real)).isDirectory()) return refused(`${found.name} is a file; read it instead.`);
   const entries = (await readdir(found.real, { withFileTypes: true })).map(entry => `${entry.name}${entry.isDirectory() ? '/' : entry.isSymbolicLink() ? '@' : ''}`).sort();
-  return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
+  return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries).map(observe.text), truncated: entries.length > LIMITS.entries };
 }
 
 /** A text file's lines from `offset`, numbered, within the line and byte limits; `next` is where a truncated read goes on. */
-async function read(root: string, input: unknown): Promise<Result> {
-  const found = await locate(root, field(input, 'path'));
+async function read(root: string, input: unknown, observe: Observations): Promise<Result> {
+  const found = await locate(root, field(input, 'path'), observe.text);
   if (found.error !== undefined) return refused(found.error);
   const offset = field(input, 'offset') ?? 1, limit = field(input, 'limit') ?? LIMITS.lines;
   if (!whole(offset) || !whole(limit)) return refused('offset and limit are whole numbers from 1.');
@@ -88,8 +93,9 @@ async function read(root: string, input: unknown): Promise<Result> {
   if (!info.isFile()) return refused(`${found.name} is not a file.`);
   if (info.size > LIMITS.fileBytes) return refused(`${found.name} is over ${LIMITS.fileBytes / 1024 / 1024} MB; grep it instead.`);
   const bytes = await readFile(found.real);
+  if (bytes.length > LIMITS.fileBytes) return refused(`${found.name} is over ${LIMITS.fileBytes / 1024 / 1024} MB; grep it instead.`);
   if (binary(bytes)) return refused(`${found.name} is a binary file.`);
-  const lines = bytes.toString('utf8').split(/\r?\n/);
+  const lines = observe.file(found.real, bytes.toString('utf8')).split(/\r?\n/);
   if (lines.at(-1) === '') lines.pop();
   const content: string[] = [];
   let size = 0, index = offset - 1;
@@ -146,15 +152,15 @@ function globExpression(glob: string): RegExp | null {
  * within LIMITS.searchMs. `include` is a glob of file names, or of paths below the searched folder when it has a /.
  * Links are never followed; large and binary files are skipped.
  */
-async function grep(root: string, input: unknown): Promise<Result> {
+async function grep(root: string, input: unknown, observe: Observations): Promise<Result> {
   const source = field(input, 'pattern'), include = field(input, 'include');
   if (typeof source !== 'string' || !source || source.length > LIMITS.pattern) return refused(`Pass a pattern of 1 to ${LIMITS.pattern} characters.`);
   if (include !== undefined && (typeof include !== 'string' || !include || include.length > LIMITS.include)) return refused(`include is a glob of 1 to ${LIMITS.include} characters, such as *.ts.`);
   const glob = typeof include === 'string' ? globExpression(include) : null, byPath = typeof include === 'string' && include.includes('/');
   if (include !== undefined && glob === null) return refused(INCLUDE);
   let pattern: RegExp;
-  try { pattern = new RegExp(source); } catch (error) { return refused(`The pattern is not a regular expression: ${(error as Error).message}`); }
-  const found = await locate(root, field(input, 'path'));
+  try { pattern = new RegExp(source); } catch (error) { return refused(observe.text(`The pattern is not a regular expression: ${(error as Error).message}`)); }
+  const found = await locate(root, field(input, 'path'), observe.text);
   if (found.error !== undefined) return refused(found.error);
   const base = found.real, matches: string[] = [], deadline = Date.now() + LIMITS.searchMs;
   const context = createContext({ pattern, lines: [] as string[], hits: [] as number[], room: 0, glob, names: [] as string[], kept: [] as boolean[] });
@@ -171,12 +177,12 @@ async function grep(root: string, input: unknown): Promise<Result> {
   async function search(file: string) {
     if ((await stat(file)).size > LIMITS.searchedBytes) return;
     const bytes = await readFile(file);
-    if (binary(bytes)) return;
+    if (bytes.length > LIMITS.searchedBytes || binary(bytes)) return;
     searched += 1;
-    const lines = bytes.toString('utf8').split(/\r?\n/);
+    const lines = observe.file(file, bytes.toString('utf8')).split(/\r?\n/);
     Object.assign(context, { lines, hits: [], room: LIMITS.matches + 1 - matches.length });
     SEARCH.runInContext(context, remaining());
-    for (const index of context.hits as number[]) matches.push(`${shown(root, file)}:${index + 1}: ${clip(lines[index].trim(), LIMITS.matchChars)}`);
+    for (const index of context.hits as number[]) matches.push(`${observe.text(shown(root, file))}:${index + 1}: ${clip(lines[index].trim(), LIMITS.matchChars)}`);
   }
   try {
     if ((await stat(found.real)).isFile()) await search(found.real);
@@ -206,17 +212,17 @@ const schema = (properties: Record<string, JSONSchema7>, required: string[]) =>
 const PATH = { type: 'string', description: 'A path relative to the workspace, such as repo or repo/package.json.' } satisfies JSONSchema7;
 
 /** How the loop shows a tool call: its name and what it was asked for, on one line. */
-function described(name: string, input: unknown) {
-  const path = oneLine(field(input, 'path') ?? '.'), offset = field(input, 'offset'), include = field(input, 'include');
+function described(name: string, input: unknown, protect: Protect) {
+  const path = oneLine(protect(field(input, 'path') ?? '.')), offset = field(input, 'offset'), include = field(input, 'include');
   if (name === 'read') return `read ${path}${whole(offset) && offset > 1 ? `:${offset}` : ''}`;
-  if (name === 'grep') return `grep ${JSON.stringify(oneLine(field(input, 'pattern') ?? ''))} in ${path}${include === undefined ? '' : ` (${oneLine(include)})`}`;
-  return `${oneLine(name)} ${path}`;
+  if (name === 'grep') return `grep ${JSON.stringify(oneLine(protect(field(input, 'pattern') ?? '')))} in ${path}${include === undefined ? '' : ` (${oneLine(protect(include))})`}`;
+  return `${oneLine(protect(name))} ${path}`;
 }
 /** A tool call's line: what a read was asked for, or that a write was valid, or why either was refused. */
-function outcome(name: string, input: unknown, output: unknown) {
-  const ok = field(output, 'ok') === true, why = firstLine(String(field(output, 'error') ?? 'refused'));
+function outcome(name: string, input: unknown, output: unknown, protect: Protect) {
+  const ok = field(output, 'ok') === true, why = firstLine(protect(field(output, 'error') ?? 'refused'));
   if (name === 'write_config') return ok ? '✓ write_config' : `✗ write_config: ${why}`;
-  return ok ? `→ ${described(name, input)}` : `✗ ${described(name, input)}: ${why}`;
+  return ok ? `→ ${described(name, input, protect)}` : `✗ ${described(name, input, protect)}: ${why}`;
 }
 
 /**
@@ -258,7 +264,7 @@ export interface LoopOptions {
   prompt: string;
   model: LanguageModel;
   services?: TwinServices;
-  /** Values no output line may contain, such as the key. */
+  /** Values no observation or output line may contain, such as the key. */
   secrets?: string[];
   /** Stops the loop, as SIGTERM does. */
   signal?: AbortSignal;
@@ -272,8 +278,9 @@ export interface LoopOptions {
  * last valid config it wrote, or the draft when it wrote none.
  */
 export async function authorLoop({ workspace, prompt, model, services = registry, secrets = [], signal, timeoutMs = TIME_LIMIT_MS, print = (line, stream) => { process[stream].write(`${line}\n`); } }: LoopOptions): Promise<number> {
-  const hidden = secrets.filter(Boolean), hide = hideValues(hidden);
-  const say = (line: string, stream: Stream = 'stdout') => print(hide(line), stream);
+  const hidden = secrets.filter(Boolean), hide = hideValues(hidden, { preserveLines: true });
+  const protect = (value: unknown) => redact(hide(value));
+  const say = (line: string, stream: Stream = 'stdout') => print(protect(line), stream);
   const root = await realpath(join(workspace, 'project')), text = (file: string) => readFile(file, 'utf8').catch(() => null);
   const [instructions, evidence, feedback, factsText] = await Promise.all([text(join(root, INSTRUCTIONS)), text(join(root, EVIDENCE)), text(join(root, FEEDBACK)), text(join(workspace, FACTS))]);
   if (instructions === null || evidence === null) throw new Error(`The workspace has no ${INSTRUCTIONS} or ${EVIDENCE}.`);
@@ -283,30 +290,40 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   let written = false, repeated = { error: '', count: 0 };
 
   const file = join(root, CONFIG);
+  // Editable config keeps its exact templates and ordinary values. A credential literal needs a reference, never a rewritten draft.
+  const observe: Observations = { text: protect, file: (path, text) => {
+    if (path !== file) return protect(text);
+    if (hasSecretLiteral(text, hidden)) throw new Error(CONFIG_CREDENTIAL);
+    return text;
+  } };
   /** The config a write would leave in twin.json, or why it is refused, as the controller would refuse it. */
   async function checked(input: unknown): Promise<{ text: string; error?: undefined } | { error: string }> {
     const text = field(input, 'text');
     if (typeof text !== 'string') return { error: `Pass the whole ${CONFIG} as text.` };
     if (Buffer.byteLength(text) > MAX_CONFIG) return { error: `Keep ${CONFIG} under ${MAX_CONFIG / 1024} KB.` };
+    if (hasSecretLiteral(text, hidden)) return { error: CONFIG_CREDENTIAL };
     const { error } = checkWritten(text, services);
-    if (error !== undefined) return { error };
+    if (error !== undefined) return { error: protect(error) };
     return (await lstat(file).catch(() => null))?.isFile() ? { text } : { error: `${CONFIG} must remain a file.` };
   }
   // Writes of one step run in the order the model made them, so the last valid one is twin.json.
   let writes: Promise<unknown> = Promise.resolve();
-  const writeConfig = (input: unknown) => { const result = writes.then(() => write(input), () => write(input)); writes = result; return result; };
+  const writeConfig = (input: unknown) => {
+    const result = writes.then(() => write(input), () => write(input)).catch((error: unknown) => refused(protect(`The write_config failed: ${(error as Error).message}`)));
+    writes = result; return result;
+  };
   async function write(input: unknown): Promise<Result> {
     const config = await checked(input);
     if (config.error === undefined) {
       await writeFile(file, config.text);
       written = true; repeated = { error: '', count: 0 };
-      return { ok: true, ...(work ? { unwired: unwiredSummary(work, config.text) } : {}) };
+      return { ok: true, ...(work ? { unwired: unwiredSummary(work, config.text, protect) } : {}) };
     }
     repeated = { error: config.error, count: repeated.error === config.error ? repeated.count + 1 : 1 };
     return { ...refused(config.error), ...(repeated.count >= REPEATED_FAILURES ? { note: CHANGE_APPROACH } : {}) };
   }
-  const reading = (name: string, run: (root: string, input: unknown) => Promise<Result>) => (input: unknown) =>
-    run(root, input).catch((error: unknown) => refused(`The ${name} failed: ${(error as Error).message}`));
+  const reading = (name: string, run: (root: string, input: unknown, observe: Observations) => Promise<Result>) => (input: unknown) =>
+    run(root, input, observe).catch((error: unknown) => refused(protect(`The ${name} failed: ${(error as Error).message}`)));
   const tools = {
     list: tool({ description: `Lists a folder of the workspace, at most ${LIMITS.entries} entries; folders end in /.`, inputSchema: schema({ path: PATH }, ['path']), execute: reading('list', list) }),
     read: tool({
@@ -330,7 +347,7 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   const timeout = AbortSignal.timeout(timeoutMs), usage: Usage = { steps: 0, input: 0, output: 0, cost: null };
   try {
     await generateText({
-      model, tools, instructions: `${instructions}\n\n${evidence}`, prompt: feedback === null ? prompt : `${prompt}\n\n${feedback}`,
+      model, tools, instructions: protect(`${instructions}\n\n${evidence}`), prompt: protect(feedback === null ? prompt : `${prompt}\n\n${feedback}`),
       stopWhen: [isStepCount(STEPS), hasToolCall('done')],
       abortSignal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       // Reasoning and its provider metadata carry over from step to step as the provider returned them: nothing here
@@ -342,8 +359,8 @@ export async function authorLoop({ workspace, prompt, model, services = registry
       // does not exist, is a tool error.
       onStepEnd(step) {
         for (const part of step.content) {
-          if (part.type === 'tool-result') say(outcome(part.toolName, part.input, part.output));
-          else if (part.type === 'tool-error') say(`✗ ${oneLine(part.toolName)}: ${firstLine(part.error instanceof Error ? part.error.message : String(part.error))}`);
+          if (part.type === 'tool-result') say(outcome(part.toolName, part.input, part.output, protect));
+          else if (part.type === 'tool-error') say(`✗ ${oneLine(protect(part.toolName))}: ${firstLine(protect(part.error instanceof Error ? part.error.message : String(part.error)))}`);
           else if (part.type === 'tool-call' && part.toolName === 'done') say('✓ done');
         }
       },
@@ -355,7 +372,7 @@ export async function authorLoop({ workspace, prompt, model, services = registry
     if (ToolChoiceViolationError.isInstance(error)) { say(`✗ write_config: the model wrote nothing at step ${FORCED_WRITE_STEP}, when it had to.`); return 0; }
     if (signal?.aborted) { say(STOPPED, 'stderr'); return 1; }
     say(PROVIDER_STOPPED, 'stderr');
-    say(`Error: ${oneLine(providerError(error, hide), ERROR_LINE_CHARS)}`, 'stderr');
+    say(`Error: ${oneLine(providerError(error, protect), ERROR_LINE_CHARS)}`, 'stderr');
     return 1;
   } finally { say(usageLine(usage)); }
 }
@@ -378,7 +395,7 @@ export async function runLoopProcess({ args = process.argv.slice(2), env = proce
   else if (!apiKey) process.stderr.write('OPENROUTER_API_KEY is not set.\n');
   else {
     try { code = await authorLoop({ workspace, prompt, model: model(id, apiKey), services, secrets: [apiKey], signal: stop.signal }); }
-    catch (error) { process.stderr.write(`The twin config author could not start: ${oneLine(hideValues([apiKey])((error as Error).message ?? error), 500)}\n`); }
+    catch (error) { process.stderr.write(`The twin config author could not start: ${oneLine(redact(hideValues([apiKey])((error as Error).message ?? error)), 500)}\n`); }
   }
   // Exits once its output is written; an idle connection of the model's never holds it open for long.
   process.exitCode = code;

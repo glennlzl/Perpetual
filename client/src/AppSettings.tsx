@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type Ref, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type Ref } from 'react';
 import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -7,24 +7,17 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api } from '@/lib/api';
 import { useActionFocus } from '@/lib/journey-focus';
+import type { AppSettingsSession, SettingsDraft } from '@/lib/app-settings';
+import type { ModelSettingsView, OpenRouterModel } from '../../contract/settings.ts';
 
-/** GET /api/settings/model: the model settings; the stored key itself is never returned. */
-type ModelCapabilities = { provider: 'openrouter' | 'custom'; model: string; baseUrl: string; keyConfigured: boolean; modelConfigured: boolean; modelError?: string; escalationModel?: string };
-/** An eligible model in the OpenRouter catalog (GET /api/settings/models). */
-type CatalogModel = { id: string; name: string; provider: string };
-type Catalog = { models: CatalogModel[]; defaultModel?: string; defaultEscalationModel?: string };
-type ModelGroup = { label: string; models: CatalogModel[] };
-/** Unsaved App Settings edits; they outlive the page until saved or discarded. escalationModel is what build repairs escalate to. */
-export type SettingsDraft = { model: string; apiKey: string; escalationModel: string };
-
-const openRouter = (capabilities: ModelCapabilities | null) => capabilities?.provider === 'openrouter';
+type ModelGroup = { label: string; models: OpenRouterModel[] };
+const openRouter = (capabilities: ModelSettingsView | null) => capabilities?.provider === 'openrouter';
 const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', 'meta-llama': 'Meta', 'x-ai': 'xAI', qwen: 'Qwen', mistralai: 'Mistral', nvidia: 'NVIDIA', openrouter: 'OpenRouter', rekaai: 'Reka' };
 const namePrefix = (name: string) => /^([^:]{1,48}):\s+\S/.exec(name)?.[1].trim();
 // Groups are named as the catalog names its models ("Meta: Llama 4"), so slugs that share
 // a vendor merge; the slug is only a fallback for a provider whose names carry no prefix.
-function modelGroups(models: CatalogModel[], pinnedId?: string) {
+function modelGroups(models: OpenRouterModel[], pinnedId?: string) {
   const prefixes = new Map<string, Map<string, number>>();
   for (const item of models) {
     const prefix = namePrefix(item.name);
@@ -51,7 +44,7 @@ function modelGroups(models: CatalogModel[], pinnedId?: string) {
     .map(group => ({ ...group, models: group.models.sort((a, b) => collator.compare(a.name, b.name) || a.id.localeCompare(b.id)) }));
 }
 // Inside its group a model drops the repeated vendor prefix; typeahead still matches the full name.
-const modelOption = (item: CatalogModel, group?: string) => {
+const modelOption = (item: OpenRouterModel, group?: string) => {
   const prefix = namePrefix(item.name);
   const text = group && prefix?.toLocaleLowerCase() === group.toLocaleLowerCase() ? item.name.slice(item.name.indexOf(':') + 1).trim() : item.name;
   return <SelectItem value={item.id} key={item.id} textValue={item.name}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{text}</span></SelectItem>;
@@ -72,7 +65,7 @@ function PinnedGroup({ label, children }: { label: string; children: ReactNode }
 }
 
 // A catalog Select whose saved or preselected model stays pinned above the provider groups.
-function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange, triggerRef }: { id: string; value: string; models: CatalogModel[]; pinned?: CatalogModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void; triggerRef?: Ref<HTMLButtonElement> }) {
+function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange, triggerRef }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void; triggerRef?: Ref<HTMLButtonElement> }) {
   const selected = models.find(item => item.id === value);
   const groups = useMemo(() => modelGroups(models, pinned?.id), [models, pinned]);
   // Radix can report an empty form value while asynchronously loaded options
@@ -83,99 +76,31 @@ function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading
   </Select>;
 }
 
-export default function AppSettings({ draft, onDraftChange }: { draft: SettingsDraft | null; onDraftChange: Dispatch<SetStateAction<SettingsDraft | null>> }) {
-  const [capabilities, setCapabilities] = useState<ModelCapabilities | null>(null);
-  const [models, setModels] = useState<CatalogModel[]>([]);
-  const [savedModel, setSavedModel] = useState('');
-  const [serverModel, setServerModel] = useState('');
-  const [savedEscalation, setSavedEscalation] = useState('');
-  const [serverEscalation, setServerEscalation] = useState('');
+export default function AppSettings({ settings }: { settings: AppSettingsSession }) {
+  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, loading, modelsLoading, modelsError, saving, saved, readError, saveError } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
   const model = draft?.model ?? savedModel;
   const escalationModel = draft?.escalationModel ?? savedEscalation;
   const apiKey = draft?.apiKey ?? '';
   const [showKey, setShowKey] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loaded, setLoaded] = useState(false);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const dirty = Boolean(draft);
-  // An automatically chosen default is savable but is not an unsaved user edit.
-  const suggested = !dirty && (Boolean(savedModel) && savedModel !== serverModel || Boolean(savedEscalation) && savedEscalation !== serverEscalation);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState('');
-  const active = useRef(true);
-  const loadingRef = useRef(false);
-  const modelsLoadingRef = useRef(false);
-  const savingRef = useRef(false);
+  // Once its first read settles, recovery keeps the form and its focused controls mounted.
+  const [loaded, setLoaded] = useState(() => !loading);
   const keyInput = useRef<HTMLInputElement>(null);
   const modelTrigger = useRef<HTMLButtonElement>(null);
   const rememberSettingsFocus = useActionFocus(loading || saving, () => [keyInput.current]);
   const rememberModelsFocus = useActionFocus(modelsLoading, () => [modelTrigger.current]);
+  const dirty = Boolean(draft), error = saveError || readError;
+  // An automatically chosen default is savable but is not an unsaved user edit.
+  const suggested = !dirty && (Boolean(savedModel) && savedModel !== serverModel || Boolean(savedEscalation) && savedEscalation !== serverEscalation);
   const hasSavedKey = openRouter(capabilities) && capabilities!.keyConfigured;
   const validModel = models.some(item => item.id === model);
-  const validEscalation = models.some(item => item.id === escalationModel);
   // The saved models, or the preselected defaults, stay pinned above the provider groups.
   const pinnedModel = models.find(item => item.id === savedModel);
   const pinnedEscalation = models.find(item => item.id === savedEscalation);
-
-  function acceptCatalog(catalog: Catalog, preferred = '', preferredEscalation = '') {
-    setModels(catalog.models);
-    const listed = (id: string) => catalog.models.some(item => item.id === id);
-    const selected = listed(preferred) ? preferred : catalog.defaultModel;
-    setSavedModel(selected || '');
-    setSavedEscalation(listed(preferredEscalation) ? preferredEscalation : catalog.defaultEscalationModel || selected || '');
-  }
-  async function load() {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    setLoading(true); setError(''); setModelsError('');
-    const [settings, catalog] = await Promise.allSettled([api<{ capabilities: ModelCapabilities }>('/api/settings/model'), api<Catalog>('/api/settings/models')]);
-    loadingRef.current = false;
-    if (!active.current) return;
-    let preferred = '', preferredEscalation = '';
-    if (settings.status === 'fulfilled') {
-      const next = settings.value.capabilities;
-      setCapabilities(next);
-      preferred = openRouter(next) ? next.model : '';
-      preferredEscalation = openRouter(next) ? next.escalationModel || '' : '';
-      setServerModel(preferred);
-      setServerEscalation(preferredEscalation);
-    } else setError((settings.reason as Error).message);
-    if (catalog.status === 'fulfilled') acceptCatalog(catalog.value, preferred, preferredEscalation);
-    else { setSavedModel(preferred); setSavedEscalation(preferredEscalation); setModelsError((catalog.reason as Error).message); }
-    setLoading(false);
-    setLoaded(true);
-  }
-  async function reloadModels() {
-    if (modelsLoadingRef.current) return;
-    modelsLoadingRef.current = true; setModelsLoading(true); setModelsError('');
-    try {
-      const catalog = await api<Catalog>('/api/settings/models');
-      if (active.current) acceptCatalog(catalog, model, escalationModel);
-    } catch (failure) { if (active.current) setModelsError((failure as Error).message); }
-    finally { modelsLoadingRef.current = false; if (active.current) setModelsLoading(false); }
-  }
-  useEffect(() => { active.current = true; void load(); return () => { active.current = false; }; }, []);
-  function changed(values: Partial<SettingsDraft>) {
-    onDraftChange({ model, apiKey, escalationModel, ...values });
-    setSaved(false);
-  }
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (savingRef.current || !validModel || !capabilities) return;
-    rememberSettingsFocus();
-    const submittedDraft = draft;
-    savingRef.current = true; setSaving(true); setError(''); setSaved(false);
-    try {
-      const { capabilities: next } = await api<{ capabilities: ModelCapabilities }>('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) });
-      // A completed save may outlive this page; retain any newer edits.
-      onDraftChange(current => current === submittedDraft ? null : current);
-      if (!active.current) return;
-      setCapabilities(next); setSavedModel(next.model); setServerModel(next.model); setSavedEscalation(next.escalationModel || escalationModel); setServerEscalation(next.escalationModel || ''); setShowKey(false); setSaved(true);
-    } catch (failure) { if (active.current) setError((failure as Error).message); }
-    finally { savingRef.current = false; if (active.current) setSaving(false); }
-  }
+  useEffect(() => { void settings.load(); }, [settings]);
+  useEffect(() => { if (!loading) setLoaded(true); }, [loading]);
+  useEffect(() => { if (saved) setShowKey(false); }, [saved]);
+  const changed = (values: Partial<SettingsDraft>) => settings.edit(values);
+  const save = (event: FormEvent) => { event.preventDefault(); rememberSettingsFocus(); void settings.save(); };
 
   return <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings">
     <section className="mx-auto w-full max-w-2xl" aria-labelledby="openrouter-heading">
@@ -201,7 +126,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
             <Label htmlFor="openrouter-model" className="sm:self-start sm:pt-3">Model</Label>
             <div className="min-w-0 space-y-3">
               <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} triggerRef={modelTrigger} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
-              {(modelsError || modelsLoading) && <div className="space-y-2">{modelsError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p>}<Button type="button" variant="outline" size="sm" disabled={saving} aria-disabled={modelsLoading} aria-busy={modelsLoading} className="aria-disabled:opacity-50" onClick={() => { if (!modelsLoading) { rememberModelsFocus(); void reloadModels(); } }}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
+              {(modelsError || modelsLoading) && <div className="space-y-2">{modelsError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p>}<Button type="button" variant="outline" size="sm" disabled={saving} aria-disabled={modelsLoading} aria-busy={modelsLoading} className="aria-disabled:opacity-50" onClick={() => { if (!modelsLoading) { rememberModelsFocus(); void settings.reloadModels(); } }}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
             </div>
           </div>
           <Separator />
@@ -211,7 +136,7 @@ export default function AppSettings({ draft, onDraftChange }: { draft: SettingsD
           </div>
         </fieldset>
         <Separator />
-        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { rememberSettingsFocus(); onDraftChange(null); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberSettingsFocus(); void load(); } }}>{loading && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
+        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { rememberSettingsFocus(); settings.discard(); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberSettingsFocus(); void settings.load(); } }}>{loading && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
       </form>}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
     </section>

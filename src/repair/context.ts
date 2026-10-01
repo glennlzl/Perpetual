@@ -15,7 +15,8 @@ export interface FailedWorkflow { id: string; name: string; path: string | null;
 type RunRef = { id: string; name: string | null; path: string | null };
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
-const inline = (value: unknown, limit = 200) => clip(String(value ?? '').replace(/[`\r\n]+/g, ' ').trim(), limit);
+const redactedClip = (text: string, limit: number) => clip(redact(text), limit);
+const inline = (value: unknown, limit = 200) => clip(redact(value ?? '').replace(/[`\r\n]+/g, ' ').trim(), limit);
 const fence = (text: string, language = '') => `\`\`\`\`${language}\n${text.replace(/````/g, '```​`')}\n\`\`\`\``;
 
 /** A repository file's text: a regular file inside the repository, reached without links, at most limit bytes. */
@@ -88,24 +89,24 @@ export function attemptPrompt({ repair, workflows, digest, number, total, feedba
   for (const workflow of workflows) {
     const { step, failure } = workflow;
     const lines = [`## Failed run: ${inline(workflow.name)}${workflow.path ? ` (${inline(workflow.path)})` : ''}`, `Job: ${inline(step.job ?? 'unknown')}. Failed step: ${inline(step.step ?? 'unknown')}.`];
-    if (step.run) lines.push(`The failing step's command${step.workingDirectory ? `, in ${inline(step.workingDirectory)}` : ''}:`, fence(clip(step.run, 4000), 'sh'));
+    if (step.run) lines.push(`The failing step's command${step.workingDirectory ? `, in ${inline(step.workingDirectory)}` : ''}:`, fence(redactedClip(step.run, 4000), 'sh'));
     if (failure) {
       lines.push(`Diagnosis (rule-based, ${inline(failure.diagnosis.category)}): ${inline(failure.diagnosis.summary, 400)}`);
-      if (failure.log) lines.push('Error lines of the failed log, redacted:', fence(clip(failure.log, 6000)));
-      if (failure.tail) lines.push('End of the failed log, redacted:', fence(failure.tail.slice(-4000)));
+      if (failure.log) lines.push('Error lines of the failed log, redacted:', fence(redactedClip(failure.log, 6000)));
+      if (failure.tail) lines.push('End of the failed log, redacted:', fence(redact(failure.tail).slice(-4000)));
     }
-    if (workflow.yaml) lines.push(`Workflow file ${inline(workflow.path)}:`, fence(clip(workflow.yaml, 8000), 'yaml'));
+    if (workflow.yaml) lines.push(`Workflow file ${inline(workflow.path)}:`, fence(redactedClip(workflow.yaml, 8000), 'yaml'));
     sections.push(lines.join('\n'));
   }
-  sections.push(`## Repository digest\n${fence(digest)}`);
+  sections.push(`## Repository digest\n${fence(redact(digest))}`);
   if (changed) sections.push(`## The workspace\nThe workspace still holds the previous attempts' change; \`git diff ${repair.sha}\` shows it. Keep what is right and fix the rest.`);
-  if (feedback) sections.push(`## The previous attempt\n${fence(clip(feedback, 8000))}`);
+  if (feedback) sections.push(`## The previous attempt\n${fence(redactedClip(feedback, 8000))}`);
   return sections.join('\n\n');
 }
 
 export const pullRequestTitle = (repair: Pick<Repair, 'sha'>, workflows: readonly FailedWorkflow[]) =>
   inline(`Fix the failed ${[...new Set(workflows.map(workflow => workflow.name))].slice(0, 3).join(', ') || 'CI'} build at ${short(repair.sha)}`, 200);
-export const commitMessage = (title: string, summary: string) => redact(`${title}\n\n${clip(summary.trim(), 2000)}`).trim();
+export const commitMessage = (title: string, summary: string) => `${redact(title)}\n\n${clip(redact(summary).trim(), 2000)}`.trim();
 
 /** The pull request's body: the failure, its diagnosis, the change, holds, attempts with their models and cost; redacted. */
 export function pullRequestBody({ repair, workflows, summary, attempts, holds, check, spent }: {
@@ -117,9 +118,10 @@ export function pullRequestBody({ repair, workflows, summary, attempts, holds, c
     if (workflow.failure) lines.push(`- Diagnosis: ${inline(workflow.failure.diagnosis.category)}. ${inline(workflow.failure.diagnosis.summary, 400)}`);
   }
   const log = workflows.map(workflow => workflow.failure?.log).find(Boolean);
-  if (log) lines.push('', fence(clip(log.split('\n').slice(0, 40).join('\n'), 3000)));
+  if (log) lines.push('', fence(clip(redact(log).split('\n').slice(0, 40).join('\n'), 3000)));
   lines.push('', '### Change');
-  if (summary.trim()) lines.push(...clip(summary.trim(), 3000).split('\n').map(line => `> ${line}`), '');
+  const safeSummary = redact(summary).trim();
+  if (safeSummary) lines.push(...clip(safeSummary, 3000).split('\n').map(line => `> ${line}`), '');
   if (check) lines.push(`${check.paths.length} ${check.paths.length === 1 ? 'file' : 'files'}, +${check.added} −${check.removed}`, ...check.paths.slice(0, 30).map(path => `- \`${inline(path, 300)}\``));
   if (holds.length) lines.push('', `Held for a person: ${holds.map(hold => inline(hold, 300)).join(' ')}`);
   lines.push('', '### Attempts', '', '| # | Model | Result | Tokens | Cost |', '| - | - | - | - | - |');

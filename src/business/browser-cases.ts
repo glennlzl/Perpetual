@@ -3,25 +3,9 @@ import { businessSourceContext, redactBusinessText } from './discovery.ts';
 import { REDACTED } from '../redaction.ts';
 import type { ModelSource } from './discovery.ts';
 
-/** A check of the live page's text or URL. */
-export type TextCheck = { type: 'url-contains' | 'text-visible' | 'text-absent'; value: string };
-/** Reads the number next to a label; a later compare-number check names it. */
-export type ReadNumberCheck = { type: 'read-number'; label: string; name: string };
-export type CompareNumberCheck = { type: 'compare-number'; label: string; name: string; op: '<' | '>' | '=' | '!='; than: string };
-/** A check the runner evaluates on the live page when its milestone completes. */
-export type MilestoneCheck = TextCheck | ReadNumberCheck | CompareNumberCheck;
-/** One ordered business milestone of a journey. */
-export type JourneyStep = { id: string; title: string; checks?: MilestoneCheck[] };
-/** An independent check of the final page. */
-export type FinalAssertion = TextCheck;
-export type SourceEvidence = { path: string; line: number };
-export type Isolation = 'shared' | 'isolated';
-/** A reviewed or draft business journey, as validateBrowserCases returns it. */
-export type BrowserCase = {
-  id: string; name: string; goal: string; steps: JourneyStep[]; isolation: Isolation;
-  preconditions: string[]; expectedOutcomes: string[]; assertions: FinalAssertion[];
-  selected: boolean; needsReview: boolean; evidence: SourceEvidence[];
-};
+import type { TextCheck, CompareNumberCheck, MilestoneCheck, JourneyStep, FinalAssertion, SourceEvidence, Isolation, BrowserCase } from '../../contract/browser.ts';
+export type { TextCheck, ReadNumberCheck, CompareNumberCheck, MilestoneCheck, JourneyStep, FinalAssertion, SourceEvidence, Isolation, BrowserCase } from '../../contract/browser.ts';
+
 /** A proposed journey discovery could not accept, and why. */
 export type OmittedCase = { name: string; reason: string };
 

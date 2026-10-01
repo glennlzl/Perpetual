@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -48,7 +48,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   const { checkoutPath, sha: B } = await managedCopy(dataDir);
   const current: RepairSource = { key: 'github:owner/app:/', branch: 'main', repository: 'owner/app', checkoutPath, rootDirectory: '/' };
   const pull: PullRequestRef = { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true };
-  const github = { head: A, connection: { login: 'glennlzl', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
+  const github = { head: A, connection: { login: 'developer', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
     remote: null as string | null, openPull: null as PullRequestRef | null, pullState: 'open' as 'open' | 'closed' | 'merged', blips: 0, labelErrors: 0, closeErrors: 0, readyErrors: 0 };
   const pushes: { sha: string; lease: string; branch: string; author: string; files: string }[] = [], remoteReads: (AbortSignal | undefined)[] = [];
   const runner: CommandRunner = async (file, args, options) => {
@@ -65,7 +65,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   };
   const records = { created: [] as { title: string; body: string; branch: unknown; base: string }[], updated: [] as string[], ready: [] as number[], labels: [] as string[], labelCalls: 0, comments: [] as string[], closed: [] as number[], states: 0 };
   const pullRequests = {
-    async account() { return { login: 'glennlzl', id: 1234 }; },
+    async account() { return { login: 'developer', id: 1234 }; },
     async find() { return github.openPull; },
     async create(input: { title: string; body: string; branch: unknown; base: string }) { records.created.push(input); github.openPull = pull; return pull; },
     async update({ body }: { body: string }) { records.updated.push(body); },
@@ -110,7 +110,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
     async failure({ runId }) { return failure(runId, logs[runId]); },
     async rerun() { throw new Error('unused'); },
   };
-  const manager = await createRepairManager({ dataDir, source: () => current, github: fake, steps: { unavailable: () => null, repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover } });
+  const manager = await createRepairManager({ dataDir, source: () => current, github: fake, steps: { unavailable: () => null, repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover, cleanup: agent.cleanup } });
   t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
   const saved = async (): Promise<Repair> => JSON.parse(await readFile(join(dataDir, 'repairs', 'state.json'), 'utf8')).repairs[0];
   const repair = () => manager.view().repairs.find(item => item.sha === B);
@@ -138,7 +138,7 @@ test('a failed head gets a draft pull request; a CI failure becomes the second a
   assert.deepEqual([view.status, view.reason, view.pullRequest], ['ready', undefined, { number: 7, url: 'https://github.com/owner/app/pull/7', draft: false }]);
   const branch = `perpetual/repair/${h.B.slice(0, 7)}`;
   assert.deepEqual(h.pushes.map(push => [push.branch, push.lease]), [[branch, ''], [branch, h.pushes[0].sha]], 'The first push leases a missing branch, the next the commit it pushed.');
-  assert.deepEqual(h.pushes.map(push => push.author), ['glennlzl <1234+glennlzl@users.noreply.github.com>', 'glennlzl <1234+glennlzl@users.noreply.github.com>']);
+  assert.deepEqual(h.pushes.map(push => push.author), ['developer <1234+developer@users.noreply.github.com>', 'developer <1234+developer@users.noreply.github.com>']);
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js', 'test/add.test.js'], 'A later attempt pushes a new commit on top of the last.');
   assert.equal(h.records.created.length, 1);
   assert.deepEqual([h.records.created[0].branch, h.records.created[0].base, h.records.created[0].title], [branch, 'main', `Fix the failed CI build at ${h.B.slice(0, 7)}`]);
@@ -153,7 +153,7 @@ test('a failed head gets a draft pull request; a CI failure becomes the second a
   assert.deepEqual([h.boxes.images, h.boxes.created.every(box => box.removed())], [['node:22-bookworm'], true]);
   assert.deepEqual(h.keys, [KEY, KEY], 'The key reaches only the model factory.');
   assert.ok(!JSON.stringify(h.boxes.created.map(box => [box.calls, box.outputs])).includes(KEY) && !JSON.stringify(stored).includes(KEY), 'The key never enters the box or the repair.');
-  assert.equal((await stat(join(h.dataDir, 'repairs', view.id))).mode & 0o777, 0o700);
+  await assert.rejects(stat(join(h.dataDir, 'repairs', view.id)), { code: 'ENOENT' });
   await assert.rejects(stat(join(h.dataDir, 'repairs', view.id, 'clone')), 'The host copy is removed with the box.');
 });
 
@@ -407,7 +407,7 @@ test('a pull request that passed CI goes to the merge step with its pushed head,
   await h.manager.idle();
   assert.deepEqual(seen, [{ sha: h.pushes[0].sha, head: h.pushes[0].sha, holds: [], autoMerge: true, boxRemoved: true, draft: false, ci: { status: 'failed', reason: NO_CI } }], 'The merge step gets the pushed head in the live host copy, after the box is gone.');
   assert.deepEqual([h.repair()?.merged, (await h.saved()).merged, h.records.ready], [M, M, [7]]);
-  assert.deepEqual(await readdir(join(h.dataDir, 'repairs', h.repair()!.id)), [], 'The host copy and the gate checkout are removed.');
+  await assert.rejects(stat(join(h.dataDir, 'repairs', h.repair()!.id)), { code: 'ENOENT' }, 'The host copy and gate checkout are removed after confirmed cleanup.');
 });
 
 test('a pull request GitHub refuses to mark ready after CI still goes to the merge step, as a draft', async t => {
@@ -422,4 +422,29 @@ test('a pull request GitHub refuses to mark ready after CI still goes to the mer
   await until(() => h.repair()?.status === 'ready');
   assert.deepEqual(seen, [{ draft: true, sha: h.pushes[0].sha }], 'The merge step gets the draft and its verified head.');
   assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready], ['Beta needs release: No reviewed journeys.', true, []]);
+});
+
+test('an unremoved box holds the merge and host clone; cleanup retry never repeats model work', async t => {
+  let failed = true, merged = 0;
+  const h = await harness(t, {
+    scripts: [FIX], ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request' })],
+    merge: { async merge() { merged++; return { status: 'merged', merged: C }; } },
+  });
+  const create = h.boxes.boxes.create;
+  h.boxes.boxes.create = async input => {
+    const box = await create(input), remove = box.remove;
+    box.remove = async () => { if (failed) throw new Error('Docker could not remove the box'); await remove(); };
+    return box;
+  };
+  t.after(async () => { failed = false; for (const made of h.boxes.created) await made.box.remove(); });
+  await h.fail(); await h.manager.idle();
+  const saved = await h.saved(), clone = join(h.dataDir, 'repairs', saved.id, 'clone');
+  assert.deepEqual([saved.status, saved.cleanup?.status, merged], ['needs-person', 'failed', 0]);
+  assert.match(saved.reason ?? '', /could not remove/);
+  assert.equal(h.boxes.created[0].removed(), false);
+  assert.equal((await stat(clone)).isDirectory(), true);
+  failed = false;
+  await h.manager.check(); await h.manager.idle();
+  assert.deepEqual([h.models.length, merged, (await h.saved()).cleanup, h.boxes.created[0].removed()], [1, 0, undefined, true]);
+  await assert.rejects(stat(clone), { code: 'ENOENT' });
 });

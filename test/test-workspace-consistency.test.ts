@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { createBrowserManager, type BrowserManagerOptions } from '../src/browser/manager.ts';
 import { createTestWorkspace } from '../client/src/lib/test-workspace.ts';
 
-const original = { id: 'checkout', name: 'Complete checkout', goal: 'Buy a product', steps: [{ id: 'buy', title: 'Buy a product' }, { id: 'verify', title: 'Verify the saved order' }], expectedOutcomes: ['Order saved'], preconditions: [], assertions: [{ type: 'text-visible', value: 'Order saved' }], needsReview: true, selected: false };
+import type { BrowserCase } from '../contract/browser.ts';
+
+const original: BrowserCase = { id: 'checkout', name: 'Complete checkout', goal: 'Buy a product', steps: [{ id: 'buy', title: 'Buy a product' }, { id: 'verify', title: 'Verify the saved order' }], expectedOutcomes: ['Order saved'], preconditions: [], assertions: [{ type: 'text-visible', value: 'Order saved' }], needsReview: true, selected: false, isolation: 'shared', evidence: [] };
 
 // A runtime for tests that only save and read cases: it reports its capabilities and never starts a worker.
 const casesOnly = (capabilities: { runtimeInstalled: boolean; browserInstalled: boolean; modelConfigured: boolean }): NonNullable<BrowserManagerOptions['runtime']> => ({ capabilities: async () => capabilities, start() { throw new Error('These tests start no browser worker.'); } });

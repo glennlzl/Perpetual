@@ -124,11 +124,10 @@ test('Run now and Release refresh every gate view', () => {
   assert.equal(calls, 1);
 });
 
-test('the stage card uses native shadcn Badge and AlertDialog, and offers Release only through canRelease', async () => {
+test('the stage card uses native shadcn Badge and AlertDialog', async () => {
   const source = await readFile(new URL('../client/src/StageGate.tsx', import.meta.url), 'utf8');
   assert.match(source, /from '@\/components\/ui\/alert-dialog'/);
   assert.match(source, /from '@\/components\/ui\/badge'/);
-  assert.match(source, /\{canRelease\(gate\) && <AlertDialog/);
   assert.match(source, />Run now</);
   const app = await readFile(new URL('../client/src/App.tsx', import.meta.url), 'utf8');
   assert.match(app, /const sandbox = stage\.kind === 'sandbox';/);

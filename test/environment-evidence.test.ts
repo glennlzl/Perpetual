@@ -2,11 +2,11 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { BUILD_EVIDENCE_LIMITS, EVIDENCE_LIMITS, buildEvidenceText, evidenceText, readVariables, repositoryEvidence, repositoryFacts, unwiredSummary } from '../src/environments/evidence.ts';
+import { BUILD_EVIDENCE_LIMITS, EVIDENCE_LIMITS, buildEvidenceText, evidenceText, readVariables, repositoryEvidence, repositoryFacts, unwiredSummary, workFacts } from '../src/environments/evidence.ts';
 import { snapshotSource } from '../src/environments/plans.ts';
 
 // EVIDENCE.md from a repository on disk: no network, no model, nothing of the repository runs.
@@ -28,6 +28,66 @@ const section = (text: string, title: string) => text.split(`\n## ${title}\n\n`)
 const WORK_LIST_INTRO = 'Each app in `twin.json` as this attempt starts: the variables its runtime code reads that no configured service provides by its standard name, that are not PORT and that its `env` does not map.';
 const FUNCTIONS_INTRO = 'Each function in the repository: whether the `supabase` service serves it (its `functions` option), and the variables its code reads that `functions.env` does not map; the edge runtime provides the SUPABASE_ names.';
 const ROLES_INTRO = 'Runtime first: each name, its role, the first file and line that reads or declares it, and its other roles.';
+
+test('repository evidence hides supplied values before package manager and script text is shortened', async t => {
+  const secret = `opaqueZ-value-${'q'.repeat(1100)}`;
+  const contents = JSON.stringify({ name: '@acme/web', packageManager: `${'x'.repeat(95)}${secret}`, scripts: { start: `PORT=3000 node app.js ${secret}` } }, null, 2);
+  const { repo } = await fixture(t, {
+    'package.json': contents,
+    'app.js': 'const token = process.env.SESSION_SECRET;\n',
+    '.github/workflows/build.yml': `jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${'x'.repeat(194)}${secret}\n`,
+  });
+  const facts = await repositoryFacts({ source: repo, secrets: [secret] });
+  const output = evidenceText(facts, '{"services":{},"apps":{"web":{"directory":"."}}}');
+  assert.ok(!output.includes(secret.slice(0, 5)), 'A supplied value cannot survive as a clipped prefix in metadata, scripts or setup commands.');
+  assert.match(section(output, 'Apps and packages'), /PORT=3000 node app\.js \[REDACTED\]/);
+  assert.deepEqual(facts.packages, [{ directory: '.', name: '@acme/web', dependencies: [] }]);
+  assert.deepEqual(facts.reads, [{ name: 'SESSION_SECRET', file: 'app.js', line: 1, role: 'runtime' }]);
+  assert.match(section(output, 'Variables by role'), /PORT: script, `package\.json:5`/);
+  assert.equal(await readFile(join(repo, 'package.json'), 'utf8'), contents, 'Evidence never changes the app source.');
+});
+
+test('repository evidence redacts full quoted package scripts, metadata and headings', async t => {
+  const token = `sk-${'b'.repeat(350)}`;
+  const key = '-----BEGIN PRIVATE KEY-----\nPRIVATE_SCRIPT_BODY\n-----END PRIVATE KEY-----';
+  const { repo } = await fixture(t, {
+    'package.json': JSON.stringify({ name: '@acme/web', packageManager: `${'x'.repeat(94)} ${token}`, scripts: { start: `cat <<'EOF'\n${key}\nEOF\nnode app.js` } }),
+    'README.md': `# Setup ${token}\n`,
+  });
+  const facts = await repositoryFacts({ source: repo, packages: [{ path: '.', framework: `Framework ${token}` }] });
+  for (const output of [evidenceText(facts, '{}'), buildEvidenceText(facts, ['# Build evidence'])]) {
+    assert.ok(!output.includes(token.slice(0, 5)), 'Even a credential clipped in packageManager or a metadata field is removed.');
+    assert.ok(!output.includes('PRIVATE_SCRIPT_BODY'), 'Multiline script content is redacted before it is flattened.');
+    assert.match(output, /\[REDACTED\]/);
+    assert.match(output, /node app\.js/);
+  }
+  assert.equal(facts.packages[0].name, '@acme/web');
+});
+
+test('repository evidence observes paths and variable names when projecting raw facts', async t => {
+  const pathValue = 'opaquePathZ_value_12345678', nameValue = `OPAQUE_NAME_Z_${'Q'.repeat(1050)}`;
+  const directory = `apps/${pathValue}`, file = `${directory}/src/server.js`;
+  const { repo } = await fixture(t, {
+    [`${directory}/package.json`]: manifest('@acme/web', {}, {}),
+    [file]: `process.env.${nameValue};\nprocess.env.SESSION_SECRET;\n`,
+  });
+  const draft = JSON.stringify({ services: {}, apps: { [pathValue]: { directory } } });
+  const options = { source: repo, secrets: [pathValue, nameValue], draft };
+  const facts = await repositoryFacts(options);
+  const serialized = JSON.parse(JSON.stringify(facts)), work = workFacts(serialized);
+  assert.ok(work);
+  assert.ok(!Object.hasOwn(serialized, 'observe'), 'The observation callback is not serialized into raw author facts.');
+  for (const output of [await repositoryEvidence(options), evidenceText(facts, draft), buildEvidenceText(facts, ['# Build evidence']), unwiredSummary(facts, draft).join('\n'),
+    unwiredSummary({ ...work, services: facts.services }, draft, facts.observe).join('\n')]) {
+    assert.ok(!output.includes(pathValue), 'Supplied values in semantic paths are hidden whenever facts are projected.');
+    assert.ok(!output.includes(nameValue.slice(0, 12)), 'A variable name matching a supplied value is hidden before evidence limits can retain a prefix.');
+    assert.match(output, /\[REDACTED\]/);
+  }
+  assert.deepEqual(facts.packages, [{ directory, name: '@acme/web', dependencies: [] }]);
+  assert.deepEqual(facts.reads, [{ name: nameValue, file, line: 1, role: 'runtime' }, { name: 'SESSION_SECRET', file, line: 2, role: 'runtime' }]);
+  assert.deepEqual(work.reads, facts.reads, 'Serialization retains raw names and paths for semantic matching.');
+  assert.match(evidenceText(facts, draft), /SESSION_SECRET: `apps\/\[REDACTED\]\/src\/server\.js:2`/, 'Unrelated names and file positions remain usable.');
+});
 
 const VALUE = 'https://value-never-shown.example', KEY_VALUE = 'sk_test_value_never_shown';
 const repository = {

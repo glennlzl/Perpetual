@@ -1,10 +1,11 @@
 // The repair agent's tools, its only permissions. Each runs inside the repair box: list, read and grep within the
 // workspace with capped output and a `truncated` flag; edit and write within the workspace, never .git; run a shell
-// command with a time limit, returning its exit code and the tail of its output; and done. A path is checked twice: as
+// command with a time limit, returning its exit code and bounded output; and done. A path is checked twice: as
 // text on the host (relative, no `..`, no .git) and by its real path in the box, so a link cannot lead out.
 import { posix } from 'node:path';
 import { jsonSchema, tool, type JSONSchema7 } from 'ai';
-import type { RepairBox } from './box.ts';
+import type { BoxResult, RepairBox } from './box.ts';
+import { redact } from '../redaction.ts';
 
 export const LIMITS = {
   path: 1024, entries: 500, lines: 2000, readBytes: 64 * 1024, lineChars: 2000, matches: 100, matchChars: 300, pattern: 500, include: 200,
@@ -12,12 +13,21 @@ export const LIMITS = {
 };
 type Refusal = { ok: false; error: string };
 type Result = { ok: true; [key: string]: unknown } | Refusal;
+type FileObservation = { ok: true; raw: string[]; redacted: string[] } | Refusal;
 /** What the loop learns from the tools: each command's exit code, and each file a tool changed. */
 export interface ToolEvents { run?(command: string, exitCode: number): void; change?(path: string): void }
 
 const refused = (error: string): Refusal => ({ ok: false, error });
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
-const oneLine = (value: unknown, limit = 200) => clip(String(value).replace(/\s+/g, ' ').trim(), limit);
+const oneLine = (value: unknown, limit = 200) => clip(redact(value).replace(/\s+/g, ' ').trim(), limit);
+const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
+/** Model-facing text only; internal paths, file edits and change validation keep their original bytes. */
+function modelResult(result: Result): Result {
+  const strings = (value: unknown): unknown => typeof value === 'string' ? redact(value)
+    : Array.isArray(value) ? value.map(strings)
+      : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, strings(item)])) : value;
+  return strings(result) as Result;
+}
 const field = (input: unknown, name: string) => input !== null && typeof input === 'object' ? (input as Record<string, unknown>)[name] : undefined;
 const whole = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 1;
 const GIT = /^\.git[. ]*$/i;
@@ -48,6 +58,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (named.error !== undefined) return named;
     const target = named.path === '.' ? root : `${root}/${named.path}`;
     const result = await exec(['sh', '-c', RESOLVE, 'sh', target]);
+    if (result.truncated) return { error: 'The workspace path could not be read completely.' };
     const [ancestor, real] = result.stdout.split('\n');
     if (result.exitCode !== 0 || !ancestor || !real || !target.startsWith(ancestor)) return { error: `${named.path} leads outside /workspace.` };
     const full = posix.normalize(real + target.slice(ancestor.length)).replace(/\/$/, '');
@@ -59,25 +70,33 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const found = await locate(field(input, 'path'), '.');
     if (found.error !== undefined) return refused(found.error);
     const result = await exec(['sh', '-c', '[ -d "$1" ] || exit 3; ls -1AF "$1"', 'sh', found.full]);
+    if (result.truncated) return unavailable(result);
     if (result.exitCode === 3) return refused(`${found.name} is not a folder; read it instead.`);
     if (result.exitCode !== 0) return refused(`${found.name} could not be listed.`);
-    const entries = result.stdout.split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
+    const entries = redact(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
     return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
+  }
+  /** Redact the complete bounded file before selecting lines; a fragment may have lost its credential's context. */
+  async function observeFile(found: { full: string; name: string }): Promise<FileObservation> {
+    const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; cat "$1"', 'sh', found.full], { limit: 4 * LIMITS.readBytes });
+    if (result.truncated) return unavailable(result);
+    if (result.exitCode === 3) return refused(`${found.name} is not a file; list it instead.`);
+    if (result.exitCode !== 0 || result.timedOut) return refused(`${found.name} could not be read completely.`);
+    if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
+    const lines = (text: string) => { const values = text.split('\n'); if (values.at(-1) === '') values.pop(); return values; };
+    const raw = lines(result.stdout), redacted = lines(redact(result.stdout));
+    if (raw.length !== redacted.length) return refused(`${found.name} cannot be shown with accurate line numbers after redaction.`);
+    return { ok: true, raw, redacted };
   }
   async function read(input: unknown): Promise<Result> {
     const found = await locate(field(input, 'path'));
     if (found.error !== undefined) return refused(found.error);
     const offset = field(input, 'offset') ?? 1, limit = field(input, 'limit') ?? LIMITS.lines;
     if (!whole(offset) || !whole(limit)) return refused('offset and limit are whole numbers from 1.');
-    // One line past the limit tells whether more follow.
     const wanted = Math.min(limit, LIMITS.lines);
-    const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; sed -n "$2,$3p" "$1"', 'sh', found.full, String(offset), String(offset + wanted)], { limit: 4 * LIMITS.readBytes });
-    if (result.exitCode === 3) return refused(`${found.name} is not a file; list it instead.`);
-    if (result.exitCode !== 0) return refused(`${found.name} could not be read.`);
-    if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
-    const lines = result.stdout.split('\n');
-    if (lines.at(-1) === '') lines.pop();
-    if (result.truncated && lines.length > 1) lines.pop();
+    const file = await observeFile(found);
+    if (!file.ok) return file;
+    const lines = file.redacted.slice(offset - 1);
     if (offset > 1 && !lines.length) return refused(`${found.name} has fewer than ${offset} lines.`);
     const content: string[] = [];
     let size = 0;
@@ -87,7 +106,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       size += numbered.length + 1;
       content.push(numbered);
     }
-    const truncated = content.length < lines.length || result.truncated;
+    const truncated = content.length < lines.length;
     return { ok: true, path: found.name, content: content.join('\n'), truncated, ...(truncated ? { next: offset + content.length } : {}) };
   }
   async function grep(input: unknown): Promise<Result> {
@@ -97,14 +116,35 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const found = await locate(field(input, 'path'), '.');
     if (found.error !== undefined) return refused(found.error);
     const result = await exec(['grep', '-rnHIsE', '--null', '--exclude-dir=.git', ...(include ? [`--include=${include}`] : []), '-e', pattern, '--', found.full], { timeoutMs: LIMITS.searchSeconds * 1000, limit: 1024 * 1024 });
+    if (result.truncated) return unavailable(result);
     if (result.timedOut) return refused(`The search took over ${LIMITS.searchSeconds} seconds; use a narrower path or an include glob.`);
     if (result.exitCode > 1) return refused(`The search failed: ${oneLine(result.stderr || 'grep error', 300)}`);
-    const lines = result.stdout.split('\n').filter(Boolean);
-    const matches = lines.slice(0, LIMITS.matches).map(line => {
-      const [file, rest = ''] = line.split('\0');
-      return `${file.startsWith(`${root}/`) ? shown(file) : file === root ? '.' : file}:${clip(rest.trim(), LIMITS.matchChars)}`;
-    });
-    return { ok: true, path: found.name, matches, truncated: lines.length > LIMITS.matches || result.truncated };
+    // Keep grep's native ERE and match order. Its text is evidence for a complete-file read, never model output.
+    const selected: { file: string; line: number; text: string }[] = [];
+    let cursor = 0, count = 0;
+    while (cursor < result.stdout.length) {
+      const separator = result.stdout.indexOf('\0', cursor), end = result.stdout.indexOf('\n', separator + 1);
+      const colon = result.stdout.indexOf(':', separator + 1), number = result.stdout.slice(separator + 1, colon);
+      if (separator < cursor || end < 0 || colon < separator || colon > end || !/^[1-9]\d*$/.test(number) || !Number.isSafeInteger(Number(number))) return refused('The search returned an unreadable match.');
+      if (count < LIMITS.matches) selected.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
+      count += 1;
+      cursor = end + 1;
+    }
+    const files = new Map<string, FileObservation>(), matches: string[] = [];
+    for (const match of selected) {
+      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
+      let file = files.get(match.file);
+      if (!file) {
+        const located = await locate(shown(match.file));
+        if (located.error !== undefined) return refused(located.error);
+        file = await observeFile(located);
+        files.set(match.file, file);
+      }
+      if (!file.ok) return file;
+      if (file.raw[match.line - 1] !== match.text) return refused(`${shown(match.file)} changed after the search; search again.`);
+      matches.push(`${shown(match.file)}:${clip(`${match.line}:${file.redacted[match.line - 1]}`.trim(), LIMITS.matchChars)}`);
+    }
+    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches };
   }
   async function write(found: { full: string; name: string }, text: string) {
     const result = await exec(['sh', '-c', '[ -d "$1" ] && exit 3; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', found.full], { stdin: text });
@@ -143,11 +183,12 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (!whole(seconds) || seconds > LIMITS.runSeconds) return refused(`timeoutSeconds is a whole number from 1 to ${LIMITS.runSeconds}.`);
     const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.output, keep: 'tail' });
     events.run?.(command, result.exitCode);
-    return { ok: true, exitCode: result.exitCode, output: result.stdout + result.stderr, timedOut: result.timedOut, truncated: result.truncated };
+    if (result.truncated) return unavailable(result);
+    return { ok: true, exitCode: result.exitCode, output: redact(result.stdout + result.stderr), timedOut: result.timedOut, truncated: result.truncated };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.
   const guarded = (name: string, work: (input: unknown) => Promise<Result>) => async (input: unknown) => {
-    try { return await work(input); }
+    try { return modelResult(await work(input)); }
     catch (error) { if (signal?.aborted) throw error; return refused(`The ${name} failed: ${oneLine((error as Error).message ?? error, 300)}`); }
   };
   const schema = (properties: Record<string, JSONSchema7>, required: string[]) => jsonSchema<unknown>({ type: 'object', properties, required, additionalProperties: false });
@@ -155,12 +196,12 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
   return {
     list: tool({ description: `Lists a folder of /workspace, at most ${LIMITS.entries} entries; folders end in / and links in @.`, inputSchema: schema({ path: PATH }, []), execute: guarded('list', list) }),
     read: tool({
-      description: `Reads a text file of /workspace, its lines numbered: at most ${LIMITS.lines} lines or ${LIMITS.readBytes / 1024} KB from offset. When truncated, next is the line to read on from.`,
+      description: `Reads a text file of /workspace after redacting its complete contents (at most ${4 * LIMITS.readBytes / 1024} KB), with accurate line numbers: at most ${LIMITS.lines} lines or ${LIMITS.readBytes / 1024} KB from offset. When truncated, next is the line to read on from.`,
       inputSchema: schema({ path: PATH, offset: { type: 'integer', minimum: 1 }, limit: { type: 'integer', minimum: 1, maximum: LIMITS.lines } }, ['path']),
       execute: guarded('read', read),
     }),
     grep: tool({
-      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text. Pass a narrow path and an include glob.`,
+      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). Pass a narrow path and an include glob.`,
       inputSchema: schema({ pattern: { type: 'string', maxLength: LIMITS.pattern }, path: PATH, include: { type: 'string', description: 'A file name glob, such as *.ts.' } }, ['pattern']),
       execute: guarded('grep', grep),
     }),
@@ -171,7 +212,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     }),
     write: tool({ description: 'Writes a whole file of /workspace, creating its folders.', inputSchema: schema({ path: PATH, text: { type: 'string' } }, ['path', 'text']), execute: guarded('write', create) }),
     run: tool({
-      description: `Runs a bash command in /workspace and returns its exit code and the last ${LIMITS.output / 1000} KB of its output. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
+      description: `Runs a bash command in /workspace and returns its exit code and up to ${LIMITS.output / 1000} KB of redacted output. Incomplete captures are withheld; narrow the command to observe less output. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
       inputSchema: schema({ command: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: LIMITS.runSeconds } }, ['command']),
       execute: guarded('run', run),
     }),

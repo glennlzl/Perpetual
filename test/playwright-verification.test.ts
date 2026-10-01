@@ -51,7 +51,7 @@ async function setup(t:TestContext,extra:Partial<BrowserManagerOptions>={}){
   const context={key:'repo',stageId:'beta',controllerOrigin:'http://127.0.0.1:4317',scan:{repo:{path:join(dataDir,'repo'),sha:'abc'}}};
   await manager.saveConfig(context,{targetUrl:'http://localhost:3000'});await manager.saveCases(context,[journey]);
   const hash=(await manager.saveSpec(context,{caseId:journey.id,code})).spec.draft!.hash;
-  const f={dataDir,context,workers,hash,get manager(){return manager;},async restart(){await manager.close();manager=await createBrowserManager(options);return manager;},
+  const f={dataDir,context,workers,playwright,hash,get manager(){return manager;},async restart(){await manager.close();manager=await createBrowserManager(options);return manager;},
     verification:async()=>(await manager.view(context)).specs[journey.id]?.draft?.verification,
     async worker(count:number){for(let i=0;i<400;i++){if(workers.length>=count)return workers[count-1];await wait(5);}throw new Error('The attempt did not start.');},
     async settled(){for(let i=0;i<400;i++){const verification=await f.verification();if(verification&&verification.status!=='running'&&!manager.isActive(context))return verification;await wait(5);}throw new Error('The verification did not settle.');}};
@@ -326,6 +326,60 @@ test('an interrupted verification keeps its own verdict after its attempts leave
   assert.deepEqual(await verificationRuns(f),[]);
   assert.deepEqual(await f.verification(),{status:'cancelled',passes:1,control:null});
   await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409,message:'Verify this code first: it needs three passing runs and a caught control run.'});
+});
+
+test('a verification that fails before its first run keeps that verdict after restart and cannot approve older evidence',async t=>{
+  const f=await setup(t);
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+  for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
+  assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
+  // A new verification is recorded, but missing Chromium prevents its first run from being admitted.
+  t.mock.method(f.playwright,'capabilities',async()=>({browserInstalled:false}));
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+  const failed={status:'failed',passes:0,control:null,error:'Install Chromium for Playwright: npx playwright install chromium.'};
+  assert.deepEqual(await f.settled(),failed);
+  assert.equal(f.workers.length,4);
+  await f.restart();
+  assert.deepEqual(await f.verification(),failed);
+  await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409,message:'Verify this code first: it needs three passing runs and a caught control run.'});
+});
+
+test('a failed draft verification leaves older approved code runnable after restart',async t=>{
+  const f=await setup(t);
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+  for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
+  await f.settled();
+  await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
+  const draft=(await f.manager.saveSpec(f.context,{caseId:journey.id,code:`${code}// New draft.\n`})).spec.draft!;
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:draft.hash});
+  (await f.worker(5)).finish([{type:'result',result:{caseId:journey.id,stopCause:'action',error:'The new draft could not open Settings.',assertions:[]}}]);
+  const failed=await f.settled();assert.equal(failed.status,'failed');
+  await f.restart();
+  const view=(await f.manager.view(f.context)).specs[journey.id];
+  assert.equal(view.approved?.hash,f.hash);assert.deepEqual(view.draft?.verification,failed);
+  await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:draft.hash}),{statusCode:409});
+  await f.manager.saveCases(f.context,[{...journey,selected:true}]);
+  const {run}=await f.manager.run(f.context,{}),worker=await f.worker(6);
+  assert.deepEqual(worker.input.spec,{code,hash:f.hash});
+  worker.finish(passing);await idle(f,f.context);
+  assert.equal((await f.manager.runProgress(f.context,run.id)).run.status,'passed');
+});
+
+test('a failed code approval save publishes no approval and the next save can approve the same evidence',async t=>{
+  const f=await setup(t);
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+  for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
+  await f.settled();
+  const before=(await f.manager.view(f.context)).specs[journey.id],file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
+  await rm(file);await mkdir(file);
+  try{
+    await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}));
+    assert.deepEqual((await f.manager.view(f.context)).specs[journey.id],before);
+  }finally{await rm(file,{recursive:true});await writeFile(file,saved);}
+  await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
+  await f.restart();
+  const after=(await f.manager.view(f.context)).specs[journey.id];
+  assert.equal(after.approved?.hash,f.hash);assert.equal(after.draft,undefined);
 });
 
 test('another stage\'s runs never push a running verification\'s attempts out of the history',async t=>{

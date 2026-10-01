@@ -103,7 +103,7 @@ test('a repair fixes a real type error end to end: its box reproduces and fixes 
   const real = createRepairBoxes({ dataDir, owner: 'repair-test' }), ids: string[] = [];
   const boxes: RepairBoxes = { ...real, create: input => { ids.push(input.id); return real.create(input); } };
   // GitHub: the connected account, the branch head and each commit's runs; the push and pull request writes are recorded.
-  const connection = { login: 'glennlzl', repository: 'owner/app' }, heads = { sha: A }, runs: Record<string, WorkflowRun[]> = {};
+  const connection = { login: 'developer', repository: 'owner/app' }, heads = { sha: A }, runs: Record<string, WorkflowRun[]> = {};
   const pushes: { sha: string; lease: string; branch: string; files: string; add: string }[] = [];
   const runner: CommandRunner = async (file, args, options) => {
     if (args.includes('ls-remote')) return { stdout: '' };
@@ -117,7 +117,7 @@ test('a repair fixes a real type error end to end: its box reproduces and fixes 
   const pull: PullRequestRef = { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true };
   const records = { created: [] as { title: string; body: string }[], labels: [] as string[], ready: [] as number[] };
   const pullRequests = {
-    async account() { return { login: 'glennlzl', id: 1234 }; },
+    async account() { return { login: 'developer', id: 1234 }; },
     async find() { return null; },
     async create(input: { title: string; body: string }) { records.created.push(input); return pull; },
     async update() {},
@@ -142,7 +142,7 @@ test('a repair fixes a real type error end to end: its box reproduces and fixes 
     failure: async ({ runId }) => failure(runId),
     async rerun() { throw new Error('unused'); },
   };
-  const manager = await createRepairManager({ dataDir, source: () => current, github, steps: { unavailable: () => boxes.available(), repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover } });
+  const manager = await createRepairManager({ dataDir, source: () => current, github, steps: { unavailable: () => boxes.available(), repair: agent.repair, state: agent.state, close: agent.close, recover: agent.recover, cleanup: agent.cleanup } });
   t.after(async () => {
     await manager.close();
     for (const id of ids) cleanup(id);

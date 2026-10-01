@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OPENROUTER_OPTIONS, openrouterModels, runAttempt } from '../src/repair/agent.ts';
-import { attemptPrompt, describeFailures, repositoryDigest, INSTRUCTIONS } from '../src/repair/context.ts';
+import { attemptPrompt, commitMessage, describeFailures, pullRequestBody, pullRequestTitle, repositoryDigest, INSTRUCTIONS, type FailedWorkflow } from '../src/repair/context.ts';
 import { getGitHubFailure, type CommandRunner } from '../src/repair/github.ts';
 import { brokenRepository, hostBox } from './fixtures/repair-box.ts';
 import { scriptedModel, type ModelCall, type ScriptedStep } from './fixtures/scripted-model.ts';
@@ -178,4 +178,54 @@ test('the prompt carries the failing workflow, step, command, redacted log, diag
   assert.match(INSTRUCTIONS, /Never weaken what judges the fix/);
   assert.match(INSTRUCTIONS, /Never change CI or deployment configuration/);
   assert.doesNotMatch(INSTRUCTIONS, /unless the workflow/);
+});
+
+const pem = (size: number) => `-----BEGIN PRIVATE KEY-----\n${'QUJD'.repeat(size)}\n-----END PRIVATE KEY-----`;
+const repair = { repository: 'acme/app', branch: 'main', sha: 'a'.repeat(40) };
+const workflow = (yaml: string, run = 'npm test'): FailedWorkflow => ({
+  id: '41', name: 'CI', path: '.github/workflows/ci.yml', yaml, failure: null,
+  step: { job: 'test', step: 'Check', run, workingDirectory: null, toolchain: null },
+});
+
+test('the repair prompt redacts workflow and command credentials before any text is clipped', () => {
+  const original = workflow(`env:\n  API_KEY: synthetic-workflow-value\n${pem(2200)}`, `npm test --password synthetic-command-value\n${pem(1200)}`);
+  const prompt = attemptPrompt({ repair, workflows: [original], digest: 'token=synthetic-digest-value', number: 1, total: 4, feedback: pem(2200), changed: false });
+  assert.ok(!prompt.includes('synthetic-') && !prompt.includes('QUJD'), 'No credential or clipped key fragment reaches model context.');
+  assert.match(prompt, /API_KEY: \[REDACTED\]/);
+  assert.match(prompt, /npm test --password \[REDACTED\]/);
+  assert.match(prompt, /token=\[REDACTED\]/);
+  assert.ok(original.yaml?.includes('synthetic-workflow-value'), 'The original workflow remains intact for reproduction.');
+  assert.ok(original.step.run?.includes('synthetic-command-value'));
+});
+
+test('the done summary is redacted before the attempt applies its length limit', async t => {
+  const f = await workspace(t);
+  const result = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'done', input: { summary: `Repaired the parser.\n${pem(1200)}\nVerified npm test.` } }] }]), box: f.box, prompt: 'Fix the build.', signal: new AbortController().signal });
+  assert.equal(result.end, 'done');
+  assert.equal(result.summary, 'Repaired the parser.\n[REDACTED]\n[REDACTED]\n[REDACTED]\nVerified npm test.');
+  const long = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'done', input: { summary: 'x'.repeat(4100) } }] }]), box: f.box, prompt: 'Fix the build.', signal: new AbortController().signal });
+  assert.equal(long.summary, 'x'.repeat(4000), 'Ordinary summaries retain the existing bound.');
+});
+
+test('repair commit and pull request text redact complete secrets before their field limits', () => {
+  const summary = `Repaired the parser.\n${pem(900)}\nVerified npm test.`;
+  const message = commitMessage('Fix CI', summary);
+  const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
+  for (const text of [message, body]) {
+    assert.ok(!text.includes('QUJD') && !text.includes('BEGIN PRIVATE KEY'), 'Public repair text contains no clipped key fragment.');
+    assert.match(text, /\[REDACTED\]/);
+    assert.match(text, /Repaired the parser/);
+    assert.match(text, /Verified npm test/);
+  }
+  const title = pullRequestTitle(repair, [{ ...workflow(''), name: `CI ${pem(80)}` }]);
+  assert.ok(!title.includes('QUJD'), 'Inline metadata is redacted before flattening and clipping.');
+  assert.match(title, /\[REDACTED\]/);
+});
+
+test('ordinary repair text still uses the existing commit and pull request bounds', () => {
+  const summary = 'x'.repeat(4100);
+  assert.equal(commitMessage('Fix CI', summary), `Fix CI\n\n${'x'.repeat(2000)}…`);
+  const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
+  assert.ok(body.includes(`> ${'x'.repeat(3000)}…`));
+  assert.ok(!body.includes('x'.repeat(3001)));
 });

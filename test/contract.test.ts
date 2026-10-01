@@ -20,7 +20,7 @@ test('the contract holds types only, and every side imports it as types', async 
   for (const file of [...await files('src/'), ...await files('client/src/'), ...await files('test/')]) {
     const text = await source(file);
     for (const line of text.split('\n')) {
-      if (!/^\s*(import|export)\b.*contract\/\w+\.ts['"]/.test(line)) continue;
+      if (!/^\s*(import|export)\b.*contract\/[\w-]+\.ts['"]/.test(line)) continue;
       assert.match(line, /^\s*(import type|export type)\b/, `${file}: ${line.trim()}`);
     }
   }
@@ -28,6 +28,8 @@ test('the contract holds types only, and every side imports it as types', async 
 
 test('the controller replies with the contract\'s shapes and the client reads them from it', async () => {
   const pairs: [string, string][] = [
+    ['src/browser/manager.ts', 'contract/browser.ts'], ['src/browser/journey-code.ts', 'contract/browser.ts'], ['src/browser/results.ts', 'contract/browser.ts'], ['src/business/browser-cases.ts', 'contract/browser.ts'],
+    ['client/src/lib/browser-test-ui.ts', 'contract/browser.ts'], ['client/src/lib/test-workspace.ts', 'contract/browser.ts'],
     ['src/gate/manager.ts', 'contract/gate.ts'], ['src/github-runs.ts', 'contract/github.ts'], ['src/github-deployments.ts', 'contract/github.ts'], ['src/repair/view.ts', 'contract/autopilot.ts'],
     ['client/src/lib/stage-gate.ts', 'contract/gate.ts'], ['client/src/lib/pipeline-github.ts', 'contract/github.ts'], ['client/src/lib/pipeline-deployments.ts', 'contract/github.ts'], ['client/src/lib/pipeline-autopilot.ts', 'contract/autopilot.ts'],
   ];

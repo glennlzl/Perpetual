@@ -30,7 +30,7 @@ import { scriptedModel, type ScriptedStep } from './fixtures/scripted-model.ts';
 const KEY = 'sk-or-v1-fedcba9876543210fedcba9876543210';
 const MODEL = 'openai/gpt-6-luna', ESCALATION = 'anthropic/claude-sonnet-5';
 const exec = promisify(execFile) as CommandRunner;
-const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'glennlzl', name: null } };
+const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'developer', name: null } };
 const FIX: ScriptedStep[] = [
   { calls: [{ tool: 'run', input: { command: 'node check.js' } }] },
   { calls: [{ tool: 'edit', input: { path: 'add.js', old: 'a - b', new: 'a + b' } }] },
@@ -71,7 +71,7 @@ function fakeGitHub(sha: string, { remote, next }: { remote?: string; next?: str
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=50`) return answer({ total_count: 1, workflow_runs: [run] }, included ? 'runs' : undefined);
     if (endpoint === `repos/owner/app/actions/runs?head_sha=${sha}&per_page=100&page=1`) return answer({ total_count: 1, workflow_runs: [{ ...run, workflow_id: 1 }] });
     if (endpoint === 'repos/owner/app/actions/runs/2/jobs?per_page=100' || endpoint === 'repos/owner/app/actions/runs/2/attempts/1/jobs?per_page=100') return answer(jobs, included ? 'jobs' : undefined);
-    if (endpoint === 'user') return answer({ login: 'glennlzl', id: 1234 });
+    if (endpoint === 'user') return answer({ login: 'developer', id: 1234 });
     if (endpoint?.startsWith('repos/owner/app/pulls?state=open&')) return answer([]);
     if (endpoint === 'repos/owner/app/pulls' && method === 'POST') return answer({ number: 7, html_url: 'https://github.com/owner/app/pull/7', draft: true });
     if (endpoint === 'repos/owner/app/issues/7/labels' && method === 'POST') return answer([{ name: 'perpetual-repair' }]);
@@ -145,9 +145,9 @@ async function controller(t: TestContext, { build = brokenRepository, root = '/'
   }
   const scanPath = join(checkoutPath, ...root.split('/').filter(Boolean));
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: scanPath, name: 'app', sha, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes, edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
-  const source = { scanPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: root, sha, connectedAccount: 'glennlzl', savedAt: '2026-09-25T09:00:00.000Z' };
+  const source = { scanPath, checkoutPath, repository: 'owner/app', branch: 'main', rootDirectory: root, sha, connectedAccount: 'developer', savedAt: '2026-09-25T09:00:00.000Z' };
   const pipelines = stages ? { [`github:owner/app:${root}`]: { repoPath: scanPath, stages } } : {};
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'glennlzl', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines, githubConnection: { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, source } }));
   // App Settings as the Settings page saves them: the OpenRouter key, the model and, once chosen, the escalation model.
   await writeFile(join(dataDir, 'browser-model.json'), JSON.stringify({ apiKey: KEY, model: MODEL, baseUrl: 'https://openrouter.ai/api/v1', ...(escalation ? { escalationModel: escalation } : {}) }));
   const github = fakeGitHub(sha, { remote, next }), request = (endpoint: string, etag: string | null) => githubRequest(endpoint, etag, { run: github.gh }), pulls = createRepairPullRequests({ run: github.gh });
@@ -182,8 +182,9 @@ async function controller(t: TestContext, { build = brokenRepository, root = '/'
     for (let attempt = 0; attempt < attempts; attempt++) { const current = await view(), repair = await saved(); if (check(current, repair)) return { view: current, repair }; await new Promise(done => setTimeout(done, 10)); }
     throw new Error('The repair did not settle.');
   }
+  const finished = (status: Repair['status']) => until((view, repair) => repair?.status === status && !repair.cleanup && !change(view)?.steps.some(step => step.id === 'cleanup'));
   const read = async (path: string) => (await fetch(`${app.url}${path}`)).json();
-  return { sha, next, scanPath, checkoutPath, dataDir, github, boxes, models, prompts, post, send, view, until, saved, read };
+  return { sha, next, scanPath, checkoutPath, dataDir, github, boxes, models, prompts, post, send, view, until, finished, saved, read };
 }
 
 test('a person\'s Repair goes from gh\'s failed jobs and log through triage, the box and the scripted model to a draft pull request', async t => {
@@ -245,7 +246,7 @@ test('attempts 1 and 2 use the App Settings model and 3 and 4 its escalation mod
     scripts: [[{ text: 'Unsure.' }], [{ text: 'Still unsure.' }], touch('web/vercel.json'), touch('web/railway.toml')],
   });
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  const failed = await c.until((_view, repair) => repair?.status === 'failed');
+  const failed = await c.finished('failed');
   assert.deepEqual([failed.repair.reason, change(failed.view)?.status, change(failed.view)?.reason], ['The build was not fixed in 4 attempts.', 'not-merged', 'The build was not fixed in 4 attempts.']);
   assert.deepEqual(c.models, [{ id: MODEL, apiKey: KEY }, { id: MODEL, apiKey: KEY }, { id: ESCALATION, apiKey: KEY }, { id: ESCALATION, apiKey: KEY }]);
   const stored = await c.saved();
@@ -259,7 +260,7 @@ test('attempts 1 and 2 use the App Settings model and 3 and 4 its escalation mod
 test('without an escalation model saved, all four attempts use the App Settings model', async t => {
   const c = await controller(t, { scripts: [[{ text: 'Unsure.' }], [{ text: 'Unsure.' }], [{ text: 'Unsure.' }], [{ text: 'Unsure.' }]] });
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  await c.until((_view, repair) => repair?.status === 'failed');
+  await c.finished('failed');
   assert.deepEqual(c.models.map(model => model.id), [MODEL, MODEL, MODEL, MODEL]);
 });
 
@@ -273,7 +274,7 @@ const STAGES = [
 test('without a Sandbox stage, a pull request that passed CI is squash-merged at its verified head through gh', async t => {
   const c = await controller(t, { scripts: [FIX], ...FAST });
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  const merged = await c.until((_view, repair) => repair?.status === 'merged');
+  const merged = await c.finished('merged');
   const head = c.github.commits[0];
   assert.deepEqual([merged.repair.merged, merged.repair.pullRequest, change(merged.view)?.status], [MERGED, { number: 7, url: 'https://github.com/owner/app/pull/7', branch: `perpetual/repair/${c.sha.slice(0, 7)}`, draft: false }, 'merged']);
   assert.deepEqual(change(merged.view)?.steps.at(-1), { id: 'merge', name: 'Merge', status: 'done', detail: ['Merged ', { text: '#7', href: 'https://github.com/owner/app/pull/7' }, ' into ', { text: 'main' }, ' as ', { text: MERGED.slice(0, 7) }] });
@@ -287,7 +288,7 @@ test('without a Sandbox stage, a pull request that passed CI is squash-merged at
 test('a Sandbox stage without reviewed journeys holds the fix at ready, reports on the pull request head, and never moves the source', async t => {
   const c = await controller(t, { scripts: [FIX], stages: STAGES, ...FAST });
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  const ready = await c.until((_view, repair) => repair?.status === 'ready');
+  const ready = await c.finished('ready');
   const head = c.github.commits[0];
   assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.steps.at(-1)?.status], ['Beta needs release: No reviewed journeys.', 'needs-review', 'waiting']);
   assert.equal(c.github.calls.some(args => args.includes('repos/owner/app/pulls/7/merge')), false, 'A stage without reviewed journeys never merges by itself.');
@@ -310,7 +311,7 @@ test('the Build stage\'s Autopilot mode is the pipeline\'s auto-merge switch, se
   const ask = await c.post('/api/autopilot/mode', { repoPath: c.scanPath, stageId: 'build', mode: 'ask' });
   assert.deepEqual([ask.status, ask.body.stages?.build?.mode, (await c.view()).stages?.build?.mode, (await c.read('/api/state')).autopilot.stages.build.mode], [200, 'ask', 'ask', 'ask']);
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  const ready = await c.until((_view, repair) => repair?.status === 'ready');
+  const ready = await c.finished('ready');
   assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.reason], ['Auto-merge is off.', 'needs-review', 'Auto-merge is off.']);
   assert.equal(c.github.calls.some(args => args.includes('repos/owner/app/pulls/7/merge')), false);
 });

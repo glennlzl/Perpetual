@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestWorkspace, type StageRemoval } from '../client/src/lib/test-workspace.ts';
+import type { BrowserCase } from '../contract/browser.ts';
 import type { Controller } from '../client/src/lib/api.ts';
 import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
 
@@ -38,12 +39,11 @@ test('source polling publishes stages added or renamed in another tab without re
 test('pipeline writes keep earlier polls from restoring the graph before the write', async t => {
   const initial = defaultPipeline(source.path), saved = applyPipelineAction(initial, { action: 'add-stage', name: 'Beta' });
   const old = deferred();
-  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => old.promise });
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async (_path, input) => input ? { pipeline: saved } : old.promise });
   t.after(() => workspace.dispose());
   workspace.activate(source, { pipeline: initial, browserTests: {} });
-  const reading = workspace.refreshSource(), release = workspace.holdPipeline();
-  workspace.updatePipeline(saved);
-  release();
+  const reading = workspace.refreshSource();
+  await workspace.changePipeline({ action: 'add-stage', afterStageId: 'build', name: 'Beta' });
   old.resolve({ scan: { repo: source }, pipeline: initial, browserTests: {} });
   await reading;
   assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Beta', 'Production']);
@@ -61,7 +61,7 @@ test('a late pipeline read from the previous branch cannot change the new source
   await reading;
   assert.deepEqual(workspace.getSnapshot().pipeline?.stages.map(stage => stage.name), ['Source', 'Build', 'Gamma', 'Production']);
 });
-const scenario = { id: 'journey', name: 'Complete checkout', goal: 'Buy a product', expectedOutcomes: ['Order saved'], preconditions: [], assertions: [], needsReview: true, selected: false };
+const scenario: BrowserCase = { steps: [], isolation: 'shared', evidence: [], id: 'journey', name: 'Complete checkout', goal: 'Buy a product', expectedOutcomes: ['Order saved'], preconditions: [], assertions: [], needsReview: true, selected: false };
 const deferred = () => { let resolve = (_value: unknown) => {}; const promise = new Promise<unknown>(done => { resolve = done; }); return { promise, resolve }; };
 function fixture(t: TestContext, controller: Controller) {
   const workspace = createTestWorkspace({ controller, pollInterval: 0 });

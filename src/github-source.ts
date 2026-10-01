@@ -1,9 +1,12 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { failureText, redact } from './redaction.ts';
+import type { GitHubSession, GitHubRepositoryPage, GitHubBranchPage } from '../contract/github.ts';
+import type { GitHistory } from '../contract/git-history.ts';
+export type { GitHubAccount, GitHubSession, GitHubRepositoryChoice } from '../contract/github.ts';
 
 const exec = promisify(execFile);
 const PAGE_SIZE = 100;
@@ -14,16 +17,11 @@ const NULL_FILE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 // GitHub JSON is untrusted: a parsed object reads as a record of unknown fields, each checked where it is used.
 type GitHubJson = { readonly [key: string]: unknown } | null;
 const record = (value: unknown): GitHubJson => value !== null && typeof value === 'object' ? value as { readonly [key: string]: unknown } : null;
-export interface GitHubAccount { login: string; name: string | null }
-/** The GitHub CLI's session: an account exactly when it is authenticated. */
-export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined }
-  | { available: boolean; authenticated: false; account: null; message?: string };
-export interface GitHubRepositoryChoice { fullName: string; name: unknown; private: boolean; defaultBranch: unknown }
 /** A managed clone of one branch, and the directory of it that is scanned. */
 export interface PreparedGitHubSource { scanPath: string; checkoutPath: string; repository: string; branch: string; rootDirectory: string; sha: string }
 /** A saved source as read back: every field is checked again before Git runs in it. */
 export interface ManagedSourceInput { repository?: unknown; branch?: unknown; rootDirectory?: unknown; checkoutPath?: unknown; scanPath?: unknown }
-export interface HistorySync { syncedAt: string; source: 'github' }
+export type HistorySync = Required<Pick<GitHistory, 'syncedAt'>> & { source: 'github' };
 
 class GitHubSourceError extends Error {
   declare code: string;
@@ -59,6 +57,7 @@ function commandFailure(error: ExecFileException | GitHubSourceError, executable
 
 async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string) {
   try {
+    if (executable === 'gh') return await runGitHub(args, { timeout, maxBuffer: MAX_OUTPUT, env: commandEnvironment() });
     return await exec(executable, args, {
       timeout, maxBuffer: MAX_OUTPUT, encoding: 'utf8', windowsHide: true,
       env: commandEnvironment(), ...(cwd ? { cwd } : {}),
@@ -121,18 +120,19 @@ export async function getGitHubSession(): Promise<GitHubSession> {
   }
 }
 
-export async function listGitHubRepositories({ page = 1 }: { page?: unknown } = {}): Promise<{ repositories: GitHubRepositoryChoice[]; nextPage: number | null }> {
+export async function listGitHubRepositories({ page = 1 }: { page?: unknown } = {}): Promise<GitHubRepositoryPage> {
   const currentPage = pageNumber(page);
   const { data, hasNext } = await githubApi(`user/repos?per_page=${PAGE_SIZE}&page=${currentPage}&sort=updated&direction=desc&affiliation=owner,collaborator,organization_member`);
   if (!Array.isArray(data)) throw new GitHubSourceError('GitHub did not return a repository list. Try again.');
   const repositories = data.map((entry: unknown) => {
     const item = record(entry);
-    return { fullName: repositoryName(item?.full_name), name: item?.name, private: Boolean(item?.private), defaultBranch: item?.default_branch || null };
+    return { fullName: repositoryName(item?.full_name), name: typeof item?.name === 'string' ? item.name : null,
+      private: Boolean(item?.private), defaultBranch: typeof item?.default_branch === 'string' && item.default_branch ? item.default_branch : null };
   });
   return { repositories, nextPage: hasNext && currentPage < 10_000 ? currentPage + 1 : null };
 }
 
-export async function listGitHubBranches({ repository, page = 1, preferredBranch }: { repository?: unknown; page?: unknown; preferredBranch?: unknown } = {}) {
+export async function listGitHubBranches({ repository, page = 1, preferredBranch }: { repository?: unknown; page?: unknown; preferredBranch?: unknown } = {}): Promise<GitHubBranchPage> {
   const selected = repositoryName(repository), currentPage = pageNumber(page);
   const preferred = preferredBranch == null ? null : branchName(preferredBranch);
   const [metadata, response] = await Promise.all([

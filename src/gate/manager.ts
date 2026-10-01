@@ -48,6 +48,7 @@ export interface RepairGateRequest { key: unknown; repair: unknown; branch: unkn
 export type RepairGateView = PublicGate & { context: string };
 /** The last branch head the watcher saw for a pipeline, and the account that read it; checkedAt is only a record. */
 interface Head { repository?: string; branch: string | null; login: string; sha: string; etag: string | null; checkedAt?: string }
+type WatchResult = { identity: string; login: string; sha: string } | { identity: string | null; error: string } | null;
 interface GateState { version: 1; gates: Gate[]; heads: Partial<Record<string, Head>> }
 
 // Every gate status and commit state, so a stored gate is checked against the whole set.
@@ -97,7 +98,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   // repair ended with the restart.
   for (const gate of state.gates) if (ACTIVE.includes(gate.status) || gate.repair && gate.status === 'queued') Object.assign(gate, { status: 'needs-release', reason: RESTARTED, completedAt: now(), updatedAt: now() } satisfies Partial<Gate>);
   const saves = createSaveQueue();
-  let closed = false, draining: Promise<void> | null = null, watching: Promise<void> | null = null, syncing: Promise<void> | null = null, syncAgain = false;
+  let closed = false, draining: Promise<void> | null = null, watching: Promise<WatchResult> | null = null, syncing: Promise<void> | null = null, syncAgain = false;
   let timer: NodeJS.Timeout | undefined, retry: NodeJS.Timeout | undefined, watchError: string | null = null;
   let watchErrorScope: { identity: string | null; login: string | null } | null = null;
   // A repair's wait for each of its gates, the gate being executed, and repair gates stopped while it was prepared.
@@ -310,25 +311,27 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   // source, so it follows the head whenever that differs from the scanned commit, a head saved before a restart and
   // answered with 304 included. A follow that cannot start now waits for the next poll; one that fails stays the watch
   // error until a watch succeeds.
-  function watch() {
-    if (closed) return Promise.resolve();
+  function watch(): Promise<WatchResult> {
+    if (closed) return Promise.resolve(null);
     let scope: typeof watchErrorScope = null;
-    watching ??= Promise.resolve().then(async () => {
+    watching ??= Promise.resolve().then(async (): Promise<WatchResult> => {
       const selected = active();
-      if (!selected?.repository) return;
+      if (!selected?.repository) return null;
       // Keep the response under the source it was requested for, even if the selection changes meanwhile.
       const current = { ...selected, repository: selected.repository };
-      const identity = sourceIdentity(current);
+      const identity = sourceIdentity(current)!;
       scope = { identity, login: null };
       const connection = await github.connection();
-      if (!connection || closed || sourceIdentity(active()) !== identity || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return;
-      scope = { identity, login: connection.login.toLowerCase() };
+      if (closed || sourceIdentity(active()) !== identity) return null;
+      if (!connection || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return { identity, error: 'Connect GitHub to read the branch head.' };
+      const login = connection.login;
+      scope = { identity, login: login.toLowerCase() };
       const previous = state.heads[current.key];
-      const known = previous?.branch === current.branch && previous.login === connection.login;
+      const known = previous?.branch === current.branch && previous.login === login;
       const head = await github.head({ repository: current.repository, branch: current.branch, etag: known ? previous.etag : null });
-      if (closed) return;
+      if (closed) return null;
       if (head.status !== 304) {
-        state.heads[current.key] = { repository: current.repository, branch: current.branch, login: connection.login, sha: head.sha, etag: head.etag, checkedAt: now() };
+        state.heads[current.key] = { repository: current.repository, branch: current.branch, login, sha: head.sha, etag: head.etag, checkedAt: now() };
         const first = sandboxes(current)[0];
         if (first && known && previous.sha !== head.sha) enqueue(current, first, head.sha, now());
         await persist();
@@ -345,8 +348,34 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       }
       watchError = null;
       watchErrorScope = null;
-    }).catch(error => { watchError = text(error); watchErrorScope = scope; }).finally(() => { watching = null; });
+      return sha ? { identity, login, sha } : { identity, error: 'Could not read the branch head. Try again.' };
+    }).catch(error => { watchError = text(error); watchErrorScope = scope; return { identity: scope?.identity ?? null, error: watchError }; }).finally(() => { watching = null; });
     return watching;
+  }
+  /** Display evidence and manual admission share the same account, source and failed-watch constraints. */
+  function watchedHead({ key, repository, branch, login }: { key: string; repository: string; branch: string | null; login: string }): SourceHead | null {
+    const current = active();
+    if (!current?.repository || !branch || current.key !== key || current.branch !== branch || current.repository.toLowerCase() !== repository.toLowerCase()) return null;
+    if (watchError && watchErrorScope?.identity === sourceIdentity(current) && (watchErrorScope.login === null || watchErrorScope.login === login.toLowerCase())) throw Object.assign(new Error(watchError), { statusCode: 502 });
+    const head = state.heads[key];
+    if (!head || head.repository?.toLowerCase() !== repository.toLowerCase() || head.branch !== branch || head.login.toLowerCase() !== login.toLowerCase() || !SHA.test(head.sha)) return null;
+    return { key, branch, sha: head.sha.toLowerCase() };
+  }
+  /** A saved head is a push baseline, not permission to start new work after its refresh failed. */
+  async function manualCommit(current: GateSource): Promise<string | null> {
+    const identity = sourceIdentity(current), observed = await watch();
+    guard();
+    if (sourceIdentity(active()) !== identity) throw conflict('The active source changed. Reload the pipeline.');
+    if (!current.repository) return current.sha;
+    if (observed && observed.identity !== identity) throw conflict('The active source changed. Reload the pipeline.');
+    if (!observed || 'error' in observed) throw Object.assign(new Error(observed?.error ?? 'Could not read the branch head. Try again.'), { statusCode: 502 });
+    const connection = await github.connection();
+    guard();
+    if (sourceIdentity(active()) !== identity) throw conflict('The active source changed. Reload the pipeline.');
+    if (!connection || connection.login.toLowerCase() !== observed.login.toLowerCase() || connection.repository.toLowerCase() !== current.repository.toLowerCase()) throw conflict('The GitHub connection changed. Run the gate again.');
+    const head = watchedHead({ key: current.key, repository: current.repository, branch: current.branch, login: connection.login });
+    if (!head || head.sha !== observed.sha.toLowerCase()) throw conflict('The branch head changed. Run the gate again.');
+    return head.sha;
   }
   function view(): GateView {
     const current = active();
@@ -358,16 +387,9 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   const guard = () => { if (closed) throw conflict('The controller is shutting down.'); };
   return {
     view,
-    watch,
+    async watch() { await watch(); },
     /** Read only: a verified caller can display this source's watched head without advancing a gate. */
-    watchedHead({ key, repository, branch, login }: { key: string; repository: string; branch: string | null; login: string }): SourceHead | null {
-      const current = active();
-      if (!current?.repository || !branch || current.key !== key || current.branch !== branch || current.repository.toLowerCase() !== repository.toLowerCase()) return null;
-      if (watchError && watchErrorScope?.identity === sourceIdentity(current) && (watchErrorScope.login === null || watchErrorScope.login === login.toLowerCase())) throw Object.assign(new Error(watchError), { statusCode: 502 });
-      const head = state.heads[key];
-      if (!head || head.repository?.toLowerCase() !== repository.toLowerCase() || head.branch !== branch || head.login.toLowerCase() !== login.toLowerCase() || !SHA.test(head.sha)) return null;
-      return { key, branch, sha: head.sha.toLowerCase() };
-    },
+    watchedHead,
     /** A fresh copy lets release callers compare evidence again after asynchronous checks, before deployment. */
     releaseEvidence(sha: unknown): ReleaseEvidence | null {
       const current = active();
@@ -391,12 +413,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (!current) throw new Error('Scan a repository first.');
       if (!sandboxes(current).some(stage => stage.id === stageId)) throw new Error('Choose a Sandbox stage.');
       const identity = sourceIdentity(current);
-      await watch();
+      const sha = await manualCommit(current);
       current = active();
       const stage = current && sandboxes(current).find(item => item.id === stageId);
       if (!current || !stage || sourceIdentity(current) !== identity) throw conflict('The active source changed. Reload the pipeline.');
-      const head = state.heads[current.key];
-      const sha = current.repository && head?.branch === current.branch ? head.sha : current.sha;
       if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error('Scan a repository with a commit first.');
       enqueue(current, stage, sha.toLowerCase(), now());
       await persist();

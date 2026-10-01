@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { browserJourneySteps, browserRunLabel, journeyActive, journeyCode, journeyErrorTone, journeyOpenByDefault, journeyProgress, journeyQueueLabel, journeyRecordings, journeyRevision, type BrowserCase, type BrowserRun, type JourneySpec } from '@/lib/browser-test-ui';
+import { browserJourneySteps, browserRunLabel, journeyActive, journeyCode, journeyErrorTone, journeyOpenByDefault, journeyProgress, journeyQueueLabel, journeyRecordings, journeyRevision, type JourneyDefinition, type BrowserRun, type JourneySpec } from '@/lib/browser-test-ui';
 import BrowserLiveFrame from './BrowserLiveFrame';
 import JourneyRecording from './JourneyRecording';
 import JourneyEvidence, { hasJourneyEvidence } from './JourneyEvidence';
@@ -28,7 +28,7 @@ function JourneyCode({ spec }: { spec: JourneySpec | null | undefined }) {
 }
 
 type JourneyCardProps = {
-  item: BrowserCase; run: BrowserRun | null | undefined; status: string; label?: string; repoPath: string; stageId: string;
+  item: JourneyDefinition; run: BrowserRun | null | undefined; status: string; label?: string; repoPath: string; stageId: string;
   selection?: ReactNode; actions?: ReactNode; spec?: JourneySpec; onSkip?: () => void; skipping?: boolean;
   onInspect?: () => void; onViewRun?: () => void; onFocus?: () => void; focusRef?: Ref<HTMLButtonElement>; focused?: boolean;
 };

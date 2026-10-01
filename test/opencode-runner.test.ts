@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOpencodeRunner, openrouterRefusal, type RunFailure } from '../src/agents/opencode.ts';
@@ -75,6 +75,69 @@ test('an unrecognized agent failure keeps its diagnostic in the displayed error'
     return true;
   });
   assert.equal(f.calls(), 1);
+});
+
+async function capture(t: TestContext, chunks: string[], { exit = 0, secrets = [], env = {}, harnessEnv = {} }: { exit?: number; secrets?: string[]; env?: Record<string, string>; harnessEnv?: Record<string, string> } = {}) {
+  const cwd = await mkdtemp(join(tmpdir(), 'perpetual-opencode-output-'));
+  await writeFile(join(cwd, 'chunks.json'), JSON.stringify(chunks));
+  const runner = createOpencodeRunner({ model: 'example/model', cwd, env, secrets, timeoutMs: 30_000, cleanupGraceMs: 1000, messages,
+    harness: () => ({ command: process.execPath, env: harnessEnv, args: ['--input-type=module', '-e', `
+      import {readFile} from 'node:fs/promises';
+      for (const chunk of JSON.parse(await readFile('chunks.json','utf8'))) {
+        await new Promise(resolve => process.${exit ? 'stderr' : 'stdout'}.write(chunk, resolve));
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      process.exitCode = ${exit};
+    `] }) });
+  t.after(async () => { runner.cancel(); await rm(cwd, { recursive: true, force: true }); });
+  return runner.run('Write the reviewed data.');
+}
+
+test('agent output redacts complete credential blocks before retaining a success or failure tail', async t => {
+  for (const exit of [0, 1]) await t.test(`exit ${exit}`, async t => {
+    const promise = capture(t, ['-----BEGIN PRIVATE KEY-----\n', 'private-fixture-body\n'.repeat(300), '-----END PRIVATE KEY-----\nFinished.\n'], { exit });
+    const result = exit ? await promise.catch((error: RunFailure) => error) : await promise;
+    assert.ok(!result.output.includes('private-fixture-body'));
+    assert.ok(result.output.includes('Finished.'), 'Ordinary diagnostic text remains useful.');
+    if ('reason' in result) assert.equal(result.reason, messages.stopped);
+  });
+});
+
+test('an agent that stops inside a credential block never returns its unfinished body', async t => {
+  const promise = capture(t, ['-----BEGIN PRIVATE KEY-----\n', 'private-fixture-body\n'.repeat(300)], { exit: 1 });
+  await assert.rejects(promise, (error: RunFailure) => {
+    assert.equal(error.reason, messages.stopped);
+    assert.ok(!error.output.includes('private-fixture-body'));
+    assert.ok(error.output.includes('[REDACTED]'));
+    return true;
+  });
+});
+
+test('agent output hides a supplied value across stream chunks without retaining a suffix', async t => {
+  const secret = `supplied-fixture-${'q'.repeat(5000)}-end`;
+  const result = await capture(t, [secret.slice(0, 4500), secret.slice(4500), '\nFinished.\n'], { secrets: [secret] });
+  assert.ok(!result.output.includes('q'.repeat(30)));
+  assert.ok(result.output.includes('[REDACTED]'));
+  assert.ok(result.output.includes('Finished.'));
+});
+
+test('agent output protects the effective process model key before clipping without requiring duplicate secrets', async t => {
+  const key = `private-model-credential-${'q'.repeat(40)}`;
+  for (const input of [{ env: { OPENROUTER_API_KEY: key } }, { harnessEnv: { OPENROUTER_API_KEY: key } }]) {
+    const result = await capture(t, [`${key}${'.'.repeat(3970)}`], input);
+    assert.ok(!result.output.includes('q'.repeat(10)));
+  }
+});
+
+test('incomplete captured output is withheld while the actual agent outcome remains known', async t => {
+  const promise = capture(t, ['-----BEGIN PRIVATE KEY-----\n', 'private-fixture-body\n'.repeat(30_000), '-----END PRIVATE KEY-----\n'], { exit: 1 });
+  await assert.rejects(promise, (error: RunFailure) => {
+    assert.equal(error.reason, messages.stopped);
+    assert.equal(error.timedOut, undefined);
+    assert.ok(!error.output.includes('private-fixture-body'));
+    assert.match(error.output, /output.*withheld/i);
+    return true;
+  });
 });
 
 test('cancellation takes precedence over provider refusal output', async t => {

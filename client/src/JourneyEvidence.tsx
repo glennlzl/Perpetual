@@ -1,11 +1,11 @@
 import { Badge } from '@/components/ui/badge';
-import { CHECKS, browserActionFailure, browserActionLabel, browserRunLabel, checkedOutcome, journeyActions, journeyCheckState, type BrowserCase, type CaseProgress, type CaseResult } from '@/lib/browser-test-ui';
+import { CHECKS, browserActionFailure, browserActionLabel, browserRunLabel, checkedOutcome, journeyActions, journeyCheckState, type JourneyDefinition, type CaseProgress, type CaseResult } from '@/lib/browser-test-ui';
 import { JourneyMark } from './JourneySteps';
 
 export const hasJourneyEvidence = (result: CaseResult | null | undefined, progress: CaseProgress | null | undefined) => Boolean(result?.engine || result?.assertions?.length || journeyActions(progress).items.length);
 
 // Checks-backed outcomes, final independent checks and browser actions stay visibly separate.
-export default function JourneyEvidence({ item, result, progress }: { item: BrowserCase; result: CaseResult | null | undefined; progress: CaseProgress | null | undefined }) {
+export default function JourneyEvidence({ item, result, progress }: { item: JourneyDefinition; result: CaseResult | null | undefined; progress: CaseProgress | null | undefined }) {
   const { items: actions, count } = journeyActions(progress);
   if (!hasJourneyEvidence(result, progress)) return null;
   const checked = result?.engine === 'playwright' && checkedOutcome(result);

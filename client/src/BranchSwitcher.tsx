@@ -7,7 +7,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { api } from '@/lib/api';
 import { canSwitchBranch, nameParts, readsLocalCheckout } from '@/lib/source-selection';
 import type { Scan } from './App';
-import type { GitHubConnection, SourceSelection } from './SourceSettings';
+import type { SourceSelection } from './SourceSettings';
+import type { GitHubConnection, GitHubBranchPage } from '../../contract/github.ts';
 
 type BranchList = { connection: GitHubConnection | null; branches: string[]; defaultBranch: string | null; nextPage: number | null; loading: boolean; error: string };
 type BranchCache = { key: string; branches: string[]; defaultBranch: string | null; nextPage: number | null };
@@ -129,7 +130,7 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
       const page = append && previous?.nextPage ? previous.nextPage : 1;
       const query = new URLSearchParams({ repository: source.repository, page: String(page) });
       if (page === 1 && branch) query.set('preferredBranch', branch);
-      const result = await api<{ branches?: { name?: unknown }[]; nextPage?: number | null; defaultBranch?: string | null }>(`/api/github/branches?${query}`);
+      const result = await api<GitHubBranchPage>(`/api/github/branches?${query}`);
       if (!valid()) return;
       const branches = [...new Set([
         ...(page === 1 ? [] : previous?.branches || []),

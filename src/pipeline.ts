@@ -1,9 +1,6 @@
 import { randomUUID } from 'node:crypto';
-
-export type StageKind = 'source' | 'build' | 'production' | 'sandbox';
-export interface Stage { id: string; name: string; kind: StageKind; collapsed: boolean; githubWorkflow?: string | null }
-export interface Transition { id: string; source: string; target: string; blocked: boolean; reason: string }
-export interface Pipeline { repoPath: string; stages: Stage[]; transitions: Transition[] }
+import type { Pipeline, Stage, Transition } from '../contract/pipeline.ts';
+export type { Pipeline, Stage, StageKind, Transition } from '../contract/pipeline.ts';
 /** A definition that passed validatePipeline; saved transitions are checked when normalized. */
 type PipelineDefinition = Omit<Pipeline, 'transitions'> & { transitions?: unknown };
 

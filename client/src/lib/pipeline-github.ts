@@ -1,10 +1,11 @@
-// GitHub Actions status for the current commit, read through /api/github/runs.
+// GitHub Actions status for the watched Build commit, read through /api/github/build.
 // A run for another commit never verifies the current source.
 import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
+import { createVisiblePoller } from './visible-poller.ts';
 
 // The shapes are the controller's contract (contract/github.ts): GET /api/github/runs as the controller replies.
-import type { BuildReply, CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
+import type { ActionWorkflow, BuildReply, CommitRuns, WorkflowJob, WorkflowRun, WorkflowStep } from '../../../contract/github.ts';
 export type { BuildReply };
 export type GitHubStep = WorkflowStep;
 export type GitHubJob = WorkflowJob;
@@ -68,18 +69,10 @@ export function githubBuildStatus(result: GitHubRuns | null | undefined, sha: st
   const build = githubBuildSummary(result, sha, workflows);
   return build ? { kind: BUILD_KINDS[build.status] || 'idle', text: GITHUB_MARK_LABELS[build.status], sha: build.sha } : { kind: 'idle', text: 'Not run' };
 }
-export const githubRunsActive = (result: GitHubRuns | null | undefined, workflows?: string[]) => railRuns(result, workflows).some(run => ['queued', 'running'].includes(String(githubMark(run))));
 
-export const workflowRuns = (result: GitHubRuns | null | undefined, file: string) => (result?.runs || []).filter(run => workflowPath(run.path) === file);
-export const workflowMark = (result: GitHubRuns | null | undefined, file: string) => combinedMark(workflowRuns(result, file).map(githubMark));
-// Matrix jobs append their values, and reusable workflow jobs prefix their caller.
-export const jobRuns = (runs: Pick<GitHubRun, 'jobs'>[] | null | undefined, job: { id: string; name: string }) => (runs || []).flatMap(run => run.jobs || []).filter(item => [job.name, job.id].includes(item.name) || item.name.startsWith(`${job.name} (`) || item.name.startsWith(`${job.name} / `));
-export const jobMark = (runs: Pick<GitHubRun, 'jobs'>[] | null | undefined, job: { id: string; name: string }) => combinedMark(jobRuns(runs, job).map(githubMark));
-export const stepMark = (jobs: Pick<GitHubJob, 'steps'>[] | null | undefined, step: { name: string }) => combinedMark((jobs || []).flatMap(job => job.steps || []).filter(item => item.name === step.name || item.name === `Run ${step.name}`).map(githubMark));
-
-// Rail labels for scanned names. An unnamed `uses:` step keeps its action and a
-// short ref; an unevaluated expression leaves its base name and context. Matching
-// above still uses the original name.
+// Rail labels for scanned configuration only. An unnamed `uses:` step keeps its
+// action and a short ref; an unevaluated expression leaves its base name and context.
+// Observed job and step names are shown exactly as GitHub reported them.
 const ACTION_REF = /^([\w.-]+\/[\w./-]+|docker:\/\/[\w./:-]+)@([\w./:-]+)$/;
 const EXPRESSION = /\$\{\{[\s\S]*?\}\}/g;
 const CONTEXT = /(?<![\w.])(matrix|inputs|github|env|vars|needs|steps|jobs|job|runner|strategy|secrets)\s*[.[]/g;
@@ -118,7 +111,7 @@ export function watchedBuildStatus(view: BuildReply | null | undefined, error?: 
 }
 
 /** Names from the scanned workflow files. These are configuration, never execution evidence. */
-export interface ConfiguredWorkflow { file: string; name: string; jobs: { id: string; name: string; steps: { id: string; name: string }[] }[]; error?: string }
+export type ConfiguredWorkflow = ActionWorkflow;
 export interface BuildWorkflowRow extends ConfiguredWorkflow { runs: GitHubRun[] }
 /** Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. */
 export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined): BuildWorkflowRow[] {
@@ -151,31 +144,12 @@ export function createGitHubBuildPoller({ repoPath, branch, controller, ...optio
 /** Polls one controller route while the page is visible: every `activeDelay` while `active(result)`, else every `idleDelay`, publishing only changed results. */
 export interface GitHubPollerOptions<T> { controller: Controller; path: string; active: (result: T | null) => boolean; onChange: (result: T | null) => void; document?: PageVisibility | null; timers?: Timers; activeDelay?: number; idleDelay?: number }
 export function createGitHubPoller<T>({ controller, path, active, onChange, document = globalThis.document, timers = globalThis, activeDelay = 5000, idleDelay = 60000 }: GitHubPollerOptions<T>) {
-  let timer: unknown, stopped = false, loading = false, current: T | null = null, key: string | undefined;
-  const schedule = () => {
-    timers.clearTimeout(timer);
-    if (!stopped && !document?.hidden) timer = timers.setTimeout(poll, active(current) ? activeDelay : idleDelay);
-  };
-  async function poll() {
-    if (stopped || loading || document?.hidden) return;
-    loading = true;
-    let next: T | null = null;
-    try { next = await controller(path) as T; } catch { next = null; }
-    loading = false;
-    if (stopped) return;
-    const nextKey = JSON.stringify(next);
-    if (nextKey !== key) { key = nextKey; current = next; onChange(next); }
-    schedule();
-  }
-  const visibility = () => { if (!document?.hidden && !stopped) { timers.clearTimeout(timer); void poll(); } };
-  document?.addEventListener?.('visibilitychange', visibility);
-  if (!document?.hidden) void poll();
-  return {
-    refresh() { timers.clearTimeout(timer); void poll(); },
-    stop() { stopped = true; timers.clearTimeout(timer); document?.removeEventListener?.('visibilitychange', visibility); },
-  };
-}
-
-export function createGitHubRunsPoller({ repoPath, workflows = [], ...options }: Omit<GitHubPollerOptions<GitHubRuns>, 'path' | 'active'> & { repoPath: string; workflows?: string[] }) {
-  return createGitHubPoller<GitHubRuns>({ ...options, path: `/api/github/runs?${new URLSearchParams({ repoPath })}`, active: current => githubRunsActive(current, workflows) });
+  let current: T | null = null, key: string | undefined;
+  return createVisiblePoller({ document, timers, read: () => controller(path) as Promise<T>,
+    interval: () => active(current) ? activeDelay : idleDelay,
+    onResult(result) {
+      const next = result.ok ? result.value : null, nextKey = JSON.stringify(next);
+      if (nextKey !== key) { key = nextKey; current = next; onChange(next); }
+    },
+  });
 }

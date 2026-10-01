@@ -7,12 +7,12 @@ type Invocation = [command: string, args: string[], options: { env: NodeJS.Proce
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
 const REPO = 'acme/storefront';
-const LOGIN = 'glennlzl';
+const LOGIN = 'developer';
 // Trimmed from the shapes GitHub returns for GET /repos/{owner}/{repo}/actions/runs and /runs/{id}/jobs.
 const workflowRun = (id: number, extra: object = {}) => ({
   id, name: 'CI', display_title: 'Add credit ledger', node_id: 'WFR_kwLOx', head_branch: 'main', head_sha: SHA, path: '.github/workflows/ci.yml', run_number: 412, event: 'push',
   status: 'completed', conclusion: 'success', workflow_id: 9001, check_suite_id: 1, url: `https://api.github.com/repos/${REPO}/actions/runs/${id}`, html_url: `https://github.com/${REPO}/actions/runs/${id}`,
-  created_at: '2026-09-23T10:00:00Z', updated_at: '2026-09-23T10:04:00Z', run_attempt: 1, run_started_at: '2026-09-23T10:00:05Z', actor: { login: 'glennlzl' }, head_commit: { id: SHA, message: 'Add credit ledger' }, ...extra,
+  created_at: '2026-09-23T10:00:00Z', updated_at: '2026-09-23T10:04:00Z', run_attempt: 1, run_started_at: '2026-09-23T10:00:05Z', actor: { login: 'developer' }, head_commit: { id: SHA, message: 'Add credit ledger' }, ...extra,
 });
 const runsPage = (runs: object[]) => ({ total_count: runs.length, workflow_runs: runs });
 const workflowJob = (id: number, runId: number, extra: object = {}) => ({
@@ -169,9 +169,9 @@ test('a failed read is not cached and a failed job read leaves that run unknown'
 });
 
 test('the session is re-verified on every call, because gh reads with its active account', async () => {
-  let calls = 0, login: string | null = 'glennlzl';
+  let calls = 0, login: string | null = 'developer';
   const reader = createGitHubRunsReader({ request: async () => { throw new Error('unused'); }, session: async () => { calls++; return login ? { available: true, authenticated: true, account: { login, name: null } } : { available: true, authenticated: false, account: null }; }, now: () => 0 });
-  assert.equal((await reader.session()).account!.login, 'glennlzl');
+  assert.equal((await reader.session()).account!.login, 'developer');
   login = 'someone-else';
   assert.equal((await reader.session()).account!.login, 'someone-else', 'gh auth switch is seen on the next call.');
   login = null;
@@ -190,7 +190,7 @@ test('reads require the connected login and never share cached data between acco
   assert.equal(calls.length, 0);
   await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
   assert.equal(calls.length, 2);
-  await reader.read({ repository: REPO, sha: SHA, login: 'GlennLZL' });
+  await reader.read({ repository: REPO, sha: SHA, login: 'Developer' });
   assert.equal(calls.length, 2, 'Logins compare case-insensitively, as GitHub does.');
   const other = await reader.read({ repository: REPO, sha: SHA, login: 'someone-else' });
   assert.deepEqual(calls.slice(2).map(call => [call.endpoint.replace(`repos/${REPO}/`, ''), call.etag]), [[`actions/runs?head_sha=${SHA}&per_page=50`, null], ['actions/runs/12/attempts/1/jobs?per_page=100', null]], 'Another account neither reuses the read, its entity tag, nor completed jobs.');

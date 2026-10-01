@@ -1,8 +1,6 @@
 // A state file the controller owns: how its directory is kept private, how it is read back and how
 // it is written. Every manager keeps its own file, its own size limits, its own words for a bad file
-// and its own restart recovery; what they share is here, so a guard exists once. The controller's own
-// state.json (src/server.ts) keeps its fixed temporary name and pretty print on purpose: tests inject
-// a write failure at that exact path.
+// and its own restart recovery; what they share is here, so a guard exists once.
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';

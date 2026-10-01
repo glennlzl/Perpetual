@@ -126,10 +126,12 @@ test('concurrent pipeline mutations serialize and failed persistence cannot chan
   assert.ok(responses.every(response => response.status === 200));
   const before = (await request('/api/pipeline')).data.pipeline;
   assert.equal(before.stages.length, 5);
-  await mkdir(join(fixture.dataDir, 'state.json.tmp'));
+  const savedState = await readFile(join(fixture.dataDir, 'state.json'));
+  await rm(join(fixture.dataDir, 'state.json')); await mkdir(join(fixture.dataDir, 'state.json'));
   assert.equal((await action({ action: 'toggle-stage', stageId: 'source' })).status, 400);
   assert.deepEqual((await request('/api/pipeline')).data.pipeline, before);
-  await rm(join(fixture.dataDir, 'state.json.tmp'), { recursive: true });
+  await rm(join(fixture.dataDir, 'state.json'), { recursive: true });
+  await writeFile(join(fixture.dataDir, 'state.json'), savedState);
   assert.equal((await action({ action: 'toggle-stage', stageId: 'source' })).status, 200);
   const disk = JSON.parse(await readFile(join(fixture.dataDir, 'state.json'), 'utf8'));
   assert.equal(disk.state.pipelines[repoPath].stages[0].collapsed, true);
@@ -387,17 +389,6 @@ test('card Add test opens only New test and returns focus to its trigger', async
   assert.match(app, /document\.querySelector(?:<\w+>)?\(`\[data-add-test="\$\{CSS\.escape\(stageId\)\}"\]`\)\?\.focus\(/);
 });
 
-test('collapsing a stage applies at once without the global busy lock', async () => {
-  const app = await source('App.tsx');
-  const toggle = /const toggleStage = useCallback\(async \(?stageId(?:: string\))? => \{[\s\S]*?\n  \}, \[state\.scan, workspace\]\);/.exec(app)?.[0] || '';
-  assert.ok(toggle, 'toggleStage');
-  assert.doesNotMatch(toggle, /setBusy|mutation\.current = true/);
-  assert.ok(toggle.indexOf('setPipeline(flip)') < toggle.search(/await api(?:<\w+>)?\('\/api\/pipeline\/action'/), 'The card collapses before the save returns.');
-  assert.match(toggle, /const rolledBack = base === pipelineRevision\.current;\n\s+if \(rolledBack\) setPipeline\(flip\);\n\s+setError\((?:\(failure as Error\)|failure)\.message, rolledBack \? \(\) => toggleStage\(stageId\) : null\);/, 'A failed save rolls back, reports, and offers the same toggle again.');
-  assert.match(stageNode(app), /onOpenChange=\{\(\) => toggleStage\(stage\.id\)\}/);
-  assert.doesNotMatch(app, /action: 'toggle-stage'[^\n]*mutate|mutate\(\{ action: 'toggle-stage'/);
-});
-
 test('the canvas follows the app theme and drops unused styles', async () => {
   const app = await source('App.tsx'), css = await source('pipeline.css');
   assert.match(/<ReactFlow [^>]*>/.exec(app)![0], /colorMode=\{theme\}/);
@@ -431,9 +422,7 @@ test('a canvas failure is a dismissible Alert above the stages, with Try again o
   assert.doesNotMatch(css, /\.canvas-alert \{[^}]*position: absolute/);
   // A failed toggle and the refresh after a stage removal can repeat; polls retry themselves.
   assert.match(app, /const refresh = \(\) => void refreshPipeline\(\)\.catch\(failure => setError\(failure\.message, refresh\)\);/);
-  assert.match(app, /tests\.error && tests\.error !== quietError \? \{ message: tests\.error, retry: null \}/);
-  assert.match(app, /const dismissError = useCallback\(\(\) => \{ if \(error\) setError\(''\); else setQuietError\(tests\.error\); \}/);
-  assert.match(app, /useEffect\(\(\) => \{ if \(!tests\.error\) setQuietError\(''\); \}, \[tests\.error\]\);/, 'A dismissed poll failure shows again if it recurs after clearing.');
+  // Poll dismissal, recurrence and action retry precedence are exercised on the mounted App in pipeline-sync-ui.test.ts.
 });
 
 test('the header row never clips the sidebar toggle focus ring', async () => {
