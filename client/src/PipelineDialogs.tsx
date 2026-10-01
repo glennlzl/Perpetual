@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { lazy, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Box, GitBranch, X } from 'lucide-react';
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -10,14 +10,17 @@ import { Badge } from '@/components/ui/badge';
 import SourceSettings, { type SourceSelection, type SourceSettingsHandle, type SourceState } from './SourceSettings';
 import ServiceSettings from './ServiceSettings';
 import TransitionConfirmation from './TransitionConfirmation';
-import GitGraphPanel from './GitGraphPanel';
-import EnvironmentSettings from './EnvironmentSettings';
+import DeferredView, { ViewLoadState } from './DeferredView';
+import { EnvironmentHeader, GitGraphHeader } from './InspectorHeaders';
 import StageSettingsDialog from './StageSettingsDialog';
 import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
 import type { PipelineView } from '@/lib/pipeline-nodes.ts';
 import type { PipelineDialog, Scan } from './App';
 import type { PipelineAction } from './lib/test-workspace';
 import type { PipelineActionReply as PipelineActionResult } from '../../contract/pipeline.ts';
+
+const GitGraphPanel = lazy(() => import('./GitGraphPanel'));
+const EnvironmentSettings = lazy(() => import('./EnvironmentSettings'));
 
 type OnAction = (input: PipelineAction) => Promise<PipelineActionResult>;
 
@@ -260,10 +263,14 @@ export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSou
         panel.current = null;
       }}
       onEscapeKeyDown={event => { if (locked) event.preventDefault(); }} onInteractOutside={event => event.preventDefault()} onKeyDownCapture={event => releaseTabAtEdges(event, focusOrigin.current)}>
+      {dialog.type === 'git-graph' || dialog.type === 'environment' ? <>
+      {dialog.type === 'git-graph' ? <GitGraphHeader onClose={onClose} /> : <EnvironmentHeader repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} busy={locked} onClose={onClose} />}
+      <DeferredView key={dialog.type} fallback={failed => <div className="inspector-body min-h-0 flex-1 overflow-y-auto p-4"><ViewLoadState failed={failed} /></div>}>
       {dialog.type === 'git-graph'
-        ? <GitGraphPanel key={`${scan?.repo?.path}:${scan?.repo?.branch}`} scan={scan} onClose={onClose} />
-        : dialog.type === 'environment'
-        ? <EnvironmentSettings key={`${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} initialTab={dialog.tab} initialError={dialog.error} initialWatch={dialog.watch} initialRunId={dialog.runId} initialCaseId={dialog.caseId} caseRequestKey={dialog.caseRequestKey} onClose={onClose} onBusyChange={setPending} onAppSettings={onAppSettings} busy={busy} />
+        ? <GitGraphPanel key={`${scan?.repo?.path}:${scan?.repo?.branch}`} scan={scan} onClose={onClose} showHeader={false} />
+        : <EnvironmentSettings key={`${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} initialTab={dialog.tab} initialError={dialog.error} initialWatch={dialog.watch} initialRunId={dialog.runId} initialCaseId={dialog.caseId} caseRequestKey={dialog.caseRequestKey} onClose={onClose} onBusyChange={setPending} onAppSettings={onAppSettings} busy={busy} showHeader={false} />}
+      </DeferredView>
+      </>
         : <DialogForm key={dialogKey} dialog={dialog} scan={scan} onClose={onClose} onSourceSave={onSourceSave} busy={locked} setPending={setPending} />}
     </SheetContent>}
   </Sheet>;

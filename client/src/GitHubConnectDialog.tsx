@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, LoaderCircle } from 'lucide-react';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -6,11 +6,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
 import type { GitHubConnection, SignInSnapshot } from '../../contract/github.ts';
+import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 
 const DEVICE_URL = 'https://github.com/login/device';
 const pending = (session: SignInSnapshot | null) => ['starting', 'pending'].includes(session?.status ?? '');
 
-export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void }) {
+export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose, focusTargets }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void; focusTargets: () => readonly (FocusTarget | null | undefined)[] }) {
   const [session, setSession] = useState<SignInSnapshot | null>(null);
   const [starting, setStarting] = useState(false);
   const [attaching, setAttaching] = useState(false);
@@ -19,6 +20,9 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
   const active = useRef(true);
   const sessionId = useRef<string | null | undefined>(null);
   const submitting = useRef(false);
+  const content = useRef<HTMLDivElement>(null);
+  const signIn = useRef<HTMLButtonElement>(null);
+  const continueConnection = useRef<HTMLButtonElement>(null);
   const openGitHub = useRef<HTMLAnchorElement>(null);
   const callbacks = useRef({ onConnect, onClose });
   callbacks.current = { onConnect, onClose };
@@ -81,6 +85,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
   async function startSignIn() {
     if (starting || submitting.current || pending(session)) return;
     setStarting(true);
+    setSession(null);
     setError('');
     setCopied(false);
     try {
@@ -99,9 +104,6 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
     }
   }
 
-  // The code arrives by polling, so GitHub opens from an explicit link once the code is visible.
-  useEffect(() => { if (session?.userCode) openGitHub.current?.focus(); }, [session?.userCode]);
-
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(session!.userCode!);
@@ -113,8 +115,18 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
 
   const waiting = starting || pending(session);
   const existingAccount = session?.status === 'complete' ? session.account?.login : connection?.authenticated ? connection.account?.login : null;
+  useLayoutEffect(() => {
+    // Replacing the focused action leaves focus on the dialog (or body before Radix
+    // restores it). A user who moved to a surviving control keeps that focus.
+    if (document.activeElement !== content.current && document.activeElement !== document.body) return;
+    if (waiting) restoreFocus([openGitHub.current]);
+    else if (error && !attaching) restoreFocus([continueConnection.current, signIn.current]);
+  }, [waiting, session?.userCode, error, attaching, existingAccount]);
   return <Dialog open onOpenChange={open => { if (!open && !submitting.current) onClose(); }}>
-    <DialogContent aria-describedby={undefined} showCloseButton={!attaching} className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-md" onInteractOutside={event => event.preventDefault()}>
+    <DialogContent ref={content} aria-describedby={undefined} showCloseButton={!attaching} className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-md" onInteractOutside={event => event.preventDefault()} onCloseAutoFocus={event => {
+      event.preventDefault();
+      restoreFocus(focusTargets());
+    }}>
       <DialogHeader><DialogTitle className="flex items-center gap-3"><img src="/assets/providers/github.svg" className="provider-logo" data-monochrome="true" width={24} height={24} alt="" />Connect GitHub</DialogTitle></DialogHeader>
       {checking ? <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 motion-safe:animate-spin" />Checking GitHub…</p> : waiting ? <div className="grid gap-4">
         {session?.userCode && <div className="grid gap-2">
@@ -127,9 +139,9 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
         {session?.userCode && <Button asChild><a ref={openGitHub} href={DEVICE_URL} target="_blank" rel="noopener noreferrer" onClick={() => void copyCode()}>Copy code and open GitHub<ExternalLink /></a></Button>}
         <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 motion-safe:animate-spin" />{session?.userCode ? 'Waiting for GitHub…' : 'Preparing sign-in…'}</p>
       </div> : <div className="grid gap-3">
-        {existingAccount && <Button type="button" disabled={attaching} onClick={attach}>{attaching && <LoaderCircle className="motion-safe:animate-spin" />}Continue as {existingAccount}</Button>}
-        {session?.status === 'complete' && !existingAccount && <Button type="button" disabled={attaching} onClick={attach}>{attaching && <LoaderCircle className="motion-safe:animate-spin" />}Finish connection</Button>}
-        <Button type="button" variant={existingAccount ? 'outline' : 'default'} disabled={attaching} onClick={startSignIn}>Sign in with GitHub</Button>
+        {existingAccount && <Button ref={continueConnection} type="button" disabled={attaching} onClick={attach}>{attaching && <LoaderCircle className="motion-safe:animate-spin" />}Continue as {existingAccount}</Button>}
+        {session?.status === 'complete' && !existingAccount && <Button ref={continueConnection} type="button" disabled={attaching} onClick={attach}>{attaching && <LoaderCircle className="motion-safe:animate-spin" />}Finish connection</Button>}
+        <Button ref={signIn} type="button" variant={existingAccount ? 'outline' : 'default'} disabled={attaching} onClick={startSignIn}>Sign in with GitHub</Button>
       </div>}
       {error && <p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{error}</p>}
       <DialogFooter><Button type="button" variant="ghost" disabled={attaching} onClick={onClose}>Cancel</Button></DialogFooter>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
+import React, { lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { ReactFlow, ReactFlowProvider, Handle, Position, BaseEdge, MarkerType, getStraightPath, useNodesInitialized, useReactFlow, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps, type Viewport } from '@xyflow/react';
 import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { BaseNode, BaseNodeHeader, BaseNodeHeaderTitle } from '@/components/base-node';
@@ -11,8 +11,8 @@ import { Separator } from '@/components/ui/separator';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import PipelineDialogs from './PipelineDialogs';
 import PipelineLoading from './PipelineLoading';
-import AppSettings from './AppSettings';
 import { createAppSettings } from '@/lib/app-settings';
+import DeferredView, { ViewLoadState } from './DeferredView';
 import GitHubActionsCard from './GitHubActionsCard';
 import BranchSwitcher from './BranchSwitcher';
 import NewTestDialog from './NewTestDialog';
@@ -38,7 +38,7 @@ import { createStageDataCache, stageNodeData, statusChanges, type PipelineStage,
 import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
 import StageJourneyList from './StageJourneyList';
 import TwinServices from './TwinServices';
-import { environmentStatusLabel, latestEnvironment } from './EnvironmentSettings';
+import { environmentStatusLabel, latestEnvironment } from '@/lib/environment-view';
 import { GateActions, GateBadge, useStageGates } from './StageGate';
 import { ProductionRelease, useReleases } from './ProductionRelease';
 import { releaseBadge } from '@/lib/production-release';
@@ -48,6 +48,8 @@ import type { SourceSelection } from './SourceSettings';
 import type { GitHubSource } from '../../contract/github.ts';
 import type { Scan as ScanReply } from '../../contract/scanner.ts';
 import type { PipelineStateReply, SourceReply } from '../../contract/pipeline.ts';
+
+const AppSettings = lazy(() => import('./AppSettings'));
 
 // The pipeline as GET /api/state reports it. Scans may predate the current discovery shape, so their fields are optional.
 export type ScanRepo = Pick<ScanReply['repo'], 'path'> & Partial<Omit<ScanReply['repo'], 'path'>>;
@@ -521,7 +523,12 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   if (nodesInitialized && !ready) setReady(true);
   const [sheetViewport] = useState(createSheetViewport);
   const view = useRef<{ moved: boolean; stageId: string | null; timer: ReturnType<typeof setTimeout> | 0; raf: number }>({ moved: false, stageId: null, timer: 0, raf: 0 });
-  const takeView = useCallback(() => { view.current.moved = true; sheetViewport.moved(); }, [sheetViewport]);
+  const takeView = useCallback(() => {
+    const pending = view.current;
+    clearTimeout(pending.timer); cancelAnimationFrame(pending.raf);
+    pending.moved = true;
+    sheetViewport.moved();
+  }, [sheetViewport]);
   // Programmatic moves report no event; a drag, wheel or pinch does.
   const onMoveStart = useCallback((event: MouseEvent | TouchEvent | null) => { if (event) takeView(); }, [takeView]);
   // An animated move is recorded until it lands, so a sheet opened meanwhile
@@ -880,7 +887,7 @@ function PipelineApp() {
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
       <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Pipeline'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
-      {page === 'settings' ? <AppSettings settings={settings} /> : <main className="pipeline-page" id="pipeline">
+      {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
         {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{error ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{error && <p role="alert">{error.message}</p>}<Button onClick={error ? load : () => openDialog({ type: 'source', connect: true })}>{error ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
     </div>

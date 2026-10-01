@@ -131,22 +131,26 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
 
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
     <DialogContent aria-describedby={undefined} showCloseButton={false} onCloseAutoFocus={returnFocus} className="browser-agent-viewer flex h-[min(90dvh,960px)] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[1440px]">
-      <DialogHeader className="flex-row items-center gap-3 border-b px-5 py-4">
-        <Monitor className="size-5 shrink-0" /><DialogTitle className="min-w-0 flex-1 break-words text-left">{run ? browserRunTitle(run) : mode === 'discover' ? 'Explore product' : 'Browser test'}</DialogTitle>
-        {run?.verification?.control && <Badge variant="outline">Control</Badge>}
-        {browserConcurrencyLabel(run) && <Badge variant="outline">{browserConcurrencyLabel(run)}</Badge>}
-        <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>
-        {startingError && mode === 'discover' && onTestSettings && <Button size="sm" variant="outline" onClick={onTestSettings}>Test settings</Button>}
-        {/* Cancelling stops every journey in the run, so it is confirmed with Keep running focused first. */}
-        {!finished && !startingError && <AlertDialog open={confirmingStop} onOpenChange={setConfirmingStop}>
-          <AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={!runId || stopping}><Square />{stopping ? 'Cancelling…' : 'Cancel run'}</Button></AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader><AlertDialogTitle>Cancel run?</AlertDialogTitle><AlertDialogDescription className="break-words">{run ? browserRunTitle(run) : mode === 'discover' ? 'Explore product' : 'Browser test'}</AlertDialogDescription></AlertDialogHeader>
-            <AlertDialogFooter><AlertDialogCancel>Keep running</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { void stop(); }}>Cancel run</AlertDialogAction></AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>}
-        {/* Closing only hides the viewer; the run keeps going until Cancel run. */}
-        <DialogClose asChild><Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Close viewer"><X /></Button></DialogClose>
+      <DialogHeader className="shrink-0 flex-row flex-wrap items-start gap-3 border-b px-5 py-4">
+        <div className="flex min-w-0 flex-1 basis-72 items-start gap-3">
+          <Monitor className="mt-0.5 size-5 shrink-0" /><DialogTitle className="min-w-0 flex-1 text-left [overflow-wrap:anywhere]">{run ? browserRunTitle(run) : mode === 'discover' ? 'Explore product' : 'Browser test'}</DialogTitle>
+        </div>
+        <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
+          {run?.verification?.control && <Badge variant="outline">Control</Badge>}
+          {browserConcurrencyLabel(run) && <Badge variant="outline">{browserConcurrencyLabel(run)}</Badge>}
+          <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>
+          {startingError && mode === 'discover' && onTestSettings && <Button size="sm" variant="outline" onClick={onTestSettings}>Test settings</Button>}
+          {/* Cancelling stops every journey in the run, so it is confirmed with Keep running focused first. */}
+          {!finished && !startingError && <AlertDialog open={confirmingStop} onOpenChange={setConfirmingStop}>
+            <AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={!runId || stopping}><Square />{stopping ? 'Cancelling…' : 'Cancel run'}</Button></AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader><AlertDialogTitle>Cancel run?</AlertDialogTitle><AlertDialogDescription className="break-words">{run ? browserRunTitle(run) : mode === 'discover' ? 'Explore product' : 'Browser test'}</AlertDialogDescription></AlertDialogHeader>
+              <AlertDialogFooter><AlertDialogCancel>Keep running</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { void stop(); }}>Cancel run</AlertDialogAction></AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>}
+          {/* Closing only hides the viewer; the run keeps going until Cancel run. */}
+          <DialogClose asChild><Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Close viewer"><X /></Button></DialogClose>
+        </div>
       </DialogHeader>
       {(startingError || error || run?.error) && <p role="alert" className="border-b px-5 py-3 text-sm text-destructive">{startingError || error || run?.error}</p>}
       {run?.concurrency ? <RunJourneyGallery run={run} repoPath={repoPath} stageId={stageId} initialFocus={focusCaseId} /> : <div className={evidenceOnly ? "flex min-h-0 flex-1" : "grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_200px] lg:grid-cols-[minmax(0,1fr)_320px] lg:grid-rows-1"}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type Ref } from 'react';
 import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useActionFocus } from '@/lib/journey-focus';
 import type { AppSettingsSession, SettingsDraft } from '@/lib/app-settings';
 import type { ModelSettingsView, OpenRouterModel } from '../../contract/settings.ts';
 
@@ -64,11 +65,13 @@ function PinnedGroup({ label, children }: { label: string; children: ReactNode }
 }
 
 // A catalog Select whose saved or preselected model stays pinned above the provider groups.
-function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void }) {
+function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange, triggerRef }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void; triggerRef?: Ref<HTMLButtonElement> }) {
   const selected = models.find(item => item.id === value);
   const groups = useMemo(() => modelGroups(models, pinned?.id), [models, pinned]);
-  return <Select value={selected ? value : ''} disabled={disabled} onValueChange={onChange}>
-    <SelectTrigger id={id} className="min-w-0 w-full data-[size=default]:h-10" title={selected?.name}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'}>{selected?.name}</SelectValue></span></SelectTrigger>
+  // Radix can report an empty form value while asynchronously loaded options
+  // register. Every selectable model has an id; that empty value is not an edit.
+  return <Select value={selected ? value : ''} disabled={disabled} onValueChange={next => { if (next) onChange(next); }}>
+    <SelectTrigger ref={triggerRef} id={id} className="min-w-0 w-full data-[size=default]:h-10" title={selected?.name}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'}>{selected?.name}</SelectValue></span></SelectTrigger>
     <SelectContent position="popper" align="start" collisionPadding={16} className="max-h-[min(60dvh,var(--radix-select-content-available-height))] w-(--radix-select-trigger-width) max-w-[calc(100vw-2rem)]">{pinned && <PinnedGroup label={pinnedLabel}>{modelOption(pinned)}{groups.length > 0 && <SelectSeparator />}</PinnedGroup>}{groups.map(group => <SelectGroup key={group.label}><SelectLabel>{group.label}</SelectLabel>{group.models.map(item => modelOption(item, group.label))}</SelectGroup>)}</SelectContent>
   </Select>;
 }
@@ -79,6 +82,12 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
   const escalationModel = draft?.escalationModel ?? savedEscalation;
   const apiKey = draft?.apiKey ?? '';
   const [showKey, setShowKey] = useState(false);
+  // Once its first read settles, recovery keeps the form and its focused controls mounted.
+  const [loaded, setLoaded] = useState(() => !loading);
+  const keyInput = useRef<HTMLInputElement>(null);
+  const modelTrigger = useRef<HTMLButtonElement>(null);
+  const rememberSettingsFocus = useActionFocus(loading || saving, () => [keyInput.current]);
+  const rememberModelsFocus = useActionFocus(modelsLoading, () => [modelTrigger.current]);
   const dirty = Boolean(draft), error = saveError || readError;
   // An automatically chosen default is savable but is not an unsaved user edit.
   const suggested = !dirty && (Boolean(savedModel) && savedModel !== serverModel || Boolean(savedEscalation) && savedEscalation !== serverEscalation);
@@ -88,9 +97,10 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
   const pinnedModel = models.find(item => item.id === savedModel);
   const pinnedEscalation = models.find(item => item.id === savedEscalation);
   useEffect(() => { void settings.load(); }, [settings]);
+  useEffect(() => { if (!loading) setLoaded(true); }, [loading]);
   useEffect(() => { if (saved) setShowKey(false); }, [saved]);
   const changed = (values: Partial<SettingsDraft>) => settings.edit(values);
-  const save = (event: FormEvent) => { event.preventDefault(); void settings.save(); };
+  const save = (event: FormEvent) => { event.preventDefault(); rememberSettingsFocus(); void settings.save(); };
 
   return <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings">
     <section className="mx-auto w-full max-w-2xl" aria-labelledby="openrouter-heading">
@@ -99,7 +109,7 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
         <Button variant="outline" size="sm" asChild><a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer">Get API Key<ExternalLink /></a></Button>
       </header>
       <Separator />
-      {loading ? <div role="status" aria-label="Loading settings" className="divide-y">
+      {!loaded ? <div role="status" aria-label="Loading settings" className="divide-y">
         {[0, 1].map(row => <div key={row} className="grid gap-3 py-7 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-8" aria-hidden="true"><Skeleton className="h-4 w-28 sm:mt-3" /><Skeleton className="h-10 w-full" /></div>)}
       </div> : <form onSubmit={save}>
         <fieldset disabled={saving || !capabilities} className="m-0 min-w-0 border-0 p-0">
@@ -109,14 +119,14 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
               <Label htmlFor="openrouter-api-key">OpenRouter API Key</Label>
               {capabilities && <Badge id="openrouter-api-key-state" variant={hasSavedKey ? 'secondary' : 'outline'}>{hasSavedKey ? 'Saved' : 'Not set'}</Badge>}
             </div>
-            <div className="relative min-w-0"><Input id="openrouter-api-key" type={showKey ? 'text' : 'password'} autoComplete="new-password" autoCapitalize="none" spellCheck={false} required={!hasSavedKey} aria-describedby={capabilities ? 'openrouter-api-key-state' : undefined} placeholder={hasSavedKey ? '••••••••••••••••••••••••' : 'sk-or-v1-…'} value={apiKey} maxLength={4096} className="h-10 pr-11" onChange={event => { changed({ apiKey: event.target.value }); }} /><Button type="button" variant="ghost" size="icon-sm" className="absolute top-1 right-1" disabled={!apiKey || saving} aria-label={showKey ? 'Hide API key' : 'Show API key'} aria-pressed={showKey} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff /> : <Eye />}</Button></div>
+            <div className="relative min-w-0"><Input ref={keyInput} id="openrouter-api-key" type={showKey ? 'text' : 'password'} autoComplete="new-password" autoCapitalize="none" spellCheck={false} required={!hasSavedKey} aria-describedby={capabilities ? 'openrouter-api-key-state' : undefined} placeholder={hasSavedKey ? '••••••••••••••••••••••••' : 'sk-or-v1-…'} value={apiKey} maxLength={4096} className="h-10 pr-11" onChange={event => { changed({ apiKey: event.target.value }); }} /><Button type="button" variant="ghost" size="icon-sm" className="absolute top-1 right-1" disabled={!apiKey || saving} aria-label={showKey ? 'Hide API key' : 'Show API key'} aria-pressed={showKey} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff /> : <Eye />}</Button></div>
           </div>
           <Separator />
           <div className="grid gap-3 py-7 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-8">
             <Label htmlFor="openrouter-model" className="sm:self-start sm:pt-3">Model</Label>
             <div className="min-w-0 space-y-3">
-              <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
-              {modelsError && <div className="space-y-2"><p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p><Button type="button" variant="outline" size="sm" disabled={modelsLoading || saving} onClick={() => void settings.reloadModels()}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
+              <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} triggerRef={modelTrigger} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
+              {(modelsError || modelsLoading) && <div className="space-y-2">{modelsError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p>}<Button type="button" variant="outline" size="sm" disabled={saving} aria-disabled={modelsLoading} aria-busy={modelsLoading} className="aria-disabled:opacity-50" onClick={() => { if (!modelsLoading) { rememberModelsFocus(); void settings.reloadModels(); } }}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
             </div>
           </div>
           <Separator />
@@ -126,7 +136,7 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
           </div>
         </fieldset>
         <Separator />
-        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { settings.discard(); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" onClick={() => void settings.load()}>Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
+        <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { rememberSettingsFocus(); settings.discard(); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberSettingsFocus(); void settings.load(); } }}>{loading && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
       </form>}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
     </section>

@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
 import { useTestStage } from '@/lib/use-test-workspace';
-import { environmentHasResources } from './EnvironmentSettings';
+import { environmentHasResources } from '@/lib/environment-view';
 import type { StageRemoval } from '@/lib/test-workspace';
 import type { StageRemovalReply } from '../../contract/environment.ts';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';

@@ -94,7 +94,7 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
     finally { setPending(''); }
   }
   const locked = disabled || Boolean(pending);
-  return <div ref={controls} className="nodrag nopan flex w-full min-w-0 flex-wrap gap-2">
+  return <div ref={controls} className="nodrag nopan flex w-80 max-w-full min-w-0 flex-wrap gap-2 [overflow-wrap:anywhere]">
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked || !current} onClick={() => { setError(''); setConfigure(true); }}><Settings2 />{target ? 'Deployment target' : 'Configure deployment'}</Button>
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked} onClick={() => act('refresh')}><RefreshCw />{pending === 'refresh' ? 'Checking…' : 'Check status'}</Button>
     {target && <Button className="text-xs" variant="outline" size="sm" disabled={locked || !current?.canDeploy || !current.sha} onClick={() => { if (current?.sha && current.target) { setError(''); setConfirmation({ sha: current.sha, target: { ...current.target } }); } }}><Rocket />Deploy</Button>}
