@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
 /** A node that takes focus: an element, or a stand-in with focus. */
 export interface Focusable { focus(options?: FocusOptions): void }
@@ -48,6 +48,24 @@ export function restoreFocus(candidates: readonly (FocusTarget | null | undefine
   const target = candidates.find((node): node is FocusTarget & Focusable => Boolean(node?.isConnected && typeof node.focus === 'function' && !node.disabled && !node.closest?.('[inert]')));
   target?.focus({ preventScroll: true });
   return target || null;
+}
+
+// Remember only explicit actions. Once their render settles, recover a removed or
+// temporarily disabled control without taking focus from another surviving control.
+export function useActionFocus(pending: boolean, fallback: () => readonly (FocusTarget | null | undefined)[]) {
+  const origin = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (pending || !origin.current) return;
+    const previous = origin.current;
+    origin.current = null;
+    if (document.activeElement === previous || document.activeElement === document.body) {
+      restoreFocus([previous, ...fallback()]);
+    }
+  });
+  return () => {
+    const focused = document.activeElement;
+    origin.current = focused instanceof HTMLElement && focused !== document.body ? focused : null;
+  };
 }
 
 // The opener is read on the dialog's first render, before an autoFocus field moves focus inside it.
