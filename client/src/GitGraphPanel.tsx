@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { SheetFooter } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
+import { useActionFocus } from '@/lib/journey-focus';
 import { GitGraphHeader } from './InspectorHeaders';
 import type { Scan } from './App';
 import './branch-map.css';
@@ -37,12 +38,18 @@ export default function GitGraphPanel({ scan, onClose, showHeader = true }: { sc
   const [result, setResult] = useState<HistoryResult | null>(null);
   const syncedRevision = useRef(0);
   const historyBody = useRef<HTMLDivElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
   const focusAfterLoad = useRef<number | null>(null);
   const repoPath = scan?.repo?.path;
   const requestKey = JSON.stringify([repoPath, scan?.scannedAt, scope, limit, revision]);
   const loading = result?.key !== requestKey;
   const history = !loading ? result?.history : null;
   const error = !loading ? result?.error : null;
+  const rememberFocus = useActionFocus(loading, () => {
+    const entries = historyBody.current?.querySelectorAll<HTMLElement>('[data-slot="commit-entry"]');
+    return [retryButton.current, entries?.[Math.min(focusAfterLoad.current ?? 0, (entries?.length ?? 1) - 1)], refreshButton.current];
+  });
 
   useEffect(() => {
     let active = true;
@@ -60,14 +67,6 @@ export default function GitGraphPanel({ scan, onClose, showHeader = true }: { sc
     return () => { active = false; };
   }, [repoPath, scope, limit, revision, requestKey]);
 
-  // The footer unmounts while more history loads; focus resumes on the first new commit.
-  useEffect(() => {
-    if (loading || focusAfterLoad.current === null) return;
-    const entries = historyBody.current?.querySelectorAll<HTMLElement>('[data-slot="commit-entry"]');
-    entries?.[Math.min(focusAfterLoad.current, entries.length - 1)]?.focus();
-    focusAfterLoad.current = null;
-  }, [loading]);
-
   return <>
     {showHeader && <GitGraphHeader onClose={onClose} />}
     {/* One row down to 375px; a long repository name wraps inside its badge, after the slash first. */}
@@ -80,13 +79,13 @@ export default function GitGraphPanel({ scan, onClose, showHeader = true }: { sc
           <SelectItem value="current">Current branch</SelectItem>
         </SelectContent>
       </Select>
-      <Button variant="outline" size="icon" className="size-10 shrink-0" aria-label="Refresh history" title="Refresh history" disabled={loading} onClick={() => setRevision(value => value + 1)}>
+      <Button ref={refreshButton} variant="outline" size="icon" className="size-10 shrink-0" aria-label="Refresh history" title="Refresh history" disabled={loading} onClick={() => { rememberFocus(); focusAfterLoad.current = null; setRevision(value => value + 1); }}>
         <RefreshCw className="size-4" />
       </Button>
     </div>
     <div ref={historyBody} className="inspector-body min-h-0 flex-1 overflow-auto px-4 pb-4" aria-busy={loading}>
-      {loading ? <HistoryLoading />
-        : error ? <div className="grid min-w-0 justify-items-start gap-3 py-6"><p className="max-w-full break-words text-sm leading-relaxed text-destructive [overflow-wrap:anywhere]" role="alert">{error}</p><Button variant="outline" onClick={() => setRevision(value => value + 1)}>Retry</Button></div>
+      {error || loading && result?.error ? <div className="grid min-w-0 justify-items-start gap-3 py-6">{error && <p className="max-w-full break-words text-sm leading-relaxed text-destructive [overflow-wrap:anywhere]" role="alert">{error}</p>}<Button ref={retryButton} variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberFocus(); setRevision(value => value + 1); } }}>{loading && <RefreshCw className="motion-safe:animate-spin" aria-hidden="true" />}Retry</Button></div>
+        : loading ? <HistoryLoading />
         : history && (history.commits.length
           ? <CommitGraph commits={history.commits} railWidth={20} className="git-history-graph" />
           : <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-4 py-12 text-sm text-muted-foreground" role="status"><GitGraph className="size-6" aria-hidden="true" /><p>No commits found</p></div>)}
@@ -99,7 +98,7 @@ export default function GitGraphPanel({ scan, onClose, showHeader = true }: { sc
         <Badge variant="secondary" className="max-w-full whitespace-normal break-all text-left">{history.branch || 'Detached HEAD'}</Badge>
         {history.hasMore && limit >= 500 && <span>500-commit limit</span>}
       </div>
-      {history.hasMore && limit < 500 && <Button variant="outline" size="sm" onClick={() => { focusAfterLoad.current = history.commits.length; setLimit(value => Math.min(value + 100, 500)); }}>Load more</Button>}
+      {history.hasMore && limit < 500 && <Button variant="outline" size="sm" onClick={() => { rememberFocus(); focusAfterLoad.current = history.commits.length; setLimit(value => Math.min(value + 100, 500)); }}>Load more</Button>}
     </SheetFooter>}
   </>;
 }
