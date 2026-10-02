@@ -7,6 +7,7 @@ import { stringify } from 'yaml';
 import type { Json } from '../config.ts';
 import { optionEnv } from '../options.ts';
 import { relative } from '../paths.ts';
+import { containerLogging } from '../logging.ts';
 import type { ServiceContext, TwinService } from '../registry.ts';
 
 // Official local Trigger.dev: one self-hosted webapp stack per machine (Compose project `perpetual-trigger`),
@@ -116,16 +117,16 @@ export function stack(port: number) {
   const healthy = Object.fromEntries(['postgres', 'redis', 'clickhouse'].map(name => [name, { condition: 'service_healthy' }]));
   const check = (test: string[]) => ({ test, interval: '5s', timeout: '10s', retries: 60 });
   // The instance outlives any one twin, so it comes back with Docker unless someone stops it.
-  const restart = 'unless-stopped';
+  const common = { restart: 'unless-stopped', logging: containerLogging() };
   return {
     services: {
       // The first boot applies every database and ClickHouse migration before the server listens.
-      webapp: { image: IMAGES.webapp, restart, env_file: ['.env'], ports: [`127.0.0.1:${port}:3000`], depends_on: healthy,
+      webapp: { image: IMAGES.webapp, ...common, env_file: ['.env'], ports: [`127.0.0.1:${port}:3000`], depends_on: healthy,
         extra_hosts: ['host.docker.internal:host-gateway'], healthcheck: { ...check(['CMD', 'node', '-e', HEALTH]), start_period: FIRST_BOOT } },
-      postgres: { image: IMAGES.postgres, restart, command: ['-c', 'wal_level=logical'], environment: { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' },
+      postgres: { image: IMAGES.postgres, ...common, command: ['-c', 'wal_level=logical'], environment: { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' },
         volumes: ['postgres:/var/lib/postgresql/data'], healthcheck: check(['CMD', 'pg_isready', '-U', 'postgres']) },
-      redis: { image: IMAGES.redis, restart, volumes: ['redis:/data'], healthcheck: check(['CMD', 'redis-cli', 'ping']) },
-      clickhouse: { image: IMAGES.clickhouse, restart, environment: { CLICKHOUSE_PASSWORD: '${CLICKHOUSE_PASSWORD}', CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
+      redis: { image: IMAGES.redis, ...common, volumes: ['redis:/data'], healthcheck: check(['CMD', 'redis-cli', 'ping']) },
+      clickhouse: { image: IMAGES.clickhouse, ...common, environment: { CLICKHOUSE_PASSWORD: '${CLICKHOUSE_PASSWORD}', CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
         ulimits: { nofile: { soft: 262144, hard: 262144 } }, volumes: ['clickhouse:/var/lib/clickhouse'],
         healthcheck: check(['CMD-SHELL', 'clickhouse-client --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1"']) },
     },

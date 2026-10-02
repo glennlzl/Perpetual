@@ -178,6 +178,8 @@ The health monitor reads the twin's containers every 30 seconds, including Supab
 
 ## Runtime storage
 
+Perpetual-generated Compose containers (apps, service dependencies, install and source copy) and the shared Trigger.dev stack use Docker's `json-file` driver with rotation at 10 MiB per file and at most three files per container. Recent output remains available to diagnostic log reads. A new or rebuilt twin receives the policy; the shared Trigger.dev stack applies it on its next setup, recreating changed containers while keeping its named data volumes and instance secrets. Restarting an existing container alone does not change its log driver configuration. This bounds Docker stdout/stderr logs, not application-internal files, database data or containers created independently by a vendor CLI.
+
 Each environment keeps its source snapshot in `<data>/environments/<id>/source` and its twin in `<data>/environments/<id>/twin/`: `compose.yaml`, `.env` (mode 0600, holding every value; `compose.yaml` only references it) and `twin.json`. Deletion removes both. While its config is generated, the agent's workspaces are under `<data>/environments/<id>/authoring/`, removed when generation ends. At most eight environments exist at once.
 
 Twin and shared-port storage directories are private (mode 0700); existing directories have their permissions repaired. A twin's state and the shared service port map use guarded reads: symbolic links, non-files, malformed state and oversized files are refused. Files are replaced atomically at mode 0600, and a failed replacement removes its temporary file. Parent path aliases keep the same configured paths and resource owner labels.

@@ -2,6 +2,7 @@ import { posix } from 'node:path';
 import { APPS, INSTALL, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
 import { relative } from './paths.ts';
 import { loopbackCommand } from './loopback.ts';
+import { containerLogging } from './logging.ts';
 import type { Placeholder, TwinConfig } from './config.ts';
 import type { Fidelity, ServiceContainer } from './registry.ts';
 
@@ -46,6 +47,7 @@ export interface ComposeHealthcheck { test: string[]; interval: string; timeout:
 export interface ComposeService {
   image: string; command?: string | string[]; environment?: Record<string, string>; ports?: string[]; working_dir?: string; volumes?: ComposeVolume[];
   extra_hosts: string[]; labels: Record<string, string>; healthcheck?: ComposeHealthcheck; depends_on?: Record<string, { condition: string }>; profiles?: string[];
+  logging: ReturnType<typeof containerLogging>;
 }
 export interface ComposeFile { name: string; services: Record<string, ComposeService>; volumes?: Record<string, { external?: boolean }> }
 /** Host ports by portKey, e.g. { 'apps.web': 43100, 'mail.smtp': 43101 }. */
@@ -107,7 +109,7 @@ export function composeTwin({ project, owner, environment: id, source, config, s
 }) {
   const appImage = nodeImage(config, fallback);
   const dotenv: Record<string, string> = {}, compose: ComposeFile = { name: project, services: {} }, dependsOn: Record<string, { condition: string }> = {}, inWorkspace: string[] = [];
-  const common = { extra_hosts: [HOST_GATEWAY], labels: { [LABELS.owner]: owner, [LABELS.environment]: id } };
+  const common = { extra_hosts: [HOST_GATEWAY], labels: { [LABELS.owner]: owner, [LABELS.environment]: id }, logging: containerLogging() };
   const hostPort = (key: string) => ports[key] ?? fail(`No host port was allocated for ${key}.`);
   // Repository code runs from a Docker volume, not a host bind mount: installs and builds write many small files,
   // which a host mount makes several times slower on Docker Desktop.
