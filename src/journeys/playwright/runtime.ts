@@ -9,6 +9,7 @@ import { validateRunCredentials, type RunCredentials } from '../../browser/run-c
 import { HOST as TWIN_HOST } from '../../twin/compose.ts';
 import { CHECK_VERSION, sameOrigin, type ApprovedCase } from './checks.ts';
 import { createLifecycleRecorder, lifecycleEvent, lifecycleError } from './diagnostics.ts';
+import { NAVIGATION_TIMEOUT_MS } from './navigation.ts';
 
 /** A Playwright project of a journey workspace's config. */
 export type JourneyProject = { name: string; testDir: string; testMatch?: string; testIgnore?: string };
@@ -55,7 +56,7 @@ export async function writeJourneyWorkspace(workspace: string, { item, targetUrl
     timeout: timeoutSeconds * 1000, workers: 1, retries: 0, failOnFlakyTests: true,
     use: {
       baseURL: new URL(targetUrl).origin, viewport: VIEWPORT, video: video ? { mode: 'on', size: VIEWPORT } : 'off', trace: 'off', screenshot: 'off',
-      actionTimeout: 10000, navigationTimeout: 20000, serviceWorkers: 'block', acceptDownloads: false, headless: true,
+      actionTimeout: 10000, navigationTimeout: NAVIGATION_TIMEOUT_MS, serviceWorkers: 'block', acceptDownloads: false, headless: true,
       // As in discovery's browser, the twin's host name resolves to loopback.
       launchOptions: { args: [`--host-resolver-rules=MAP ${TWIN_HOST} 127.0.0.1`] },
     },

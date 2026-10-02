@@ -15,7 +15,8 @@ type OpenCodeProject = {
 type ToolResult = { content: { text?: string }[]; isError?: boolean };
 type McpClient = { connect(transport: unknown): Promise<void>; callTool(call: object, schema: undefined, options: object): Promise<ToolResult>; close(): Promise<void> };
 
-const [mode, log, prompt] = process.argv.slice(2), env = process.env;
+const [requestedMode, log, prompt] = process.argv.slice(2), env = process.env;
+const mode = requestedMode.replace(/^trace-/, '');
 const opencode = JSON.parse(readFileSync('opencode.json', 'utf8')) as OpenCodeProject, plan = readFileSync('specs/plan.md', 'utf8');
 const agent = opencode.agent['playwright-test-generator'], server = opencode.mcp['playwright-test'];
 const configPath = server.command[server.command.indexOf('--config') + 1], config = (await import(pathToFileURL(configPath).href)).default as { projects: { testDir: string }[] };
@@ -64,6 +65,13 @@ async function generate() {
   const wrote = await call('generator_write_test', { fileName: target, code: valid() });
   await client.close();
   return { setups, refused, written, wrote, leaked: existsSync(leak), exposed: outputs.join('\n').includes(env.PERPETUAL_ACCOUNT_PASSWORD!) };
+}
+
+// OpenCode v1.18.32 --format json envelopes, emitted by a real local child at the harness boundary.
+if (requestedMode.startsWith('trace-')) {
+  console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),sessionID:'private-session',part:{id:'private-part',type:'tool',tool:'playwright-test_generator_setup_page',state:{status:'completed',input:{plan},output:`${env.OPENROUTER_API_KEY} ${env.PERPETUAL_ACCOUNT_USERNAME} ${env.PERPETUAL_ACCOUNT_PASSWORD}`,time:{start:Date.now(),end:Date.now()}}}}));
+  console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),part:{type:'tool',tool:'playwright-test_browser_click',state:{status:mode==='fail'?'error':'completed',input:{element:'Private account Save'},output:'Private browser contents',error:'Private error'}}}));
+  if (mode !== 'hang') console.log(JSON.stringify({type:'step_finish',timestamp:Date.now(),part:{type:'step-finish',reason:mode==='fail'?'error':'stop',cost:0.001,tokens:{input:11,output:12,reasoning:0,cache:{read:0,write:0}}}}));
 }
 
 if (mode === 'hang') {

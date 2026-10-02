@@ -7,7 +7,9 @@ import { privateWorkspace } from '../agents/opencode.ts';
 import { authorTwinConfig, selectedAuthorHarness, type AuthorHarness } from '../twin/authoring.ts';
 import { HOST, LOOPBACK } from '../twin/compose.ts';
 import { redactor } from '../twin/runtime.ts';
-import { redact } from '../redaction.ts';
+import { failureText, redact } from '../redaction.ts';
+import { diagnosticText } from './diagnostics.ts';
+import { ID } from '../twin/config.ts';
 import { AUTHORING, LOG_LINES, checkWritten, feedbackText, generateTwinConfig, type AttemptOutcome } from './generation.ts';
 import { evidenceText, repositoryFacts, unwiredSummary } from './evidence.ts';
 import { snapshotSource } from './plans.ts';
@@ -70,6 +72,7 @@ const appSubject = (config: TwinConfig, id: string) => {
 export interface PreparedEnvironment {
   status: 'ready'; step: string; timings: StepTiming[]; readyAt: string; apps: EnvironmentApp[]; services: EnvironmentService[]; accounts: EnvironmentAccount[];
   plan?: TwinConfig; generated?: PlanProvenance;
+  logs?: string;
 }
 /** A health check: `final` says the twin will not recover by itself. */
 export interface EnvironmentHealth { status: 'ready' | 'starting' | 'failed'; error?: string; final?: boolean }
@@ -127,10 +130,12 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
   // The named containers' last lines, or every container's when none is named; empty before the twin has any.
   async function containerLogs(dataDir: string, id: string, names: string[]) {
     try {
-      const failed = names.slice(0, 3);
+      // Vendor-owned container names are outside Compose's service-ID grammar. Their verified logs
+      // join the whole twin read; never feed those names to `docker compose logs`.
+      const failed = names.some(name => !ID.test(name)) ? [] : names.slice(0, 3);
       const parts = failed.length ? await Promise.all(failed.map(service => twin.logs({ dataDir, id, service, tail: LOG_LINES }))) : [await twin.logs({ dataDir, id, tail: LOG_LINES })];
       return parts.join('\n').trim().split('\n').slice(-LOG_LINES).join('\n');
-    } catch { return ''; }
+    } catch (error) { return `Environment logs unavailable: ${failureText(error, 600)}`; }
   }
   // The failed containers' last lines, or every container's when none has stopped.
   const failureLogs = async (dataDir: string, id: string) => containerLogs(dataDir, id, (await twinContainers(dataDir, id)).filter(stopped).map(item => item.name));
@@ -264,6 +269,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     // Facts come from the execution snapshot, cached until supplied secrets change; example names come from the checkout.
     // Each attempt's evidence leads with the unwired variables of the twin.json it starts from.
     let authoredModel = model.model;
+    let evidence = '';
     const attempts: AttemptOutcome[] = [];
     const authorSecrets = () => [model.apiKey, ...knownSecrets];
     try {
@@ -291,11 +297,24 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
         checkpoint: onDraft,
-        teardown: async config => { await twin.destroy({ dataDir, id: environment.id, inputs: await readInputs(config) }); },
+        teardown: async config => {
+          // Generation retries also remove owned vendor containers. Save the bounded full evidence
+          // through the manager before any teardown, even when feedback itself has fewer lines.
+          let captured: string;
+          try { captured = await twin.logs({ dataDir, id: environment.id }); }
+          catch (error) { captured = `Environment logs unavailable: ${failureText(error, 600)}`; }
+          evidence = diagnosticText(redactor(authorSecrets())([evidence, captured].filter(Boolean).join('\n\n')));
+          try { await onUpdate({ logs: evidence }); }
+          catch (error) { evidence = diagnosticText(`${evidence}\nEvidence could not be saved before cleanup: ${failureText(error, 600)}`); }
+          await twin.destroy({ dataDir, id: environment.id, inputs: await readInputs(config) });
+        },
         hide: text => redact(redactor(authorSecrets())(text)),
       });
-      return { ...ready(outcome.result), plan: outcome.config, ...(outcome.logs ? { authoringLogs: outcome.logs } : {}),
+      return { ...ready(outcome.result), plan: outcome.config, ...(evidence ? { logs: evidence } : {}), ...(outcome.logs ? { authoringLogs: outcome.logs } : {}),
         generated: { generatedAt: new Date().toISOString(), harness: authorHarness.name, model: `openrouter/${authoredModel}`, attempts: outcome.attempts } };
+    } catch (error) {
+      if (error instanceof Error && evidence) Object.assign(error, { logs: diagnosticText([evidence, 'logs' in error && typeof error.logs === 'string' ? error.logs : ''].filter(Boolean).join('\n\n')) });
+      throw error;
     } finally { await rm(workspaces, { recursive: true, force: true }); }
   }
 

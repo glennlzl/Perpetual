@@ -40,6 +40,7 @@ type AccountFields = AccountRequest | Record<string, never>;
 type Watching = Omit<Partial<BrowserRun>, 'id' | 'mode'> & { id?: string | null; mode: BrowserRun['mode']; focusCaseId?: string; error?: string; live?: boolean };
 type RunRequest = { caseIds: string[] | null; title: string };
 type CodeRequest = { action: 'generate' | 'verify'; caseId: string; hash?: string };
+import type { AuthoringRecord } from '../../contract/authoring.ts';
 import type { SpecCodeReply as CodeReview } from '../../contract/browser.ts';
 const ACTIVE = new Set(['queued', 'running']);
 const CHECKS: Record<string, string> = { 'text-visible': 'Text visible', 'text-absent': 'Text absent', 'url-contains': 'URL contains' };
@@ -364,8 +365,30 @@ function CodeActions({ code, modelConfigured, onGenerate, onStop, onVerify, onSt
   </>;
 }
 
+const authoringOutcome = { draft: 'Draft generated', failed: 'Authoring failed', cancelled: 'Cancelled', 'timed-out': 'Timed out' };
+function AuthoringDetails({ records }: { records: AuthoringRecord[] }) {
+  return <ItemGroup className="min-w-0 max-h-[50vh] overflow-auto">
+    {records.length ? records.map(record => <Collapsible key={record.id}>
+      <Item size="sm"><ItemContent><CollapsibleTrigger asChild><Button variant="ghost" className="h-auto justify-between whitespace-normal text-left"><span>{authoringOutcome[record.outcome]} · {new Date(record.completedAt).toLocaleString()}</span><ChevronDown className="size-4 shrink-0" /></Button></CollapsibleTrigger></ItemContent></Item>
+      <CollapsibleContent><div className="space-y-2 px-4 pb-4 text-sm break-words">
+        <div>{record.provenance.model}</div>
+        <div className="text-muted-foreground">{record.provenance.harness} · {record.provenance.generator}</div>
+        <div>{(record.durationMs / 1000).toFixed(1)} s · Cleanup {record.cleanup}</div>
+        <div className="font-mono text-xs">Case {record.caseHash.slice(0, 12)} · Code {record.outputHash?.slice(0, 12) || 'Unknown'}</div>
+        {record.attempts.map((attempt, index) => <Item key={index} variant="outline" size="sm" className="min-w-0"><ItemContent>
+          <ItemTitle>{attempt.phase === 'generation' ? 'Generation' : 'Grammar repair'}<Badge variant="outline">{attempt.outcome}</Badge></ItemTitle>
+          <div>Finish reason: {attempt.reportedFinishReason === 'unknown' ? 'Unknown' : attempt.reportedFinishReason}</div>
+          <div>Last step usage: {attempt.usage ? `${attempt.usage.input} input · ${attempt.usage.output} output` : 'Unknown'}</div>
+          {attempt.events.length ? <ItemGroup>{attempt.events.map((event, eventIndex) => <Item key={eventIndex} size="sm"><ItemContent><ItemTitle className="flex-wrap"><span>{event.tool.replaceAll('_', ' ')}</span><Badge variant="outline">{event.outcome === 'error' ? 'Tool error' : 'Tool completed'}</Badge></ItemTitle></ItemContent></Item>)}</ItemGroup> : <div>No tool outcomes recorded</div>}
+          {attempt.eventsTruncated && <div>Evidence limit reached</div>}
+        </ItemContent></Item>)}
+      </div></CollapsibleContent>
+    </Collapsible>) : <Item size="sm"><ItemContent>No authoring record</ItemContent></Item>}
+  </ItemGroup>;
+}
+
 // The code a person approves: the draft, or its line diff against the approved code it replaces.
-function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusFallback }: { repoPath: string; stageId: string; item: BrowserCase; onApprove: (hash: string) => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
+function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusFallback, diagnostics = false }: { diagnostics?: boolean; repoPath: string; stageId: string; item: BrowserCase; onApprove: (hash: string) => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
   const returnFocus = useReturnFocus(focusFallback);
   const [code, setCode] = useState<CodeReview | null>(null);
   const [error, setError] = useState('');
@@ -384,14 +407,14 @@ function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusF
   }
   return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
     <DialogContent aria-describedby={undefined} className="code-review sm:max-w-3xl" onCloseAutoFocus={returnFocus}>
-      <DialogHeader><DialogTitle>Approve code</DialogTitle></DialogHeader>
+      <DialogHeader><DialogTitle>{diagnostics ? 'Authoring diagnostics' : 'Approve code'}</DialogTitle></DialogHeader>
       {/* A blank line keeps its row height; each row's text sits in its own span beside the gutter. */}
-      {code ? <pre aria-label={`${item.name} code`} tabIndex={0} className="max-h-[60vh] min-h-0 min-w-0 overflow-auto rounded-md border bg-muted/40 py-2 font-mono text-xs leading-5">{lines.map((line, index) => <span key={index} className={`flex min-h-5 whitespace-pre pr-3 ${line.kind === 'added' ? 'bg-accent text-accent-foreground' : line.kind === 'removed' ? 'text-muted-foreground' : ''}`}>
+      {code ? diagnostics ? <AuthoringDetails records={code.authoring || []} /> : <pre aria-label={`${item.name} code`} tabIndex={0} className="max-h-[60vh] min-h-0 min-w-0 overflow-auto rounded-md border bg-muted/40 py-2 font-mono text-xs leading-5">{lines.map((line, index) => <span key={index} className={`flex min-h-5 whitespace-pre pr-3 ${line.kind === 'added' ? 'bg-accent text-accent-foreground' : line.kind === 'removed' ? 'text-muted-foreground' : ''}`}>
         <span aria-hidden="true" className="w-6 shrink-0 select-none text-center text-muted-foreground">{line.kind === 'added' ? '+' : line.kind === 'removed' ? '-' : ''}</span>
         <span>{line.kind !== 'same' && <span className="sr-only">{line.kind === 'added' ? 'Added: ' : 'Removed: '}</span>}{line.text}</span>
       </span>)}</pre> : !error && <Skeleton className="h-40 w-full" />}
       {error && <div className="code-review-error"><ErrorText>{error}</ErrorText></div>}
-      <DialogFooter><Button type="button" variant="outline" disabled={saving} onClick={onClose}>Cancel</Button><Button type="button" disabled={!code?.draft || saving} onClick={approve}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}Approve</Button></DialogFooter>
+      <DialogFooter><Button type="button" variant="outline" disabled={saving} onClick={onClose}>{diagnostics ? 'Done' : 'Cancel'}</Button>{!diagnostics && <Button type="button" disabled={!code?.draft || saving} onClick={approve}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}Approve</Button>}</DialogFooter>
     </DialogContent>
   </Dialog>;
 }
@@ -433,6 +456,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const [caseFilter, setCaseFilter] = useState('all');
   const [deletingCase, setDeletingCase] = useState<BrowserCase | null>(null);
   const [approvingCase, setApprovingCase] = useState<BrowserCase | null>(null);
+  const [authoringCase, setAuthoringCase] = useState<BrowserCase | null>(null);
   const [creatingCase, setCreatingCase] = useState(false);
   const [configDialog, setConfigDialog] = useState<'settings' | 'generate' | null>(null);
   const [runDialog, setRunDialog] = useState<RunRequest | null>(null);
@@ -623,7 +647,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
               {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => setCodeDialog({ action: 'generate', caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
                 onVerify={() => setCodeDialog({ action: 'verify', caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
                 onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
-              <DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+              <DropdownMenuItem onSelect={() => setAuthoringCase(item)}><ListChecks />Authoring diagnostics</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
             skipping={pending === 'skip'}
             onViewRun={run ? () => setWatching({ ...watchedRun(run), focusCaseId: item.id }) : undefined}
@@ -650,6 +674,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       setCodeDialog(null);
       void perform(`${action}-code`, async tx => { if (dirty) await persistConfig(tx); return tx.post(`specs/${action}`, { caseId, ...(hash ? { hash } : {}), ...account }); });
     }} />}
+    {authoringCase && <ApproveCodeDialog key={`authoring-${authoringCase.id}`} diagnostics repoPath={repoPath} stageId={stageId} item={authoringCase} focusFallback={focusCase(authoringCase.id)} onClose={() => setAuthoringCase(null)} onApprove={async () => {}} />}
     {approvingCase && <ApproveCodeDialog key={approvingCase.id} repoPath={repoPath} stageId={stageId} item={approvingCase} focusFallback={focusCase(approvingCase.id)} onClose={() => setApprovingCase(null)} onApprove={async hash => {
       await stage.perform('browser', 'approve-code', tx => tx.post('specs/approve', { caseId: approvingCase.id, hash }));
       if (mounted.current && stage.isCurrent()) setApprovingCase(null);

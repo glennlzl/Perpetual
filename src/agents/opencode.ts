@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { browserError, superviseWorker, type WorkerError, type WorkerJob } from '../browser/runtime.ts';
 import { hide as hideValues } from '../redaction.ts';
+import { captureAuthoringEvidence } from './authoring-evidence.ts';
+import type { HarnessEvidence } from '../../contract/authoring.ts';
 
 export const OPENCODE_VERSION = '1.18.32';
 /** The harness as a use's provenance names it. */
@@ -26,7 +28,7 @@ export type Harness = (input: { model: string; prompt: string; cwd: string }) =>
 export type RunMessages = { cancelled: string; timedOut: string; stopped: string; unavailable: string };
 
 /** OpenCode running `agent`, a primary agent of the project's opencode.json, once with a prompt. */
-export const opencodeRun = (agent: string): Harness => ({ model, prompt }) => ({ command: 'npx', args: ['-y', `opencode-ai@${OPENCODE_VERSION}`, 'run', '--agent', agent, '--model', model, prompt] });
+export const opencodeRun = (agent: string, { json = false } = {}): Harness => ({ model, prompt }) => ({ command: 'npx', args: ['-y', `opencode-ai@${OPENCODE_VERSION}`, 'run', ...(json ? ['--format', 'json'] : []), '--agent', agent, '--model', model, prompt] });
 
 /** Settings every use's opencode.json carries: no update or sharing, only its OpenRouter model, and its permission. */
 export const opencodeSettings = ({ model, permission }: { model: string; permission: Record<string, unknown> }) =>
@@ -35,7 +37,7 @@ export const opencodeSettings = ({ model, permission }: { model: string; permiss
 const exec = promisify(execFile);
 const TAIL = 4000;
 // Observe complete bounded streams before retaining their tails. An overflow loses the context needed for redaction.
-const CAPTURE_CHARS = 256 * 1024;
+const CAPTURE_BYTES = 256 * 1024;
 const OUTPUT_WITHHELD = 'Agent output exceeded the capture limit; output text withheld.';
 /** Added to a use's own reason for a failed run, which replaces the worker's, when its processes may remain. */
 const INCOMPLETE = 'Cleanup incomplete; the agent’s processes could not be confirmed stopped.';
@@ -92,49 +94,53 @@ export const fingerprint = async (files: string[]): Promise<Record<string, strin
  * `reason` and redacted `output` are each alone, and `timedOut`
  * says it ran out of time rather than stopping or being cancelled.
  */
-export type RunFailure = Error & { reason: string; output: string; timedOut?: true; cleanupIncomplete?: true };
+export type RunFailure = Error & { reason: string; output: string; timedOut?: true; cleanupIncomplete?: true; evidence?: HarnessEvidence };
 
 /**
  * Runs a use's agent, once per call to run(prompt), which resolves with the end of its output. cancel() stops the current
  * run and refuses later ones. A failed run rejects with a RunFailure, redacted of `secrets` and of the model key in
  * `env`; `cleanupIncomplete` says an owned process may remain.
  */
-export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeoutMs, cleanupGraceMs, settleMs = 0, messages }: {
+export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeoutMs, cleanupGraceMs, settleMs = 0, messages, structuredOutput = false }: {
   harness: Harness; model: string; cwd: string; env: Record<string, string>; secrets: (string | undefined)[];
-  timeoutMs: number; cleanupGraceMs: number; settleMs?: number; messages: RunMessages;
+  timeoutMs: number; cleanupGraceMs: number; settleMs?: number; messages: RunMessages; structuredOutput?: boolean;
 }) {
   const abort = new AbortController(), hidden = secrets.filter((value): value is string => Boolean(value));
   const hide = hideValues(hidden);
   let job: WorkerJob | null = null;
-  async function run(prompt: string): Promise<{ output: string }> {
+  async function run(prompt: string): Promise<{ output: string; evidence: HarnessEvidence }> {
     if (abort.signal.aborted) throw new Error(messages.cancelled);
     const { command, args, env: own } = harness({ model: `openrouter/${model}`, prompt, cwd });
     const childEnv = { ...env, ...own };
+    let reportedRefusal: string | undefined;
+    const evidence = captureAuthoringEvidence(value => browserError(hide(String(value)), childEnv, Infinity), message => { reportedRefusal = openrouterRefusal(`Error: ${message}`); });
     const captures = { stdout: { text: '', truncated: false }, stderr: { text: '', truncated: false } };
     const tail = (stream: 'stdout' | 'stderr') => {
+      if (structuredOutput) return ''; // JSON tool results contain page contents and account data; only the allowlisted evidence leaves.
       const capture = captures[stream];
       // browserError owns the environment's model keys and text redaction. Let it see the complete capture first.
       return capture.truncated ? OUTPUT_WITHHELD : capture.text ? browserError(hide(capture.text), childEnv, Infinity).slice(-TAIL).trim() : '';
     };
     job = superviseWorker({ command, args, cwd, env: childEnv, timeoutMs, cleanupGraceMs, settleMs, secrets: hidden, unavailable: messages.unavailable,
       onOutput(chunk, stream) {
+        evidence.write(chunk, stream);
         const capture = captures[stream];
         if (capture.truncated) return;
-        if (capture.text.length + chunk.length > CAPTURE_CHARS) { capture.text = ''; capture.truncated = true; }
+        if (Buffer.byteLength(capture.text) + Buffer.byteLength(chunk) > CAPTURE_BYTES) { capture.text = ''; capture.truncated = true; }
         else capture.text += chunk;
       } });
     try {
       await job.promise;
-      const output = [tail('stdout'), tail('stderr')].filter(Boolean).join('\n');
-      return { output: output && browserError(output, childEnv, TAIL) };
+      const output = structuredOutput ? reportedRefusal ?? '' : [tail('stdout'), tail('stderr')].filter(Boolean).join('\n');
+      return { output: output && browserError(output, childEnv, TAIL), evidence: evidence.finish('completed') };
     }
     catch (caught) {
-      const error = caught as WorkerError, incomplete = error.cleanupIncomplete ? { cleanupIncomplete: true } : {};
+      const error = caught as WorkerError, incomplete = { ...(error.cleanupIncomplete ? { cleanupIncomplete: true } : {}), evidence: evidence.finish(abort.signal.aborted ? 'cancelled' : error.timedOut ? 'timed-out' : 'failed', error.cleanupIncomplete) };
       const said = (reason: string) => error.cleanupIncomplete && !reason.includes('Cleanup incomplete') ? `${reason} ${INCOMPLETE}` : reason;
       if (abort.signal.aborted) throw Object.assign(new Error(said(messages.cancelled)), { reason: said(messages.cancelled), output: '' }, incomplete);
       const output = (tail('stderr') || tail('stdout')).split('\n').slice(-6).join(' ').slice(-500);
       const stopped = /exited before completing/.test(error.message);
-      const refusal = stopped && !error.timedOut ? openrouterRefusal(output) : undefined;
+      const refusal = stopped && !error.timedOut ? structuredOutput ? reportedRefusal : openrouterRefusal(output) : undefined;
       const reason = said(error.timedOut ? messages.timedOut : stopped ? refusal ?? messages.stopped : error.message);
       throw Object.assign(new Error(browserError(hide(`${reason}${output && !refusal ? ` ${output}` : ''}`), childEnv, 800)),
         { reason: browserError(hide(reason), childEnv, 800), output: output && browserError(hide(output), childEnv, 800) }, error.timedOut ? { timedOut: true } : {}, incomplete);

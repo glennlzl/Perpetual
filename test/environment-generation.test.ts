@@ -289,11 +289,16 @@ test('a failed preparation is feedback with its step, error and redacted log tai
   assert.ok(feedback.startsWith(`${staged(attempt(1), 'preparing the twin failed at "Starting twin"', 'build', 'Web: container web exited (1) with [redacted]', { subject: WEB })}\n## Logs\n\nThe last lines of the failed containers' logs, at most 150:\n\n\`\`\`\nweb  | log line 52\n`), feedback);
   assert.match(feedback, /web {2}\| Error: connect ECONNREFUSED, key \[redacted\] and \[redacted\]\nweb {2}\| exited\n```\n$/);
   assert.ok(!feedback.includes('log line 51\n'), 'Only the last 150 lines are kept.');
-  // The logs of the containers that stopped, and the twin torn down before the next attempt.
-  assert.deepEqual(f.calls.logs, [{ service: 'web', tail: 150 }]);
+  // Feedback names the failed container; a full bounded snapshot is checkpointed before teardown.
+  assert.deepEqual(f.calls.logs, [{ service: 'web', tail: 150 }, { service: undefined, tail: undefined }]);
   assert.equal(f.calls.destroy, 1);
   assert.equal(f.calls.prepare.length, 2);
   for (const text of [JSON.stringify(await f.saved()), JSON.stringify(await f.manager.view(f.context)), feedback]) assert.ok(!text.includes(KEY) && !text.includes(SECRET), 'No secret reaches feedback or state.');
+  f.twinState.logs = 'web | current healthy app output';
+  const visible = await f.manager.logs(f.context, ready.id);
+  assert.match(visible.logs, /Writing twin config \(attempt 1 of 4\)/);
+  assert.match(visible.logs, /ECONNREFUSED/);
+  assert.match(visible.logs, /current healthy app output/);
 });
 
 test('a failed service exposes its terminal error in the environment and attempt summaries without secrets', async t => {
@@ -353,7 +358,7 @@ test('staged feedback names the stage an attempt failed at and the app, service,
     assert.equal((await f.create()).status, 'ready', item.name);
     const [, second] = await lines(f.log);
     assert.equal(second.feedback?.split('\n## Logs\n')[0].replace(`:${f.port}/`, ':PORT/'), item.expected, item.name);
-    if (item.logs) assert.deepEqual(f.calls.logs.map(call => call.service), item.logs, item.name);
+    if (item.logs) assert.deepEqual(f.calls.logs.map(call => call.service), [...item.logs, undefined], item.name);
   }
 });
 

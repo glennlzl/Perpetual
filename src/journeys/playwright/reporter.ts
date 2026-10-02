@@ -17,7 +17,7 @@ export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[];
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
 type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown };
 
-// Journey actions by Playwright step title; reads, waits for state and the fixture's own calls are not actions.
+// Journey actions by Playwright step title; fixture reads stay private while explicit readiness waits are visible.
 const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
 const FORWARDED = new Set<unknown>(['frame', 'journey-step']);
 const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/g, '').replace(/^\s*Error:\s*/, '');
@@ -76,10 +76,10 @@ export default class JourneyReporter implements Reporter {
       else if (event.type === 'journey-stop' && typeof event.error === 'string') this.stop ||= event.error;
     }
   }
-  // A step inside a fixture, a hook or the fixture's own checks is never a journey action; sign-in is one action.
+  // Calls inside setup or reviewed checks stay private. Sign-in and reload readiness have one named action each.
   action(step: TestStep) {
     for (let parent = step.parent; parent; parent = parent.parent) if (['fixture', 'hook'].includes(parent.category) || parent.category === 'test.step' && [STEPS.checks, STEPS.signIn].includes(parent.title)) return null;
-    if (step.category === 'test.step') return step.title === STEPS.signIn ? SIGN_IN_ACTION : null;
+    if (step.category === 'test.step') return step.title === STEPS.signIn ? SIGN_IN_ACTION : step.title === STEPS.reloadReady ? 'wait' : null;
     return step.category === 'pw:api' ? ACTIONS.find(([pattern]) => pattern.test(step.title))?.[1] || null : null;
   }
   onStepBegin(_test: TestCase, _result: TestResult, step: TestStep) {

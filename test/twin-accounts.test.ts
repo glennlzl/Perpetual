@@ -207,7 +207,7 @@ test('Supabase gives an already registered user the generated password, so accou
 test('Supabase reports Auth errors and checks its users before any request', async () => {
   const failing = authAdmin({ failure: 'Database error saving new user' });
   await assert.rejects(supabase.accounts(supabaseContext(failing, [{ id: 'owner', email: 'owner@example.test' }])),
-    /^Error: Supabase Auth did not create test account owner: Database error saving new user$/);
+    /Supabase Auth account [a-f0-9]{12}: POST \/auth\/v1\/admin\/users; HTTP failure \(HTTP 500\).*phase: response received.*outcome unknown/);
   for (const [users, message] of [
     [{ id: 'owner' }, /supabase\.users must be a list/],
     [[{ id: 'Owner', email: 'owner@example.test' }], /users\[0\]\.id must use lowercase letters/],

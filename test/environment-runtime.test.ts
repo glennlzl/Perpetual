@@ -212,3 +212,26 @@ test('logs and deletion go through the twin, and deleting an older Cua guest rem
   assert.deepEqual(f.calls.at(-1), ['guest', { dataDir: f.dataDir, id: guest.sandboxId }]);
   assert.equal(f.calls.filter(([operation]) => operation === 'destroy').length, 1);
 });
+
+test('A generated attempt checkpoints service diagnostics before tearing its twin down', async t => {
+  const f = await setup(t), draft = JSON.stringify({ apps: { web: { start: 'node app.mjs', port: 3000 } } });
+  const updates: { logs?: string }[] = [];
+  let attempts = 0, destroyed = false;
+  const runtime = createEnvironmentRuntime({
+    author: () => ({ promise: Promise.resolve({ text: draft }), cancel() {} }),
+    twin: only({
+      prepare: async () => { if (++attempts === 1) throw new Error('Auth request deadline'); return { services: [], apps: [] }; },
+      health: async () => ({ status: 'failed', containers: [{ name: 'supabase_auth_perpetual-beta', state: 'exited', health: null, exitCode: 1 }] }),
+      logs: async () => 'database waiting\nAuth request interrupted\npassword=fixture-private-value\n',
+      destroy: async () => {
+        destroyed = true;
+        assert.ok(updates.some(update => update.logs?.includes('database waiting')), 'checkpoint must finish before teardown starts');
+      },
+    }),
+  });
+  const result = await runtime.prepareEnvironment({ dataDir: f.dataDir, repoPath: f.repoPath, directory: f.directory, environment: { id: 'environment-1' },
+    generate: { draft, model: { apiKey: 'fixture-key', model: 'vendor/model' } }, onUpdate: async update => { updates.push(update); }, cancelled: () => false });
+  assert.equal(result.status, 'ready'); assert.equal(destroyed, true);
+  assert.ok(updates.some(update => update.logs?.includes('Auth request interrupted')));
+  assert.doesNotMatch(JSON.stringify(updates), /fixture-private-value/);
+});

@@ -9,7 +9,7 @@ import type {AddressInfo} from 'node:net';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
 import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,repairPrompt,seedSpec} from '../src/journeys/playwright/generation.ts';
-import {specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
+import {caseHash,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
 import {codeFor} from './fixtures/journey-code.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
@@ -70,7 +70,7 @@ function heldSeed(){
 }
 
 test('the default harness is OpenCode running Playwright’s generator agent against OpenRouter',()=>{
-  assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
+  assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--format','json','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
 });
 
 test('generation and repair identify the configured seed project for the setup tool',()=>{
@@ -654,4 +654,99 @@ test('a seed whose application does not open says so, never that the test accoun
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.deepEqual(await settled(f,journey.id,90),{generation:{status:'failed',error:`The application could not be opened: page.goto: net::ERR_CONNECTION_REFUSED at ${url}`}});
   assert.equal((await lines(f.log)).length,0,'No model call was spent.');
+});
+
+
+test('successful authoring survives workspace removal and restart as private scoped diagnostics, never approval',async t=>{
+  const f=await setup(t,{mode:'trace-valid'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const spec=await settled(f),reply=await f.manager.specCode(f.context,{caseId:journey.id});
+  const authoring=(reply as unknown as {authoring?:import('../contract/authoring.ts').AuthoringRecord[]}).authoring;
+  assert.equal(authoring?.length,1,'The successful authoring record must survive workspace removal.');
+  const record=authoring![0];
+  assert.equal(record.outcome,'draft');assert.equal(record.caseHash,caseHash(journey));assert.equal(record.outputHash,spec!.draft!.hash);
+  assert.equal(record.attempts.length,1);assert.equal(record.attempts[0].phase,'generation');
+  assert.deepEqual(record.attempts[0].events,[{tool:'generator_setup_page',outcome:'completed'},{tool:'browser_click',outcome:'completed'}]);
+  assert.equal(record.attempts[0].reportedFinishReason,'stop');assert.equal(record.cleanup,'complete');
+  assert.ok(record.durationMs>=0);assert.ok(Date.parse(record.completedAt)>=Date.parse(record.startedAt));
+  assert.equal(spec?.approved,undefined);assert.equal(spec?.draft?.verification,undefined);
+  await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:spec!.draft!.hash}),/three passing runs and a caught control run/);
+  assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[]);
+  for(const value of [key,password,'tester@example.com','Private browser contents','private-session','Private account'])assert.ok(!JSON.stringify(authoring).includes(value));
+  await f.manager.close();const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.specCode(f.context,{caseId:journey.id}) as typeof reply),reply);
+  const other={...f.context,stageId:'gamma'};await restarted.saveCases(other,[journey]);
+  assert.deepEqual(await restarted.specCode(other,{caseId:journey.id}),{});
+  const source={...f.context,key:'other'};await restarted.saveCases(source,[journey]);
+  assert.deepEqual(await restarted.specCode(source,{caseId:journey.id}),{});
+  assert.equal((await lines(f.log)).length,1,'Reading diagnostics and restarting perform no paid work.');
+});
+
+for(const mode of ['trace-repair','trace-invalid','trace-fail'])test(`authoring retains grammar repair and failed harness evidence: ${mode}`,async t=>{
+  const f=await setup(t,{mode});await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);
+  const records=(await f.manager.specCode(f.context,{caseId:journey.id}) as unknown as {authoring?:import('../contract/authoring.ts').AuthoringRecord[]}).authoring;
+  assert.equal(records?.length,1);
+  const record=records![0];assert.equal(record.outcome,mode==='trace-repair'?'draft':'failed');
+  assert.deepEqual(record.attempts.map(attempt=>attempt.phase),mode==='trace-fail'?['generation']:['generation','grammar-repair']);
+  assert.equal(record.attempts[0].outcome,mode==='trace-fail'?'failed':'completed');
+  assert.equal(record.attempts[0].events[1].outcome,mode==='trace-fail'?'error':'completed');
+  if(mode!=='trace-fail')assert.match(record.attempts[0].codeHash!,/^[a-f0-9]{64}$/);
+  assert.equal(record.cleanup,'complete');
+});
+
+for(const finish of ['cancel','timeout'] as const)test(`authoring captures ${finish} without inventing terminal metadata`,async t=>{
+  const f=await setup(t,{mode:'trace-hang',timeoutMs:finish==='timeout'?1200:20000});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  for(const deadline=Date.now()+10000;!(await lines(f.log)).length&&Date.now()<deadline;)await wait(20);
+  if(finish==='cancel')await f.manager.cancelSpecGeneration(f.context,{caseId:journey.id});
+  await settled(f);
+  const record=(await f.manager.specCode(f.context,{caseId:journey.id})).authoring?.[0];
+  assert.ok(record);assert.equal(record.outcome,finish==='cancel'?'cancelled':'timed-out');
+  assert.equal(record.attempts[0].reportedFinishReason,'unknown');assert.equal(record.attempts[0].usage,null);
+  assert.equal(record.attempts[0].events.length,2);assert.equal(record.cleanup,'complete');
+  assert.equal(f.manager.isActive(f.context),false);
+  await f.manager.close();const restart=await createBrowserManager(f.options());t.after(()=>restart.close());
+  assert.deepEqual((await restart.specCode(f.context,{caseId:journey.id})).authoring,[record]);
+});
+
+test('authoring retains evidence when workspace cleanup fails and releases its stage', {skip:process.platform==='win32'||process.getuid?.()===0},async t=>{
+  const seed=heldSeed(),f=await setup(t,{playwright:seed.runtime});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});const fail=await seed.started;
+  const {chmod}=await import('node:fs/promises'),root=join(f.dataDir,'browser','generations');
+  await chmod(root,0o500);
+  try{
+    fail(new Error('The application could not be opened.'));await settled(f);
+    const record=(await f.manager.specCode(f.context,{caseId:journey.id})).authoring?.[0];
+    assert.ok(record);assert.equal(record.cleanup,'incomplete');assert.equal(record.outcome,'failed');
+    assert.deepEqual(record.attempts,[],'The failed seed never started the authoring harness.');
+    assert.equal(f.manager.isActive(f.context),false,'Nonessential diagnostics never retain the stage lease.');
+  }finally{await chmod(root,0o700);}
+});
+
+test('restart bounds and sanitizes stored authoring records and deletion removes their history',async t=>{
+  const f=await setup(t,{mode:'trace-valid'});await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8'));
+  const scope=Object.keys(stored.authoring)[0],record=stored.authoring[scope][journey.id][0];
+  const recent=Array.from({length:5},(_,i)=>({...record,id:`00000000-0000-0000-0000-${String(i).padStart(12,'0')}`,completedAt:new Date(Date.now()-i*1000).toISOString(),unknown:'private account payload',provenance:{...record.provenance,model:`openrouter/${key}`},attempts:record.attempts.map((attempt:object)=>({...attempt,reportedFinishReason:'private account error',usage:{input:'invalid'},events:[{tool:`browser_${password}`,outcome:'error',output:'private page contents'}]}))}));
+  stored.authoring[scope][journey.id]=[...recent,{...record,completedAt:'2000-01-01T00:00:00.000Z'}];
+  await writeFile(file,JSON.stringify(stored));
+  const restart=await createBrowserManager(f.options());t.after(()=>restart.close());
+  const records=(await restart.specCode(f.context,{caseId:journey.id})).authoring!;
+  assert.equal(records.length,3);assert.deepEqual(records.map(value=>value.id),recent.slice(0,3).map(value=>value.id));
+  assert.equal(records[0].provenance.model,'unknown');assert.equal(records[0].attempts[0].reportedFinishReason,'unknown');assert.equal(records[0].attempts[0].usage,null);
+  assert.deepEqual(records[0].attempts[0].events,[{tool:'unknown',outcome:'error'}]);
+  assert.ok(!JSON.stringify(records).includes('private'));assert.ok(secretFree(records));
+  await restart.saveCases(f.context,[]);await restart.saveCases(f.context,[journey]);
+  assert.deepEqual(await restart.specCode(f.context,{caseId:journey.id}),{});
+  assert.equal((await lines(f.log)).length,1);
+});
+
+test('a long-lived controller expires authoring on read and prunes it at the next ordinary save',async t=>{
+  const f=await setup(t,{mode:'trace-valid'});await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);
+  assert.equal((await f.manager.specCode(f.context,{caseId:journey.id})).authoring?.length,1);
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});t.mock.timers.tick(15*86400000);
+  assert.equal((await f.manager.specCode(f.context,{caseId:journey.id})).authoring,undefined,'An old record expires without a restart or a new paid generation.');
+  await f.manager.saveConfig(f.context,{targetUrl:'http://localhost:3000/'});
+  const stored=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8'));
+  assert.deepEqual(stored.authoring,{});assert.equal((await lines(f.log)).length,1);
 });

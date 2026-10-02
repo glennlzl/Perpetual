@@ -6,6 +6,7 @@ import { detectEnvironmentConfig } from './plans.ts';
 import { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox } from './runtime.ts';
 import { AUTHORING, isGenerationFailure, type AttemptOutcome } from './generation.ts';
 import { redact } from '../redaction.ts';
+import { diagnosticText, retainDiagnostics } from './diagnostics.ts';
 import { IN_PROGRESS, applicationOrigin, createEnvironmentUsage, holdsResources, scopeId } from './usage.ts';
 import { serviceOptionErrors, validateTwinConfig } from '../twin/index.ts';
 import { HOST } from '../twin/compose.ts';
@@ -36,7 +37,7 @@ export interface EnvironmentRecord extends EnvironmentReply {
   id: string; scope: string; pipelineKey: string; stageId: string; repoPath: string; sourceBranch: string | null; sourceRevision: string | null;
   plan?: TwinConfig; status: EnvironmentStatus; step: string; services: EnvironmentService[]; apps: EnvironmentApp[]; createdAt: string; updatedAt?: string;
   error?: string | null; sandboxId?: string; snapshot?: { hash: string; files: number; bytes: number }; timings?: StepTiming[]; readyAt?: string;
-  accounts?: EnvironmentAccount[]; origins?: string[]; logs?: string; cleanedAt?: string; cleanupError?: string; destroyedAt?: string; browserPreparationError?: string;
+  accounts?: EnvironmentAccount[]; origins?: string[]; logs?: string; logsAt?: string; cleanedAt?: string; cleanupError?: string; destroyedAt?: string; browserPreparationError?: string;
   /** Set while its preparation reads the checkout it was created from, as generating a twin config does. */
   readsCheckout?: true;
   /** Each failed attempt of the twin config's generation, in order. */
@@ -46,7 +47,7 @@ export interface EnvironmentRecord extends EnvironmentReply {
   /** The repair whose journey gate built this twin from its pull request checkout, which repoPath names. */
   repair?: string;
 }
-export type PublicEnvironment = EnvironmentReply & Omit<EnvironmentRecord, 'scope' | 'plan' | 'logs' | 'origins' | 'authoringLogs'>;
+export type PublicEnvironment = EnvironmentReply & Omit<EnvironmentRecord, 'scope' | 'plan' | 'logs' | 'logsAt' | 'origins' | 'authoringLogs'>;
 /** The monitor's last check, kept in memory only: when it ran, whether it passed and its consecutive failures, or when a due check was skipped as in use. */
 export type { EnvironmentHealth as HealthBeat } from '../../contract/environment.ts';
 /** An environment as stage views list it. */
@@ -77,7 +78,7 @@ const failure = (error: unknown) => {
   const text = redact(String((error as Error).message || error));
   return text.length <= FAILURE_TEXT ? text : `${text.slice(0, FAILURE_HEAD)}${OMITTED}${text.slice(-(FAILURE_TEXT - FAILURE_HEAD - OMITTED.length))}`;
 };
-function publicEnvironment({ scope, plan, logs, origins, authoringLogs, ...item }: EnvironmentRecord): PublicEnvironment {
+function publicEnvironment({ scope, plan, logs, logsAt, origins, authoringLogs, ...item }: EnvironmentRecord): PublicEnvironment {
   // Older twins saved their container address as the app link. Convert only the owned twin's public view.
   if (item.sandboxId !== item.id) return item;
   return { ...item, apps: item.apps.map(app => {
@@ -179,7 +180,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   function skipHealth(id: string) { if (!((healthSkips.get(id) || 0) >= (healthChecks.get(id) || 0))) healthSkips.set(id, Date.now()); }
   const serialized = () => JSON.stringify(state);
   function budget() { if (Buffer.byteLength(serialized()) > 30 * 1024 * 1024) throw new Error('Local metadata storage is full. Export your history and choose a new data directory.'); }
-  function persist() { return saves.run(async () => { budget(); await writeStateFile(file, serialized()); }); }
+  function persist() { return saves.run(async () => { retainDiagnostics(state.environments); budget(); await writeStateFile(file, serialized()); }); }
   function quarantine(environment: EnvironmentRecord | undefined, error: string, step = 'Interrupted operation') {
     if (!environment?.sandboxId || environment.status === 'destroyed' || environment.cleanedAt) return;
     Object.assign(environment, { status: 'cleanup_failed', step, updatedAt: now(), error });
@@ -357,6 +358,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           try {
             ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath: environment.repoPath, directory, signal: controller.signal, cancelled: () => closed || controller.signal.aborted, onUpdate: async update => {
               Object.assign(environment, update, { updatedAt: now() });
+              if (typeof update.logs === 'string') Object.assign(environment, { logs: diagnosticText(update.logs), logsAt: now() });
               if (environment.cancellationRequestedAt) Object.assign(environment, { status: 'preparing', step: 'Stopping' });
               await persist();
             },
@@ -371,15 +373,23 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
             const stopping = Boolean(environment.cancellationRequestedAt);
             if (!stopping) environment.failedStep = environment.step;
             Object.assign(environment, { status: 'preparing', step: stopping ? 'Stopping' : 'Cleaning up', updatedAt: now(), error: failure(error) });
-            await persist();
+            let storageFailure = '';
+            try { await persist(); }
+            catch (storage) { storageFailure = `Evidence could not be saved before cleanup: ${failure(storage)}`; }
             // The logs keep what the error leaves out, such as the end of the twin config author's output.
-            const logs = [errorLogs(error)];
+            const logs = [environment.logs ?? '', errorLogs(error), storageFailure];
             if (environment.sandboxId) {
-              try { logs.push(await runtime.environmentLogs({ dataDir, environment })); } catch { /* Preparation can fail before the twin has containers. */ }
+              try { logs.push(await runtime.environmentLogs({ dataDir, environment })); }
+              catch (collection) { logs.push(`Environment logs unavailable: ${failure(collection)}`); }
+              environment.logs = diagnosticText(logs.filter(Boolean).join('\n\n')); environment.logsAt = now();
+              // Durable evidence precedes teardown. A failed evidence write must not strand resources
+              // or replace the original error; the final state save tries again after cleanup.
+              try { await persist(); }
+              catch (storage) { environment.logs = diagnosticText(`${environment.logs}\nEvidence could not be saved before cleanup: ${failure(storage)}`); }
               try { await runtime.destroySandbox({ dataDir, environment }); if (!uncertain) environment.cleanedAt = now(); }
               catch (cleanup) { environment.status = 'cleanup_failed'; environment.cleanupError = failure(cleanup); }
             }
-            if (logs.some(Boolean)) environment.logs = logs.filter(Boolean).join('\n\n');
+            else if (logs.some(Boolean)) Object.assign(environment, { logs: diagnosticText(logs.filter(Boolean).join('\n\n')), logsAt: now() });
             if (!uncertain && environment.status !== 'cleanup_failed') {
               try { await removeSnapshot(environment); }
               catch (error) { environment.status = 'cleanup_failed'; environment.cleanupError = failure(error); }
@@ -442,6 +452,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           Object.assign(environment, { status: 'destroyed', step: 'Deleted', services: [], apps: [], destroyedAt: now(), updatedAt: now(), error: null });
           delete environment.accounts;
           await removeSnapshot(environment);
+          delete environment.logs; delete environment.logsAt;
           delete environment.plan;
         } catch (error) { Object.assign(environment, { status: 'cleanup_failed', step: 'Deletion failed', updatedAt: now(), error: failure(error) }); }
         await persist();
@@ -453,10 +464,14 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     },
     async logs(context: StageRef, id: string): Promise<EnvironmentLogs> {
       const environment = findEnvironment(context, id);
-      if (environment.logs) return { logs: environment.logs };
+      if (retainDiagnostics(state.environments)) await persist();
+      if (environment.status !== 'ready') {
+        if (environment.logs) return { logs: environment.logs };
+        if (environment.logsAt) return { logs: 'Failure evidence expired.' };
+      }
       // A generated twin's log leads with how its config was written.
       const live = await runtime.environmentLogs({ dataDir, environment });
-      return { logs: environment.authoringLogs ? `${environment.authoringLogs}\n\n${live}` : live };
+      return { logs: [environment.authoringLogs, environment.logs, live].filter(Boolean).join('\n\n') };
     },
     async tick() {
       if (closed || ticking) return;
