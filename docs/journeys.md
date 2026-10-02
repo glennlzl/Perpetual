@@ -70,6 +70,8 @@ Running one unselected journey temporarily selects it. Its panel restores that c
 
 **Add test** appears only on Sandbox stages. A stage holds at most 60 cases; a run takes 1 to 30 of them.
 
+Description-based drafting keeps the existing 4,096-token output cap for models with lower output limits. It requests low reasoning effort only when the cached OpenRouter catalog lists that capability; otherwise it retains the provider default. This is an effort request, not a guaranteed token reservation. Reasoning text is excluded from the response, but still counts against the output limit ([reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)). A response cut off by that limit is refused with an output-limit error, even if its JSON parses. A complete standalone JSON Markdown block is unwrapped before the same case validation; prose, multiple proposals and partial output are refused. There is no automatic paid retry, and the dialog keeps the description for an explicit retry or edit.
+
 **Dictate** records a description after microphone permission. **Stop** sends the recording through the local controller to OpenRouter's transcription endpoint and appends the transcript to the editable description. Audio is not written to application storage. Recording stops automatically at two minutes and is capped at 8 MiB; closing the dialog discards an unfinished recording and cancels a pending transcription. Typing stays available when the browser cannot use a microphone.
 
 ## Cases and milestones

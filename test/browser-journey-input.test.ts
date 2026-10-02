@@ -88,3 +88,48 @@ test('a transcription reply without text is an upstream error, whatever JSON it 
     await assert.rejects(transcribeBrowserAudio({configuration,audio:Buffer.from('audio').toString('base64'),format:'wav'}),{statusCode:502,message:/Transcription returned invalid text/});
   }
 });
+
+test('a draft exhausted by reasoning reports the output limit without retrying or exposing provider content',async t=>{
+  let calls=0;
+  let content:unknown=null;
+  t.mock.method(globalThis,'fetch',async()=>{
+    calls++;
+    return Response.json({choices:[{finish_reason:'length',message:{content,reasoning:'private provider reasoning'}}],usage:{completion_tokens:4096,completion_tokens_details:{reasoning_tokens:4096}}});
+  });
+  const draft=()=>draftBrowserCase({configuration,description:'Create, save, reopen and run a workflow twice, checking its credits and history.',sourceContext:'{}'});
+  await assert.rejects(draft(),{statusCode:502,message:'The model reached its output limit before finishing the test. Shorten the description or choose another model in Settings.'});
+  assert.equal(calls,1,'An incomplete paid response is never retried automatically');
+  // Even parseable content is incomplete when the provider explicitly says it was truncated.
+  content=JSON.stringify({case:candidate});
+  await assert.rejects(draft(),/output limit/);
+  assert.equal(calls,2);
+});
+
+test('case drafting uses the catalog-selected effort without excluding lower-output-limit models',async t=>{
+  t.mock.method(globalThis,'fetch',async (_url:unknown,options:RequestInit)=>{
+    const request=JSON.parse(String(options.body));
+    assert.equal(request.reasoning?.max_tokens,undefined);
+    assert.equal(request.reasoning?.effort,'low');
+    assert.equal(request.reasoning?.exclude,true,'Internal reasoning is not needed to validate a draft');
+    assert.equal(request.max_tokens,4096,'Keep the existing total cap for selectable models limited to 4096 output tokens');
+    return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({case:candidate})}}]});
+  });
+  const result=await draftBrowserCase({configuration,description:'Save and reopen workspace settings.',sourceContext:'{}',reasoning:{effort:'low',exclude:true}});
+  assert.equal(result.needsReview,true);
+  assert.equal(result.selected,false);
+});
+
+
+test('a single standalone JSON fence is accepted without accepting prose, partial or multiple proposals',async t=>{
+  const json=JSON.stringify({case:candidate});
+  let content=`  \n\x60\x60\x60json\n${json}\n\x60\x60\x60\n `,finish='stop';
+  t.mock.method(globalThis,'fetch',async()=>Response.json({choices:[{finish_reason:finish,message:{content}}]}));
+  const draft=()=>draftBrowserCase({configuration,description:'Save and reopen workspace settings.',sourceContext:'{}'});
+  const accepted=await draft();
+  assert.equal(accepted.needsReview,true);assert.equal(accepted.selected,false);assert.deepEqual(accepted.steps,candidate.steps);
+  for(const invalid of [`Here is the test:\n${content}`,`${content}Extra text`,`${content}\n${content}`,`\x60\x60\x60json\n${json}`,`\x60\x60\x60json\n{broken}\n\x60\x60\x60`, `\x60\x60\x60json\n${JSON.stringify({case:{...candidate,steps:[]}})}\n\x60\x60\x60`]){
+    content=invalid;await assert.rejects(draft(),/valid test/);
+  }
+  content=`\x60\x60\x60json\n${json}\n\x60\x60\x60`;finish='length';
+  await assert.rejects(draft(),/output limit/);
+});

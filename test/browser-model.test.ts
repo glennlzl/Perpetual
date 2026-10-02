@@ -83,3 +83,22 @@ test('the escalation model defaults to a strong model the catalog has, else the 
   catalog(['openai/gpt-5.4-mini','qwen/qwen3']);
   assert.equal((await createOpenRouterModelCatalog().view('qwen/qwen3')).defaultEscalationModel,'qwen/qwen3','Without a strong model, repairs escalate to the Settings model.');
 });
+
+
+test('draft effort uses cached catalog capabilities and never guesses support from a model name',async t=>{
+  let calls=0;
+  t.mock.method(globalThis,'fetch',async(_url:unknown,options:RequestInit)=>{
+    calls++;assert.equal(new Headers(options.headers).has('Authorization'),false);
+    return Response.json({data:[
+      ['low',{supported_efforts:['high','medium','low']}],['high',{supported_efforts:['high']}],
+      ['any',{supported_efforts:null}],['missing',{}],['malformed',{supported_efforts:'low'}],
+    ].map(([name,reasoning])=>({id:`vendor/${name}`,name,reasoning,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))});
+  });
+  const catalog=createOpenRouterModelCatalog();
+  await catalog.view();
+  for(const name of ['low','any'])assert.deepEqual(await catalog.draftReasoning(`vendor/${name}`),{effort:'low',exclude:true});
+  for(const name of ['high','missing','malformed','unknown'])assert.deepEqual(await catalog.draftReasoning(`vendor/${name}`),{exclude:true});
+  assert.equal(calls,1,'Drafting reuses the settings catalog without transmitting credentials');
+  t.mock.method(globalThis,'fetch',async()=>{throw new Error('Catalog unavailable');});
+  assert.deepEqual(await createOpenRouterModelCatalog().draftReasoning('vendor/low'),{exclude:true},'An unavailable catalog retains provider defaults rather than guessing an unsupported effort');
+});
