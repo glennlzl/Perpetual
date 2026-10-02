@@ -114,8 +114,6 @@ test('The default provisioning email ignores ambient Git configuration overrides
 
 // A service that provisions its own test keys, in the shape of the Stripe adapter; `run` is scripted per test.
 const SECRET = 'rkcs_test_provisioned_fixture', PUBLIC = 'pk_test_provisioned_fixture', CLAIM = 'https://dashboard.example.test/claim/fixture';
-const DAY = 86_400_000;
-const day = (at: Date, days = 0) => new Date(at.getTime() + days * DAY).toISOString().slice(0, 10);
 async function provisionStore(t: TestContext, { run, at = new Date('2026-09-24T12:00:00Z') }: { run: Scripted; at?: Date }) {
   const dataDir = join(await mkdtemp(join(tmpdir(), 'perpetual-provision-')), 'data');
   t.after(() => rm(dirname(dataDir), { recursive: true, force: true }));
@@ -177,7 +175,7 @@ test('Oversized provision metadata cannot replace the credentials without their 
   assert.deepEqual((await f.store.values()).sandbox, { KEY: `${SECRET}_3`, PUBLIC });
 });
 
-test('A save that ends a provision keeps none of its values, which would never be renewed or expire', async t => {
+test('A save that ends a provision keeps none of its values beyond expiry', async t => {
   const f = await provisionStore(t, { run: async (ctx, n) => issued('2026-10-01', n) });
   await f.store.provision('sandbox', { email: 'dev@example.test' });
   await f.store.set('sandbox', { PUBLIC: 'pk_test_own_fixture' });
@@ -185,7 +183,6 @@ test('A save that ends a provision keeps none of its values, which would never b
   f.clock.at = new Date('2026-10-20T00:00:00Z');
   assert.deepEqual((await f.store.values()).sandbox, { PUBLIC: 'pk_test_own_fixture' }, 'The sandbox key is gone after its expiry too.');
   assert.deepEqual(missingInputs(f.sandbox, (await f.store.values()).sandbox), ['KEY']);
-  assert.deepEqual(await f.store.refresh(), []);
   // Without a provision, a save keeps the user's other values.
   await f.store.set('sandbox', { KEY: 'sk_test_own_fixture' });
   assert.deepEqual((await f.store.values()).sandbox, { KEY: 'sk_test_own_fixture', PUBLIC: 'pk_test_own_fixture' });
@@ -219,50 +216,24 @@ test('An expired provision leaves its service blocked, and keys set afterwards s
   assert.deepEqual((await f.store.values()).sandbox, { KEY: 'sk_test_own_fixture' });
 });
 
-test('Refresh renews a provision that expires by tomorrow from its stored inputs and reports a failure without throwing', async t => {
-  let failing = false, f: Awaited<ReturnType<typeof provisionStore>>;
-  f = await provisionStore(t, { run: async (ctx, n) => { if (failing) throw new Error('Could not create a sandbox.'); return issued(day(f.clock.at, 7), n); } });
+test('An expired sandbox is replaced only by another explicit provision', async t => {
+  const f = await provisionStore(t, { run: async (_ctx, n) => issued(n === 1 ? '2026-10-01' : '2026-10-08', n) });
   await f.store.provision('sandbox', { email: 'owner@example.test' });
-  assert.deepEqual(await f.store.refresh(), [], 'A week from expiry nothing is renewed.');
-  f.clock.at = new Date(f.clock.at.getTime() + 5 * DAY);
-  assert.deepEqual(await f.store.refresh(), [], 'Two days from expiry nothing is renewed.');
-  f.clock.at = new Date(f.clock.at.getTime() + DAY);
-  assert.deepEqual(await f.store.refresh(['database']), [], 'Only the named services are renewed.');
-  assert.deepEqual(await f.store.refresh(['database', 'sandbox', 'sandbox']), [{ id: 'sandbox' }]);
-  assert.equal(f.calls.length, 2);
-  assert.deepEqual(f.calls[1].inputs, { email: 'owner@example.test' });
-  assert.deepEqual((await f.store.values()).sandbox, { KEY: `${SECRET}_2`, PUBLIC });
-  assert.equal((await records(f.dataDir)).sandbox.expiresAt, day(f.clock.at, 7));
-
-  failing = true;
-  f.clock.at = new Date(f.clock.at.getTime() + 7 * DAY);
-  const expired = await records(f.dataDir);
-  assert.deepEqual(await f.store.refresh(), [{ id: 'sandbox', error: 'Could not create a sandbox.' }]);
-  assert.deepEqual(await records(f.dataDir), expired, 'A failed renewal keeps the expired record.');
-  assert.deepEqual(missingInputs(f.sandbox, (await f.store.values()).sandbox), ['KEY']);
-});
-
-test('A manual save made as a renewal starts wins, and the renewal stores nothing', async t => {
-  let release = () => {};
-  const held = new Promise<void>(resolve => { release = resolve; });
-  const f = await provisionStore(t, { run: async (ctx, n) => { if (n > 1) await held; return issued(n > 1 ? '2026-10-07' : '2026-10-01', n); } });
-  await f.store.provision('sandbox', { email: 'dev@example.test' });
-  f.clock.at = new Date('2026-09-30T12:00:00Z');
-  // The save is not refused: the renewal has not started its provisioning yet.
-  const renewal = f.store.refresh(['sandbox']);
-  await f.store.set('sandbox', { KEY: 'sk_test_claimed_fixture' });
-  release();
-  assert.deepEqual(await renewal, [{ id: 'sandbox' }]);
-  assert.deepEqual((await f.store.values()).sandbox, { KEY: 'sk_test_claimed_fixture' });
-  assert.deepEqual(await records(f.dataDir), {});
+  f.clock.at = new Date('2026-10-01T00:00:00Z');
+  assert.deepEqual((await f.store.values()).sandbox, {});
   assert.equal((await f.store.view()).find(item => item.id === 'sandbox')!.provisioned, undefined);
-  assert.deepEqual((await readdir(f.dataDir)).sort(), ['twin-inputs.json', 'twin-provisions.json']);
+  assert.equal(f.calls.length, 1);
+  await f.store.provision('sandbox', { email: 'next-owner@example.test' });
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls[1].inputs, { email: 'next-owner@example.test' });
+  assert.deepEqual((await f.store.values()).sandbox, { KEY: `${SECRET}_2`, PUBLIC });
+  assert.deepEqual(await records(f.dataDir), { sandbox: { inputs: { email: 'next-owner@example.test' }, expiresAt: '2026-10-08', claimUrl: CLAIM,
+    account: 'acct_fixture2', provisionedAt: '2026-10-01T00:00:00.000Z' } });
 });
 
-test('One provision runs per service at a time, across stores; a refresh waits for it and a manual save is refused', async t => {
+test('One explicit provision runs per service across stores and refuses a concurrent manual save', async t => {
   const gates = new Map<number, Promise<void>>(), hold = (n: number) => { let release = () => {}; gates.set(n, new Promise<void>(resolve => { release = resolve; })); return () => release(); };
-  // Each sandbox expires tomorrow, so it is always due for renewal.
-  const f = await provisionStore(t, { run: async (ctx, n) => { await gates.get(n); return issued('2026-09-25', n); } });
+  const f = await provisionStore(t, { run: async (_ctx, n) => { await gates.get(n); return issued('2026-10-01', n); } });
   const other = createTwinInputs(f.options);
   const release = hold(1), first = f.store.provision('sandbox', { email: 'dev@example.test' });
   await assert.rejects(other.provision('sandbox', { email: 'dev@example.test' }), (error: Failure) => error.statusCode === 409 && error.message === 'Sandbox payments setup is already running.');
@@ -270,23 +241,26 @@ test('One provision runs per service at a time, across stores; a refresh waits f
   release();
   await first;
   assert.equal(f.calls.length, 1);
-  // Two refreshes at once make one renewal.
-  const [renewed, waited] = await Promise.all([f.store.refresh(), other.refresh()]);
-  assert.deepEqual([renewed, waited], [[{ id: 'sandbox' }], [{ id: 'sandbox' }]]);
-  assert.equal(f.calls.length, 2);
-  // A refresh while the user's provisioning runs waits for it instead of starting another.
-  const again = hold(3), user = f.store.provision('sandbox', { email: 'owner@example.test' }), waiting = other.refresh();
-  await new Promise(resolve => setTimeout(resolve, 200));
+
+  // Reading inputs during an explicit replacement keeps the current account until the new one is saved.
+  const again = hold(2), user = f.store.provision('sandbox', { email: 'owner@example.test' });
+  assert.deepEqual((await other.values()).sandbox, { KEY: `${SECRET}_1`, PUBLIC });
+  await assert.rejects(other.set('sandbox', { KEY: 'sk_test_own_fixture' }), (error: Failure) => error.statusCode === 409);
   again();
   await user;
-  assert.deepEqual(await waiting, [{ id: 'sandbox' }]);
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual((await other.values()).sandbox, { KEY: `${SECRET}_2`, PUBLIC });
   assert.deepEqual((await records(f.dataDir)).sandbox.inputs, { email: 'owner@example.test' });
+
   // Stores of different data directories never block each other.
   const elsewhere = await provisionStore(t, { run: async () => issued('2026-10-01') });
-  const busy = f.store.provision('sandbox', { email: 'dev@example.test' });
+  const finish = hold(3), busy = f.store.provision('sandbox', { email: 'dev@example.test' });
   await elsewhere.store.provision('sandbox', { email: 'dev@example.test' });
+  finish();
   await busy;
+  await other.set('sandbox', { KEY: 'sk_test_own_fixture' });
+  assert.deepEqual((await f.store.values()).sandbox, { KEY: 'sk_test_own_fixture' });
+  assert.deepEqual(await records(f.dataDir), {});
 });
 
 test('Claimable sandbox keys pass the Stripe input patterns', async t => {

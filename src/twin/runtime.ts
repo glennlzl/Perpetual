@@ -11,7 +11,7 @@ import { missingInputs } from './inputs.ts';
 import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
 import type { HostPorts, ResolvedService } from './compose.ts';
-import type { CommandOutput, InputValues, ServiceContext, ServiceOutputs, TwinServices } from './registry.ts';
+import type { CommandOutput, InputValues, ServiceContext, ServiceHealthContainer, ServiceOutputs, TwinServices } from './registry.ts';
 import { hide, redact as redactSecrets } from '../redaction.ts';
 import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
@@ -202,6 +202,28 @@ const parsePs = (stdout: unknown): ComposePs[] => {
   const entries: unknown = text.startsWith('[') ? JSON.parse(text) : text.split('\n').filter(Boolean).map(line => JSON.parse(line));
   return (Array.isArray(entries) ? entries : []).map(entry => fields(entry) ?? {});
 };
+
+// Inspect only named resources, and return no environment, health-command output or other private configuration.
+const HEALTH_FORMAT = '{"name":{{json .Name}},"state":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"exitCode":{{json .State.ExitCode}},"labels":{{json .Config.Labels}}}';
+function inspectedHealth(stdout: string, expected: ServiceHealthContainer[]): ContainerStatus[] {
+  const invalid = 'Docker did not report health for every owned service container.';
+  let entries: unknown[];
+  try { entries = stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as unknown); }
+  catch { return fail(invalid); }
+  const remaining = new Map(expected.map(item => [`/${item.name}`, item]));
+  if (remaining.size !== expected.length || entries.length !== expected.length) fail(invalid);
+  const containers = entries.map(entry => {
+    const value = fields(entry), owned = typeof value?.name === 'string' ? remaining.get(value.name) : undefined, labels = fields(value?.labels);
+    if (!value || !owned || !labels || Object.entries(owned.labels).some(([name, content]) => labels[name] !== content)
+      || typeof value.state !== 'string' || !['created', 'restarting', 'running', 'removing', 'paused', 'exited', 'dead'].includes(value.state)
+      || typeof value.health !== 'string' || !['starting', 'healthy', 'unhealthy'].includes(value.health)
+      || typeof value.exitCode !== 'number' || !Number.isInteger(value.exitCode)) return fail(invalid);
+    remaining.delete(value.name as string);
+    return { name: owned.name, state: value.state, health: value.health, exitCode: value.exitCode };
+  });
+  if (remaining.size) fail(invalid);
+  return containers;
+}
 
 const overall = (containers: ContainerStatus[]): TwinHealth['status'] => !containers.length ? 'stopped'
   : containers.some(item => ['exited', 'dead'].includes(item.state) || item.health === 'unhealthy') ? 'failed'
@@ -452,8 +474,22 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const twin = locate(dataDir, id);
     if (!await exists(twin.compose)) return { status: 'stopped', containers: [] };
     const state = await readState(twin.state);
-    const { stdout } = await operations.run({ timeoutMs: READ_TIMEOUT_MS }, () => docker(composeArgs(twin, 'ps', '--all', '--format', 'json'), { redact: redactor(state?.secrets ?? []) }));
+    const redact = redactor(state?.secrets ?? []);
+    const { stdout } = await operations.run({ timeoutMs: READ_TIMEOUT_MS }, () => docker(composeArgs(twin, 'ps', '--all', '--format', 'json'), { redact }));
     const containers = parsePs(stdout).map(item => ({ name: String(item.Service), state: String(item.State), health: typeof item.Health === 'string' && item.Health ? item.Health : null, exitCode: typeof item.ExitCode === 'number' ? item.ExitCode : null }));
+    // A separate service stack cannot supply the twin's missing Compose containers.
+    if (!containers.length) return { status: 'stopped', containers };
+    // Blocked services have no resource record. A restarted controller reads the same owned names from the adapter.
+    for (const record of state?.services ?? []) {
+      const definition = services[record.id];
+      if (!definition?.healthContainers) continue;
+      try {
+        const expected = await definition.healthContainers({ project: twin.project, dir: join(twin.dir, 'services', record.id) });
+        if (!expected.length) continue;
+        const inspected = await operations.run({ timeoutMs: READ_TIMEOUT_MS }, () => docker(['inspect', '--type', 'container', '--format', HEALTH_FORMAT, ...expected.map(item => item.name)], { redact }));
+        containers.push(...inspectedHealth(inspected.stdout, expected));
+      } catch (error) { throw new Error(`${definition.title}: ${redactSecrets(redact((error as Error).message))}`); }
+    }
     return { status: overall(containers), containers };
   }
 

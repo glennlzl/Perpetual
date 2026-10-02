@@ -42,6 +42,7 @@ export function journeyResult(approved:ApprovedJourney,reported:unknown,steps:re
   // Untrusted worker facts: only their checked fields count.
   const facts=isRecord(reported)?reported:{};
   if(facts.caseId!==approved.id)throw new Error('Browser runtime returned an unknown case.');
+  if(facts.controlRead!==undefined&&typeof facts.controlRead!=='boolean')throw new Error('Browser runtime returned invalid control evidence.');
   const stop=facts.stopCause;
   if(!stopCauses.has(stop))throw new Error('Browser runtime returned an invalid stop cause.');
   const blockers=reportedBlockers(approved,facts.blockers),checks=finalChecks(approved,facts.assertions);
@@ -68,7 +69,7 @@ export function journeyResult(approved:ApprovedJourney,reported:unknown,steps:re
     return assertions.length||(approved.steps||[]).some(step=>step.checks?.length)?['passed',null]:['needs_review','The journey has no reviewed checks or final assertions.'];
   }
   const [status,error]=decide();
-  return {caseId:approved.id,status,engine:'playwright',assertions,...(blockers?.length?{blockers}:{}),...(error?{error}:{})};
+  return {caseId:approved.id,status,engine:'playwright',assertions,...(facts.controlRead===undefined?{}:{controlRead:facts.controlRead as boolean}),...(blockers?.length?{blockers}:{}),...(error?{error}:{})};
 }
 
 const rollUp=['failed','blocked','needs_review','cancelled'] as const;

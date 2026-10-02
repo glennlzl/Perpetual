@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { parse as parseToml } from 'smol-toml';
 import { relative } from '../paths.ts';
 import { bridgeSupabaseImportMaps } from '../supabase-import-maps.ts';
 import type { Json } from '../config.ts';
@@ -36,6 +37,26 @@ const PROJECT_ID = 40;
 const projectId = ({ project }: { project: string }) => project.length <= PROJECT_ID ? project
   : `${project.slice(0, PROJECT_ID - 9)}-${createHash('sha256').update(project).digest('hex').slice(0, 8)}`;
 const workdir = (ctx: Pick<Context, 'dir'>) => join(ctx.dir, 'supabase');
+async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
+  const invalid = 'Supabase health needs its readable owned project config.', file = join(workdir(ctx), 'supabase/config.toml');
+  let config: Record<string, unknown>;
+  try {
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw new Error(invalid);
+    config = parseToml(await readFile(file, 'utf8'));
+  } catch { throw new Error(invalid); }
+  const project = projectId(ctx);
+  if (config.project_id !== project) throw new Error(invalid);
+  const enabled = (name: string) => {
+    const section = config[name];
+    if (section === undefined) return true;
+    if (!object(section) || section.enabled !== undefined && typeof section.enabled !== 'boolean') throw new Error(invalid);
+    return section.enabled !== false;
+  };
+  // CLI 2.118.0 always starts Kong without --exclude; api.enabled only controls PostgREST.
+  return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
+    .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
+}
 const cli = (ctx: Pick<Context, 'dir' | 'exec'>, ...args: string[]) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir });
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseEnv = (text: string): Record<string, string> => Object.fromEntries(text.split('\n').map(line => line.trim().match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
@@ -216,6 +237,7 @@ export default {
     return { url: ctx.url('api'), anonKey: status.ANON_KEY, serviceRoleKey: status.SERVICE_ROLE_KEY, jwtSecret: status.JWT_SECRET, dbUrl: db.href };
   },
   containers: () => [], // the CLI owns the stack's containers
+  healthContainers,
   env: ({ outputs: o }) => ({
     SUPABASE_URL: o.url, SUPABASE_ANON_KEY: o.anonKey, SUPABASE_SERVICE_ROLE_KEY: o.serviceRoleKey, SUPABASE_JWT_SECRET: o.jwtSecret,
     DATABASE_URL: o.dbUrl, NEXT_PUBLIC_SUPABASE_URL: o.url, NEXT_PUBLIC_SUPABASE_ANON_KEY: o.anonKey,

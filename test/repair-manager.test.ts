@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import fs, { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagnoseFailure } from '../src/providers.ts';
@@ -26,6 +27,22 @@ const run = (id: string, sha: string, conclusion: string | null, { status = conc
 const shown = (id: string, path = CI) => ({ id, name: 'CI', path, url: `https://github.com/owner/app/actions/runs/${id}` });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 const aborted = (signal: AbortSignal) => new Promise<void>(done => { if (signal.aborted) done(); else signal.addEventListener('abort', () => done(), { once: true }); });
+// Hold the first terminal save at the filesystem boundary; all writes still use the real store.
+async function holdTerminalSave(t: TestContext, dataDir: string) {
+  const entered = deferred(), release = deferred(), write = fs.writeFile, root = await realpath(join(dataDir, 'repairs'));
+  let held = false;
+  const saving = t.mock.method(fs, 'writeFile', async (...args: Parameters<typeof write>) => {
+    const [path, content] = args;
+    if (!held && typeof path === 'string' && path.startsWith(join(root, '.state-')) && typeof content === 'string' && content.includes('"status":"needs-person"')) {
+      held = true;
+      entered.resolve();
+      await release.promise;
+    }
+    return write(...args);
+  });
+  syncBuiltinESMExports();
+  return { entered: entered.promise, release: release.resolve, restore() { saving.mock.restore(); syncBuiltinESMExports(); } };
+}
 async function until(check: () => unknown) {
   for (let attempt = 0; attempt < 500; attempt++) { if (check()) return; await new Promise(done => setTimeout(done, 2)); }
   throw new Error('The repair did not settle.');
@@ -215,6 +232,89 @@ test('without an OpenRouter API key or an agent step, a repair that needs the ag
       await h.manager.idle();
       assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.category], ['needs-person', reason, 'build']);
     });
+  }
+});
+
+test('retrying a finished repair waits for its terminal save before opening the next repair', async t => {
+  let configured = false;
+  const a = agent(undefined, { unavailable: () => configured ? null : 'Add an OpenRouter API key in Settings.' });
+  const h = await harness(t, { steps: a.steps });
+  h.github.runs[A] = [run('1', A, 'failure')];
+  await h.poll();
+  const saving = await holdTerminalSave(t, h.dataDir);
+  try {
+    await h.manager.repair({ runId: '1' });
+    await saving.entered;
+    assert.equal(h.repair(A)?.status, 'needs-person', 'The terminal outcome is visible while its save is outstanding.');
+    assert.equal((await h.saved()).repairs[0].status, 'triaging');
+    configured = true;
+    const again = h.manager.repair({ runId: '1' }).then(view => ({ view }), (error: HttpError) => ({ error }));
+    // Drain this turn's immediate GitHub reads while the terminal filesystem operation stays held.
+    await new Promise<void>(done => setImmediate(done));
+    assert.equal(h.manager.view().repairs.length, 1, 'No next repair is admitted before the finished execution is saved.');
+    saving.release();
+    const result = await again;
+    assert.ok('view' in result, 'error' in result ? `${result.error.statusCode}: ${result.error.message}` : undefined);
+    assert.equal(result.view.repairs.length, 2);
+    await h.manager.idle();
+    assert.deepEqual((await h.saved()).repairs.map(repair => repair.status), ['ready', 'needs-person']);
+    assert.equal(a.contexts.length, 1, 'Only the new, configured repair reaches the agent.');
+  } finally {
+    saving.release();
+    await h.manager.idle();
+    saving.restore();
+  }
+});
+
+test('a retry waiting for a finished repair revalidates source, account and failed-run evidence', async t => {
+  for (const changed of ['source', 'account', 'run'] as const) await t.test(changed, async t => {
+    const a = agent(undefined, { unavailable: () => 'Add an OpenRouter API key in Settings.' });
+    const h = await harness(t, { steps: a.steps });
+    h.github.runs[A] = [run('1', A, 'failure')];
+    await h.poll();
+    const saving = await holdTerminalSave(t, h.dataDir);
+    try {
+      await h.manager.repair({ runId: '1' });
+      await saving.entered;
+      const again = h.manager.repair({ runId: '1' }).then(view => ({ view }), (error: HttpError) => ({ error }));
+      await new Promise<void>(done => setImmediate(done));
+      if (changed === 'source') h.current.rootDirectory = '/client';
+      if (changed === 'account') h.github.connection = { login: 'another-developer', repository: 'owner/app' };
+      if (changed === 'run') h.github.runs[A] = [run('1', A, 'success', { attempt: 2 })];
+      saving.release();
+      const result = await again;
+      assert.ok('error' in result, 'A changed admission condition cannot start the requested repair.');
+      assert.equal(result.error.statusCode, 409);
+      const expected = { source: 'The active source changed. Reload the pipeline.', account: 'The GitHub connection changed. Start the repair again.', run: 'Choose a failed workflow run.' };
+      assert.equal(result.error.message, expected[changed]);
+      assert.deepEqual([h.manager.view().repairs.length, a.contexts.length], [1, 0]);
+    } finally {
+      saving.release();
+      await h.manager.idle();
+      saving.restore();
+    }
+  });
+});
+
+test('a normal terminal repair still refuses a retry while resource cleanup is pending or failed', async t => {
+  const entered = deferred(), release = deferred();
+  const a = agent(async () => ({ status: 'failed' }), { async cleanup() { entered.resolve(); await release.promise; throw new Error('Docker removal failed'); } });
+  const h = await harness(t, { steps: a.steps });
+  try {
+    await h.failHead([run('2', B, 'failure')]);
+    await entered.promise;
+    const again = h.manager.repair({ runId: '2' }).then(view => ({ view }), (error: HttpError) => ({ error }));
+    const result = await Promise.race([again, new Promise<null>(done => setImmediate(() => done(null)))]);
+    assert.ok(result && 'error' in result, 'Pending resource cleanup refuses admission without waiting for that cleanup.');
+    assert.deepEqual([result.error.statusCode, result.error.message], [409, 'The previous repair is still ending. Try again.']);
+    release.resolve();
+    await h.manager.idle();
+    await assert.rejects(h.manager.repair({ runId: '2' }), (error: HttpError) => error.statusCode === 409 && error.message === 'The previous repair is still ending. Try again.');
+    assert.deepEqual([h.manager.view().repairs.length, a.contexts.length], [1, 1]);
+    assert.equal(h.repair(B)?.cleanup?.status, 'failed');
+  } finally {
+    release.resolve();
+    await h.manager.idle();
   }
 });
 

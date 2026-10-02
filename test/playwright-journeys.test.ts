@@ -172,10 +172,11 @@ async function verified({manager,context}:Progress,{id=journey.id,seconds=90}={}
 }
 
 test('a draft spec passes its reviewed journey with live frames, actions and a recording, and is approved after its verification',{timeout:180000},async t=>{
-  const f=await setup(t);
+  const persisted={...journey,steps:journey.steps.map(step=>step.id==='save-name'?{...step,checks:step.checks.filter(check=>check.type!=='text-visible')}:step)};
+  const f=await setup(t,{item:persisted});
   const uncoded=await finished(f,(await f.run()).run.id);
   assert.equal(uncoded.results[0].error,'Generate and approve code for this journey.');
-  const {draft}=await f.draft(spec());
+  const {draft}=await f.draft(spec().replace("await page.getByRole('button', { name: 'Save' }).click();","await page.getByRole('button', { name: 'Save' }).click(); await page.waitForLoadState('load'); await page.reload();"));
   const gated=await finished(f,(await f.manager.run(f.context,{credentials:account})).run.id);
   assert.equal(gated.results[0].error,'Generate and approve code for this journey.','Only a person runs a draft.');
   const {run}=await f.run();
@@ -186,9 +187,9 @@ test('a draft spec passes its reviewed journey with live frames, actions and a r
   const [progress]=report.progress.cases;
   assert.deepEqual(progress.steps!.map(step=>[step.id,step.status]),journey.steps.map(step=>[step.id,'completed']));
   // The number read before saving is compared after it.
-  assert.deepEqual(progress.steps!.flatMap(step=>step.checks!.map(check=>['name' in check?check.name:check.value,check.passed,check.observed])),[['/settings',true,undefined],['before',true,10],['Saved',true,undefined],['after',true,9],['Signed in as Twin Tester',true,undefined]]);
-  assert.match(progress.steps![1].evidence??'',/^Reviewed checks passed: Text visible “Saved”; Credits 9 < before 10\.$/);
-  assert.deepEqual(progress.actions.map(action=>action.type),['sign_in_with_test_account','input','click','reload_page']);
+  assert.deepEqual(progress.steps!.flatMap(step=>step.checks!.map(check=>['name' in check?check.name:check.value,check.passed,check.observed])),[['/settings',true,undefined],['before',true,10],['after',true,9],['Signed in as Twin Tester',true,undefined]]);
+  assert.match(progress.steps![1].evidence??'',/^Reviewed checks passed: Credits 9 < before 10\.$/);
+  assert.deepEqual(progress.actions.map(action=>action.type),['sign_in_with_test_account','input','click','wait','reload_page','reload_page']);
   assert.ok(progress.actions.every(action=>action.status==='passed'));
   const frame=await f.manager.frame(f.context,run.id,journey.id);
   assert.ok(frame!.length>100&&frame![0]===0xff&&frame![1]===0xd8,'A JPEG frame reached the live view.');
@@ -202,7 +203,7 @@ test('a draft spec passes its reviewed journey with live frames, actions and a r
   const control=(await f.manager.view(f.context)).runs.find(item=>item.verification?.control)!,result=control.results![0];
   assert.deepEqual([result.status,result.error],['failed','Milestone check failed: Save the display name Twin Tester.']);
   const saved=(await f.manager.runProgress(f.context,control.id)).progress!.cases[0].steps![1];
-  assert.deepEqual([saved.status,(saved.checks![0] as {value?:string}).value,saved.checks![0].passed],['failed','Saved',false]);
+  assert.deepEqual([saved.status,(saved.checks![0] as {label?:string}).label,saved.checks![0].passed],['failed','Credits',false]);
   assert.equal(f.app.posts.filter(post=>post==='POST /settings').length,4,'Only the four unblocked runs saved the name.');
   await f.manager.approveSpec(f.context,{caseId:journey.id,hash:draft!.hash});
   assert.equal((await f.manager.view(f.context)).specs[journey.id].approved?.hash,draft!.hash);
@@ -219,7 +220,7 @@ test('a control run blocks every write from the page but lets the fixture sign i
   assert.deepEqual(steps.map(event=>`${event.stepId}:${event.status}`),['open-settings:running','open-settings:completed','save-name:running','save-name:failed']);
   assert.equal(steps.at(-1)?.evidence,'Reviewed check failed: Text visible “Saved”.');
   const facts=events.at(-1)?.result;
-  assert.deepEqual(facts,{caseId:journey.id,assertions:[],stopCause:'none'});
+  assert.deepEqual(facts,{caseId:journey.id,assertions:[],controlRead:false,stopCause:'none'});
   assert.equal(journeyResult(journey,facts,journey.steps.map(({id,title},index)=>({id,title,status:['completed','failed','pending'][index]}))).status,'failed');
   // The same code without the block saves the name.
   await runSpec(target,spec());

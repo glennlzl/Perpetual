@@ -25,6 +25,8 @@ A case stores an immutable goal, preconditions, expected outcomes and independen
 
 Generated cases are unselected drafts; a person saves a review before a case can be selected. Missing business inputs are stated as preconditions, never invented credentials. Generated code performs the journey's actions and contains no checks; the reviewed checks run on the page from the approved case. Finished code without passing checks is `needs_review`, never `passed`. Checks prove only their declared observations; database and API oracles are future work.
 
+Approval requires three passing runs and a caught write-blocked control. Under check version 3, a caught control needs a failed reviewed outcome check after a blocked change and a successful fresh GET of the judged page; a missing acknowledgement or a blocked read alone cannot qualify. Earlier approvals are stale, with code and history preserved for explicit reuse, verification and approval. A restart starts no generation or verification. The precise evidence rules and unsupported reads are in [Verification](../journeys.md#verification).
+
 The milestone protocol, verdict and scheduling are specified in [Journey contract](journey-contract.md).
 
 ## Runtime and presentation

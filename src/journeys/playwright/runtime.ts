@@ -8,13 +8,14 @@ import { superviseWorker, workerTimeoutMs, type BrowserWorkerInput, type WorkerE
 import { validateRunCredentials, type RunCredentials } from '../../browser/run-credentials.ts';
 import { HOST as TWIN_HOST } from '../../twin/compose.ts';
 import { CHECK_VERSION, sameOrigin, type ApprovedCase } from './checks.ts';
+import { createLifecycleRecorder, lifecycleEvent, lifecycleError } from './diagnostics.ts';
 
 /** A Playwright project of a journey workspace's config. */
 export type JourneyProject = { name: string; testDir: string; testMatch?: string; testIgnore?: string };
 export type JourneyWorkspaceOptions = { item: ApprovedCase; targetUrl: string; timeoutSeconds: number; projects?: JourneyProject[]; video?: boolean };
 export type JourneyEnvironmentOptions = {
   hash: string; targetUrl: string; allowedOrigins?: string[]; credentials?: RunCredentials; signInUrl?: string; videoDir?: string;
-  checkTimeoutMs?: number; events?: boolean; blockWrites?: boolean; checkVersion?: number;
+  checkTimeoutMs?: number; events?: boolean; blockWrites?: boolean; checkVersion?: number; diagnostics?: boolean;
 };
 /**
  * One journey run as the browser manager starts it: the approved case snapshot, its approved spec and the check version
@@ -70,7 +71,7 @@ export async function writeJourneyWorkspace(workspace: string, { item, targetUrl
  * control run, and checkVersion is what its reviewed checks read. Every call draws a new run token, so each journey process, and each
  * attempt of a verification, types its own values.
  */
-export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION }: JourneyEnvironmentOptions): Record<string, string> {
+export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION, diagnostics = false }: JourneyEnvironmentOptions): Record<string, string> {
   const childEnv: Record<string, string> = { FORCE_COLOR: '0' };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH']) if (typeof values[key] === 'string') childEnv[key] = values[key];
   return Object.assign(childEnv, {
@@ -78,6 +79,7 @@ export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string,
     PERPETUAL_CASE: join(workspace, 'case.json'), PERPETUAL_SPEC_HASH: hash, PERPETUAL_CHECK_TIMEOUT_MS: String(checkTimeoutMs), PERPETUAL_CHECK_VERSION: String(checkVersion),
     PERPETUAL_TARGET_URL: targetUrl, PERPETUAL_ALLOWED_ORIGINS: JSON.stringify(allowedOrigins), PERPETUAL_RUN_TOKEN: runToken(),
     ...(videoDir ? { PERPETUAL_VIDEO_DIR: videoDir } : {}), ...(blockWrites ? { PERPETUAL_BLOCK_WRITES: '1' } : {}),
+    ...(diagnostics && events && !blockWrites ? { PERPETUAL_LIFECYCLE_DIAGNOSTICS: '1' } : {}),
     ...(credentials ? { PERPETUAL_ACCOUNT_USERNAME: credentials.username, PERPETUAL_ACCOUNT_PASSWORD: credentials.password } : {}),
     ...(signInUrl ? { PERPETUAL_SIGN_IN_URL: signInUrl } : {}),
   });
@@ -87,7 +89,7 @@ export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string,
  * Runs one journey's code as its own `playwright test` process. A private workspace holds the approved case snapshot,
  * the spec and a generated config. input.blockWrites runs it as a verification's control run.
  */
-export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10000 }: { env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv); checkTimeoutMs?: number } = {}) {
+export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10000, diagnosticsDir }: { env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv); checkTimeoutMs?: number; diagnosticsDir?: string } = {}) {
   let preflight: PlaywrightCapabilities | null = null, checkedAt = 0;
   return {
     async capabilities(): Promise<PlaywrightCapabilities> {
@@ -105,20 +107,47 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       if (!Number.isInteger(checkVersion) || checkVersion < 1 || checkVersion > CHECK_VERSION) throw new Error('A Playwright journey needs a known check version.');
       const signInUrl: unknown = input.signInUrl;
       if (signInUrl !== undefined && (typeof signInUrl !== 'string' || !sameOrigin(signInUrl, input.targetUrl))) throw new Error('A Playwright journey’s sign-in page must be on its application URL’s origin.');
-      let job: WorkerJob | null = null, cancelled = false;
+      const values = typeof env === 'function' ? env() : env;
+      const diagnostic = createLifecycleRecorder({ directory: diagnosticsDir ?? values.PERPETUAL_PLAYWRIGHT_DIAGNOSTICS_DIR, blockWrites: input.blockWrites === true, secrets: credentials ? [credentials.username, credentials.password] : [] });
+      let job: WorkerJob | null = null, cancelled = false, failed = false;
       const promise = (async () => {
         const workspace = await mkdtemp(join(tmpdir(), 'perpetual-playwright-'));
         try {
           const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds });
           await writeFile(join(workspace, 'journey.spec.mjs'), input.spec.code);
-          const childEnv = journeyEnvironment(typeof env === 'function' ? env() : env, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion });
+          const childEnv = journeyEnvironment(values, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion, diagnostics: diagnostic.enabled });
           if (cancelled) throw new Error('Browser operation cancelled.');
           // Playwright finishes the test, its recordings and its reporter on SIGINT.
-          job = superviseWorker({ command: process.execPath, args: [PLAYWRIGHT_CLI, 'test', '--config', config], cwd: workspace, env: childEnv, onEvent, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], unavailable: 'Playwright is unavailable. Run npm install.' });
+          job = superviseWorker({ command: process.execPath, args: [PLAYWRIGHT_CLI, 'test', '--config', config], cwd: workspace, env: childEnv, onEvent: event => {
+            // Retention does not depend on optional diagnostic delivery. These are existing result facts,
+            // observed without changing them or the controller's verdict.
+            if (event.type === 'journey-step' && event.status === 'failed') failed = true;
+            if (event.type === 'result' && event.result && typeof event.result === 'object') {
+              const facts = event.result as Record<string, unknown>;
+              if (facts.stopCause === 'action' || facts.stopCause === 'deadline' || Array.isArray(facts.assertions) && facts.assertions.some(value => value && typeof value === 'object' && value.passed === false)) failed = true;
+            }
+            onEvent(event);
+          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], unavailable: 'Playwright is unavailable. Run npm install.',
+            ...(diagnostic.enabled ? {
+              onLifecycle: event => diagnostic.record({ ...event, source: 'supervisor' }),
+              onDiagnostic: value => {
+                const event = lifecycleEvent(value);
+                if (!event || !['fixture', 'reporter'].includes(event.source)) return;
+                if (event.source === 'reporter' && event.name === 'reporter-end' && event.failed === true) failed = true;
+                diagnostic.record(event);
+              },
+            } : {}),
+          });
           await job.promise;
-        } finally { await rm(workspace, { recursive: true, force: true }).catch(() => {}); }
+        } catch (error) { failed = true; diagnostic.record({ source: 'runtime', name: 'runtime-end', error: lifecycleError(error) }); throw error; }
+        finally {
+          await rm(workspace, { recursive: true, force: true }).catch(() => {});
+          diagnostic.record({ source: 'runtime', name: 'runtime-end', failed });
+          // Optional filesystem I/O cannot hold the completed worker or its environment lease.
+          void diagnostic.finish(failed);
+        }
       })();
-      return { promise, cancel() { cancelled = true; job?.cancel(); } };
+      return { promise, cancel() { cancelled = true; diagnostic.record({ source: 'runtime', name: 'runtime-cancel' }); job?.cancel(); } };
     },
   };
 }

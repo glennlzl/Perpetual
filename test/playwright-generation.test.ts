@@ -177,8 +177,8 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
 
 test('a generated draft is approved only after its verification, and regenerating keeps the approved code',async t=>{
   let result='passed';
-  // A journey whose checks notice: the control run blocks every change, so its first check fails.
-  const events=(input:JourneyRunInput):WorkerEvent[]=>{const passed=result==='passed'&&!input.blockWrites;return [...input.case.steps!.flatMap(step=>[{type:'journey-step',caseId:input.case.id,stepId:step.id,status:'running'},{type:'journey-step',caseId:input.case.id,stepId:step.id,status:passed?'completed':'failed',evidence:'Reviewed checks evaluated.',checks:step.checks!.map(check=>({...check,passed}))}].slice(0,passed||step===input.case.steps![0]?2:0)),{type:'result',result:{caseId:input.case.id,stopCause:'none',assertions:[]}}];};
+  // Model the trusted fixture reporting a caught fresh-read failure; actual read eligibility is tested with Chromium.
+  const events=(input:JourneyRunInput):WorkerEvent[]=>{const passed=result==='passed'&&!input.blockWrites;return [...input.case.steps!.flatMap(step=>[{type:'journey-step',caseId:input.case.id,stepId:step.id,status:'running'},{type:'journey-step',caseId:input.case.id,stepId:step.id,status:passed?'completed':'failed',evidence:'Reviewed checks evaluated.',checks:step.checks!.map(check=>({...check,passed}))}].slice(0,passed||step===input.case.steps![0]?2:0)),{type:'result',result:{caseId:input.case.id,stopCause:'none',...(input.blockWrites?{controlRead:true}:{}),assertions:[]}}];};
   const f=await setup(t,{events});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   const hash=(await settled(f))!.draft!.hash;

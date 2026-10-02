@@ -357,11 +357,3 @@ test('Stripe setup fails when the CLI prints no signing secret', async () => {
   const ctx = await context<StripeContext>({ respond: () => 'Your API key is invalid', inputs: { secretKey: 'sk_test_key' }, options: { webhook: 'http://host.docker.internal:1/w' } });
   await assert.rejects(stripe.setup(ctx), /webhook signing secret/);
 });
-
-test('Stripe lists the Dashboard-only settings with links', () => {
-  assert.ok(stripe.checklist.length);
-  for (const item of stripe.checklist) {
-    assert.ok(item.id && item.title);
-    assert.match(item.url, /^https:\/\/dashboard\.stripe\.com\/test\//);
-  }
-});

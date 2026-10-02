@@ -33,6 +33,8 @@ const now=()=>new Date().toISOString();
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 const NO_CODE='Generate and approve code for this journey.',STALE_CODE='The approved code is for an earlier version of this journey.';
+const OLD_CODE='Reuse and verify the approved code again: its control evidence is out of date.';
+const UNREAD='The control did not check freshly read business data. Reload after the change, then check a run-unique value or a number against its earlier value.';
 const MISSED='The journey passed with every change blocked. Strengthen its checks.',UNJUDGED='No reviewed check noticed the blocked changes.',CHANGED='The journey changed during its verification. Verify its code again.';
 const active=(run:VerificationRun)=>['queued','running'].includes(run.status);
 const drafted=(item:BrowserCase,code:string,provenance?:unknown):StoredSpec=>({code,hash:specHash(code),caseHash:caseHash(item),savedAt:now(),...(provenance?{provenance:structuredClone(provenance)}:{})});
@@ -86,6 +88,7 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
     if(passes<3)return {status:'cancelled',passes,control:null};
     if(!result)return failed();
     if(result.status==='passed')return {status:'failed',passes,control:'missed',error:MISSED};
+    if(noticed(run,caseId,result)&&result.controlRead!==true)return {status:'failed',passes,control:'missed',error:UNREAD};
     return noticed(run,caseId,result)?{status:'passed',passes,control:'caught'}:failed(result.error?`${UNJUDGED} ${result.error}`:UNJUDGED);
   }
   return error?{status:'failed',passes,control:null,error}:{status:'cancelled',passes,control:null};
@@ -126,7 +129,7 @@ export function createJourneyCode(storage:Persistence){
         const generation=current.generations.get(item.id)||(storedFailure?{status:'failed' as const,...storedFailure}:undefined);
         const provenance=(spec:StoredSpec)=>spec.provenance?{provenance:structuredClone(spec.provenance)}:{};
         return [item.id,{
-          ...(approved?{approved:{hash:approved.hash,stale:approved.caseHash!==caseHash(item),approvedAt:approved.approvedAt,...provenance(approved)}}:{}),
+          ...(approved?{approved:{hash:approved.hash,stale:approved.caseHash!==caseHash(item)||(approved.checkVersion??1)!==CHECK_VERSION,approvedAt:approved.approvedAt,...provenance(approved)}}:{}),
           ...(draft?{draft:{hash:draft.hash,stale:draft.caseHash!==caseHash(item),...provenance(draft),...(verification?{verification}:{})}}:{}),
           ...(generation?{generation:{status:generation.status,...(generation.step?{step:generation.step}:{}),...(generation.error?{error:generation.error}:{}),...(generation.rejected?{rejected:generation.rejected}:{})}}:{}),
         }];
@@ -138,8 +141,9 @@ export function createJourneyCode(storage:Persistence){
     },
     runnable(scope:string,item:BrowserCase,{manual=false,verification}:{manual?:boolean;verification?:Verification}={}):RunnableCode{
       const {approved,draft}=storage.read(scope).code.specs[item.id]||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);
-      const spec=verification?(draft?.hash===verification.hash&&draft.caseHash===verification.caseHash&&current(draft)?draft:null):current(approved)?approved:manual&&current(draft)?draft:null;
-      if(!spec)return {missing:verification?CHANGED:approved&&!current(approved)?STALE_CODE:NO_CODE};
+      const approvedCurrent=current(approved)&&(approved?.checkVersion??1)===CHECK_VERSION;
+      const spec=verification?(draft?.hash===verification.hash&&draft.caseHash===verification.caseHash&&current(draft)?draft:null):approvedCurrent?approved:manual&&current(draft)?draft:null;
+      if(!spec)return {missing:verification?CHANGED:approved&&!current(approved)?STALE_CODE:approved&&!approvedCurrent?OLD_CODE:NO_CODE};
       try{validateJourneySpec(spec.code,item);}catch(error){return {missing:`Generate code for this journey again: ${(error as Error).message}`};}
       return {code:spec.code,hash:spec.hash,checkVersion:spec===approved?approved.checkVersion??1:CHECK_VERSION};
     },
@@ -170,7 +174,7 @@ export function createJourneyCode(storage:Persistence){
     });},
     reuse(scope:string,caseId:string){return changeSpec(scope,caseId,(_,item,{approved,draft})=>{
       if(!approved)throw Object.assign(new Error('This test has no approved code to reuse.'),{statusCode:404});
-      if(approved.caseHash===caseHash(item))throw conflict('The approved code is current.');
+      if(approved.caseHash===caseHash(item)&&(approved.checkVersion??1)===CHECK_VERSION)throw conflict('The approved code is current.');
       if(draft&&draft.caseHash===caseHash(item))throw conflict('Discard the draft first.');
       let code:string;try{code=validateJourneySpec(approved.code,item);}catch(error){throw new Error(`Generate code for this test again: ${(error as Error).message}`);}
       return {approved,draft:drafted(item,code,approved.provenance)};

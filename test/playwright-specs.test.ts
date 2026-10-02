@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {writeJourneyWorkspace} from '../src/journeys/playwright/runtime.ts';
 import {caseHash,signsIn,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
-import {navigationAllowed,numberAfter,paymentAllowed,stripeLive} from '../src/journeys/playwright/checks.ts';
+import {CHECK_VERSION,navigationAllowed,numberAfter,paymentAllowed,stripeLive} from '../src/journeys/playwright/checks.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 import type {BrowserCase} from '../src/business/browser-cases.ts';
@@ -195,7 +195,7 @@ const passing=(input:JourneyRunInput):WorkerEvent[]=>[...input.case.steps!.flatM
 const failingSecond=(input:JourneyRunInput):WorkerEvent[]=>{const [first,second]=input.case.steps!,id=input.case.id;return [
   {type:'journey-step',caseId:id,stepId:first.id,status:'running'},{type:'journey-step',caseId:id,stepId:first.id,status:'completed',evidence:'Reviewed checks passed.',checks:first.checks!.map(check=>({...check,passed:true}))},
   {type:'journey-step',caseId:id,stepId:second.id,status:'running'},{type:'journey-step',caseId:id,stepId:second.id,status:'failed',evidence:'A reviewed check failed.',checks:second.checks!.map(check=>({...check,passed:false}))},
-  {type:'result',result:{caseId:id,stopCause:'none',assertions:[]}}];};
+  {type:'result',result:{caseId:id,stopCause:'none',...(input.blockWrites?{controlRead:true}:{}),assertions:[]}}];};
 // A journey whose checks notice: it passes, except in the control run, where nothing it changes is kept.
 const noticing=(input:JourneyRunInput)=>input.blockWrites?failingSecond(input):passing(input);
 async function verified(f:Awaited<ReturnType<typeof fixture>>,hash:string){
@@ -221,7 +221,7 @@ test('code approved without a verification, as a stored single spec was, loads a
       [replaced.id]:{approved:{...saved(replaced,'Old'),approvedAt,approvedRunIds:['run-1']},draft:saved(replaced,'New')},
       [pruned.id]:{approved:{...saved(pruned,'Pruned'),approvedAt,approvedRunIds:['run-2','run-3','run-4']},draft:null},
       // Approved after its verification's three passing runs and control run.
-      [verified.id]:{approved:{...saved(verified,'Verified'),approvedAt,approvedRunIds:['run-1','run-2','run-3','run-4']},draft:null},
+      [verified.id]:{approved:{...saved(verified,'Verified'),approvedAt,approvedRunIds:['run-1','run-2','run-3','run-4'],checkVersion:CHECK_VERSION},draft:null},
     }}}));
   }});
   assert.deepEqual((await f.manager.view(f.context)).specs,{
@@ -417,7 +417,7 @@ test('stale approved code is reused as the draft of the edited journey when its 
     const scope=createHash('sha256').update('repo\0beta').digest('hex');
     await mkdir(join(dataDir,'browser'),{recursive:true});
     await writeFile(join(dataDir,'browser','state.json'),JSON.stringify({version:1,configs:{[scope]:{targetUrl:'http://localhost:3000/'}},cases:{[scope]:[journey,other]},analyses:{},runs:[],specs:{[scope]:{
-      [journey.id]:{approved:{code,hash:specHash(code),caseHash:caseHash(journey),savedAt:approvedAt,provenance,approvedAt,approvedRunIds:['run-1','run-2','run-3','run-4']},draft:null},
+      [journey.id]:{approved:{code,hash:specHash(code),caseHash:caseHash(journey),savedAt:approvedAt,provenance,approvedAt,approvedRunIds:['run-1','run-2','run-3','run-4'],checkVersion:CHECK_VERSION},draft:null},
     }}}));
   }});
   await assert.rejects(f.manager.reuseSpec(f.context,{caseId:journey.id}),/The approved code is current\./,'Current approved code needs no draft.');

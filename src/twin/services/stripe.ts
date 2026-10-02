@@ -161,10 +161,6 @@ export default {
   ],
   // Only on the user's explicit action: the email goes to Stripe, which needs no account or key for it.
   provision: { inputs: [{ name: 'email', label: 'Email', default: 'git-email' }], run: createSandbox },
-  // Settings the Stripe API cannot make; the user saves them once in the sandbox's Dashboard.
-  checklist: [
-    { id: 'customer-portal', title: 'Default customer portal configuration', url: 'https://dashboard.stripe.com/test/settings/billing/portal' },
-  ],
   setup: async ctx => defined({
     fixtures: ctx.options.fixtures ? await fixtures(ctx) : {},
     webhookSecret: ctx.options.webhook ? await webhookSecret(ctx) : undefined,
