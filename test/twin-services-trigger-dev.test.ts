@@ -146,13 +146,21 @@ test('Trigger.dev rewrites stale stack files on every start, keeping the instanc
   await trigger.setup(ctx);
   const secrets = secretLines(await readFile(join(ctx.shared, '.env'), 'utf8'));
   assert.equal(secrets.length, 8);
-  await writeFile(join(ctx.shared, 'compose.yaml'), 'services: {}\n');
+  const previous = parse(await readFile(join(ctx.shared, 'compose.yaml'), 'utf8'));
+  for (const service of Object.values(previous.services) as Record<string, unknown>[]) delete service.logging;
+  await writeFile(join(ctx.shared, 'compose.yaml'), stringify(previous));
   await writeFile(join(ctx.shared, '.env'), `${secrets.join('\n')}\nAPP_ORIGIN='http://localhost:1'\nSTALE='1'\n`);
 
   const moved = PORT + 100, again = await context({ server, shared: ctx.shared, port: () => moved });
   again.outputs = await trigger.setup(again);
   assert.deepEqual(again.reservations, [{ name: PROJECT, current: PORT }]);
   assert.equal(await readFile(join(ctx.shared, 'compose.yaml'), 'utf8'), stringify(stack(moved)));
+  const updated = parse(await readFile(join(ctx.shared, 'compose.yaml'), 'utf8'));
+  for (const [name, service] of Object.entries(updated.services) as [string, { logging: unknown; volumes: unknown }][]) {
+    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } }, name);
+    assert.deepEqual(service.volumes, previous.services[name].volumes, `${name} keeps its data mounts`);
+  }
+  assert.deepEqual(updated.volumes, previous.volumes);
   const env = await readFile(join(ctx.shared, '.env'), 'utf8');
   assert.deepEqual(secretLines(env), secrets);
   assert.ok(env.includes(`APP_ORIGIN='http://localhost:${moved}'\n`) && env.includes(`API_ORIGIN='http://${HOST}:${moved}'\n`));

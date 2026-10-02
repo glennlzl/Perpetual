@@ -41,6 +41,7 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'web', 'api', 'source']);
   const labels = { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' };
   for (const service of Object.values(file.services)) {
+    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } });
     assert.deepEqual(service.labels, labels);
     assert.deepEqual(service.extra_hosts, ['host.docker.internal:host-gateway']);
     for (const port of service.ports ?? []) assert.match(port, /^127\.0\.0\.1:\d+:\d+$/);
@@ -76,6 +77,7 @@ test('A shared install is a one-shot service that a plain up never starts', () =
     image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }],
     command: ['sh', '-c', 'corepack enable && pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
     extra_hosts: ['host.docker.internal:host-gateway'], labels: { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' },
+    logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },
   });
   // Apps keep their own commands and never wait on the install; the runtime runs it before they start.
   assert.deepEqual(file.services.web.command, ['sh', '-c', 'corepack enable && pnpm build && pnpm start --port $$PORT']);
