@@ -2,6 +2,9 @@
 // --loop=opencode`), run headlessly by OpenCode against OpenRouter (src/agents/opencode.ts). Perpetual writes no agent
 // loop or MCP client: it prepares a private workspace, runs the harness, and accepts only code that validateJourneySpec
 // accepts.
+import { randomUUID } from 'node:crypto';
+import type { AuthoringRecord, HarnessEvidence } from '../../../contract/authoring.ts';
+import { hide, redact } from '../../redaction.ts';
 import { chmod, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -11,7 +14,7 @@ import type { WorkerEvent, WorkerJob } from '../../browser/runtime.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 import { RUN, SIGN_IN_ACTION, checkTemplate, readsRunData, type ApprovedCase, type Check, type JourneyStep } from './checks.ts';
 import { PLAYWRIGHT_CLI, PLAYWRIGHT_VERSION, createPlaywrightRuntime, journeyEnvironment, writeJourneyWorkspace, type JourneyRunInput } from './runtime.ts';
-import { specHash, validateJourneySpec } from './specs.ts';
+import { caseHash, specHash, validateJourneySpec } from './specs.ts';
 
 /** A reviewed case whose spec is generated: it names its milestones. */
 export type GenerationCase = ApprovedCase & { steps: JourneyStep[] };
@@ -25,7 +28,7 @@ export type GenerationOptions = {
   credentials?: RunCredentials; signInUrl?: string; apiKey: string; model: string; harness?: Harness; playwright?: SeedRuntime;
   env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv); timeoutMs?: number; cleanupGraceMs?: number; onStep?: (step: GenerationStep) => void;
 };
-export type GeneratedSpec = { code: string; provenance: { harness: string; generator: string; model: string } };
+export type GeneratedSpec = { code: string; provenance: { harness: string; generator: string; model: string }; authoring: AuthoringRecord };
 // Playwright's init-agents writes opencode.json; it is parsed text until the agent and MCP server it needs are checked.
 // opencode.json as Playwright's init-agents writes it, read back as parsed JSON: each level is checked before it is changed.
 const record = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -49,7 +52,7 @@ const MESSAGES = { cancelled: CANCELLED, timedOut: 'Code generation exceeded its
 const workspaceFolders = (workspace: string) => ({ project: join(workspace, 'project'), run: join(workspace, 'run'), home: join(workspace, 'home') });
 
 /** The default harness: OpenCode runs Playwright's generator agent once in the workspace. model is `openrouter/<id>`. */
-export const opencodeHarness: Harness = opencodeRun(GENERATOR_AGENT);
+export const opencodeHarness: Harness = opencodeRun(GENERATOR_AGENT, { json: true });
 
 /** The seed opens the application, as every journey starts, and signs in when the twin has a test account. */
 export const seedSpec = (signIn: boolean) => `import { test } from 'perpetual';
@@ -224,7 +227,13 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
  * with the validation error.
  */
 export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins, timeoutSeconds, credentials, signInUrl, apiKey, model, harness = opencodeHarness, playwright = createPlaywrightRuntime(), env = process.env, timeoutMs = 10 * 60 * 1000, cleanupGraceMs = 15000, onStep = () => {} }: GenerationOptions): WorkerJob<GeneratedSpec> {
-  const abort = new AbortController(), secrets = [apiKey, credentials?.password];
+  const abort = new AbortController(), secrets = [apiKey, credentials?.password, credentials?.username];
+  const started = Date.now(), attempts: AuthoringRecord['attempts'] = [];
+  const provenance = { harness: OPENCODE, generator: `${GENERATOR_AGENT}@${PLAYWRIGHT_VERSION}`, model: redact(hide(secrets)(`openrouter/${model}`)) };
+  const evidence = (outcome: AuthoringRecord['outcome'], outputHash: string | null = null, cleanupIncomplete = false): AuthoringRecord => ({
+    id: randomUUID(), startedAt: new Date(started).toISOString(), completedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - started),
+    caseHash: caseHash(item), outcome, outputHash, provenance, attempts, cleanup: cleanupIncomplete ? 'incomplete' : 'complete',
+  });
   let runner: OpencodeRunner | null = null;
   const promise = (async () => {
     onStep('preparing');
@@ -240,18 +249,28 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
       ...opencodeEnvironment(values, { home, userHome, apiKey }),
     };
     if (abort.signal.aborted) throw new Error(CANCELLED);
-    const agent = runner = createOpencodeRunner({ harness, model, cwd: project, env: childEnv, secrets, timeoutMs, cleanupGraceMs, settleMs: SETTLE_MS, messages: MESSAGES });
+    const agent = runner = createOpencodeRunner({ harness, model, cwd: project, env: childEnv, secrets, timeoutMs, cleanupGraceMs, settleMs: SETTLE_MS, messages: MESSAGES, structuredOutput: harness === opencodeHarness });
     onStep('generating');
     let since = Date.now();
-    const first = await agent.run(generatePrompt);
+    const author = async (prompt: string, phase: 'generation' | 'grammar-repair') => {
+      try { const result = await agent.run(prompt); attempts.push({ ...result.evidence, phase, codeHash: null }); return result; }
+      catch (error) {
+        const captured = (error as { evidence?: HarnessEvidence }).evidence;
+        if (captured) attempts.push({ ...captured, phase, codeHash: null });
+        throw error;
+      }
+    };
+    const first = await author(generatePrompt, 'generation');
     await intact();
     let result = await readSpec(project, item, since);
+    attempts.at(-1)!.codeHash = result.code || result.rejected ? specHash(result.code ?? result.rejected!) : null;
     if (result.error) {
       onStep('repairing');
       since = Date.now();
-      const repair = await agent.run(repairPrompt(result.error, result.file, generationRules(item, { signIn })));
+      const repair = await author(repairPrompt(result.error, result.file, generationRules(item, { signIn })), 'grammar-repair');
       await intact();
       result = await readSpec(project, item, since);
+      attempts.at(-1)!.codeHash = result.code || result.rejected ? specHash(result.code ?? result.rejected!) : null;
       // The rejected code stays with the failure, so a person can see what the generator wrote.
       if (result.error) {
         // A harness may exit successfully after reporting a tool/provider failure without writing a file.
@@ -261,7 +280,10 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
       }
     }
     // A spec without an error is the validated code.
-    return { code: result.code!, provenance: { harness: OPENCODE, generator: `${GENERATOR_AGENT}@${PLAYWRIGHT_VERSION}`, model: `openrouter/${model}` } };
-  })();
+    return { code: result.code!, provenance, authoring: evidence('draft', specHash(result.code!)) };
+  })().catch((error: unknown) => {
+    const failure = error as { timedOut?: boolean; cleanupIncomplete?: boolean };
+    throw Object.assign(error instanceof Error ? error : new Error('Code generation failed.'), { authoring: evidence(abort.signal.aborted ? 'cancelled' : failure?.timedOut ? 'timed-out' : 'failed', null, failure?.cleanupIncomplete) });
+  });
   return { promise, cancel() { abort.abort(); runner?.cancel(); } };
 }

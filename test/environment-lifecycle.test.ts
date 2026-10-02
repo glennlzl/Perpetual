@@ -339,3 +339,72 @@ test('a long failure keeps its start, which names the step, and its end, where t
   assert.match(failed.error!, /^Supabase: layer0: /);
   assert.match(failed.error!, /failed to start: container is unhealthy$/);
 });
+
+test('Creation failure persists redacted service evidence before owned teardown', async t => {
+  let storedBeforeTeardown = '';
+  const { manager, dataDir } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => { await onUpdate({ sandboxId: environment.id }); throw new Error('Auth request deadline; write outcome unknown'); },
+    environmentLogs: async () => 'Auth log: password=private-fixture\ndatabase waiting\ngateway connected\n',
+    destroySandbox: async () => { storedBeforeTeardown = await readFile(join(dataDir, 'environments/state.json'), 'utf8'); },
+  });
+  const { environment } = await manager.create(context), failed = await manager.awaitIdle(environment.id);
+  assert.match(storedBeforeTeardown, /database waiting/);
+  assert.doesNotMatch(storedBeforeTeardown, /private-fixture/);
+  assert.match(failed.error!, /Auth request deadline; write outcome unknown/);
+  const logs = await manager.logs(context, environment.id);
+  assert.match(logs.logs, /gateway connected/);
+  assert.doesNotMatch(logs.logs, /private-fixture/);
+});
+
+test('Log collection failure remains visible and does not replace the preparation or cleanup failure', async t => {
+  const { manager } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => { await onUpdate({ sandboxId: environment.id }); throw new Error('Original account failure'); },
+    environmentLogs: async () => { throw new Error('log reader unavailable password=private-fixture'); },
+    destroySandbox: async () => { throw new Error('cleanup unavailable'); },
+  });
+  const { environment } = await manager.create(context), failed = await manager.awaitIdle(environment.id);
+  assert.equal(failed.status, 'cleanup_failed');
+  assert.equal(failed.error, 'Original account failure');
+  assert.match(failed.cleanupError!, /cleanup unavailable/);
+  const logs = await manager.logs(context, environment.id);
+  assert.match(logs.logs, /log.*unavailable/i);
+  assert.doesNotMatch(logs.logs, /private-fixture/);
+});
+
+test('The first failed failure-state save still cleans resources and keeps the original failure', async t => {
+  let data = '', cleaned = false;
+  const { manager, dataDir } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => {
+      await onUpdate({ sandboxId: environment.id });
+      const file = join(data, 'environments/state.json'); await rm(file); await mkdir(file);
+      throw new Error('Original account failure');
+    },
+    environmentLogs: async () => 'Auth service evidence',
+    destroySandbox: async () => { cleaned = true; await rm(join(data, 'environments/state.json'), { recursive: true }); },
+  });
+  data = dataDir;
+  const { environment } = await manager.create(context), failed = await manager.awaitIdle(environment.id);
+  assert.equal(cleaned, true);
+  assert.equal(failed.error, 'Original account failure');
+  assert.match((await manager.logs(context, environment.id)).logs, /could not be saved before cleanup/);
+});
+
+test('Expired evidence stays expired across repeated log reads and restart without dropping cleanup ownership', async t => {
+  const f = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => { await onUpdate({ sandboxId: environment.id }); throw new Error('account failed'); },
+    environmentLogs: async () => 'original private service evidence',
+    destroySandbox: async () => { throw new Error('resources still owned'); },
+  });
+  const { environment } = await f.manager.create(context); await f.manager.awaitIdle(environment.id); await f.manager.close();
+  const path = join(f.dataDir, 'environments/state.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.environments[0].logsAt = '2000-01-01T00:00:00Z';
+  await writeFile(path, JSON.stringify(saved));
+  const manager = await createEnvironmentManager({ dataDir: f.dataDir, runtime: only({ environmentLogs: async () => { assert.fail('expired evidence cannot fall through to the old twin logs'); } }) });
+  try {
+    for (let index = 0; index < 2; index++) assert.deepEqual(await manager.logs(context, environment.id), { logs: 'Failure evidence expired.' });
+    const view = await manager.view(context);
+    assert.equal(view.environments[0].status, 'cleanup_failed');
+    assert.equal(view.environments[0].sandboxId, environment.id);
+    assert.doesNotMatch(await readFile(path, 'utf8'), /original private service evidence/);
+  } finally { await manager.close(); }
+});

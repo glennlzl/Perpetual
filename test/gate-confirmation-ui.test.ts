@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import type { StageGate } from '../contract/gate.ts';
 import type { Stage } from '../contract/pipeline.ts';
@@ -20,7 +20,7 @@ test('a Sandbox release confirmation never follows a different gate, source or s
     const root=createRoot(document.getElementById('root'));
     window.addEventListener('fixture:gate', event => root.render(React.createElement(GateActions,event.detail)));
   `;
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
     name: 'gate-confirmation-test', resolveId(id) { if (id.endsWith('/__gate-ui.tsx')) return '\0gate-ui.tsx'; },
     load(id) { if (id === '\0gate-ui.tsx') return entry; },
     configureServer(server) { server.middlewares.use(async (req, res, next) => {
@@ -29,7 +29,7 @@ test('a Sandbox release confirmation never follows a different gate, source or s
       res.end(await server.transformIndexHtml('/__gate-ui', '<div id="root"></div><script type="module" src="/build/__gate-ui.tsx"></script>'));
     }); },
   }] });
-  t.after(() => server.close()); await server.listen();
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage();
   const requests: unknown[] = [];

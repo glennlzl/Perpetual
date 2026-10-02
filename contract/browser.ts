@@ -69,7 +69,7 @@ export interface SpecSummary {
 }
 export type JourneySpecs = Record<string, SpecSummary>;
 /** Code text is read separately for review, never in polling summaries. */
-export interface SpecCodeReply { approved?: { hash: string; code: string }; draft?: { hash: string; code: string } }
+export interface SpecCodeReply { authoring?: import('./authoring.ts').AuthoringRecord[]; approved?: { hash: string; code: string }; draft?: { hash: string; code: string } }
 export interface BrowserSummaryReply { cases: BrowserCase[]; specs: JourneySpecs; runs: RunSummary[]; preparation: BrowserPreparation | null }
 export interface BrowserViewReply extends Omit<BrowserSummaryReply, 'runs'> {
   config: BrowserConfig; runs: PublicRun[]; analysis: BrowserAnalysis | null; accounts: EnvironmentAccount[]; capabilities: BrowserCapabilities;

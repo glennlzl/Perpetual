@@ -513,12 +513,12 @@ test('journey code is generated, verified, approved in a Dialog showing the code
   const actions = panel.slice(panel.indexOf('function CodeActions'), panel.indexOf('function ApproveCodeDialog'));
   for (const label of ['Generating code', 'Stop generating', "'Regenerate code' : 'Generate code'", 'Stop verifying', 'Verify code', 'Approve code', 'Reuse approved code', 'Discard draft']) assert.ok(actions.includes(label), label);
   const approve = panel.slice(panel.indexOf('function ApproveCodeDialog'), panel.indexOf('function DeleteCaseDialog'));
-  assert.match(approve, /return <Dialog open /);assert.ok(approve.includes('<DialogHeader><DialogTitle>Approve code</DialogTitle></DialogHeader>'));
+  assert.match(approve, /return <Dialog open /);
+  // browser-code-ui.test.ts exercises the title and footer of both approval and read-only diagnostics.
   assert.match(approve, /api\(`\/api\/browser\/specs\/code\?\$\{new URLSearchParams\(\{ repoPath, stageId, caseId: item\.id \}\)\}`\)/);
   assert.match(approve, /codeLines\(code\.draft\.code, code\.approved\?\.code\)/);
   assert.match(approve, /<pre[^>]*className="[^"]*overflow-auto[^"]*font-mono/);
   assert.match(approve, /'added' \? 'bg-accent text-accent-foreground' : line\.kind === 'removed' \? 'text-muted-foreground'/);
-  assert.match(approve, /<DialogFooter><Button type="button" variant="outline"[^>]*>Cancel<\/Button><Button type="button"[^>]*>\{saving && [^}]*\}Approve<\/Button><\/DialogFooter>/);
   assert.match(panel, /tx\.post\('specs\/approve', \{ caseId: approvingCase\.id, hash \}\)/, 'Approval takes the hash of the code the person saw.');
   assert.match(panel, /\{run\.verification\?\.control && <Badge variant="outline">Control<\/Badge>\}/);
   // The card shows the approved and draft states journeyCode names, and why a verification or generation failed.

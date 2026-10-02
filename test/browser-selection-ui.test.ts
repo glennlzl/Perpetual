@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import { browserCaseFixture, browserRunFixture } from './fixtures/browser-view.ts';
 
@@ -41,7 +41,7 @@ test('one-off selection can be restored after a failed save without starting the
     }
     root.render(React.createElement(Fixture));
   `;
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
     name: 'selection-ui-test', resolveId(id) { if (id.endsWith('/__selection-ui.tsx')) return '\0selection-ui.tsx'; }, load(id) { if (id === '\0selection-ui.tsx') return entry; },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
@@ -71,7 +71,7 @@ test('one-off selection can be restored after a failed save without starting the
       });
     },
   }] });
-  t.after(() => server.close()); await server.listen();
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   for (const scenario of ['retry after remount', 'failed start then reload', 'user deselects and selects again']) await t.test(scenario, async t => {
     item = structuredClone(original); runs = []; failRestore = true; startFails = scenario === 'failed start then reload'; restoreAttempts = 0; starts = 0;

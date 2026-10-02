@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import type { BrowserCase } from '../client/src/lib/browser-test-ui.ts';
 
@@ -38,7 +38,7 @@ test('journey authoring offers account choices and an actionable missing-check s
     workspace.activate({path:'/acme/app', branch:'main'}, {browserTests:{beta: await controller('/api/browser')}});
     createRoot(document.getElementById('root')).render(React.createElement(TestWorkspaceContext.Provider, {value:workspace}, React.createElement(TooltipProvider, {}, React.createElement(BrowserTestingPanel, {repoPath:'/acme/app', stageId:'beta'}))));
   `;
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
     name: 'journey-ui-test',
     resolveId(id) { if (id.endsWith('/__journey-ui.tsx')) return '\0journey-ui.tsx'; },
     load(id) { if (id === '\0journey-ui.tsx') return entry; },
@@ -50,7 +50,7 @@ test('journey authoring offers account choices and an actionable missing-check s
             res.statusCode = 503; res.end(JSON.stringify({ error: 'Could not read the draft. Try again.' })); return;
           }
           const code = Array.from({ length: 60 }, (_, index) => `  await page.getByRole('button', { name: 'Workflow milestone ${index + 1}' }).click();`).join('\n');
-          res.end(JSON.stringify({ draft: { hash, code: `${code}\n  await page.getByText('Workflow saved').waitFor();` }, approved: { code } })); return;
+          res.end(JSON.stringify({ authoring:[{id:'11111111-1111-1111-1111-111111111111',startedAt:'2026-10-01T00:00:00.000Z',completedAt:'2026-10-01T00:00:03.000Z',durationMs:3000,caseHash:hash,outputHash:hash,outcome:'draft',cleanup:'complete',provenance:{harness:'opencode@1.18.32',generator:'playwright-test-generator@1.63.0',model:'openrouter/example/model'},attempts:[{phase:'generation',startedAt:'2026-10-01T00:00:00.000Z',completedAt:'2026-10-01T00:00:03.000Z',durationMs:3000,outcome:'completed',outputHash:hash,codeHash:hash,outputBytes:100,eventsTruncated:false,reportedFinishReason:'unknown',usage:null,events:[{tool:'browser_click',outcome:'error'}]}]}], draft: { hash, code: `${code}\n  await page.getByText('Workflow saved').waitFor();` }, approved: { code } })); return;
         }
         if (req.url?.includes('/__controller')) {
           const path = req.url.split('/__controller')[1];
@@ -73,10 +73,30 @@ test('journey authoring offers account choices and an actionable missing-check s
       });
     },
   }] });
-  t.after(() => server.close());
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const url = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__journey-ui`;
+  await t.test('authoring diagnostics are readable before verification and trigger no work', async t => {
+    requests.length = 0; reviewMode = 'none';
+    const page = await browser.newPage({ viewport: { width: 320, height: 800 } }); t.after(() => page.close());
+    page.on('pageerror', error => t.diagnostic(`Page error: ${error.message}`));
+    page.on('requestfailed', request => { if (request.resourceType() === 'script') t.diagnostic(`Module failed: ${request.url()} ${request.failure()?.errorText}`); });
+    page.on('response', response => { if (response.status() >= 400 && response.request().resourceType() === 'script') t.diagnostic(`Module HTTP ${response.status()}: ${response.url()}`); });
+    await page.goto(url);
+    await page.getByRole('button', { name: `Actions for ${journey.name}`, exact: true }).click();
+    const menu = page.getByRole('menuitem', { name: 'Authoring diagnostics', exact: true });
+    await expect(menu).toBeVisible({ timeout: 2000 }); await menu.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Authoring diagnostics' })).toBeVisible();
+    await dialog.getByRole('button', { name: /Draft generated/ }).click();
+    await expect(dialog.getByText('Finish reason: Unknown', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('browser click', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('Tool error', { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Done', exact: true })).toBeInViewport();
+    assert.equal(requests.length, 0, 'A read-only diagnostic performs no generation, run or approval.');
+    await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  });
   for (const [action, button, path] of [['Verify code', 'Verify', 'verify'], ['Regenerate code', 'Generate', 'generate']]) {
     await t.test(`${action} sends the entered account only on submission`, async t => {
       requests.length = 0; item = structuredClone(journey);

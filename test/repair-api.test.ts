@@ -79,7 +79,7 @@ async function start(t: TestContext, { connection = { login: 'developer', connec
   const ended = (view: AutopilotResponse) => change(view) && change(view)!.status !== 'running' ? change(view) : null;
   // The start reads the head once, a baseline.
   for (let attempt = 0; managed && connection && !seams.calls.heads.length && attempt < 400; attempt++) await new Promise(done => setTimeout(done, 5));
-  return { dir, dataDir, post, get, view, repair, until, ended, seams };
+  return { dir, dataDir, post, get, view, repair, until, ended, seams, close: () => app.close() };
 }
 
 test('the Autopilot view names the active source, carries Build alone, starts empty at the baseline head, and refuses another source', async t => {
@@ -126,6 +126,9 @@ test('a person\'s Repair triages the failed head and, without an OpenRouter API 
   assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['not-merged', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual([change(settled)?.steps[1].detail, change(settled)?.steps[2].detail], [['The build does not compile.'], ['Add an OpenRouter API key in Settings.']]);
   assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
+  // A view observes the terminal state before the background job's final atomic save settles.
+  // Shutdown joins that save, so the durable-state assertion does not race the writer.
+  await f.close();
   const saved = JSON.parse(await readFile(join(f.dataDir, 'repairs', 'state.json'), 'utf8'));
   assert.deepEqual([saved.repairs[0].login, saved.repairs[0].trigger, saved.repairs[0].status, saved.repairs[0].category], ['developer', 'person', 'needs-person', 'build']);
   assert.deepEqual(build(settled)?.failed, { sha: SHA, runs: [shown('41')] }, 'A repair that needed a person may start again.');

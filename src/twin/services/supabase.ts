@@ -164,33 +164,57 @@ function users(options: Options) {
 }
 
 /** The Auth admin API's reply fields this adapter reads, each checked where it is read. */
-type AdminReply = { users?: unknown; msg?: unknown; message?: unknown; error_description?: unknown };
+type AdminReply = { users?: unknown };
 
 // The controller reaches the stack on the host loopback, where the CLI publishes it.
-async function admin(ctx: Context, method: string, path: string, body?: unknown) {
+async function admin(ctx: Context, account: string, method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown) {
   const key = ctx.outputs.serviceRoleKey;
-  const response = await request(ctx, `http://127.0.0.1:${ctx.port('api')}/auth/v1/admin${path}`, {
-    method, headers: { apikey: key, authorization: `Bearer ${key}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  const text = await response.text();
+  // Keep the existing request deadline through body consumption. Fetch implementations can call a
+  // timed-out body an AbortError; the signal's reason preserves which boundary actually stopped it.
+  const deadline = AbortSignal.timeout(20_000), signal = AbortSignal.any([deadline, ...(ctx.signal ? [ctx.signal] : [])]);
+  // IDs may themselves contain private text. Never include account data, query values, remote IDs,
+  // request bodies or a server's raw reply in an operation summary.
+  const reference = createHash('sha256').update(account).digest('hex').slice(0, 12);
+  const route = `/auth/v1/admin/users${method === 'PUT' ? '/:user' : ''}`, started = performance.now();
+  let phase = 'not sent', status: number | undefined;
+  const failure = (kind: string) => new Error(`Supabase Auth account ${reference}: ${method} ${route}; ${kind}${status === undefined ? '' : ` (HTTP ${status})`}; ${Math.round(performance.now() - started)} ms; phase: ${phase}.${method !== 'GET' && phase !== 'not sent' ? ' Write outcome unknown; the mutation may have committed.' : ''}`);
+  let response: Response, text: string;
+  try {
+    ctx.signal?.throwIfAborted();
+    phase = 'awaiting response headers';
+    response = await request(ctx, `http://127.0.0.1:${ctx.port('api')}/auth/v1/admin${path}`, {
+      method, signal, headers: { apikey: key, authorization: `Bearer ${key}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    status = response.status;
+    phase = 'reading response body';
+    text = await response.text();
+    phase = 'response received';
+  } catch (error) {
+    const name = error instanceof Error ? error.name : '';
+    const timedOut = signal.aborted ? signal.reason === deadline.reason && deadline.aborted : name === 'TimeoutError';
+    throw failure(timedOut ? 'request deadline' : ctx.signal?.aborted || name === 'AbortError' ? 'cancelled' : 'transport failure');
+  }
   let data: unknown;
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { msg: text.slice(0, 200) }; }
-  return { ok: response.ok, status: response.status, data: object(data) ? data as AdminReply : {} };
+  try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+  return { ok: response.ok, status: response.status, data: object(data) ? data as AdminReply : {}, failure: () => failure('HTTP failure') };
 }
 
 export async function accounts(ctx: Context) {
   const created = [];
   for (const user of users(ctx.options)) {
     const password = generatedPassword();
+    ctx.rememberSecret?.(password);
+    ctx.rememberSecret?.(user.email);
     const attributes = { email: user.email, password, email_confirm: user.emailConfirmed, user_metadata: user.metadata };
-    let reply = await admin(ctx, 'POST', '/users', attributes);
+    let reply = await admin(ctx, user.id, 'POST', '/users', attributes);
     if (reply.status === 422) { // the address is registered already
-      const listed = (await admin(ctx, 'GET', `/users?filter=${encodeURIComponent(user.email)}`)).data.users;
+      const listing = await admin(ctx, user.id, 'GET', `/users?filter=${encodeURIComponent(user.email)}`);
+      if (!listing.ok) throw listing.failure();
+      const listed = listing.data.users;
       const existing = Array.isArray(listed) ? listed.find((item): item is { id: string } => object(item) && typeof item.id === 'string' && typeof item.email === 'string' && item.email.toLowerCase() === user.email) : undefined;
-      if (existing) reply = await admin(ctx, 'PUT', `/users/${encodeURIComponent(existing.id)}`, attributes);
+      if (existing) reply = await admin(ctx, user.id, 'PUT', `/users/${encodeURIComponent(existing.id)}`, attributes);
     }
-    const { msg, message, error_description: description } = reply.data;
-    if (!reply.ok) throw new Error(`Supabase Auth did not create test account ${user.id}: ${msg ?? message ?? description ?? `status ${reply.status}`}`);
+    if (!reply.ok) throw reply.failure();
     // GoTrue's password grant, which a product's browser sign-in posts to.
     created.push({ id: user.id, label: user.id, username: user.email, password, authEndpoints: [ctx.url('api', '/auth/v1/token')] });
   }
@@ -238,6 +262,7 @@ export default {
   },
   containers: () => [], // the CLI owns the stack's containers
   healthContainers,
+  diagnosticSecrets: options => users(options).map(user => user.email),
   env: ({ outputs: o }) => ({
     SUPABASE_URL: o.url, SUPABASE_ANON_KEY: o.anonKey, SUPABASE_SERVICE_ROLE_KEY: o.serviceRoleKey, SUPABASE_JWT_SECRET: o.jwtSecret,
     DATABASE_URL: o.dbUrl, NEXT_PUBLIC_SUPABASE_URL: o.url, NEXT_PUBLIC_SUPABASE_ANON_KEY: o.anonKey,

@@ -54,3 +54,12 @@ test('setup logs retain a final diagnostic that has no newline', async t => {
   await assert.rejects(runtime.prepare({ dataDir, id: 'beta', source, config: { services: { setup: {} } } }), /Setup failed/);
   assert.match(await runtime.logs({ dataDir, id: 'beta' }), /Final diagnostic without newline/);
 });
+
+test('A diagnostic command exceeding its byte budget discards partial credentials and stops its process', async () => {
+  await assert.rejects(execCommand(process.execPath, ['-e', 'process.stdout.write("private-credential-".repeat(1000));setTimeout(()=>{},10000)'], { outputLimitBytes: 256, timeoutMs: 1000 }), (error: Error & { stdout?: string; stderr?: string }) => {
+    assert.match(error.message, /size limit.*discarded/);
+    assert.equal(error.stdout, ''); assert.equal(error.stderr, '');
+    assert.doesNotMatch(error.message, /private-credential/);
+    return true;
+  });
+});

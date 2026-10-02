@@ -77,14 +77,14 @@ test('an unrecognized agent failure keeps its diagnostic in the displayed error'
   assert.equal(f.calls(), 1);
 });
 
-async function capture(t: TestContext, chunks: string[], { exit = 0, secrets = [], env = {}, harnessEnv = {} }: { exit?: number; secrets?: string[]; env?: Record<string, string>; harnessEnv?: Record<string, string> } = {}) {
+async function capture(t: TestContext, chunks: string[], { exit = 0, secrets = [], env = {}, harnessEnv = {}, structuredOutput = false }: { structuredOutput?: boolean; exit?: number; secrets?: string[]; env?: Record<string, string>; harnessEnv?: Record<string, string> } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'perpetual-opencode-output-'));
   await writeFile(join(cwd, 'chunks.json'), JSON.stringify(chunks));
-  const runner = createOpencodeRunner({ model: 'example/model', cwd, env, secrets, timeoutMs: 30_000, cleanupGraceMs: 1000, messages,
+  const runner = createOpencodeRunner({ model: 'example/model', cwd, env, secrets, structuredOutput, timeoutMs: 30_000, cleanupGraceMs: 1000, messages,
     harness: () => ({ command: process.execPath, env: harnessEnv, args: ['--input-type=module', '-e', `
       import {readFile} from 'node:fs/promises';
       for (const chunk of JSON.parse(await readFile('chunks.json','utf8'))) {
-        await new Promise(resolve => process.${exit ? 'stderr' : 'stdout'}.write(chunk, resolve));
+        await new Promise(resolve => process.${exit && !structuredOutput ? 'stderr' : 'stdout'}.write(chunk, resolve));
         await new Promise(resolve => setTimeout(resolve, 5));
       }
       process.exitCode = ${exit};
@@ -173,4 +173,70 @@ for (const ignoreTermination of [false, true]) test(`deadline and cleanup owners
   if (ignoreTermination) t.mock.timers.tick(100);
   await failed;
   assert.equal(f.calls(), 1);
+});
+
+const jsonTool=(tool='playwright-test_browser_click',status='completed')=>JSON.stringify({type:'tool_use',timestamp:1700000000000,sessionID:'ses_private',part:{id:'prt_private',type:'tool',tool,callID:'private-call',state:{status,input:{url:'https://private.invalid/account',password:'personal-password'},output:'Private page and account contents',time:{start:1700000000000,end:1700000000001}}}})+'\n';
+const jsonFinish=JSON.stringify({type:'step_finish',timestamp:1700000000002,part:{type:'step-finish',reason:'stop',cost:0.001,tokens:{input:10,output:20,reasoning:2,cache:{read:3,write:0}}}})+'\n';
+test('the actual harness stream retains only structured safe tool outcomes and provider metadata',async t=>{
+  const result=await capture(t,[jsonTool(),jsonFinish]) as unknown as {evidence:{outcome:string;events:unknown[];reportedFinishReason:string;usage:unknown;outputHash:string;outputBytes:number}};
+  assert.ok(result.evidence,'Successful harness output must retain safe authoring evidence.');
+  assert.equal(result.evidence.outcome,'completed');
+  assert.deepEqual(result.evidence.events,[{tool:'browser_click',outcome:'completed'}]);
+  assert.equal(result.evidence.reportedFinishReason,'stop');
+  assert.deepEqual(result.evidence.usage,{input:10,output:20,reasoning:2,cacheRead:3,cacheWrite:0,cost:0.001});
+  assert.match(result.evidence.outputHash,/^[a-f0-9]{64}$/);
+  for(const sensitive of ['private.invalid','personal-password','Private page','ses_private','private-call'])assert.ok(!JSON.stringify(result.evidence).includes(sensitive));
+});
+
+test('unstructured comments, unknown tool names and terminal prose never become authoring facts',async t=>{
+  const result=await capture(t,['Clicked Save successfully; budget exhausted.\n',jsonTool('custom-secret-tool'),JSON.stringify({type:'step_finish',part:{type:'step-finish',reason:'private account ran out of money',tokens:{input:'12'}}})+'\n']) as unknown as {evidence:{events:unknown[];reportedFinishReason:string;usage:unknown}};
+  assert.ok(result.evidence);
+  assert.deepEqual(result.evidence.events,[{tool:'unknown',outcome:'completed'}]);
+  assert.equal(result.evidence.reportedFinishReason,'unknown');
+  assert.equal(result.evidence.usage,null);
+  assert.ok(!JSON.stringify(result.evidence).includes('private account'));
+});
+
+test('structured output split across chunks hides supplied values before projection and bounds oversized events',async t=>{
+  const event=jsonTool('playwright-test_browser_click');
+  const result=await capture(t,[event.slice(0,event.indexOf('browser_click')+8),event.slice(event.indexOf('browser_click')+8),JSON.stringify({type:'text',part:{text:'sk-fixture-secret-value-'+ 'a'.repeat(300000)}})+'\n',jsonFinish],{secrets:['browser_click']}) as unknown as {evidence:{events:unknown[];eventsTruncated:boolean;reportedFinishReason:string;outputBytes:number}};
+  assert.ok(result.evidence);
+  assert.deepEqual(result.evidence.events,[{tool:'unknown',outcome:'completed'}],'A supplied secret must never survive even as a tool identifier.');
+  assert.equal(result.evidence.eventsTruncated,true);
+  assert.equal(result.evidence.reportedFinishReason,'stop');
+  assert.ok(!JSON.stringify(result.evidence).includes('fixture-secret'));
+});
+
+
+test('JSON-mode failures never turn tool inputs or page contents into a displayed tail',async t=>{
+  const event=jsonTool('playwright-test_browser_click','error');
+  await assert.rejects(capture(t,[event],{exit:1,structuredOutput:true}),(error:RunFailure)=>{
+    assert.equal(error.message,messages.stopped);assert.equal(error.output,'');
+    assert.ok(!JSON.stringify(error).includes('private.invalid'));assert.ok(!JSON.stringify(error).includes('personal-password'));
+    return true;
+  });
+});
+
+test('JSON-mode structured provider errors retain fixed actionable refusal guidance',async t=>{
+  const event=JSON.stringify({type:'error',error:{name:'APIError',data:{message:refusal,responseBody:'private provider payload',responseHeaders:{authorization:'private header'}}}})+'\n';
+  await assert.rejects(capture(t,[event],{exit:1,structuredOutput:true}),(error:RunFailure)=>{
+    assert.equal(error.message,advice);assert.equal(error.output,'');assert.equal(error.evidence?.reportedFinishReason,'unknown');
+    return true;
+  });
+});
+
+
+test('authoring output hashes ignore stream chunk boundaries and event count is bounded',async t=>{
+  const output=jsonTool().repeat(70)+jsonFinish;
+  const first=await capture(t,[output]),second=await capture(t,[output.slice(0,177),output.slice(177)]);
+  assert.equal(first.evidence.outputHash,second.evidence.outputHash);
+  assert.equal(first.evidence.events.length,64);assert.equal(first.evidence.eventsTruncated,true);
+  assert.equal(first.evidence.reportedFinishReason,'stop');
+});
+
+test('a JSON provider refusal with zero exit retains fixed guidance without retaining its payload',async t=>{
+  const event=JSON.stringify({type:'error',error:{name:'APIError',data:{message:refusal,responseBody:'private provider payload'}}})+'\n';
+  const result=await capture(t,[event],{structuredOutput:true});
+  assert.equal(result.output,advice);assert.equal(result.evidence.outcome,'completed');assert.equal(result.evidence.reportedFinishReason,'unknown');
+  assert.ok(!JSON.stringify(result).includes('private provider payload'));
 });

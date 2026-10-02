@@ -1,3 +1,5 @@
+import type { AuthoringRecord } from '../../contract/authoring.ts';
+import { restoreAuthoring, restoreAuthoringRecord, retainAuthoring, type AuthoringHistory } from './authoring.ts';
 import {createSaveQueue,privateDirectory,readStateFile,writeStateFile} from '../store.ts';
 import {randomUUID} from 'node:crypto';
 import {mkdir,lstat,readdir,rm} from 'node:fs/promises';
@@ -66,7 +68,7 @@ type Preparation=BrowserPreparation;
 type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
-  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;
+  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
 };
 /**
  * keepLease takes the run's lease as the run ends, instead of it being released, for a caller that goes on using the twin.
@@ -238,7 +240,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([modelSettings.configuration().apiKey,...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
-  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{}};
+  let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};
   {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
   for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
   const external:unknown=state.externalOperations??{};
@@ -261,6 +263,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const code=restoreJourneyCode({specs:state.specs[scope]??{},generationFailures:failures[scope]??{}},state.cases[scope]||[],generationDiagnostic);
     state.specs[scope]=code.specs;state.generationFailures[scope]=code.generationFailures;
   }
+  state.authoring=restoreAuthoring(state.authoring??{},state.cases,hide([modelSettings.configuration().apiKey]));
   const saves=createSaveQueue();let closed=false,modelSaving=false,closing:Promise<void>|undefined;const jobs=new Map<string,RunJob>(),inputJobs=new Map<AbortController,Promise<unknown>>(),busy=new Set<string>(),frames=new Map<string,StoredFrames>(),admissions=new Set<Promise<unknown>>();
   // Only this controller's jobs and an unsaved failure need live entries. Durable failures contain no worker callbacks.
   const generations=new Map<string,Generation>(),generationJobs=new Set<Promise<void>>(),generationKey=(scope:string,caseId:string)=>`${scope}\0${caseId}`;
@@ -301,7 +304,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const names=(await readdir(videoRoot).catch(()=>[])).filter(name=>runFolder.test(name)&&!kept.has(name));
     await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(()=>{});}));
   }
-  function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const content=JSON.stringify(project());if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();});}
+  function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const projected=project(),authoring=retainAuthoring(projected.authoring??{},projected.cases);const content=JSON.stringify({...projected,authoring});if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();state.authoring=authoring;});}
   const externalLeases=new Set<string>();
   const externalCleanup='Browser cleanup for this application is unconfirmed. Stop the remaining browser processes and confirm cleanup before using this URL again.';
   function takeTarget(context:BrowserStageContext,url:string,environmentId:string|null|undefined,operation:string){
@@ -350,7 +353,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   // Also removes folders left by a crash or by runs past the history limit.
   await pruneVideos();
   await persist();
-  const codeState=(scope:string):JourneyCodeState=>({specs:state.specs[scope]||{},generationFailures:state.generationFailures[scope]||{}});
+  const codeState=(scope:string):JourneyCodeState=>({specs:state.specs[scope]||{},generationFailures:state.generationFailures[scope]||{},authoring:retainAuthoring(state.authoring,state.cases)[scope]||{}});
   const codeSnapshot=(scope:string):JourneyCodeSnapshot=>({
     code:codeState(scope),cases:state.cases[scope]||[],runs:state.runs.filter(run=>run.scope===scope),
     verifications:[...verifications.values()].filter(entry=>entry.scope===scope),
@@ -360,8 +363,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     let next:JourneyCodeState;
     await persist(()=>{
       next=change(codeSnapshot(scope));
-      return {...state,specs:{...state.specs,[scope]:next.specs},generationFailures:{...state.generationFailures,[scope]:next.generationFailures}};
-    },()=>{state.specs[scope]=next.specs;state.generationFailures[scope]=next.generationFailures;});
+      return {...state,specs:{...state.specs,[scope]:next.specs},generationFailures:{...state.generationFailures,[scope]:next.generationFailures},authoring:{...state.authoring,[scope]:next.authoring||{}}};
+    },()=>{state.specs[scope]=next.specs;state.generationFailures[scope]=next.generationFailures;state.authoring[scope]=next.authoring||{};});
   }});
   const specView=(scope:string)=>journeyCode.summary(scope);
   function discardObsoleteGenerations(scope:string,cases:readonly BrowserCase[]){
@@ -491,7 +494,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       let workspace:Awaited<ReturnType<typeof privateWorkspace>>|null=null;
       let external:Awaited<ReturnType<typeof beginExternal>>=null,uncertain=false;
       // The generation stays running until the twin is released, so a verification started next can hold it.
-      let failure:unknown=null;
+      let failure:unknown=null,authoring:AuthoringRecord|null=null;
       try{
         workspace=await privateWorkspace(generationRoot);
         external=await beginExternal(context,config.targetUrl,environment,'generate',workspace.path);
@@ -499,12 +502,15 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
         entry.cancel=()=>{entry.cancelled=true;entry.step='cancelling';job.cancel();};
         if(entry.cancelled)job.cancel();
-        const {code,provenance}=await job.promise;
+        const generated=await job.promise;
+        authoring=generated.authoring;
+        const {code,provenance}=generated;
         if(entry.cancelled)throw new Error(CANCELLED);
         entry.step='saving';
         // Generated code is a draft beside the approved code, which it never replaces by itself.
         await journeyCode.generatedDraft(scope,snapshot,code,provenance);
       }catch(error){
+        authoring=(error as {authoring?:AuthoringRecord})?.authoring??authoring;
         uncertain=(error as WorkerError|undefined)?.cleanupIncomplete===true;
         if(!entry.cancelled||uncertain&&external)failure=uncertain&&external?new Error(externalCleanup):error;
         if(environment&&(error as WorkerError|undefined)?.cleanupIncomplete)await onEnvironmentUncertain(environment.id,browserError(error)).catch(()=>{});
@@ -512,7 +518,18 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         try{if(workspace&&(!uncertain||!external))await rm(workspace.path,{recursive:true,force:true});}
         catch(error){uncertain=true;failure??=error;}
         finally{try{await finishExternal(external,uncertain);}catch(error){failure??=error;}finally{release();}}
-        // A saved or cancelled generation leaves no state. Only a failure for the same case is durable.
+        // Project evidence before workspace removal; persist after owned cleanup releases the target.
+        if(authoring){
+          try{
+            const record=restoreAuthoringRecord({...authoring,cleanup:uncertain?'incomplete':authoring.cleanup},hide([configuration.apiKey,credentials?.password,credentials?.username]));
+            let retained:AuthoringHistory;
+            await persist(()=>{
+              retained=retainAuthoring({...state.authoring,[scope]:{...state.authoring[scope],[item.id]:[record,...state.authoring[scope]?.[item.id]||[]]}},state.cases);
+              return {...state,authoring:retained};
+            },()=>{state.authoring=retained;});
+          }catch(error){failure??=new Error(`The authoring diagnostics could not be saved: ${generationDiagnostic(error)}`);}
+        }
+        // A saved or cancelled generation leaves no live state. Only a failure for the same case is durable.
         if(!failure||entry.discarded)generations.delete(key);
         else{
           const rejected=(failure as {rejected?:unknown}).rejected;
@@ -826,8 +843,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             let code:JourneyCodeState;
             await persist(()=>{
               code=replaceJourneyCases(codeState(scope),nextCases);
-              return {...state,cases:{...state.cases,[scope]:nextCases},specs:{...state.specs,[scope]:code.specs},generationFailures:{...state.generationFailures,[scope]:code.generationFailures},analyses:{...state.analyses,[scope]:analysis}};
-            },()=>{state.specs[scope]=code.specs;state.generationFailures[scope]=code.generationFailures;state.cases[scope]=nextCases;state.analyses[scope]=analysis;});
+              return {...state,cases:{...state.cases,[scope]:nextCases},specs:{...state.specs,[scope]:code.specs},authoring:{...state.authoring,[scope]:code.authoring||{}},generationFailures:{...state.generationFailures,[scope]:code.generationFailures},analyses:{...state.analyses,[scope]:analysis}};
+            },()=>{state.specs[scope]=code.specs;state.generationFailures[scope]=code.generationFailures;state.authoring[scope]=code.authoring||{};state.cases[scope]=nextCases;state.analyses[scope]=analysis;});
             discardObsoleteGenerations(scope,nextCases);
             run.discovery=discovery;run.status='completed';run.progress.cases[0].status='completed';touch(run);
           }
@@ -975,8 +992,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         let code:JourneyCodeState;
         await persist(()=>{
           code=replaceJourneyCases(codeState(scope),normalized);
-          return {...state,cases:{...state.cases,[scope]:normalized},specs:{...state.specs,[scope]:code.specs},generationFailures:{...state.generationFailures,[scope]:code.generationFailures}};
-        },()=>{state.specs[scope]=code.specs;state.generationFailures[scope]=code.generationFailures;state.cases[scope]=normalized;});
+          return {...state,cases:{...state.cases,[scope]:normalized},specs:{...state.specs,[scope]:code.specs},authoring:{...state.authoring,[scope]:code.authoring||{}},generationFailures:{...state.generationFailures,[scope]:code.generationFailures}};
+        },()=>{state.specs[scope]=code.specs;state.generationFailures[scope]=code.generationFailures;state.authoring[scope]=code.authoring||{};state.cases[scope]=normalized;});
         // A deleted case's code generation stops with it.
         discardObsoleteGenerations(scope,normalized);
         // So does its verification.

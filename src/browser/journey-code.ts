@@ -1,3 +1,4 @@
+import type { AuthoringRecord } from '../../contract/authoring.ts';
 import {randomUUID} from 'node:crypto';
 import {hasJourneyChecks} from '../business/browser-cases.ts';
 import {caseHash,specHash,validateJourneySpec} from '../journeys/playwright/specs.ts';
@@ -16,7 +17,7 @@ type CaseSpecs={approved:ApprovedSpec|null;draft:StoredSpec|null};
 type LegacySpec=StoredSpec&{approvedAt?:string;approvedRunId?:string};
 export type GenerationFailure={caseHash:string;error:string;rejected?:string};
 /** Durable journey code belongs to the browser manager's state file, never a second store. */
-export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>};
+export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>;authoring?:Record<string,AuthoringRecord[]>};
 export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number};
 type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
 type LiveVerification=VerificationIdentity&{caseId:string;done:boolean;error?:string};
@@ -71,6 +72,7 @@ export function restoreJourneyCode(value:{specs:unknown;generationFailures:unkno
 /** Compose a case replacement with the manager's case/analysis save, so code disappears in that same transaction. */
 export function replaceJourneyCases(code:JourneyCodeState,cases:readonly BrowserCase[]):JourneyCodeState{
   return {
+    ...(code.authoring?{authoring:Object.fromEntries(Object.entries(code.authoring).filter(([id])=>cases.some(item=>item.id===id)))}:{}),
     specs:Object.fromEntries(Object.entries(code.specs).filter(([id])=>cases.some(item=>item.id===id))),
     generationFailures:Object.fromEntries(Object.entries(code.generationFailures).filter(([id,failure])=>cases.some(item=>item.id===id&&caseHash(item)===failure.caseHash))),
   };
@@ -137,7 +139,7 @@ export function createJourneyCode(storage:Persistence){
     },
     code(scope:string,caseId:unknown):SpecCodeReply{
       const current=storage.read(scope),item=caseOf(current,caseId),{approved,draft}=current.code.specs[item.id]||{};
-      return {...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
+      return {...(current.code.authoring?.[item.id]?.length?{authoring:structuredClone(current.code.authoring[item.id])}:{}),...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
     },
     runnable(scope:string,item:BrowserCase,{manual=false,verification}:{manual?:boolean;verification?:Verification}={}):RunnableCode{
       const {approved,draft}=storage.read(scope).code.specs[item.id]||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);

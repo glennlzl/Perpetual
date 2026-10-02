@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import type { ModelSettingsView, OpenRouterModelView } from '../contract/settings.ts';
 
@@ -11,8 +11,8 @@ const capabilities = (model: string): ModelSettingsView => ({ provider: 'openrou
 
 // The real App owns navigation and mounts/unmounts the real Settings form; only HTTP is controlled.
 test('Settings save completion survives leaving and reopening the page', { timeout: 60000 }, async t => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
-  t.after(() => server.close()); await server.listen();
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
   for (const outcome of ['success', 'failure'] as const) await t.test(outcome, async t => {

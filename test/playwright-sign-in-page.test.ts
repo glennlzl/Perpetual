@@ -88,7 +88,7 @@ test('a journey that starts on a landing page signs in on the stage’s sign-in 
   const report=await finished(f.manager,f.context,(await f.manager.run(f.context,{credentials:account},{manual:true})).run.id);
   assert.equal(report.run.status,'passed',JSON.stringify(report.results));
   assert.deepEqual(report.progress.cases[0].steps!.map(step=>[step.id,step.status]),[['sign-in','completed'],['week','completed']]);
-  assert.deepEqual(report.progress.cases[0].actions.map(action=>action.type),['sign_in_with_test_account','reload_page'],'Opening the sign-in page is part of signing in.');
+  assert.deepEqual(report.progress.cases[0].actions.map(action=>action.type),['sign_in_with_test_account','wait','reload_page'],'Opening the sign-in page is part of signing in; reload reports its readiness wait.');
   assert.deepEqual(f.app.posts,['POST /login']);
   assert.ok(secretFree(report)&&!(await readFile(join(f.dataDir,'browser','state.json'),'utf8')).includes(account.password));
   // Every event the worker reports is free of the account.

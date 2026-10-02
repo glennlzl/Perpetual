@@ -9,6 +9,7 @@ import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTem
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { controlReads } from './control.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
+import { synchronizeReload } from './navigation.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 
 /** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
@@ -276,6 +277,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (BLOCK_WRITES) target.on('websocket', socket => socket.on('framesent', () => { if (++sent > forwarded) unguarded = true; }));
       const cdp = await context.newCDPSession(target), { targetInfo } = await cdp.send('Target.getTargetInfo');
       diagnostic?.cdp(target, cdp, targetInfo);
+      synchronizeReload(target, cdp, action => base.step(STEPS.reloadReady, action));
       cdp.on('Fetch.requestPaused', ({ requestId, request, frameId }) => {
         const refused = refuse(request.url, frameId === targetInfo.targetId);
         cdp.send(refused ? 'Fetch.failRequest' : 'Fetch.continueRequest', refused ? { requestId, errorReason: 'BlockedByClient' } : { requestId }).catch(() => {});

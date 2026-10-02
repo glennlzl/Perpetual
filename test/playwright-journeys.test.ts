@@ -189,7 +189,8 @@ test('a draft spec passes its reviewed journey with live frames, actions and a r
   // The number read before saving is compared after it.
   assert.deepEqual(progress.steps!.flatMap(step=>step.checks!.map(check=>['name' in check?check.name:check.value,check.passed,check.observed])),[['/settings',true,undefined],['before',true,10],['after',true,9],['Signed in as Twin Tester',true,undefined]]);
   assert.match(progress.steps![1].evidence??'',/^Reviewed checks passed: Credits 9 < before 10\.$/);
-  assert.deepEqual(progress.actions.map(action=>action.type),['sign_in_with_test_account','input','click','wait','reload_page','reload_page']);
+  // The explicit load wait and each reload's document-activation wait are real reported actions.
+  assert.deepEqual(progress.actions.map(action=>action.type),['sign_in_with_test_account','input','click','wait','wait','reload_page','wait','reload_page']);
   assert.ok(progress.actions.every(action=>action.status==='passed'));
   const frame=await f.manager.frame(f.context,run.id,journey.id);
   assert.ok(frame!.length>100&&frame![0]===0xff&&frame![1]===0xd8,'A JPEG frame reached the live view.');

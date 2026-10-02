@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import { defaultPipeline, applyPipelineAction } from '../src/pipeline.ts';
 import type { AutopilotView } from '../contract/autopilot.ts';
@@ -66,8 +66,8 @@ test('a gate commit refresh preserves a pending optimistic stage collapse in Chr
 });
 
 test('rapid collapses stay interactive, isolate a failed save and can be retried in Chromium', { timeout: 60000 }, async t => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
-  t.after(() => server.close()); await server.listen();
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(), repoPath = '/acme/app', first = Promise.withResolvers<void>();
   t.after(() => first.resolve());
@@ -103,8 +103,8 @@ test('rapid collapses stay interactive, isolate a failed save and can be retried
 });
 
 test('a global repair cleanup failure is visible without changing Build or importing another source’s repairs', { timeout: 60000 }, async t => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
-  t.after(() => server.close()); await server.listen();
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(), repoPath = '/acme/beta', sha = 'b'.repeat(40);
   const reason = 'Repair cleanup must finish before another repair can start. Docker removal failed.';

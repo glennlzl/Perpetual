@@ -37,9 +37,8 @@ export type FixtureEvent =
  */
 export const CHECK_VERSION = 3;
 
-// The fixture's own steps: their Playwright calls are never journey actions. The sign-in step is one action, listed
-// as SIGN_IN_ACTION.
-export const STEPS = { checks: 'Perpetual reviewed checks', signIn: 'Perpetual sign-in' };
+// Named fixture steps keep checks private and report sign-in as one action and reload readiness as a wait.
+export const STEPS = { checks: 'Perpetual reviewed checks', signIn: 'Perpetual sign-in', reloadReady: 'Perpetual reload readiness' };
 export const SIGN_IN_ACTION = 'sign_in_with_test_account';
 export const OPERATORS: Record<Operator, (a: number, b: number) => boolean> = { '<': (a, b) => a < b, '>': (a, b) => a > b, '=': (a, b) => a === b, '!=': (a, b) => a !== b };
 // A sign or currency symbol must touch its digits, so "Credits - 120" reads 120.

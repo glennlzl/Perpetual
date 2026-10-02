@@ -179,6 +179,24 @@ test('A failed final state save preserves unconfirmed service cleanup and both f
   });
 });
 
+test('Diagnostics hide newly generated credentials even when their final state save fails', { skip: process.getuid?.() === 0 }, async t => {
+  const f = await fixture(t), secret = 'generated-sensitive-fixture-value';
+  t.after(() => chmod(f.dir, 0o700).catch(() => {}));
+  const probe = { id: 'probe', title: 'Probe', fidelity: 'actual', env: () => ({}), accounts: async ctx => {
+    ctx.rememberSecret?.(secret);
+    await chmod(f.dir, 0o500);
+    throw new Error('Provisioning failed');
+  } } satisfies TwinService;
+  const runtime = createTwinRuntime({ services: { probe }, isFree: async () => true, exec: async (_file, args) => ({ stdout: args.includes('logs') ? `diagnostic ${secret}` : '' }) });
+  await assert.rejects(runtime.prepare({ dataDir: f.dataDir, source: f.source, id: 'beta', config: { services: { probe: {} } } }), /Provisioning failed.*Twin state could not be saved/);
+  const saved = JSON.parse(await readFile(f.file, 'utf8'));
+  assert.ok(!saved.secrets.includes(secret), 'The generated value did not reach persisted state.');
+  const logs = await runtime.logs({ dataDir: f.dataDir, id: 'beta' });
+  assert.ok(!logs.includes(secret));
+  assert.match(logs, /diagnostic \[redacted\]/i);
+  await runtime.destroy({ dataDir: f.dataDir, id: 'beta' });
+});
+
 test('Parent aliases preserve lexical paths and the default resource owner through cleanup', async t => {
   const f = await fixture(t), alias = join(f.root, 'alias');
   await symlink(f.root, alias);

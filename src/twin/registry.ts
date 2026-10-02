@@ -60,6 +60,10 @@ export interface ServiceContext<Options extends ServiceOptions<Options> = JsonOb
   exec(file: string, args: string[], options?: { cwd?: string }): Promise<CommandOutput>;
   /** Tests supply their own; services otherwise use the global fetch. */
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** The operation's cancellation, including while an HTTP response body is being read. */
+  signal?: AbortSignal;
+  /** Register a generated credential before sending it to a process or service. */
+  rememberSecret?(value: string): void;
 }
 
 /**
@@ -108,6 +112,8 @@ export interface TwinService<Options extends ServiceOptions<Options> = JsonObjec
   containers?(ctx: ServiceContext<Options, Outputs>): ServiceContainer[];
   /** Read-only declaration of exact owned containers; it receives no setup, account or command capabilities. */
   healthContainers?(ctx: Pick<ServiceContext, 'project' | 'dir'>): Promise<ServiceHealthContainer[]>;
+  /** Private configured values to hide in diagnostic output, including older saved twins. */
+  diagnosticSecrets?(options: Options): string[];
   env(ctx: ServiceContext<Options, Outputs>): EnvInput;
   /** Test accounts, checked by the runtime before they are stored. */
   accounts?(ctx: ServiceContext<Options, Outputs>): Promise<unknown>;

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import type { Environment } from '../contract/environment.ts';
 
@@ -24,7 +24,7 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
     workspace.activate({path:'/acme/app',branch:'main'},{environments:(await controller('/api/environments')).environments,browserTests:{beta:await controller('/api/browser')}});
     createRoot(document.getElementById('root')).render(React.createElement(TestWorkspaceContext.Provider,{value:workspace},React.createElement(TooltipProvider,{},React.createElement(Sheet,{open:true},React.createElement(SheetContent,{},React.createElement(EnvironmentSettings,{repoPath:'/acme/app',stage:{id:'beta',name:'Beta',kind:'sandbox'},onClose:()=>{}}))))));
   `;
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
     name: 'environment-inspector-test', resolveId(id) { if (id.endsWith('/__environment-ui.tsx')) return '\0environment-ui.tsx'; },
     load(id) { if (id === '\0environment-ui.tsx') return entry; },
     configureServer(server) { server.middlewares.use(async (req, res, next) => {
@@ -45,7 +45,7 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
       next();
     }); },
   }] });
-  t.after(() => server.close()); await server.listen();
+  await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(); t.after(() => page.close());
   await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__environment-ui`);

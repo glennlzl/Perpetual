@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect } from '@playwright/test';
 import { sendVideo } from '../src/browser/video-file.ts';
 
@@ -44,7 +44,7 @@ test('recorded browser tabs remain playable and recover from unavailable media',
     import '/src/workspace.css';
     createRoot(document.getElementById('root')).render(React.createElement('div',{className:'pipeline-inspector'},React.createElement(JourneyRecording,{urls:${JSON.stringify(urls)},name:'Recorded journey'})));
   `;
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
     name: 'recording-ui-test',
     resolveId(id) { if (id.endsWith('/__recording-ui.tsx')) return '\0recording-ui'; },
     load(id) { if (id === '\0recording-ui') return entry; },
@@ -69,7 +69,7 @@ test('recorded browser tabs remain playable and recover from unavailable media',
       });
     },
   }] });
-  await server.listen(); t.after(() => server.close());
+  await server.listen();
   const url = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__recording-ui`;
   await t.test('real recorded frames play and pause through the native controls', async t => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } }); t.after(() => page.close());
