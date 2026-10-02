@@ -216,7 +216,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   if (!steps.cleanup && !steps.recover) for (const name of directories) await rm(join(root, name), { recursive: true, force: true });
   const saves = createSaveQueue();
   let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, recoveryError: string | null = null, reads = 0;
-  const tasks = new Set<Promise<unknown>>(), controllers = new Map<string, AbortController>();
+  const tasks = new Set<Promise<unknown>>(), controllers = new Map<string, { controller: AbortController; finished: Promise<void> }>();
   // The head each source was last read at with its ETag (reads counts the reads that succeeded), the branch's own failed
   // runs of that head as last read, the first head seen since start (a baseline that opens nothing by itself), a head
   // whose runs all passed, which is not read again, the head the loop guard judges with the repairs whose pull requests
@@ -332,7 +332,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function supersede(repair: Repair, sha: string) {
     const time = now();
     Object.assign(repair, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, updatedAt: time, completedAt: time } satisfies Partial<Repair>);
-    controllers.get(repair.id)?.abort();
+    controllers.get(repair.id)?.controller.abort();
   }
   // A newer passing head, or a newer repair's own pull request, supersedes a finished repair; its open pull request is
   // marked closing, and closeQueued() closes it.
@@ -438,9 +438,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     // Nothing starts once shutdown began: the repair stays active, and the next start records it as interrupted.
     if (closed || !ACTIVE.includes(repair.status)) return;
     const controller = new AbortController();
-    controllers.set(repair.id, controller);
-    track(execute(repair, controller.signal).catch(error => { process.stderr.write(`Repair: ${text(error)}\n`); })
-      .finally(() => { if (controllers.get(repair.id) === controller) controllers.delete(repair.id); }));
+    const finished = Promise.resolve().then(() => execute(repair, controller.signal)).catch(error => { process.stderr.write(`Repair: ${text(error)}\n`); })
+      .finally(() => { if (controllers.get(repair.id)?.controller === controller) controllers.delete(repair.id); });
+    controllers.set(repair.id, { controller, finished });
+    track(finished);
   }
   async function readHead(current: Managed, login: string) {
     const previous = heads.get(current.key);
@@ -607,43 +608,54 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (!verified) throw new Error('Connect GitHub to repair builds.');
       const connection = { ...verified };
       if (connection.repository !== current.repository) throw conflict('The GitHub connection changed. Start the repair again.');
-      // A check under way may have read the head before this request, so a check of its own follows it.
-      if (checking) await checking;
-      unchanged();
-      const read = reads;
-      await check();
-      unchanged();
-      const head = heads.get(current.key);
-      if (reads === read || head?.branch !== current.branch) throw conflict(recoveryError || watchError || `Could not read the head of ${current.branch}. Try again.`);
-      if (head.login !== connection.login) throw conflict('The GitHub connection changed. Start the repair again.');
-      // True when this commit's repair is already running; a held or other active repair refuses.
-      const started = () => {
-        const existing = scoped(current).find(repair => repair.sha === head.sha);
-        if (existing && ACTIVE.includes(existing.status)) return true;
-        if (existing && !retryable(existing.status)) throw conflict('This commit already has a repair.');
-        if (running()) throw conflict('Another repair is running.');
-        if (busy()) throw conflict('The previous repair is still ending. Try again.');
-        return false;
-      };
-      // The named run is a failed build of the branch at its head, even when that head's repair already runs.
-      const { runs } = await github.runs({ repository: current.repository, sha: head.sha, login: connection.login });
-      unchanged();
-      const connected = await github.connection();
-      unchanged();
-      if (connected?.login !== connection.login || connected.repository !== connection.repository) throw conflict('The GitHub connection changed. Start the repair again.');
-      // A repair of a commit the head moved past while its runs were read would be superseded at once.
-      const latestHead = heads.get(current.key);
-      if (latestHead?.branch !== head.branch || latestHead.login !== head.login || latestHead.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
-      const id = String(runId), own = branchRuns(runs, current.branch), failed = own.filter(failedRun);
-      if (!failed.some(run => run.id === id)) {
-        throw conflict(!runs.some(run => run.id === id) ? `This run is not at the head of ${current.branch}.` : own.some(run => run.id === id) ? 'Choose a failed workflow run.' : `This run is not a build of ${current.branch}.`);
+      for (;;) {
+        // A check under way may have read the head before this request, so a check of its own follows it.
+        if (checking) await checking;
+        unchanged();
+        const read = reads;
+        await check();
+        unchanged();
+        const head = heads.get(current.key);
+        if (reads === read || head?.branch !== current.branch) throw conflict(recoveryError || watchError || `Could not read the head of ${current.branch}. Try again.`);
+        if (head.login !== connection.login) throw conflict('The GitHub connection changed. Start the repair again.');
+        // True when this commit's repair is already running; a held or other active repair refuses.
+        const started = () => {
+          const existing = scoped(current).find(repair => repair.sha === head.sha);
+          if (existing && ACTIVE.includes(existing.status)) return true;
+          if (existing && !retryable(existing.status)) throw conflict('This commit already has a repair.');
+          if (running()) throw conflict('Another repair is running.');
+          if (busy()) throw conflict('The previous repair is still ending. Try again.');
+          return false;
+        };
+        // The named run is a failed build of the branch at its head, even when that head's repair already runs.
+        const { runs } = await github.runs({ repository: current.repository, sha: head.sha, login: connection.login });
+        unchanged();
+        const connected = await github.connection();
+        unchanged();
+        if (connected?.login !== connection.login || connected.repository !== connection.repository) throw conflict('The GitHub connection changed. Start the repair again.');
+        // A repair of a commit the head moved past while its runs were read would be superseded at once.
+        const latestHead = heads.get(current.key);
+        if (latestHead?.branch !== head.branch || latestHead.login !== head.login || latestHead.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
+        const id = String(runId), own = branchRuns(runs, current.branch), failed = own.filter(failedRun);
+        if (!failed.some(run => run.id === id)) {
+          throw conflict(!runs.some(run => run.id === id) ? `This run is not at the head of ${current.branch}.` : own.some(run => run.id === id) ? 'Choose a failed workflow run.' : `This run is not a build of ${current.branch}.`);
+        }
+        // A normal terminal outcome is visible before its save has finished. Wait for that execution,
+        // then read admission evidence again; stopped work and owned resources keep their existing hold.
+        const previous = scoped(current).find(repair => controllers.has(repair.id));
+        const ending = previous && controllers.get(previous.id);
+        if (previous && retryable(previous.status) && !previous.cleanup && ending && !ending.controller.signal.aborted) {
+          await ending.finished;
+          unchanged();
+          continue;
+        }
+        if (started()) return view();
+        const repair = open(current, connection.login, head.sha, failed, 'person');
+        await persist();
+        try { unchanged(); } catch (error) { await settle(repair, 'needs-person', text(error)); throw error; }
+        begin(repair);
+        return view();
       }
-      if (started()) return view();
-      const repair = open(current, connection.login, head.sha, failed, 'person');
-      await persist();
-      try { unchanged(); } catch (error) { await settle(repair, 'needs-person', text(error)); throw error; }
-      begin(repair);
-      return view();
     },
     /**
      * The auto-merge switch, per pipeline, which the Build stage's Autopilot mode sets: off, a repair stops at ready once CI and its gates ran, and a repair already
@@ -665,7 +677,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       const repair = state.repairs.find(item => item.id === id);
       if (!repair) throw Object.assign(new Error('Repair not found.'), { statusCode: 404 });
       if (!ACTIVE.includes(repair.status)) throw conflict('This repair is not running.');
-      controllers.get(repair.id)?.abort();
+      controllers.get(repair.id)?.controller.abort();
       await settle(repair, 'cancelled');
       return view();
     },
@@ -680,7 +692,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     async close() {
       closed = true;
       clearInterval(timer);
-      for (const controller of controllers.values()) controller.abort();
+      for (const { controller } of controllers.values()) controller.abort();
       while (checking || tasks.size) await Promise.allSettled([checking, ...tasks]);
       await saves.idle();
     },

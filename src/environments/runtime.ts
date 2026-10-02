@@ -25,13 +25,11 @@ const SETTINGS_SOURCE = 'settings';
 /** The llm service takes App Settings' model unless its `source` option names the app's own values. */
 export const fromAppSettings = (id: string, options: { source?: unknown } | null | undefined) => id === MODEL_SERVICE && (options?.source ?? SETTINGS_SOURCE) === SETTINGS_SOURCE;
 
-/** Stored test inputs by service; values go to the twin runtime only, never to a view. First renews each provision
- * of the config's services that is about to expire, so every twin creation, a gate's rebuild included, keeps a
- * provisioned sandbox with no user action; a renewal that fails leaves its service blocked. A view or a teardown
- * passes `refresh: false`, since neither may create anything. */
-export async function environmentInputs({ dataDir, config, services = registry, refresh = true, store }: {
-  dataDir: string; config?: { services?: Record<string, JsonObject> } | null; services?: TwinServices; refresh?: boolean;
-  store?: { refresh(ids: string[]): Promise<unknown>; values(): Promise<Record<string, InputValues>> };
+/** Stored test inputs by service; values go to the twin runtime only, never to a view. Reads never provision
+ * a service or replace its account. Expired credentials are omitted, leaving the service blocked. */
+export async function environmentInputs({ dataDir, config, services = registry, store }: {
+  dataDir: string; config?: { services?: Record<string, JsonObject> } | null; services?: TwinServices;
+  store?: { values(): Promise<Record<string, InputValues>> };
 }) {
   if (!store) {
     // Storage follows the configured alias; runtime resource identity still uses dataDir unchanged.
@@ -39,7 +37,6 @@ export async function environmentInputs({ dataDir, config, services = registry, 
     store = createTwinInputs({ dataDir: await realpath(dataDir), services });
   }
   const declared = config?.services ?? {};
-  if (refresh) await store.refresh(Object.keys(declared));
   const inputs = await store.values();
   if (Object.hasOwn(declared, MODEL_SERVICE) && fromAppSettings(MODEL_SERVICE, declared[MODEL_SERVICE])) {
     const model = (await createBrowserModelSettings({ dataDir })).configuration();
@@ -122,7 +119,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
   authorHarness?: AuthorHarness;
   answers?: (url: string, signal?: AbortSignal) => Promise<number>;
 } = {}) {
-  const twinInputs = (dataDir: string, config: Environment['plan'], refresh: boolean) => inputs({ dataDir, config, services, refresh });
+  const twinInputs = (dataDir: string, config: Environment['plan']) => inputs({ dataDir, config, services });
   const secretInputs = (values: Record<string, InputValues>) => Object.entries(values)
     .flatMap(([id, entries]) => (services[id]?.inputs ?? []).filter(input => input.secret).map(input => entries[input.name])).filter((value): value is string => Boolean(value));
 
@@ -204,14 +201,14 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     let values: Record<string, InputValues> = {};
     const knownSecrets = new Set<string>();
     let facts: RepositoryFacts | undefined;
-    const readInputs = async (config: Environment['plan'], refresh: boolean) => {
-      const next = await twinInputs(dataDir, config, refresh);
-      // Renewal never makes an earlier value safe to disclose. New values also invalidate already-clipped evidence.
+    const readInputs = async (config: Environment['plan']) => {
+      const next = await twinInputs(dataDir, config);
+      // Replacing inputs never makes an earlier value safe to disclose. New values invalidate already-clipped evidence.
       for (const value of secretInputs(next)) if (!knownSecrets.has(value)) { knownSecrets.add(value); facts = undefined; }
       return next;
     };
     const prepareTwin = async (config: Environment['plan']) => {
-      values = await readInputs(config, true);
+      values = await readInputs(config);
       check();
       return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, signal, onStep: async step => { check(); await onUpdate(next(step)); } });
     };
@@ -271,7 +268,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     const authorSecrets = () => [model.apiKey, ...knownSecrets];
     try {
       // Protect the first observation as well as build feedback. Reading stored inputs never provisions a service.
-      values = await readInputs(environment.plan, false);
+      values = await readInputs(environment.plan);
       check();
       const outcome = await generateTwinConfig({
         draft: generate.draft, feedback: generate.feedback, services, cancelled,
@@ -294,7 +291,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
         checkpoint: onDraft,
-        teardown: async config => { await twin.destroy({ dataDir, id: environment.id, inputs: await readInputs(config, false) }); },
+        teardown: async config => { await twin.destroy({ dataDir, id: environment.id, inputs: await readInputs(config) }); },
         hide: text => redact(redactor(authorSecrets())(text)),
       });
       return { ...ready(outcome.result), plan: outcome.config, ...(outcome.logs ? { authoringLogs: outcome.logs } : {}),
@@ -316,7 +313,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
 
   async function destroySandbox({ dataDir, environment }: { dataDir: string; environment: Environment }) {
     if (environment.sandboxId !== environment.id) return destroyCuaGuest({ dataDir, id: environment.sandboxId });
-    return twin.destroy({ dataDir, id: environment.id, inputs: await twinInputs(dataDir, environment.plan, false) });
+    return twin.destroy({ dataDir, id: environment.id, inputs: await twinInputs(dataDir, environment.plan) });
   }
 
   return { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox };

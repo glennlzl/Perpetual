@@ -12,9 +12,9 @@ import { hide } from '../../redaction.ts';
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
-export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; error?: string };
+export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
-type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown };
+type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown };
 
 // Journey actions by Playwright step title; reads, waits for state and the fixture's own calls are not actions.
 const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
@@ -23,6 +23,7 @@ const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/
 
 export default class JourneyReporter implements Reporter {
   channel: string | undefined; approved: ApprovedCase; videoDir: string | undefined; secrets: string[];
+  controlRead: boolean | undefined;
   buffer = ''; actions: JourneyAction[] = []; indexes = new Map<TestStep, number>(); running: unknown = null; checkFailed = false;
   assertions: { passed?: unknown }[] = []; stop: string | null = null; result: TestResult | null = null; errors: TestError[] = [];
   constructor() {
@@ -52,6 +53,7 @@ export default class JourneyReporter implements Reporter {
         if (event.type === 'journey-step') { this.running = event.status === 'running' ? event.stepId : null; this.checkFailed ||= event.status === 'failed'; }
         this.write(event);
       } else if (event.type === 'assertions' && Array.isArray(event.assertions)) this.assertions = event.assertions;
+      else if (event.type === 'control-read' && typeof event.eligible === 'boolean') this.controlRead = event.eligible;
       else if (event.type === 'journey-stop' && typeof event.error === 'string') this.stop ||= event.error;
     }
   }
@@ -76,7 +78,7 @@ export default class JourneyReporter implements Reporter {
   // Facts, never a verdict: the controller decides status from these, the milestones and the approved case.
   facts(): JourneyFacts {
     const { id: caseId, steps = [] } = this.approved, result = this.result;
-    const base = { caseId, assertions: this.assertions };
+    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }) };
     if (result?.status === 'passed') return { ...base, stopCause: 'none' };
     if (result?.status === 'timedOut') return { ...base, stopCause: 'deadline' };
     // A reviewed check that failed decides the journey; the error that stopped it adds nothing.

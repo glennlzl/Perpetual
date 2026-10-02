@@ -105,6 +105,7 @@ function ConnectDialog({ service, onClose, onSaved }: { service: TwinServiceRow;
             {service.provision.inputs.map(input => <Field key={input.name} id={`twin-${service.id}-provision-${input.name}`} label={input.label} type={input.name === 'email' ? 'email' : 'text'} autoComplete={input.name === 'email' ? 'email' : 'off'}
               value={provision[input.name] ?? ''} invalid={Boolean(error)} onChange={value => { setProvision(previous => ({ ...previous, [input.name]: value })); setError(''); }} />)}
           </fieldset>
+          {service.provision.inputs.some(input => input.name === 'email') && <p className="text-sm text-muted-foreground">Your email is sent to {service.title} only when you choose Create sandbox.</p>}
           {failure}
           {footer('Create sandbox', provisionRequest)}
         </form>

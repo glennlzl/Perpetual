@@ -13,8 +13,8 @@ import type { TwinServiceInputView } from '../../contract/twin.ts';
 // User-supplied test credentials, stored once per machine and reused across twins.
 // Views say only which inputs are set; values go to the twin runtime and nowhere else.
 // A service that declares `provision: { inputs, run }` can instead create its values on the user's action, e.g. a
-// sandbox that expires. Its record (the inputs it ran with, expiry, claim link) is kept apart from the values, is
-// renewed before it expires, and once expired its values are never used.
+// sandbox that expires. Its record (the inputs it ran with, expiry, claim link) is kept apart from the values.
+// Only another explicit provision replaces the sandbox; once expired its values are never used.
 
 const FILE = 'twin-inputs.json';
 const PROVISIONS = 'twin-provisions.json';
@@ -22,7 +22,6 @@ const PROVISIONS = 'twin-provisions.json';
 const STORAGE_LIMIT = 1024 * 1024;
 /** A provision input default the controller fills from `git config --global user.email`. */
 const GIT_EMAIL = 'git-email';
-const DAY = 86_400_000;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** A provision's record, kept apart from the values it provided. */
@@ -73,9 +72,7 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
   };
   const service = (id: string) => Object.hasOwn(services, id) ? services[id] : fail(`Unknown service "${id}".`);
   // UTC dates: a record whose expiry is today or earlier has expired.
-  const date = (days = 0) => new Date(now().getTime() + days * DAY).toISOString().slice(0, 10);
-  const expiresBy = (record: unknown, day: string) => plain(record) && !(typeof record.expiresAt === 'string' && record.expiresAt > day);
-  const lapsed = (record: unknown) => expiresBy(record, date());
+  const lapsed = (record: unknown) => plain(record) && !(typeof record.expiresAt === 'string' && record.expiresAt > now().toISOString().slice(0, 10));
   const valuesOf = (entry: unknown) => plain(entry) ? entry : undefined;
   const isProvision = (record: unknown): record is ProvisionRecord => plain(record) && typeof record.expiresAt === 'string' && typeof record.provisionedAt === 'string'
     && plain(record.inputs) && Object.values(record.inputs).every(value => typeof value === 'string') && (record.claimUrl === undefined || typeof record.claimUrl === 'string');
@@ -139,10 +136,9 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
   }
 
   // Runs the service's provision in a private empty directory, which may receive keys and is always removed, then
-  // stores its values, checked like a manual save, in place of the service's values, and its record. A renewal
-  // passes the record it renews and stores nothing once a save has ended it or another provision replaced it.
+  // stores its values, checked like a manual save, in place of the service's values, and its record.
   // Only services with a provision reach here, and its values are ones the service declares as inputs.
-  async function run(item: TwinService, inputs: InputValues, renewing?: Pick<ProvisionRecord, 'provisionedAt'>) {
+  async function run(item: TwinService, inputs: InputValues) {
     await directory();
     const tempDir = await mkdtemp(join(dataDir, 'provision-'));
     let result: ProvisionResult | undefined;
@@ -159,8 +155,7 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
     const claimUrl = typeof details.claimUrl === 'string' && details.claimUrl.startsWith('https://') ? details.claimUrl : null;
     const account = typeof details.account === 'string' && details.account ? details.account : null;
     await saves.run(async () => {
-      const provisions = await read(records), record = provisions[item.id];
-      if (renewing && !(plain(record) && record.provisionedAt === renewing.provisionedAt)) return;
+      const provisions = await read(records);
       await write([file, { ...await read(file), [item.id]: { ...provided } }],
         [records, { ...provisions, [item.id]: { inputs: { ...inputs }, expiresAt: details.expiresAt,
           ...(claimUrl ? { claimUrl } : {}), ...(account ? { account } : {}), provisionedAt: now().toISOString() } }]);
@@ -178,22 +173,6 @@ export function createTwinInputs({ dataDir, services = registry, docker = docker
     return view();
   }
 
-  /** Renews, from its stored inputs, each provision that expires by tomorrow (UTC), of `ids` or every service.
-   * Returns [{ id }] or [{ id, error }] per renewal; a failure is never thrown, and its service expires and is blocked.
-   * A save that ends the record while it renews wins: the renewal then stores nothing. */
-  async function refresh(ids = Object.keys(services)) {
-    const provisions = await read(records), tomorrow = date(1);
-    const due = [...new Set(ids)].filter(id => Object.hasOwn(services, id) && services[id].provision && expiresBy(provisions[id], tomorrow));
-    // Decided again under the service's lock, from its record then: a save or another provision may have replaced it.
-    const renew = async (id: string) => { const record = (await read(records))[id];
-      if (isProvision(record) && expiresBy(record, tomorrow)) await run(services[id], record.inputs, record); };
-    return Promise.all(due.map(async id => {
-      // A provisioning already running for this service, e.g. the user's, is the renewal.
-      try { await (exclusive(id, () => renew(id)) ?? provisioning.get(key(id))); return { id }; }
-      catch (error) { return { id, error: (error as Error).message }; }
-    }));
-  }
-
-  return { view, values, set, provision, refresh };
+  return { view, values, set, provision };
 }
 export type TwinInputs = ReturnType<typeof createTwinInputs>;

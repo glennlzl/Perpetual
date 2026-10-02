@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { loopbackCommand } from '../src/twin/loopback.ts';
 import { composeTwin } from '../src/twin/compose.ts';
 import { validateTwinConfig } from '../src/twin/config.ts';
@@ -13,6 +14,23 @@ import type { TestContext } from 'node:test';
 
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const command = (code: string) => `${quote(process.execPath)} -e ${quote(code)}`;
+async function ownedProcessSnapshot(pids: number[]) {
+  const observedAt = performance.now();
+  try {
+    if (process.platform === 'linux') {
+      const processes = await Promise.all(pids.map(async pid => {
+        try {
+          const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+          const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+          return { pid, state: fields[0], parent: fields[1], group: fields[2], startTicks: fields[19] };
+        } catch (error) { return { pid, unavailable: (error as NodeJS.ErrnoException).code }; }
+      }));
+      return { observedAt, processes };
+    }
+    const { stdout } = await promisify(execFile)('ps', ['-p', pids.join(','), '-o', 'pid=,ppid=,pgid=,state=,lstart='], { timeout: 1000, maxBuffer: 8192 });
+    return { observedAt, columns: 'pid parent group state started', processes: stdout.trim() };
+  } catch (error) { return { observedAt, unavailable: (error as NodeJS.ErrnoException).code }; }
+}
 async function listening() {
   const server = createServer();
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -37,7 +55,7 @@ async function assertTerminated(pid: number) {
     try { if (/^State:\s+[ZX]\b/m.test(await readFile(`/proc/${pid}/status`, 'utf8'))) return; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   }
-  assert.fail(`Process ${pid} is still running.`);
+  assert.fail(`Process ${pid} is still running (addressable at ${performance.now().toFixed(3)} ms).`);
 }
 function run(t: TestContext, code: string, ports: number[]) {
   const [file, ...args] = loopbackCommand(command(code), ports, 1);
@@ -86,12 +104,23 @@ test('Stopping the supervisor terminates an app group that ignores SIGTERM and r
     await delay(10, undefined, { signal: t.signal });
   }
   const pids = JSON.parse(job.output().stdout) as { app: number; descendant: number; appPort: number; descendantPort: number };
+  const owned = [job.child.pid!, pids.app, pids.descendant], before = await ownedProcessSnapshot(owned);
   for (const pid of [pids.app, pids.descendant]) await assert.rejects(assertTerminated(pid), /is still running/);
   for (const bound of [port, pids.appPort, pids.descendantPort]) await assert.rejects(assertReleased(bound), { code: 'EADDRINUSE' });
+  const stoppedAt = performance.now();
   job.child.kill('SIGTERM');
-  assert.equal(await job.done, 143);
-  for (const pid of [pids.app, pids.descendant]) await assertTerminated(pid);
-  for (const bound of [port, pids.appPort, pids.descendantPort]) await assertReleased(bound);
+  const supervisorExit = await job.done;
+  const supervisorClosedAt = performance.now();
+  const checks = await Promise.allSettled([
+    Promise.resolve().then(() => assert.equal(supervisorExit, 143)),
+    ...[pids.app, pids.descendant].map(assertTerminated),
+    ...[port, pids.appPort, pids.descendantPort].map(assertReleased),
+  ]);
+  const failures = checks.filter((check): check is PromiseRejectedResult => check.status === 'rejected');
+  if (failures.length) {
+    t.diagnostic(JSON.stringify({ before, stoppedAt, supervisorExit, supervisorClosedAt, afterAssertions: await ownedProcessSnapshot(owned) }));
+    throw new AggregateError(failures.map(failure => failure.reason), 'Owned loopback processes or ports remained after supervisor exit.');
+  }
 });
 
 test('Only explicit public references get relays; private, literal and blocked addresses do not', () => {

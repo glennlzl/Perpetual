@@ -25,6 +25,7 @@ export function approvedCase(value: unknown): ApprovedCase {
 /** What the fixture reports to the reporter over the run's event channel, tagged with the case ID. */
 export type FixtureEvent =
   | { type: 'journey-stop'; error: string }
+  | { type: 'control-read'; eligible: boolean }
   | { type: 'frame'; data: string; timestamp: number }
   | { type: 'journey-step'; stepId: string; status: 'running' | 'completed' | 'failed'; evidence?: string; checks?: EvaluatedCheck[] }
   | { type: 'assertions'; assertions: { type: TextCheck['type']; value: string; passed: boolean; resolved?: string }[] };
@@ -32,9 +33,9 @@ export type FixtureEvent =
 /**
  * The version of what the fixture's reviewed checks read. A verification's attempts and an approval record it, so approved
  * code keeps running under the checks its control run was caught with. 1: text checks read visible text. 2: they also read
- * what the application put in visible form fields.
+ * what the application put in visible form fields. 3: a caught control requires a fresh persistence read.
  */
-export const CHECK_VERSION = 2;
+export const CHECK_VERSION = 3;
 
 // The fixture's own steps: their Playwright calls are never journey actions. The sign-in step is one action, listed
 // as SIGN_IN_ACTION.

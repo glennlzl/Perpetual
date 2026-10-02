@@ -65,6 +65,8 @@ When the head of a managed GitHub source's target branch fails its GitHub Action
 
 The manager records cleanup ownership before allocating a repair workspace. Cleanup is separate from the repair outcome: a known merge and its SHA stay merged while cleanup is pending or failed. The repair box confirms that its labelled container, proxy and network are absent before the host workspace is removed. A failed observation or deletion keeps ownership and the workspace, preserves the business reason alongside a redacted cleanup reason, and holds new repairs.
 
+A person's retry of a finished repair waits for its final save, then checks the source, connected account, head and failed run again. Stopped or superseded work still ending, and pending or failed resource cleanup, continue to hold new repairs.
+
 Later checks and restart recovery retry cleanup only; they never repeat model work, pushes or merges. A startup sweep of the controller's owner/data labels finishes before any new agent starts, including for older terminal history whose clone was already deleted. An empty new controller does not contact Docker. Once cleanup starts, the box accepts no more commands, including when deletion needs retrying.
 
 ## Interface

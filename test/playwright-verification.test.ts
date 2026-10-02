@@ -20,7 +20,7 @@ type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Worker={input:JourneyRunInput;cancelled:boolean;promise:Promise<void>;finish(events:WorkerEvent[]):void;cancel():void};
 type Verification={id:string;attempt:number;control:boolean;hash:string;caseHash:string;checkVersion?:number};
 /** A run as the browser manager saves it, as far as these tests read it. */
-type StoredRun={id:string;mode:string;status:string;caseIds:string[];environmentId?:string;completedAt?:string;results:{status:string}[];specHashes:Record<string,string>;verification?:Verification;progress:{cases:{status:string;steps:{status:string}[]}[]}};
+type StoredRun={id:string;mode:string;status:string;caseIds:string[];environmentId?:string;completedAt?:string;results:{status:string;controlRead?:boolean}[];specHashes:Record<string,string>;verification?:Verification;progress:{cases:{status:string;steps:{status:string}[]}[]}};
 type StoredState={runs:StoredRun[];specs:Record<string,Record<string,{approved:{approvedRunIds?:string[];checkVersion?:number}|null;draft?:{verification?:{checkVersion:number}}|null}>>};
 
 // A draft is verified before approval: three passing runs of exactly its code, then a control run with every
@@ -31,8 +31,8 @@ const journey={id:'rename',name:'Rename the workspace',goal:'Rename the workspac
 const code=codeFor(journey);
 const step=(stepId:string,status:string,checks?:unknown[])=>({type:'journey-step',caseId:journey.id,stepId,status,...(status==='running'?{}:{evidence:'Reviewed checks evaluated.',checks})});
 const passing:WorkerEvent[]=[...journey.steps.flatMap(item=>[step(item.id,'running'),step(item.id,'completed',item.checks.map(check=>({...check,passed:true})))]),{type:'result',result:{caseId:journey.id,stopCause:'none',assertions:[{...journey.assertions[0],passed:true}]}}];
-// With every change blocked, the rename was not kept: the check after it fails.
-const unkept:WorkerEvent[]=[step('open','running'),step('open','completed',[{...journey.steps[0].checks[0],passed:true}]),step('rename','running'),step('rename','failed',[{...journey.steps[1].checks[0],passed:false}]),{type:'result',result:{caseId:journey.id,stopCause:'none',assertions:[]}}];
+// The worker reports a reviewed check failure after freshly reading the blocked change's outcome.
+const unkept:WorkerEvent[]=[step('open','running'),step('open','completed',[{...journey.steps[0].checks[0],passed:true}]),step('rename','running'),step('rename','failed',[{...journey.steps[1].checks[0],passed:false}]),{type:'result',result:{caseId:journey.id,stopCause:'none',controlRead:true,assertions:[]}}];
 const wait=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 
 async function setup(t:TestContext,extra:Partial<BrowserManagerOptions>={}){
@@ -114,6 +114,26 @@ test('a control run that passes with every change blocked fails the verification
   assert.deepEqual(await f.settled(),{status:'failed',passes:3,control:'missed',error:'The journey passed with every change blocked. Strengthen its checks.'});
   await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409});
 });
+
+for(const controlRead of [undefined,false]){
+  test(`a failed control check with ${controlRead===undefined?'missing':'false'} fresh-read evidence cannot approve code`,async t=>{
+    const f=await setup(t);
+    await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+    for(let attempt=1;attempt<=3;attempt++)(await f.worker(attempt)).finish(passing);
+    const events=[...unkept.slice(0,-1),{type:'result',result:{caseId:journey.id,stopCause:'none',assertions:[],...(controlRead===undefined?{}:{controlRead})}}];
+    (await f.worker(4)).finish(events);
+    const expected={status:'failed',passes:3,control:'missed',error:'The control did not check freshly read business data. Reload after the change, then check a run-unique value or a number against its earlier value.'};
+    assert.deepEqual(await f.settled(),expected);
+    const control=(await stored(f)).runs.find(run=>run.verification?.control)!;
+    assert.equal(control.results[0].status,'failed','The underlying failed check remains a failed run.');
+    assert.equal(control.results[0].controlRead,controlRead);
+    await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409});
+    await f.restart();
+    assert.deepEqual(await f.verification(),expected);
+    await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409});
+    assert.equal(f.workers.length,4,'Restart launches no new attempt.');
+  });
+}
 
 test('stopping a verification cancels its attempt, and a restart ends an unfinished one as cancelled',async t=>{
   const f=await setup(t);
@@ -203,7 +223,7 @@ test('only a failed reviewed check catches the control run; any other end of it 
   const passed=journey.steps.map(item=>item.checks.map(check=>({...check,passed:true})));
   const ends:[WorkerEvent[],{status:string;passes:number;control:string|null;error?:string}][]=[
     // The final assertion on the reached end state noticed that the rename was not kept.
-    [[...journey.steps.flatMap((item,index)=>[step(item.id,'running'),step(item.id,'completed',passed[index])]),{type:'result',result:{caseId:journey.id,stopCause:'none',assertions:[{...journey.assertions[0],passed:false}]}}],{status:'passed',passes:3,control:'caught'}],
+    [[...journey.steps.flatMap((item,index)=>[step(item.id,'running'),step(item.id,'completed',passed[index])]),{type:'result',result:{caseId:journey.id,stopCause:'none',controlRead:true,assertions:[{...journey.assertions[0],passed:false}]}}],{status:'passed',passes:3,control:'caught'}],
     // An action the block broke judges nothing.
     [[step('open','running'),step('open','completed',passed[0]),step('rename','running'),{type:'result',result:{caseId:journey.id,stopCause:'action',error:'Action failed at “Rename and reload”: page.reload: Not attached to an active page.',assertions:[]}}],
       {status:'failed',passes:3,control:null,error:'No reviewed check noticed the blocked changes. Action failed at “Rename and reload”: page.reload: Not attached to an active page.'}],
@@ -240,7 +260,7 @@ test('a verification outlives the run history, which keeps only the controller\'
   assert.deepEqual((await stored(f)).specs[Object.keys((await stored(f)).specs)[0]][journey.id].approved?.approvedRunIds,attempts);
 });
 
-test('approved code runs under the check version its verification ran with, and a draft verified under an older one is verified again',async t=>{
+test('a draft verified under older checks must be verified again before its code runs under current checks',async t=>{
   const f=await setup(t),file=join(f.dataDir,'browser','state.json');
   await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
   for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
@@ -264,17 +284,58 @@ test('approved code runs under the check version its verification ran with, and 
   assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
   await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
   assert.equal((await stored(f)).specs[Object.keys((await stored(f)).specs)[0]][journey.id].approved?.checkVersion,CHECK_VERSION);
-  // Approved code runs with the checks it was verified with, and code an older controller approved with version 1.
+  // The new approval runs with the current checks that verified it.
   await f.manager.saveCases(f.context,[{...journey,selected:true}]);
   const ran=async(count:number)=>{const {run}=await f.manager.run(f.context,{});const worker=await f.worker(count);worker.finish(passing);for(let i=0;i<400&&f.manager.isActive(f.context);i++)await wait(5);return [worker.input.checkVersion,(await f.manager.runProgress(f.context,run.id)).run.status];};
   assert.deepEqual(await ran(9),[CHECK_VERSION,'passed']);
-  await f.manager.close();
-  const approved=await stored(f);
-  delete approved.specs[Object.keys(approved.specs)[0]][journey.id].approved!.checkVersion;
-  await writeFile(file,JSON.stringify(approved));
-  await f.restart();
-  assert.deepEqual(await ran(10),[1,'passed']);
 });
+
+for(const checkVersion of [undefined,1,2]){
+  test(`an approval with ${checkVersion===undefined?'unversioned':`version ${checkVersion}`} control evidence stays historical until explicit reuse and verification`,async t=>{
+    const f=await setup(t);
+    await f.manager.saveCases(f.context,[{...journey,selected:true}]);
+    await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+    for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
+    assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
+    await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
+    await f.manager.close();
+    const legacy=await stored(f),scope=Object.keys(legacy.specs)[0],approval=legacy.specs[scope][journey.id].approved!;
+    if(checkVersion===undefined)delete approval.checkVersion;else approval.checkVersion=checkVersion;
+    for(const run of legacy.runs){
+      if(checkVersion===undefined)delete run.verification!.checkVersion;else run.verification!.checkVersion=checkVersion;
+      for(const result of run.results)delete result.controlRead;
+    }
+    await writeFile(join(f.dataDir,'browser','state.json'),JSON.stringify(legacy));
+    await f.restart();
+    const summary=(await f.manager.view(f.context)).specs[journey.id];
+    assert.equal(summary.approved?.stale,true);assert.equal(summary.draft,undefined);
+    assert.deepEqual((await stored(f)).specs[scope][journey.id].approved,approval,'Migration retains the historical approval.');
+    assert.deepEqual((await stored(f)).runs,legacy.runs,'Migration leaves recorded evidence unchanged.');
+    assert.equal(f.workers.length,4);
+    for(const options of [{},{manual:true}]){
+      const {run}=await f.manager.run(f.context,{},options);await idle(f,f.context);
+      const report=await f.manager.runProgress(f.context,run.id);
+      assert.equal(report.results[0].status,'needs_review');
+      assert.equal(report.results[0].error,'Reuse and verify the approved code again: its control evidence is out of date.');
+    }
+    assert.equal(f.workers.length,4,'Neither automatic nor manual runs execute the stale approval.');
+    const reused=await f.manager.reuseSpec(f.context,{caseId:journey.id});
+    assert.deepEqual([reused.spec.approved?.stale,reused.spec.draft?.hash,reused.spec.draft?.stale,reused.spec.draft?.verification],[true,f.hash,false,undefined]);
+    await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409});
+    await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+    for(let attempt=5;attempt<=8;attempt++)(await f.worker(attempt)).finish(attempt===8?unkept:passing);
+    assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
+    assert.deepEqual(f.workers.slice(4).map(worker=>worker.input.checkVersion),[3,3,3,3]);
+    await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
+    const current=await stored(f),currentApproval=current.specs[scope][journey.id].approved!;
+    assert.equal(currentApproval.checkVersion,3);
+    assert.deepEqual(current.runs.filter(run=>legacy.runs.some(old=>old.id===run.id)),legacy.runs,'Reverification does not rewrite previous results.');
+    assert.ok(currentApproval.approvedRunIds?.every(id=>!legacy.runs.some(run=>run.id===id)));
+    const {run}=await f.manager.run(f.context,{}),worker=await f.worker(9);
+    assert.equal(worker.input.checkVersion,3);worker.finish(passing);await idle(f,f.context);
+    assert.equal((await f.manager.runProgress(f.context,run.id)).run.status,'passed');
+  });
+}
 
 test('a journey process learns the check version its code was verified under',()=>{
   const options={hash:'0'.repeat(64),targetUrl:'http://localhost:3000/'};

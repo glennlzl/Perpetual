@@ -512,8 +512,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return reply(res,200,await withActiveScan(requestUrl.searchParams.get('repoPath'),async scan=>{
           const stage=sandboxStage(requestUrl.searchParams.get('stageId'));
           const {plan}=await environments.view(stageContext(scan,stage.id,actualPort));
-          // A view never renews a provision; only creating a twin does. It reads the controller's store, whose docker tests supply.
-          const services=twinServiceView(plan,await environmentInputs({dataDir,config:plan,refresh:false,store:twinInputs}),await twinInputs.view());
+          // Reads the controller's store without provisioning; tests supply its docker command.
+          const services=twinServiceView(plan,await environmentInputs({dataDir,config:plan,store:twinInputs}),await twinInputs.view());
           // generated: an agent wrote the stage's plan (its provenance is in GET /api/environments).
           return {services,generated:'provenance' in plan} satisfies TwinServicesReply;
         }));

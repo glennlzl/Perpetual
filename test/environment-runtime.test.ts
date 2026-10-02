@@ -48,18 +48,17 @@ async function setup(t: TestContext, twin: Partial<EnvironmentTwin> = {}) {
   return { dataDir, repoPath, directory, calls, runtime, environment };
 }
 
-test('generation protects its first author observation with stored inputs before any service is provisioned', async t => {
-  const f = await setup(t), secret = `fixture-private-${'q'.repeat(350)}`, key = 'sk-or-v1-fixture-generation-observation', refreshes: boolean[] = [];
+test('generation protects its first author observation with stored inputs', async t => {
+  const f = await setup(t), secret = `fixture-private-${'q'.repeat(350)}`, key = 'sk-or-v1-fixture-generation-observation';
   const draft = JSON.stringify({ services: { payments: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000 } } });
   const manifest = JSON.stringify({ name: 'acme-app', packageManager: `npm@11 ${secret}`, scripts: { start: `echo ${secret}` } });
   await writeFile(join(f.repoPath, 'package.json'), manifest);
   let authored = false, ranSource = '';
   const runtime = createEnvironmentRuntime({ services: fixtureServices,
-    inputs: async ({ refresh = true }) => { refreshes.push(refresh); return { payments: { PAYMENTS_KEY: secret } }; },
+    inputs: async () => ({ payments: { PAYMENTS_KEY: secret } }),
     author: options => {
       authored = true;
       assert.ok(!options.evidence.includes('fixture-private-'), 'A secret is hidden before package-manager or command text is clipped.');
-      assert.deepEqual(refreshes, [false], 'Observation preparation reads inputs without renewing or creating a sandbox.');
       assert.ok('secrets' in options);
       assert.deepEqual([...options.secrets as Iterable<unknown>].sort(), [key, secret].sort());
       return { promise: Promise.resolve({ text: draft }), cancel() {} };
@@ -77,28 +76,28 @@ test('generation protects its first author observation with stored inputs before
   assert.ok(authored);
   assert.equal(ranSource, manifest, 'The executed source snapshot is not the protected author copy.');
   assert.equal(await readFile(join(f.repoPath, 'package.json'), 'utf8'), manifest);
-  assert.deepEqual(refreshes, [false, true]);
 });
 
 test('author retries keep retired input values private and rebuild evidence when supplied values change', async t => {
-  const f = await setup(t), retired = 'fixture-retired-value-7310', renewed = `fixture-renewed-${'q'.repeat(350)}`;
+  const f = await setup(t), retired = 'fixture-retired-value-7310', replacement = `fixture-replacement-${'q'.repeat(350)}`;
   const draft = JSON.stringify({ services: { payments: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000 } } });
   const source = `export const configured = ${JSON.stringify(retired)};\n`;
   await writeFile(join(f.repoPath, 'app.mjs'), source);
-  await writeFile(join(f.repoPath, 'package.json'), JSON.stringify({ name: 'acme-app', packageManager: `npm@11 ${renewed}` }));
-  let provisioned = false, preparations = 0;
+  await writeFile(join(f.repoPath, 'package.json'), JSON.stringify({ name: 'acme-app', packageManager: `npm@11 ${replacement}` }));
+  let supplied = retired, preparations = 0;
   const observations: { source: string; evidence: string; feedback: string }[] = [];
   const runtime = createEnvironmentRuntime({ services: fixtureServices,
-    inputs: async ({ refresh }) => { if (refresh) provisioned = true; return { payments: { PAYMENTS_KEY: provisioned ? renewed : retired } }; },
+    inputs: async () => ({ payments: { PAYMENTS_KEY: supplied } }),
     authorHarness: { name: 'fixture', harness: ({ cwd }) => {
       observations.push({ source: readFileSync(join(cwd, 'repo/app.mjs'), 'utf8'), evidence: readFileSync(join(cwd, 'EVIDENCE.md'), 'utf8'),
         feedback: observations.length ? readFileSync(join(cwd, 'feedback.md'), 'utf8') : '' });
+      supplied = replacement; // A user can replace saved inputs while an author works.
       return { command: process.execPath, args: ['-e', 'const fs=require("node:fs"); fs.writeFileSync("twin.json",fs.readFileSync("twin.json"));'] };
     } },
     twin: only({ async prepare({ source: path, inputs, onStep }) {
       assert.equal(await readFile(join(path, 'app.mjs'), 'utf8'), source);
-      assert.equal(inputs?.payments.PAYMENTS_KEY, renewed);
-      if (++preparations === 1) { await onStep?.('Starting twin'); throw new Error(`Payments: declined ${retired} and ${renewed}`); }
+      assert.equal(inputs?.payments.PAYMENTS_KEY, replacement);
+      if (++preparations === 1) { await onStep?.('Starting twin'); throw new Error(`Payments: declined ${retired} and ${replacement}`); }
       return { services: [{ id: 'payments', fidelity: 'official-sandbox', status: 'ready' }], apps: [{ id: 'web', url: 'http://127.0.0.1:43000/' }] };
     }, health: async () => ({ status: 'failed', containers: [] }), logs: async () => '', destroy: async () => ({ status: 'destroyed' }) }),
     answers: async () => 200,
@@ -108,9 +107,9 @@ test('author retries keep retired input values private and rebuild evidence when
     onUpdate: async () => {}, cancelled: () => false });
   assert.equal(result.status, 'ready');
   assert.equal(observations.length, 2);
-  for (const observation of observations) assert.ok(!observation.source.includes(retired), 'A renewed input does not disclose its previous value.');
-  assert.ok(!observations[1].evidence.includes('fixture-renewed-'), 'Evidence is recomputed from full input text before clipping a newly supplied secret.');
-  assert.ok(!observations[1].feedback.includes(retired) && !observations[1].feedback.includes('fixture-renewed-'));
+  for (const observation of observations) assert.ok(!observation.source.includes(retired), 'A replaced input does not disclose its previous value.');
+  assert.ok(!observations[1].evidence.includes('fixture-replacement-'), 'Evidence is recomputed from full input text before clipping a newly supplied secret.');
+  assert.ok(!observations[1].feedback.includes(retired) && !observations[1].feedback.includes('fixture-replacement-'));
   assert.equal(await readFile(join(f.repoPath, 'app.mjs'), 'utf8'), source);
 });
 
@@ -158,27 +157,32 @@ test('environment inputs read existing credentials through a data-directory alia
   t.after(() => rm(dir, { recursive: true, force: true }));
   await createTwinInputs({ dataDir: actual }).set('stripe', { secretKey: STRIPE_KEY });
   await symlink(actual, alias);
-  assert.deepEqual((await environmentInputs({ dataDir: alias, config: plan, refresh: false })).stripe, { secretKey: STRIPE_KEY });
-  const fresh = await environmentInputs({ dataDir: join(dir, 'fresh'), refresh: false });
+  assert.deepEqual((await environmentInputs({ dataDir: alias, config: plan })).stripe, { secretKey: STRIPE_KEY });
+  const fresh = await environmentInputs({ dataDir: join(dir, 'fresh') });
   assert.ok(Object.values(fresh).every(values => Object.keys(values).length === 0), 'A fresh directory has no configured inputs.');
 });
 
-test('creating a twin first renews its services’ expiring provisions; a view or a teardown renews nothing', async t => {
-  const f = await setup(t), calls: unknown[][] = [];
-  const store = { refresh: async (ids: string[]) => { calls.push(['refresh', ids]); return [{ id: 'stripe', error: 'Renewal failed.' }]; }, values: async () => { calls.push(['values']); return { mailpit: {}, stripe: {} }; } };
-  assert.deepEqual(await environmentInputs({ dataDir: f.dataDir, config: plan, store }), { mailpit: {}, stripe: {} }, 'A failed renewal is not thrown.');
-  assert.deepEqual(calls, [['refresh', ['mailpit', 'stripe']], ['values']]);
-  calls.length = 0;
-  await environmentInputs({ dataDir: f.dataDir, config: plan, store, refresh: false });
-  assert.deepEqual(calls, [['values']]);
-
-  const refreshes: (boolean | undefined)[] = [];
-  // Every app answers on its twin address; nothing listens there in a test, and whatever does on this computer is not the test's.
-  const runtime = createEnvironmentRuntime({ inputs: async input => { refreshes.push(input.refresh); return {}; },
-    twin: only({ prepare: async () => structuredClone(twinResult), destroy: async () => ({ status: 'destroyed' }) }), answers: async () => 200 });
-  await runtime.prepareEnvironment({ dataDir: f.dataDir, environment: f.environment, repoPath: f.repoPath, directory: f.directory, onUpdate: async () => {}, cancelled: () => false });
-  await runtime.destroySandbox({ dataDir: f.dataDir, environment: { ...f.environment, sandboxId: f.environment.id } });
-  assert.deepEqual(refreshes, [true, false]);
+test('environment creation and rebuilds keep the chosen Stripe sandbox until expiry without creating another account', async t => {
+  const f = await setup(t);
+  let at = new Date('2026-09-24T12:00:00Z'), creations = 0;
+  const store = createTwinInputs({ dataDir: f.dataDir, now: () => at, gitEmail: async () => '', docker: async () => {
+    creations += 1;
+    return { stdout: JSON.stringify({ secret_key: `rkcs_test_environment_fixture_${creations}`, publishable_key: `pk_test_environment_fixture_${creations}`,
+      account_id: `acct_environment${creations}`, claim_url: 'https://dashboard.stripe.com/onboard_sandbox/environment-fixture', expires_at: '2026-10-01' }) };
+  } });
+  await store.provision('stripe', { email: 'owner@example.test' });
+  const saved = await readFile(join(f.dataDir, 'twin-provisions.json'), 'utf8');
+  for (const date of ['2026-09-24T12:00:00Z', '2026-09-30T23:59:59Z', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z']) {
+    at = new Date(date);
+    const inputs = await environmentInputs({ dataDir: f.dataDir, config: plan, store });
+    assert.equal(creations, 1, `${date}: reading environment inputs must never send the saved email to Stripe.`);
+    assert.deepEqual(inputs.stripe, date < '2026-10-01' ? { secretKey: 'rkcs_test_environment_fixture_1', publishableKey: 'pk_test_environment_fixture_1' } : {}, date);
+    assert.equal(await readFile(join(f.dataDir, 'twin-provisions.json'), 'utf8'), saved, 'Environment reads preserve the selected account record.');
+  }
+  const expired = (await store.view()).find(service => service.id === 'stripe')!;
+  assert.ok(expired.inputs.every(input => !input.set));
+  assert.ok(expired.provision, 'An expired service still offers explicit sandbox creation.');
+  assert.equal(expired.provisioned, undefined);
 });
 
 test('health reports a ready twin, a restarting twin as transient and stopped containers as final', async t => {

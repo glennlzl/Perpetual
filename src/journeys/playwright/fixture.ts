@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
+import { controlReads } from './control.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 
 /** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
@@ -124,12 +125,13 @@ function unjudged(page: Page | undefined, guard: Guard) {
 // Actions return before the page settles, so a check waits for its condition up to the check timeout. A page no check
 // can judge stops the journey for review instead, at once after a refused navigation, else once the timeout passes.
 // The page is judged by the check with the run's token in place of {run}; the result keeps the check as written.
-async function verify<C extends Check>(page: () => Page | undefined, check: C, captures: Captures, timeout: number, guard: Guard): Promise<{ stop: string } | EvaluatedCheck<C>> {
+async function verify<C extends Check>(page: () => Page | undefined, check: C, captures: Captures, timeout: number, guard: Guard, record?: (page: Page) => (check: EvaluatedCheck) => void): Promise<{ stop: string } | EvaluatedCheck<C>> {
   const deadline = Date.now() + timeout, judged = resolveCheck(check, TOKEN), filled = checkTemplate(check).includes(RUN) ? { resolved: checkTemplate(judged) } : {};
   for (;;) {
     const target = page(), reason = unjudged(target, guard), late = Date.now() >= deadline;
     if (reason && (guard.refused || late)) return { stop: reason };
     if (!reason) {
+      const observed = record?.(target!);
       let result: Observation;
       // Browser errors can contain page text; keep only a fixed reason. A page is judgeable only while it is open.
       try { result = await observe(target!, judged, captures); } catch { result = { passed: false, error: 'The current page could not be checked.' }; }
@@ -137,7 +139,9 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
         // A passed read-number check always observed its number.
         if (check.type === 'read-number' && result.passed) captures[check.name] = result.observed!;
         const { final: _final, ...evaluated } = result;
-        return { ...check, ...evaluated, ...filled };
+        const complete = { ...check, ...evaluated, ...filled };
+        observed?.(complete);
+        return complete;
       }
     }
     await wait(POLL_MS);
@@ -174,7 +178,7 @@ function holdSockets(report: string) {
     constructor(...args: ConstructorParameters<typeof Routed>) { super(...args); this.addEventListener('open', () => opened.set(this, state.actions)); }
     override send(...args: Send) {
       const at = opened.get(this);
-      if (at !== undefined && !state.signingIn) { if (at !== state.actions) return; if (at > state.signedAt) (globalThis as unknown as Record<string, () => void>)[report]?.(); }
+      if (at !== undefined && !state.signingIn) { if (at !== state.actions) { (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('blocked'); return; } if (at > state.signedAt) (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('unguarded'); }
       super.send(...args);
     }
   };
@@ -225,6 +229,18 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     if (createHash('sha256').update(readFileSync(testInfo.file)).digest('hex') !== env.PERPETUAL_SPEC_HASH) throw halt('The spec differs from its approved version.');
     const timeout = Number(env.PERPETUAL_CHECK_TIMEOUT_MS) || 10000, captures: Captures = {}, done: string[] = [];
     let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false;
+    const controlFailures: (() => boolean)[] = [];
+    let controlCheckFailed = false;
+    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context) : undefined;
+    const recordControl = control ? (target: Page) => {
+      const observed = control.observation(target);
+      return (check: EvaluatedCheck) => {
+        control.captured(check);
+        controlCheckFailed ||= !check.passed;
+        const witness = observed(check);
+        if (witness && !unguarded) controlFailures.push(witness);
+      };
+    } : undefined;
     const current = () => page.isClosed() ? context.pages().filter(item => !item.isClosed()).at(-1) : page;
     const guard: Guard = { refused: null }, stop = (reason: string) => { broken = true; return halt(reason); };
     // A refused top-level document stops the journey for review; a refused frame only stays empty.
@@ -235,13 +251,13 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     await context.route('**/*', route => {
       const request = route.request(), url = request.url(), navigation = request.isNavigationRequest();
       if (navigation ? refuse(url, topLevel(request)) : stripeLive(url)) return route.abort('blockedbyclient').catch(() => {});
-      if (BLOCK_WRITES && !signingIn && !READS.has(request.method())) return route.fulfill({ status: navigation ? 204 : 503 }).catch(() => {});
+      if (BLOCK_WRITES && !signingIn && !READS.has(request.method())) { control?.blockedRequest(request); return route.fulfill({ status: navigation ? 204 : 503 }).catch(() => {}); }
       return route.continue().catch(() => {});
     });
     // Routes never see a WebSocket's messages, so a control run also routes every page's sockets to their server,
     // counting what holdSockets lets through; the page's script is added after the route's, so it sees routed sockets.
     if (BLOCK_WRITES) {
-      await context.exposeFunction(REPORT, () => { unguarded = true; });
+      await context.exposeBinding(REPORT, ({ page }, kind: unknown) => { if (kind === 'blocked') control?.blocked(page); else unguarded = true; });
       await context.routeWebSocket('**/*', socket => {
         const server = socket.connectToServer();
         socket.onMessage(message => { forwarded++; server.send(message); });
@@ -287,7 +303,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         let unjudgeable: string | null = null;
         await base.step(STEPS.checks, async () => {
           for (const check of step.checks || []) {
-            const result = await verify(current, check, captures, timeout, guard);
+            const result = await verify(current, check, captures, timeout, guard, recordControl);
             if ('stop' in result) { unjudgeable = result.stop; break; }
             checks.push(result); if (!result.passed) break;
           }
@@ -348,7 +364,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (guard.refused) throw halt(guard.refused);
       const assertions: EvaluatedCheck<TextCheck>[] = [];
       for (const check of approved.assertions || []) {
-        const result = await verify(current, check, captures, assertions.some(item => !item.passed) ? 0 : timeout, guard);
+        const result = await verify(current, check, captures, assertions.some(item => !item.passed) ? 0 : timeout, guard, recordControl);
         if ('stop' in result) throw halt(result.stop);
         assertions.push(result);
       }
@@ -356,6 +372,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (assertions.some(item => !item.passed)) throw new Error('A final assertion failed.');
       // Every check passed, but a write may have got past the block: the control run is inconclusive, not missed.
       if (unguarded) throw halt(UNGUARDED);
-    } finally { await stopFrames(); }
+    } finally {
+      await stopFrames();
+      if (control && controlCheckFailed) emit({ type: 'control-read', eligible: !unguarded && controlFailures.some(valid => valid()) });
+    }
   },
 });

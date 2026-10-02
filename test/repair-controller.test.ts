@@ -318,7 +318,7 @@ test('the Build stage\'s Autopilot mode is the pipeline\'s auto-merge switch, se
 
 // A twin runtime that starts nothing: each twin is ready at a loopback URL of its own, and records what its checkout
 // holds. Journeys pass, except in a verification's control run, where every change is blocked and the second
-// milestone's reviewed check notices.
+// milestone's reviewed check notices on a certified fresh read; the real fixture is tested separately.
 function twinsAndJourneys() {
   const built: { id: string; repoPath: string; add: string; readme: boolean }[] = [], destroyed: string[] = [], launches: JourneyRunInput[] = [];
   let port = 45170;
@@ -336,7 +336,7 @@ function twinsAndJourneys() {
     const id = input.case.id, [first, second] = input.case.steps!;
     const step = (item: typeof first, passed: boolean) => [{ type: 'journey-step', caseId: id, stepId: item.id, status: 'running' }, { type: 'journey-step', caseId: id, stepId: item.id, status: passed ? 'completed' : 'failed', evidence: passed ? 'Reviewed checks passed.' : 'A reviewed check failed.', checks: item.checks!.map(check => ({ ...check, passed })) }];
     return input.blockWrites
-      ? [...step(first, true), ...step(second, false), { type: 'result', result: { caseId: id, stopCause: 'none', assertions: [] } }]
+      ? [...step(first, true), ...step(second, false), { type: 'result', result: { caseId: id, stopCause: 'none', controlRead: true, assertions: [] } }]
       : [...step(first, true), ...step(second, true), { type: 'result', result: { caseId: id, stopCause: 'none', agentCompleted: true, outcomes: [{ outcomeIndex: 0, status: 'satisfied', evidence: 'Shown.' }], assertions: input.case.assertions!.map(check => ({ ...check, passed: true })) } }];
   };
   const browser: NonNullable<ServerOptions['browser']> = {

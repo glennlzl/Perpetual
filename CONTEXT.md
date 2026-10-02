@@ -34,11 +34,11 @@
 
 **Verification** — The runs a draft must pass before it can be approved: three ordinary runs of exactly that code, then a control run. It holds only for that code and the reviewed case it ran against, so the same code saved for changed checks is unverified. It stops at the first run that does not pass, holds its stage so a gate waits, and a controller restart ends an unfinished one as cancelled.
 
-**Control run** — A verification's last run, in which every state-changing request is blocked except while the fixture signs in. A reviewed check must fail in it: one that passes with nothing kept has checks that cannot tell, and one that ends another way judged nothing. A control run never counts as the journey's current status.
+**Control run** — A verification's last run, which blocks state-changing requests and, after the journey acts, its page's socket sends, except while the fixture signs in. It is caught only by an eligible reviewed outcome check failing after a blocked change and a successful fresh read of the judged page, with no later blocked request, failed read or unguarded write. A missing acknowledgement or an unreadable page alone cannot qualify. A control run never counts as the journey's current status; [Verification](docs/journeys.md#verification) defines its evidence.
 
 **Run-unique value** — A value a journey's code types with its run's token, `journey.run`, and that a reviewed check names as `{run}`. A fresh browser session does not reset application data, so a fixed value an earlier run stored would still satisfy a later run's check with nothing saved; a run-unique value is new in every run, a control run included. The token only fills in the reviewed check's text and never changes which check runs.
 
-**Check version** — What the fixture's reviewed checks read, recorded with a verification's attempts and with an approval. Approved code keeps running under the version its control run was caught with; a new version never changes what an earlier approval's checks read.
+**Check version** — The fixture's check semantics and required control evidence, recorded with a verification's attempts and approval. An approval under an older version is stale: its code and history remain, and a person can reuse the code, verify it under the current version and approve it again. Restarting the controller starts none of that work.
 
 **Expected outcome** — A fixed acceptance condition for a reviewed case. Neither generated code nor a run can change it; a run's reviewed checks back it.
 
