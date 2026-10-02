@@ -601,8 +601,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     return withInput(context,async({scope,configuration,signal,assertCurrent})=>{
       if((state.cases[scope]||[]).length>=60)throw new Error('Delete a test before adding another. This stage supports 60 tests.');
       const sourceContext=await browserDiscoveryContext({repoPath:context.scan.repo.path,scope:normalized.slice(0,4000),requirements:normalized});
+      const reasoning=await modelCatalog.draftReasoning(configuration.model);
       assertCurrent();
-      const item=await draftBrowserCase({configuration,description:normalized,sourceContext,signal});
+      const item=await draftBrowserCase({configuration,description:normalized,sourceContext,signal,reasoning});
       assertCurrent();
       const previous=state.cases[scope];
       state.cases[scope]=[...(previous||[]),item];

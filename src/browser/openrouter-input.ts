@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {redactBusinessText} from '../business/discovery.ts';
 import {sourceFiles,validateDiscoveredBrowserCases} from '../business/browser-cases.ts';
 import {OPENROUTER_BASE_URL,isOpenRouterEndpoint} from './openrouter-models.ts';
+import type {DraftReasoning} from './openrouter-models.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {BrowserCase} from '../business/browser-cases.ts';
 import type {ModelSource} from '../business/discovery.ts';
@@ -82,11 +83,13 @@ async function request(configuration:BrowserModelConfiguration,path:string,paylo
 }
 
 /** This prepares a proposal only; it neither operates a browser nor approves a case. */
-export async function draftBrowserCase({configuration,description,sourceContext,signal}:{configuration:BrowserModelConfiguration;description:unknown;sourceContext:string;signal?:AbortSignal}):Promise<BrowserCase>{
+export async function draftBrowserCase({configuration,description,sourceContext,signal,reasoning={exclude:true}}:{configuration:BrowserModelConfiguration;description:unknown;sourceContext:string;signal?:AbortSignal;reasoning?:DraftReasoning}):Promise<BrowserCase>{
   const descriptionText=redactBusinessText(validateTestDescription(description));
   const source=draftSource(sourceContext,descriptionText);
   const result=await request(configuration,'chat/completions',{
-    model:configuration.model,max_tokens:4096,response_format:{type:'json_object'},
+    // Reasoning shares the output cap. The catalog selects low effort only when
+    // supported; keep 4096 for selectable models with smaller output limits.
+    model:configuration.model,max_tokens:4096,reasoning,response_format:{type:'json_object'},
     messages:[
       {role:'system',content:[
         'Turn the user description into exactly ONE browser business-journey test DRAFT. Return only JSON {"case":{"name":"...","goal":"...","steps":[{"id":"entry","title":"..."},{"id":"outcome","title":"..."}],"preconditions":[],"expectedOutcomes":[],"assertions":[],"evidence":[]}}.',
@@ -104,11 +107,16 @@ export async function draftBrowserCase({configuration,description,sourceContext,
       {role:'user',content:JSON.stringify({description:descriptionText,source})},
     ],
   },signal,'Test generation');
+  const choices=isRecord(result)?result.choices:undefined,choice=Array.isArray(choices)&&isRecord(choices[0])?choices[0]:undefined;
+  if(choice?.finish_reason==='length')throw upstreamError('The model reached its output limit before finishing the test. Shorten the description or choose another model in Settings.');
   try{
-    const choices=isRecord(result)?result.choices:undefined,message=Array.isArray(choices)&&isRecord(choices[0])?choices[0].message:undefined;
+    const message=choice?.message;
     const content=isRecord(message)?message.content:undefined;
     if(typeof content!=='string')throw new Error();
-    const proposal:unknown=JSON.parse(content);
+    // Some providers wrap JSON despite json_object. Unwrap only a complete
+    // standalone JSON fence, never extract an object from surrounding prose.
+    const fenced=/^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/.exec(content.trim());
+    const proposal:unknown=JSON.parse(fenced?.[1]??content);
     if(!isRecord(proposal)||!proposal.case||Object.keys(proposal).some(key=>key!=='case'))throw new Error();
     const [draft]=validateDiscoveredBrowserCases([{...proposal.case as object,id:randomUUID()}],JSON.stringify(source));
     return draft;
