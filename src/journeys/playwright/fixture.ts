@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { controlReads } from './control.ts';
+import { fixtureLifecycle } from './diagnostics.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 
 /** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
@@ -232,6 +233,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     const controlFailures: (() => boolean)[] = [];
     let controlCheckFailed = false;
     const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context) : undefined;
+    const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
+      write.call(process.stdout, `${env.PERPETUAL_EVENT_CHANNEL}${JSON.stringify({ type: 'lifecycle', caseId: approved.id, lifecycle })}\n`);
+    }) : undefined;
     const recordControl = control ? (target: Page) => {
       const observed = control.observation(target);
       return (check: EvaluatedCheck) => {
@@ -265,11 +269,13 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       await context.addInitScript(holdSockets, REPORT);
     }
     const watch = async (target: Page) => {
+      diagnostic?.page(target);
       // Neither kind of route reaches a worker's WebSocket, a page's WebSocketStream or anything a shared worker sends. A
       // socket message sent beyond those forwarded, or any shared worker, leaves a control run unable to vouch that
       // nothing was kept.
       if (BLOCK_WRITES) target.on('websocket', socket => socket.on('framesent', () => { if (++sent > forwarded) unguarded = true; }));
       const cdp = await context.newCDPSession(target), { targetInfo } = await cdp.send('Target.getTargetInfo');
+      diagnostic?.cdp(target, cdp, targetInfo);
       cdp.on('Fetch.requestPaused', ({ requestId, request, frameId }) => {
         const refused = refuse(request.url, frameId === targetInfo.targetId);
         cdp.send(refused ? 'Fetch.failRequest' : 'Fetch.continueRequest', refused ? { requestId, errorReason: 'BlockedByClient' } : { requestId }).catch(() => {});
@@ -373,6 +379,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       // Every check passed, but a write may have got past the block: the control run is inconclusive, not missed.
       if (unguarded) throw halt(UNGUARDED);
     } finally {
+      diagnostic?.cleanup();
       await stopFrames();
       if (control && controlCheckFailed) emit({ type: 'control-read', eligible: !unguarded && controlFailures.some(valid => valid()) });
     }

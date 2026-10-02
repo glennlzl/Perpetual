@@ -34,6 +34,8 @@ export interface ServiceProvision {
   run(options: { inputs: InputValues; docker: DockerCommand; tempDir: string }): Promise<ProvisionResult | undefined>;
 }
 export interface ContainerHealth { http?: { port: number | string; path?: string }; command?: string | string[] }
+/** A health-checked container an official CLI owns outside the twin's Compose project. */
+export interface ServiceHealthContainer { name: string; labels: Record<string, string> }
 /** One container of a service; `directory` runs it in that snapshot directory, like an app. */
 export interface ServiceContainer {
   name: string; image: string; command?: string | string[]; env?: EnvInput; ports?: Record<string, number>; health?: ContainerHealth; directory?: string;
@@ -104,6 +106,8 @@ export interface TwinService<Options extends ServiceOptions<Options> = JsonObjec
   validate?(options: Options): void;
   setup?(ctx: ServiceContext<Options, Outputs>): Promise<Outputs>;
   containers?(ctx: ServiceContext<Options, Outputs>): ServiceContainer[];
+  /** Read-only declaration of exact owned containers; it receives no setup, account or command capabilities. */
+  healthContainers?(ctx: Pick<ServiceContext, 'project' | 'dir'>): Promise<ServiceHealthContainer[]>;
   env(ctx: ServiceContext<Options, Outputs>): EnvInput;
   /** Test accounts, checked by the runtime before they are stored. */
   accounts?(ctx: ServiceContext<Options, Outputs>): Promise<unknown>;

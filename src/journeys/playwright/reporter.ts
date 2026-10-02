@@ -3,18 +3,19 @@
 // token; Playwright's steps become the live action list; the test's end becomes the journey's result facts.
 import { copyFile, stat } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FullResult, Reporter, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter';
 import { SIGN_IN_ACTION, STEPS, approvedCase, type ApprovedCase } from './checks.ts';
 import { hide } from '../../redaction.ts';
+import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
 
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
 export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
-type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown };
+type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown };
 
 // Journey actions by Playwright step title; reads, waits for state and the fixture's own calls are not actions.
 const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
@@ -24,6 +25,8 @@ const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/
 export default class JourneyReporter implements Reporter {
   channel: string | undefined; approved: ApprovedCase; videoDir: string | undefined; secrets: string[];
   controlRead: boolean | undefined;
+  diagnostics = process.env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && process.env.PERPETUAL_BLOCK_WRITES !== '1';
+  diagnosticBytes = 0; diagnosticDropped = 0;
   buffer = ''; actions: JourneyAction[] = []; indexes = new Map<TestStep, number>(); running: unknown = null; checkFailed = false;
   assertions: { passed?: unknown }[] = []; stop: string | null = null; result: TestResult | null = null; errors: TestError[] = [];
   constructor() {
@@ -38,6 +41,17 @@ export default class JourneyReporter implements Reporter {
   printsToStdio() { return true; }
   write(event: unknown) { process.stdout.write(`${JSON.stringify(event)}\n`); }
   safe(text: unknown) { return hide(this.secrets)(plain(text).split('\n')[0].trim()).slice(0, 300); }
+  diagnostic(value: unknown) {
+    if (!this.diagnostics) return;
+    const event = lifecycleEvent(value);
+    if (!event || !['fixture', 'reporter'].includes(event.source)) return;
+    // Keep the terminal summary even after chatty pages fill the optional pipe's budget.
+    const terminal = event.source === 'reporter' && event.name === 'reporter-end';
+    const line = JSON.stringify({ at: Date.now(), ...event, ...(terminal ? { dropped: this.diagnosticDropped } : {}) }) + '\n';
+    if (line.length > 1024 || !terminal && this.diagnosticBytes + Buffer.byteLength(line) > 192 * 1024) { this.diagnosticDropped++; return; }
+    this.diagnosticBytes += Buffer.byteLength(line);
+    try { writeSync(3, line); } catch { /* A missing/full diagnostic pipe must not affect Playwright. */ }
+  }
   sendActions() { this.write({ type: 'case', caseId: this.approved.id, actions: this.actions.slice(-150) }); }
   onBegin() { this.sendActions(); }
   onStdOut(chunk: string | Buffer) {
@@ -49,6 +63,11 @@ export default class JourneyReporter implements Reporter {
       let parsed: unknown; try { parsed = JSON.parse(line.slice(this.channel.length)); } catch { continue; }
       const event: ChannelEvent | null = parsed !== null && typeof parsed === 'object' ? parsed : null;
       if (event?.caseId !== this.approved.id) continue;
+      if (event.type === 'lifecycle') {
+        const lifecycle = lifecycleEvent(event.lifecycle);
+        if (lifecycle?.source === 'fixture') this.diagnostic(lifecycle);
+        continue;
+      }
       if (FORWARDED.has(event.type)) {
         if (event.type === 'journey-step') { this.running = event.status === 'running' ? event.stepId : null; this.checkFailed ||= event.status === 'failed'; }
         this.write(event);
@@ -65,16 +84,18 @@ export default class JourneyReporter implements Reporter {
   }
   onStepBegin(_test: TestCase, _result: TestResult, step: TestStep) {
     const type = this.action(step);
+    if (type === 'reload_page') this.diagnostic({ source: 'reporter', name: 'reload-begin' });
     if (!type) return;
     this.indexes.set(step, this.actions.length); this.actions.push({ type, status: 'running' }); this.sendActions();
   }
   onStepEnd(_test: TestCase, _result: TestResult, step: TestStep) {
     const index = this.indexes.get(step);
     if (index === undefined) return;
+    if (this.actions[index].type === 'reload_page') this.diagnostic({ source: 'reporter', name: 'reload-end', error: lifecycleError(step.error) });
     this.actions[index].status = step.error ? 'failed' : 'passed'; this.sendActions();
   }
   onError(error: TestError) { this.errors.push(error); }
-  onTestEnd(_test: TestCase, result: TestResult) { this.result = result; }
+  onTestEnd(_test: TestCase, result: TestResult) { this.result = result; this.diagnostic({ source: 'reporter', name: 'test-end', status: result.status }); }
   // Facts, never a verdict: the controller decides status from these, the milestones and the approved case.
   facts(): JourneyFacts {
     const { id: caseId, steps = [] } = this.approved, result = this.result;
@@ -88,6 +109,7 @@ export default class JourneyReporter implements Reporter {
     return { ...base, stopCause: 'action', error: title ? `Action failed at “${title}”: ${error}` : error };
   }
   async onEnd(full: FullResult): Promise<{ status?: FullResult['status'] } | undefined> {
+    this.diagnostic({ source: 'reporter', name: 'reporter-end', status: full.status, failed: full.status !== 'passed' || this.result?.status !== 'passed' });
     for (const action of this.actions) if (action.status === 'running') action.status = 'cancelled';
     this.sendActions();
     // Each page's recording, including a skipped journey's, named as the controller serves it.

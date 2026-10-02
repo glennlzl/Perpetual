@@ -204,6 +204,12 @@ Every tab of a run journey is recorded as WebM; discovery is not recorded. A fin
 
 Frames and recordings may show test data. They stay behind the local, scoped controller.
 
+### Browser failure diagnostics
+
+To investigate an intermittent browser disconnect, set `PERPETUAL_PLAYWRIGHT_DIAGNOSTICS_DIR` to an absolute local directory before starting the controller or tests. Diagnostics are off by default. An unsuccessful ordinary run retains a bounded lifecycle record after cleanup; successful runs and write-blocked control runs retain none. The record contains page, frame, reload and worker lifecycle facts with local numeric identifiers, without URLs, page contents, request bodies, account values or recordings. Collection and storage failures do not change the journey's verdict or cleanup.
+
+The directory and files are private (0700 and 0600). CI enables this recorder for its Node tests and, only if that test step fails, uploads these lifecycle files with a seven-day retention. No browser profile, application state or recording is uploaded. A diagnostic record helps identify a failure; it does not retry a journey or turn an incomplete run into a pass.
+
 ## API
 
 The main routes are below. Every request is scoped to `repoPath` and a Sandbox `stageId`. Mutations need the controller session token and a same-origin request.

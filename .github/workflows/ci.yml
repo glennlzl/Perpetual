@@ -36,6 +36,19 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build
       - run: npm test
+        id: node-tests
+        env:
+          PERPETUAL_PLAYWRIGHT_DIAGNOSTICS_DIR: ${{ runner.temp }}/perpetual-playwright-diagnostics
+      # Lifecycle facts only: no pages, URLs, network bodies, credentials or videos.
+      # actions/upload-artifact v7
+      - name: Keep failed browser lifecycle evidence
+        if: failure() && steps.node-tests.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: playwright-lifecycle-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/perpetual-playwright-diagnostics/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   browser-runtime:
     name: Browser runtime tests
