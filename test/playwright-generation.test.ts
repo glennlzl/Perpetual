@@ -408,17 +408,25 @@ test('stored generation failures are bounded, redacted before clipping and valid
   await assert.rejects(createBrowserManager(f.options()),/Unsupported code generation failure state/);
 });
 
-test('a harness that exits successfully without a spec keeps redacted diagnostics from both attempts',async t=>{
+test('a harness that exits successfully without a spec stops without a paid repair and preserves prior code',async t=>{
   const f=await setup(t,{mode:'missing'});
+  await f.manager.saveSpec(f.context,{caseId:journey.id,code:codeFor(journey)});
+  const before=(await f.manager.specCode(f.context,{caseId:journey.id})).draft;
   await f.manager.generateSpec(f.context,{caseId:journey.id});
-  const {generation}=(await settled(f))!;
+  const failed=(await settled(f))!,{generation}=failed;
   assert.equal(generation?.status,'failed');
   assert.match(generation?.error??'',/No test file was written/);
   assert.match(generation?.error??'',/generator_setup_page: The seed could not pause/);
-  assert.match(generation?.error??'',/generator_write_test: No test runner found/);
+  assert.equal((await lines(f.log)).length,1,'There is no code to grammar-repair; a second paid call would repeat blocked exploration.');
+  assert.deepEqual((await f.manager.specCode(f.context,{caseId:journey.id})).draft,before);
   assert.ok(secretFree(await f.manager.view(f.context)));
-  assert.equal((await lines(f.log)).length,2,'Diagnostics do not add another generation attempt.');
+  assert.equal(f.manager.isActive(f.context),false);
   assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[],'A cleaned worker leaves no credential-bearing workspace.');
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.view(f.context)).specs[journey.id],failed);
+  assert.deepEqual((await restarted.specCode(f.context,{caseId:journey.id})).draft,before);
+  assert.equal((await lines(f.log)).length,1,'Reading and restarting must not retry the failed generation.');
 });
 
 test('cancelling or timing out kills the harness’s whole process tree',async t=>{
@@ -682,15 +690,16 @@ test('successful authoring survives workspace removal and restart as private sco
   assert.equal((await lines(f.log)).length,1,'Reading diagnostics and restarting perform no paid work.');
 });
 
-for(const mode of ['trace-repair','trace-invalid','trace-fail'])test(`authoring retains grammar repair and failed harness evidence: ${mode}`,async t=>{
+for(const mode of ['trace-repair','trace-invalid','trace-fail','trace-missing'])test(`authoring retains grammar repair and failed harness evidence: ${mode}`,async t=>{
   const f=await setup(t,{mode});await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);
   const records=(await f.manager.specCode(f.context,{caseId:journey.id}) as unknown as {authoring?:import('../contract/authoring.ts').AuthoringRecord[]}).authoring;
   assert.equal(records?.length,1);
   const record=records![0];assert.equal(record.outcome,mode==='trace-repair'?'draft':'failed');
-  assert.deepEqual(record.attempts.map(attempt=>attempt.phase),mode==='trace-fail'?['generation']:['generation','grammar-repair']);
+  assert.deepEqual(record.attempts.map(attempt=>attempt.phase),mode==='trace-fail'||mode==='trace-missing'?['generation']:['generation','grammar-repair']);
   assert.equal(record.attempts[0].outcome,mode==='trace-fail'?'failed':'completed');
   assert.equal(record.attempts[0].events[1].outcome,mode==='trace-fail'?'error':'completed');
-  if(mode!=='trace-fail')assert.match(record.attempts[0].codeHash!,/^[a-f0-9]{64}$/);
+  if(mode==='trace-missing')assert.equal(record.attempts[0].codeHash,null);
+  else if(mode!=='trace-fail')assert.match(record.attempts[0].codeHash!,/^[a-f0-9]{64}$/);
   assert.equal(record.cleanup,'complete');
 });
 

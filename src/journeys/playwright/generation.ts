@@ -32,7 +32,7 @@ export type GeneratedSpec = { code: string; provenance: { harness: string; gener
 // Playwright's init-agents writes opencode.json; it is parsed text until the agent and MCP server it needs are checked.
 // opencode.json as Playwright's init-agents writes it, read back as parsed JSON: each level is checked before it is changed.
 const record = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-type AttemptSpec = { file: string; code: string; error?: undefined; rejected?: undefined } | { file: string; error: string; rejected?: string; code?: undefined };
+type AttemptSpec = { file: string; code: string; error?: undefined; rejected?: undefined; missing?: undefined } | { file: string; error: string; rejected?: string; code?: undefined; missing?: true };
 
 export const GENERATOR_AGENT = 'playwright-test-generator';
 export const SEED = 'seed.spec.mjs', PLAN = 'specs/plan.md', TESTS = 'tests', TARGET = `${TESTS}/journey.spec.mjs`;
@@ -212,7 +212,8 @@ async function writtenSpecs(project: string) {
 async function readSpec(project: string, item: GenerationCase, since: number): Promise<AttemptSpec> {
   let files = await writtenSpecs(project);
   if (files.length > 1) files = (await Promise.all(files.map(async file => (await lstat(file)).mtimeMs >= since ? file : null))).filter((file): file is string => Boolean(file));
-  if (files.length !== 1) return { file: TARGET, error: files.length ? `Write one test file; found ${files.map(file => relative(project, file)).join(', ')}.` : 'No test file was written.' };
+  if (!files.length) return { file: TARGET, error: 'No test file was written.', missing: true };
+  if (files.length !== 1) return { file: TARGET, error: `Write one test file; found ${files.map(file => relative(project, file)).join(', ')}.` };
   const [path] = files, file = relative(project, path), info = await lstat(path);
   if (!info.isFile() || info.size > MAX_SPEC) return { file, error: 'Provide a spec of at most 200 KB.' };
   const code = await readFile(path, 'utf8');
@@ -223,8 +224,8 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
  * Generates a reviewed case's spec in a private workspace the caller owns and removes. The model key reaches only
  * OpenCode's environment and the test account only the harness's and the seed's, and every captured output is redacted.
  * With an account, the seed must first sign in, on the sign-in page when one is set, as it does for the generator.
- * Resolves { code, provenance } with code validateJourneySpec accepts; after one invalid attempt the harness repairs once
- * with the validation error.
+ * Resolves { code, provenance } with code validateJourneySpec accepts; invalid output gets one repair with its
+ * validation error. Missing output stops: another exploration cannot grammar-repair code that was never written.
  */
 export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins, timeoutSeconds, credentials, signInUrl, apiKey, model, harness = opencodeHarness, playwright = createPlaywrightRuntime(), env = process.env, timeoutMs = 10 * 60 * 1000, cleanupGraceMs = 15000, onStep = () => {} }: GenerationOptions): WorkerJob<GeneratedSpec> {
   const abort = new AbortController(), secrets = [apiKey, credentials?.password, credentials?.username];
@@ -264,6 +265,12 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
     await intact();
     let result = await readSpec(project, item, since);
     attempts.at(-1)!.codeHash = result.code || result.rejected ? specHash(result.code ?? result.rejected!) : null;
+    if (result.missing) {
+      // The agent may have stopped at a real application blocker. Do not spend another model call exploring it again.
+      // Custom harness output is already redacted; the default JSON harness withholds its raw text.
+      const diagnostics = first.output ? ` Generation: ${line(first.output).slice(-300)}` : '';
+      throw new Error(agent.hide(`${result.error} Check the application and journey prerequisites before generating again.${diagnostics}`).slice(0, 800));
+    }
     if (result.error) {
       onStep('repairing');
       since = Date.now();
