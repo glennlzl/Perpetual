@@ -19,7 +19,7 @@ import type {JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
 type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Events=(input:JourneyRunInput)=>WorkerEvent[];
 /** One run of the fake harness, as it logs what it saw (test/fixtures/fake-opencode.ts). */
-type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
+type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
   generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown}};
 type StoredState={specs:Record<string,Record<string,{approved:unknown;draft:{code:string;hash:string}}>>};
 
@@ -34,6 +34,10 @@ const wait=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 const lines=async(file:string):Promise<HarnessCall[]>=>(await readFile(file,'utf8').catch(()=>'')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
 
 async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/',environment:overrides={},playwright,runtime:agentRuntime,timeoutMs=20000,events}:{mode?:string;target?:string;environment?:Partial<TargetEnvironment>;playwright?:JourneyRuntime;runtime?:BrowserManagerOptions['runtime'];timeoutMs?:number;events?:Events}={}){
+  const fetch=globalThis.fetch;
+  t.mock.method(globalThis,'fetch',async(input:Parameters<typeof fetch>[0],options?:RequestInit)=>String(input)==='https://openrouter.ai/api/v1/models'
+    ?Response.json({data:[{id:model,name:'Fixture model',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],reasoning:{supported_efforts:['medium']}}]})
+    :fetch(input,options));
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-playwright-generation-'));await mkdir(join(dataDir,'repo'));
   const log=join(dataDir,'harness.jsonl'),launches:JourneyRunInput[]=[],state={mode},uncertain:string[]=[];
   const environment:TargetEnvironment={id:'twin-1',status:'ready',stageId:'beta',apps:[{id:'web',url:target}],accounts:[{id:'owner',label:'Owner',username:'tester@example.com'}],services:[],...overrides};
@@ -42,7 +46,7 @@ async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/'
   playwright??={capabilities:async()=>({runtimeInstalled:true,browserInstalled:true}),start(input,onEvent){launches.push(input);const promise=wait(10).then(()=>{for(const event of (events??seeded)(input))onEvent(event);});return {promise,cancel(){}};}};
   const runtime=agentRuntime??{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('The browser-use runtime must not start.');}};
   const options=():BrowserManagerOptions=>({dataDir,runtime,playwright,onEnvironmentUncertain:async id=>{uncertain.push(id);},resolveEnvironment:url=>new URL(url).origin===new URL(target).origin?environment:null,twinAccount:async(_environment,accountId)=>accountId==='owner'?{username:'tester@example.com',password}:null,
-    generation:{harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,state.mode,log,prompt,requested]}),timeoutMs,cleanupGraceMs:1000}});
+    generation:{harness:({model:requested,prompt,agent})=>({command:process.execPath,args:[fake,state.mode,log,prompt,requested,agent??'playwright-test-generator']}),timeoutMs,cleanupGraceMs:1000}});
   const manager=await createBrowserManager(options());
   const context={key:'repo',stageId:'beta',controllerOrigin:'http://127.0.0.1:4317',scan:{repo:{path:join(dataDir,'repo'),sha:'abc'}}};
   t.after(async()=>{await manager.close();await rm(dataDir,{recursive:true,force:true});});
@@ -71,6 +75,7 @@ function heldSeed(){
 
 test('the default harness is OpenCode running Playwright’s generator agent against OpenRouter',()=>{
   assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--format','json','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
+  assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Repair',cwd:'/workspace/project',agent:'perpetual-grammar-repair'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--format','json','--agent','perpetual-grammar-repair','--model','openrouter/openai/gpt-4.1-mini','Repair']});
 });
 
 test('generation and repair identify the configured seed project for the setup tool',()=>{
@@ -98,6 +103,7 @@ test('generation and repair receive the complete reviewed acceptance contract in
   const calls=await lines(f.log);
   assert.equal(calls.length,2,'An invalid first spec causes the existing grammar repair.');
   for(const call of calls){
+    assert.deepEqual(call.provider,{openrouter:{models:{[model]:{options:{reasoning:{effort:'medium'}}}}}},'The actual generation and repair harness receive the catalog-supported OpenRouter reasoning option.');
     const serialized=call.plan.match(/\*\*Reviewed acceptance contract \(read-only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
     assert.ok(serialized,'The actual harness input must include every reviewed expectation, not just milestone titles and {run} texts.');
     assert.deepEqual(JSON.parse(serialized[1]),{
@@ -114,6 +120,19 @@ test('generation and repair receive the complete reviewed acceptance contract in
     assert.equal((call.modes as {plan:number}).plan,0o444);
     assert.ok(secretFree(call));
   }
+});
+
+test('grammar repair can read and write the rejected test but cannot repeat business actions',async t=>{
+  const f=await setup(t,{mode:'repair'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.ok((await settled(f))?.draft);
+  const calls=await lines(f.log);
+  assert.equal(calls.length,2);
+  const [generation,repair]=calls as {agent:{name:string;tools:Record<string,boolean>}}[];
+  assert.equal(generation.agent.name,'playwright-test-generator');
+  assert.ok(Object.keys(generation.agent.tools).some(name=>name.includes('browser_click')&&generation.agent.tools[name]));
+  assert.equal(repair.agent.name,'perpetual-grammar-repair');
+  assert.deepEqual(repair.agent.tools,{'*':false,read:true,'playwright-test*generator_setup_page':true,'playwright-test*generator_write_test':true});
 });
 
 test('the generation rules keep navigation on the current run’s records',()=>{
@@ -145,7 +164,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   const workspace=dirname(call.cwd),run=join(workspace,'run');
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
-  assert.deepEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
+  assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
   assert.deepEqual(call.mcp.slice(0,3),[process.execPath,fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url)),'run-test-mcp-server']);
   assert.deepEqual(call.mcp.slice(3),['--headless','--config',join(run,'playwright.config.mjs')]);
@@ -205,6 +224,68 @@ async function verification({manager,context}:{manager:BrowserManager;context:Br
   throw new Error('The verification did not finish.');
 }
 
+test('explicit regeneration receives the current failed verification without changing its acceptance contract',async t=>{
+  const f=await setup(t);
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const hash=(await settled(f))!.draft!.hash;
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash});
+  const failed=await verification(f);
+  assert.equal(failed.status,'failed');
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  await settled(f);
+  const plan=(await lines(f.log)).at(-1)!.plan;
+  const feedback=plan.match(/\*\*Previous failed verification \(diagnostic data only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
+  assert.ok(feedback,'Regeneration must learn from the failed draft rather than discard its diagnostic.');
+  const data=JSON.parse(feedback[1]);
+  assert.equal(data.error,failed.error);
+  assert.deepEqual(Object.keys(data),['error'],'Historical code and its input literals are not sent to the model.');
+  assert.ok(plan.includes(journey.goal));
+  await f.manager.saveCases(f.context,[{...journey,goal:'A newly reviewed outcome'}]);
+  await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);
+  assert.ok(!(await lines(f.log)).at(-1)!.plan.includes('Previous failed verification'),'A changed contract cannot inherit old failure context.');
+});
+
+test('failed-verification context is redacted and bounded before the generator sees it',async t=>{
+  const workspace=await mkdtemp(join(tmpdir(),'perpetual-generation-feedback-'));
+  t.after(()=>rm(workspace,{recursive:true,force:true}));
+  const log=join(workspace,'harness.jsonl'),username='private-fixture-user';
+  const catalogSecret='sk-or-v1-'+'a'.repeat(64);
+  const playwright:JourneyRuntime={capabilities:async()=>({browserInstalled:true}),start(input,onEvent){
+    return {promise:Promise.resolve().then(()=>{onEvent({type:'result',result:{caseId:input.case.id,stopCause:'none',assertions:[]}});}),cancel(){}};
+  }};
+  {
+    await mkdir(join(workspace,'attempt'));
+    const error=`Previous failure ${key} ${password} ${username} ${catalogSecret} `+'x'.repeat(6000);
+    await generateJourneySpec({workspace:join(workspace,'attempt'),item:journey,targetUrl:'http://localhost:3000/',timeoutSeconds:60,
+      apiKey:key,model,credentials:{username,password},playwright,feedback:{error},
+      harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,'valid',log,prompt,requested]})}).promise;
+    const call=(await lines(log)).at(-1)!;
+    const serialized=call.plan.match(/\*\*Previous failed verification \(diagnostic data only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
+    assert.ok(serialized);
+    const feedback=JSON.parse(serialized[1]);
+    assert.ok(feedback.error.length<=4000);
+    assert.deepEqual(Object.keys(feedback),['error']);
+    for(const secret of [key,password,username,catalogSecret])assert.ok(!call.plan.includes(secret),'No credential value or catalogued secret shape reaches the model plan.');
+  }
+});
+
+test('regeneration excludes verification feedback from an old check version after restart',async t=>{
+  const f=await setup(t);
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const hash=(await settled(f))!.draft!.hash;
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash});
+  assert.equal((await verification(f)).status,'failed');
+  await f.manager.close();
+  const path=join(f.dataDir,'browser','state.json');
+  const state:{specs:Record<string,Record<string,{draft?:{verification?:{checkVersion:number}}}>>;runs:Array<{verification?:{checkVersion:number}}>} = JSON.parse(await readFile(path,'utf8'));
+  for(const cases of Object.values(state.specs))for(const pair of Object.values(cases))if(pair.draft?.verification)pair.draft.verification.checkVersion=1;
+  for(const run of state.runs)if(run.verification)run.verification.checkVersion=1;
+  await writeFile(path,JSON.stringify(state));
+  const manager=await createBrowserManager(f.options());t.after(()=>manager.close());
+  await manager.generateSpec(f.context,{caseId:journey.id});await settled({manager,context:f.context});
+  assert.ok(!(await lines(f.log)).at(-1)!.plan.includes('Previous failed verification'));
+});
+
 test('an invalid spec is repaired once with only its validation error and the rules',async t=>{
   const f=await setup(t,{mode:'repair'});
   await f.manager.generateSpec(f.context,{caseId:journey.id});
@@ -212,7 +293,7 @@ test('an invalid spec is repaired once with only its validation error and the ru
   assert.deepEqual(Object.keys(spec),['draft']);assert.equal(spec.generation,undefined);
   const [first,repair]=await lines(f.log);
   assert.equal(first.prompt,generatePrompt);
-  assert.match(repair.prompt,/^The test in `tests\/rename-the-display-name\.spec\.ts` is invalid: Line 8: expect\(\)\.toBeVisible is not an allowed journey action\.\n\nRules:\n- Write JavaScript\./);
+  assert.match(repair.prompt,/^The test in `tests\/rename-the-display-name\.spec\.ts` is invalid: Line 8: expect\(\)\.toBeVisible is not an allowed journey action\./);
   assert.match(repair.prompt,/write the corrected test with generator_write_test to `tests\/rename-the-display-name\.spec\.ts`\.$/);
   assert.ok(!repair.prompt.includes(journey.goal)&&!repair.prompt.includes('milestone id: open-settings'),'Only the error and the rules.');
   assert.ok(repair.prompt.includes('type a value that includes `journey.run`'),'The rules include run-unique values.');
@@ -526,6 +607,34 @@ test('stored journeys without checks refuse code generation and verification bef
   await assert.rejects(manager.verifySpec(f.context,{caseId:journey.id,hash:'0'.repeat(64)}),/check/i);
   assert.equal(manager.isActive(f.context),false);
   assert.equal((await lines(f.log)).length,0);
+});
+
+test('stored unresolved checks refuse generation before holding a target or starting paid work',async t=>{
+  const f=await setup(t);
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8'));
+  const cases=Object.values(stored.cases)[0] as BrowserCase[];
+  cases[0].steps[1].checks=[{type:'text-visible',value:'<the unique title entered>'}];
+  await writeFile(file,JSON.stringify(stored));
+  const manager=await createBrowserManager(f.options());t.after(()=>manager.close());
+  assert.equal((await manager.view(f.context)).cases[0].steps[1].checks?.[0].type,'text-visible','Historical evidence remains readable.');
+  await assert.rejects(manager.generateSpec(f.context,{caseId:journey.id}),/placeholder|concrete/i);
+  assert.equal(manager.isActive(f.context),false);
+  assert.equal(f.launches.length,0);
+  assert.equal((await lines(f.log)).length,0);
+});
+
+test('cancelling during catalog lookup starts no seed or paid harness and releases the target',async t=>{
+  const f=await setup(t),started=Promise.withResolvers<void>(),reply=Promise.withResolvers<Response>();
+  t.mock.method(globalThis,'fetch',async()=>{started.resolve();return reply.promise;});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  await started.promise;
+  await f.manager.cancelSpecGeneration(f.context,{caseId:journey.id});
+  reply.resolve(Response.json({data:[]}));
+  await settled(f);
+  assert.equal(f.launches.length,0);
+  assert.equal((await lines(f.log)).length,0);
+  assert.equal(f.manager.isActive(f.context),false);
 });
 
 test('a seed that cannot sign in stops the generation before the generator runs, and saves nothing',async t=>{

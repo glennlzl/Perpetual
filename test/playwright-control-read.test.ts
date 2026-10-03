@@ -9,11 +9,11 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false } = {}) {
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false } = {}) {
   let value = 'Original', persist = true;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
-      if (req.url === '/save') { if (persist) value = body; res.end('Saved'); return; }
+      if (req.url === '/save') { setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
       if (req.url === '/read') { res.end(value); return; }
       res.setHeader('Content-Type', 'text/html');
       res.end(`<h1>Settings</h1><label>Name<input id=name></label><p id=kept>${postRead ? '' : value}</p><p id=loaded></p><p id=ack></p><p id=finished></p><button id=save>Save</button>
@@ -33,7 +33,9 @@ async function setup(t: TestContext, { reopen = false, postRead = false } = {}) 
     expectedOutcomes: ['The new name is stored'] };
   await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60 });
   await manager.saveCases(context, [item]);
-  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});" + (reopen ? 'await page.reload();' : '') + '});});';
+  const submit = responseWait ? "await Promise.all([page.waitForResponse('**/save'),page.getByRole('button',{name:'Save',exact:true}).click()]);"
+    : "await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});";
+  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);" + submit + (reopen ? 'await page.reload();' : '') + '});});';
   const saved = await manager.saveSpec(context, { caseId: item.id, code }); const hash = saved.spec.draft!.hash;
   async function verify() {
     await manager.verifySpec(context, { caseId: item.id, hash });
@@ -67,6 +69,11 @@ test('a fresh page read catches the blocked write and the approved journey detec
     assert.equal(report.run.status, 'failed'); return;
   }
   assert.fail('The gate run did not settle');
+});
+
+test('a delayed submission settles before fresh readback and the blocked-write response still reaches independent checks', { timeout: 90000 }, async t => {
+  const f = await setup(t, { reopen: true, responseWait: true });
+  assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
 });
 
 test('blocking a read-only POST before the journey changes anything never counts as a caught control', { timeout: 90000 }, async t => {

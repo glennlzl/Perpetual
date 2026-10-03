@@ -318,7 +318,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
         {stage.kind === 'production' && <div className="px-3 pb-3"><ProductionRelease key={repoPath} repoPath={repoPath} view={data.releases ?? null} readError={data.releaseReadError} disabled={busy} /></div>}
         {sandbox && <div className="flex min-w-0 flex-col gap-3 px-3 pb-3">
           <TwinServices repoPath={repoPath} scannedAt={scannedAt} stageId={stage.id} environment={environment} />
-          {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status)) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{environmentBusy ? 'Creating…' : `Create ${stage.name} environment`}</Button>}
+          {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status)) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{`Create ${stage.name} environment`}</Button>}
           <div className="flex items-center justify-between gap-3">
             <Button variant="ghost" size="sm" className="nodrag nopan h-8 justify-start gap-2 px-1 text-xs" aria-label={`Integration tests, ${businessCases.length}`} onClick={openTests}>Integration tests<Badge variant="outline" className="tabular-nums">{businessCases.length}</Badge></Button>
             {preparingTests || activeBrowserRun ? <Badge variant="outline"><LoaderCircle className="motion-safe:animate-spin" />{activeBrowserRun?.mode === 'run' ? 'Running' : 'Generating'}</Badge>

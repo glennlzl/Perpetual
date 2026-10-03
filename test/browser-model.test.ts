@@ -102,3 +102,20 @@ test('draft effort uses cached catalog capabilities and never guesses support fr
   t.mock.method(globalThis,'fetch',async()=>{throw new Error('Catalog unavailable');});
   assert.deepEqual(await createOpenRouterModelCatalog().draftReasoning('vendor/low'),{exclude:true},'An unavailable catalog retains provider defaults rather than guessing an unsupported effort');
 });
+
+test('journey code generation enables medium reasoning only when the catalog explicitly supports it',async t=>{
+  let calls=0;
+  t.mock.method(globalThis,'fetch',async()=>{
+    calls++;
+    return Response.json({data:[
+      ['medium',{supported_efforts:['none','low','medium','high']}],['high',{supported_efforts:['high']}],
+      ['any',{supported_efforts:null}],['missing',{}],['malformed',{supported_efforts:'medium'}],
+    ].map(([name,reasoning])=>({id:`vendor/${name}`,name,reasoning,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))});
+  });
+  const catalog=createOpenRouterModelCatalog();
+  assert.deepEqual(await catalog.generationReasoning('vendor/medium'),{effort:'medium'});
+  for(const name of ['high','any','missing','malformed','unknown'])assert.equal(await catalog.generationReasoning(`vendor/${name}`),undefined);
+  assert.equal(calls,1);
+  t.mock.method(globalThis,'fetch',async()=>{throw new Error('Unavailable');});
+  assert.equal(await createOpenRouterModelCatalog().generationReasoning('vendor/medium'),undefined);
+});

@@ -23,16 +23,16 @@ export type Command = { command: string; args: string[]; env?: Record<string, st
  * The command that runs a use's agent once with a prompt, in `cwd`, the use's project; model is `openrouter/<id>`. Tests
  * supply a fake.
  */
-export type Harness = (input: { model: string; prompt: string; cwd: string }) => Command;
+export type Harness = (input: { model: string; prompt: string; cwd: string; agent?: string }) => Command;
 /** What a use says when its agent is cancelled, runs out of time, stops or cannot start. */
 export type RunMessages = { cancelled: string; timedOut: string; stopped: string; unavailable: string };
 
 /** OpenCode running `agent`, a primary agent of the project's opencode.json, once with a prompt. */
-export const opencodeRun = (agent: string, { json = false } = {}): Harness => ({ model, prompt }) => ({ command: 'npx', args: ['-y', `opencode-ai@${OPENCODE_VERSION}`, 'run', ...(json ? ['--format', 'json'] : []), '--agent', agent, '--model', model, prompt] });
+export const opencodeRun = (agent: string, { json = false } = {}): Harness => ({ model, prompt, agent: selected = agent }) => ({ command: 'npx', args: ['-y', `opencode-ai@${OPENCODE_VERSION}`, 'run', ...(json ? ['--format', 'json'] : []), '--agent', selected, '--model', model, prompt] });
 
 /** Settings every use's opencode.json carries: no update or sharing, only its OpenRouter model, and its permission. */
-export const opencodeSettings = ({ model, permission }: { model: string; permission: Record<string, unknown> }) =>
-  ({ autoupdate: false, share: 'disabled', permission, provider: { openrouter: { models: { [model]: {} } } } });
+export const opencodeSettings = ({ model, permission, modelOptions }: { model: string; permission: Record<string, unknown>; modelOptions?: Record<string, unknown> }) =>
+  ({ autoupdate: false, share: 'disabled', permission, provider: { openrouter: { models: { [model]: modelOptions ? { options: modelOptions } : {} } } } });
 
 const exec = promisify(execFile);
 const TAIL = 4000;
@@ -108,9 +108,9 @@ export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeou
   const abort = new AbortController(), hidden = secrets.filter((value): value is string => Boolean(value));
   const hide = hideValues(hidden);
   let job: WorkerJob | null = null;
-  async function run(prompt: string): Promise<{ output: string; evidence: HarnessEvidence }> {
+  async function run(prompt: string, { agent }: { agent?: string } = {}): Promise<{ output: string; evidence: HarnessEvidence }> {
     if (abort.signal.aborted) throw new Error(messages.cancelled);
-    const { command, args, env: own } = harness({ model: `openrouter/${model}`, prompt, cwd });
+    const { command, args, env: own } = harness({ model: `openrouter/${model}`, prompt, cwd, ...(agent ? { agent } : {}) });
     const childEnv = { ...env, ...own };
     let reportedRefusal: string | undefined;
     const evidence = captureAuthoringEvidence(value => browserError(hide(String(value)), childEnv, Infinity), message => { reportedRefusal = openrouterRefusal(`Error: ${message}`); });
