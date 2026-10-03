@@ -22,7 +22,10 @@ export const APP_IMAGE = `node:${NODE_LTS[0]}-bookworm-slim`;
 export const nodeImage = (config: Pick<TwinConfig, 'node'>, fallback = APP_IMAGE) => config.node === undefined ? fallback : `node:${config.node}-bookworm-slim`;
 export const WORKSPACE = '/workspace';
 export const LABELS = { owner: 'perpetual.owner', environment: 'perpetual.environment' };
-const PACKAGE_MANAGERS = 'corepack enable';
+// Node 25+ no longer bundles Corepack. Keep the bundled version where present; this pin
+// also supports Node 25, unlike the newer Corepack line requiring Node 26 or an LTS.
+// Official images may already have Yarn binaries: replace those shims inside this container.
+const PACKAGE_MANAGERS = '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?';
 /** One machine-wide volume Perpetual owns, where package managers keep downloads, so a rebuilt twin installs from cache. */
 export const PACKAGE_CACHE = 'perpetual-package-cache';
 const CACHE = '/perpetual-cache';
@@ -62,7 +65,7 @@ export const hostUrl = (port: number, path = '') => `http://${HOST}:${port}${pat
 /** An allocated address has explicit browser or container reachability; variable names do not choose it. */
 export const addressUrl = (ref: Exclude<Placeholder, { service: string }>, port: number) => `http://${ref.public ? LOOPBACK : HOST}:${port}`;
 /** Shell command run in the app image, with the repository's package manager available. */
-export const appCommand = (...steps: (string | undefined)[]) => [PACKAGE_MANAGERS, ...steps].filter(Boolean).join(' && ');
+export const appCommand = (...steps: (string | undefined)[]) => `${PACKAGE_MANAGERS}; ${steps.filter(Boolean).join(' && ')}`;
 const literal = (value: string) => String(value).replaceAll('$', () => '$$');
 const containerName = (service: string, name: string) => name === service ? service : `${service}-${name}`;
 
