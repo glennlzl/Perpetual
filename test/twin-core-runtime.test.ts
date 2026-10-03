@@ -121,7 +121,7 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
   assert.deepEqual(sql.args.slice(-6), ['postgres:17-alpine', 'sh', '-c', 'exec psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$1"', 'fixture', '/workspace/seed/twin.sql']);
   assert.match(sql.env!.DATABASE_URL, new RegExp(`^postgres://postgres:db-password-1@host\\.docker\\.internal:${PORT_BASE + 3}/postgres$`));
   assert.ok(sql.args.includes(`${source}:/workspace:ro`));
-  assert.deepEqual(seed.args.slice(-4), [APP_IMAGE, 'sh', '-c', 'corepack enable && pnpm seed']);
+  assert.deepEqual(seed.args.slice(-4), [APP_IMAGE, 'sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed']);
   assert.deepEqual(Object.keys(seed.env!), ['COREPACK_HOME', 'npm_config_cache', 'npm_config_store_dir', 'XDG_CACHE_HOME', 'YARN_CACHE_FOLDER', 'BUN_INSTALL_CACHE_DIR', 'JOBS_API_URL', 'JOBS_PROJECT']);
   assert.ok(seed.args.includes('perpetual-package-cache:/perpetual-cache'));
   assert.deepEqual(compose(all), ['up', '--wait']);
@@ -144,7 +144,7 @@ test('A shared install runs once after services are ready, before fixtures and a
   await prepare({ config: { ...config(), install: { directory: '.', command: 'npm ci' } } });
   assert.deepEqual(steps.slice(-5), ['Starting services', 'Installing dependencies', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Starting twin']);
   assert.deepEqual(calls.slice(1).map(call => compose(call) ?? call.args.at(-1)), [
-    'perpetual-package-cache', SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', 'corepack enable && pnpm seed', ['up', '--wait']]);
+    'perpetual-package-cache', SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', ['up', '--wait']]);
   const install = calls.find(call => compose(call)?.includes('install'));
   assert.equal(install?.env, undefined, 'The install gets no twin variables.');
   assert.deepEqual(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services.install.profiles, ['install']);

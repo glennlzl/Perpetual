@@ -61,7 +61,7 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.deepEqual([file.services.source.volumes?.[0], file.services.source.command, file.services.source.profiles], [{ type: 'bind', source: '/data/source', target: '/snapshot', read_only: true }, ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
   assert.equal(web.environment?.npm_config_cache, '/perpetual-cache/npm');
   assert.equal(file.services.database.volumes, undefined);
-  assert.deepEqual(web.command, ['sh', '-c', 'corepack enable && pnpm build && pnpm start --port $$PORT']);
+  assert.deepEqual(web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
   assert.deepEqual(web.ports, ['127.0.0.1:43100:3000']);
   assert.equal(web.healthcheck?.test[0], 'CMD');
   assert.match(web.healthcheck!.test.at(-1)!, /127\.0\.0\.1:3000\//);
@@ -75,12 +75,12 @@ test('A shared install is a one-shot service that a plain up never starts', () =
   assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'install', 'web', 'api', 'source']);
   assert.deepEqual(file.services.install, {
     image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }],
-    command: ['sh', '-c', 'corepack enable && pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
+    command: ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
     extra_hosts: ['host.docker.internal:host-gateway'], labels: { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' },
     logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },
   });
   // Apps keep their own commands and never wait on the install; the runtime runs it before they start.
-  assert.deepEqual(file.services.web.command, ['sh', '-c', 'corepack enable && pnpm build && pnpm start --port $$PORT']);
+  assert.deepEqual(file.services.web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
   assert.equal(Object.hasOwn(file.services.web.depends_on!, 'install'), false);
   assert.equal(apps.some(app => app.id === 'install'), false);
   assert.equal(compose([database, mail, payments]).compose.services.install, undefined);

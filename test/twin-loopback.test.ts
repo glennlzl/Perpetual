@@ -140,7 +140,7 @@ test('Only explicit public references get relays; private, literal and blocked a
   assert.deepEqual(JSON.parse(argv[3]), [47101, 47102]);
   assert.equal(result.env.WEB__EXTERNAL, 'http://127.0.0.1:49999');
   assert.equal(result.env.WEB__BLOCKED, undefined);
-  assert.deepEqual(result.compose.services.api.command, ['sh', '-c', 'corepack enable && node api.js']);
+  assert.deepEqual(result.compose.services.api.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; node api.js']);
   assert.deepEqual(result.compose.services.web.ports, ['127.0.0.1:47100:3000']);
   assert.throws(() => loopbackCommand('node app.js', [3000], 3000), /conflicts with the app's listening port/);
 });
