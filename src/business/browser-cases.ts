@@ -79,12 +79,24 @@ function journeySteps(value: unknown): JourneyStep[] {
 /** A reviewed journey needs an observation independent of its generated actions. */
 export const hasJourneyChecks = (item: Pick<BrowserCase, 'steps' | 'assertions'>): boolean => item.assertions.length > 0 || item.steps.some(step => Boolean(step.checks?.length));
 
+/** Catch whole-value descriptive placeholders; markup/template syntax may itself be legitimate literal content. */
+export function assertExecutableJourneyChecks(item: Partial<Pick<BrowserCase, 'steps' | 'assertions'>>): void {
+  const checks = [...(item.steps ?? []).flatMap(step => step.checks ?? []), ...(item.assertions ?? [])];
+  for (const check of checks) {
+    const value = 'value' in check ? check.value : check.label;
+    if (/^<(?:the\s+)?(?:unique|generated|entered|saved|created)\s+[\p{L}][\p{L}\p{N} _-]{0,160}>$/iu.test(value.trim())) {
+      throw new Error('Replace the unresolved check placeholder with a concrete expected value. Use {run} for this run’s data, for example “Note {run}”.');
+    }
+  }
+}
+
 /** New or edited reviewed cases need milestones and checks; stored legacy cases stay readable. */
 export function assertReviewedJourneys(cases: readonly BrowserCase[], stored: readonly BrowserCase[] = []): void {
   const unchanged = (item: BrowserCase) => JSON.stringify({ ...item, selected: false });
   const previous = new Map(stored.map(item => [item.id, unchanged(item)]));
   for (const item of cases) {
     if (item.needsReview || previous.get(item.id) === unchanged(item)) continue;
+    assertExecutableJourneyChecks(item);
     if (item.steps.length < 2 || item.steps.length > 12) throw new Error(`Add 2–12 milestones before approving “${item.name}”.`);
     if (!hasJourneyChecks(item)) throw new Error(`Add at least one milestone check or final assertion before reviewing “${item.name}”.`);
   }

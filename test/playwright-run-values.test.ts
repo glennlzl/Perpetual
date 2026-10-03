@@ -78,7 +78,8 @@ async function setup(t:TestContext,events:(input:JourneyRunInput)=>WorkerEvent[]
   t.after(async()=>{await manager.close();await rm(dataDir,{recursive:true,force:true});});
   const context={key:'repo',stageId:'beta',controllerOrigin:'http://127.0.0.1:4317',scan:{repo:{path:join(dataDir,'repo'),sha:'abc'}}};
   await manager.saveConfig(context,{targetUrl:'http://localhost:3000'});await manager.saveCases(context,[item]);
-  await manager.saveSpec(context,{caseId:item.id,code:codeFor(item)});
+  const code=codeFor(item).replace('async () => {}','async () => { await page.getByLabel("Name").fill(`QA ${journey.run}`); }');
+  await manager.saveSpec(context,{caseId:item.id,code});
   const finished=async()=>{const {run}=await manager.run(context,{},{manual:true});for(let i=0;i<400;i++){const report=await manager.runProgress(context,run.id);if(!['queued','running'].includes(report.run.status))return report;await new Promise(resolve=>setTimeout(resolve,5));}throw new Error('The run did not finish.');};
   return {finished};
 }

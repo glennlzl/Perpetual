@@ -7,7 +7,7 @@ import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {hide} from '../redaction.ts';
 import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
-import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,hasJourneyChecks} from '../business/browser-cases.ts';
+import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
@@ -467,6 +467,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const [snapshot]=validateBrowserCases([item],{draft:false});
     if(!snapshot.steps.length)throw new Error('Add journey steps before generating code.');
     if(!hasJourneyChecks(snapshot))throw new Error('Add at least one milestone check or final assertion before generating code.');
+    assertExecutableJourneyChecks(snapshot);
+    const feedback=journeyCode.generationFeedback(scope,item.id);
     const account=selectRunAccount(input);let credentials:RunCredentials|undefined;
     const configuration=modelSettings.configuration();
     if(!configuration.modelConfigured||!isOpenRouterEndpoint(configuration.baseUrl))throw new Error('Add your OpenRouter API key in Settings first.');
@@ -498,8 +500,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       try{
         workspace=await privateWorkspace(generationRoot);
         external=await beginExternal(context,config.targetUrl,environment,'generate',workspace.path);
+        const reasoning=await modelCatalog.generationReasoning(configuration.model);
         // The seed signs in first with the runtime that runs journeys, on the stage's sign-in page when one is set.
-        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
+        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,reasoning,feedback,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
         entry.cancel=()=>{entry.cancelled=true;entry.step='cancelling';job.cancel();};
         if(entry.cancelled)job.cancel();
         const generated=await job.promise;

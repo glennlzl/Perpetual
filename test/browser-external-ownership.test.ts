@@ -12,6 +12,7 @@ const journey = { id: 'save', name: 'Save and reopen', goal: 'Save a workflow an
   preconditions: [], expectedOutcomes: ['The workflow was saved'], assertions: [], evidence: [] } satisfies BrowserCase;
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t: TestContext) {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ data: [{ id: 'openai/gpt-4.1-mini', name: 'Fixture model', architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] }, supported_parameters: ['tools'] }] }));
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-external-ownership-')), repo = join(dataDir, 'repo'); await mkdir(repo);
   const workers: { fail(error: Error): void; cancel(): void }[] = [];
   const start = () => {

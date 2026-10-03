@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import type { BlockStatement, File, Identifier, Node, ObjectProperty, Program, Statement } from '@babel/types';
+import type { BlockStatement, CallExpression, File, Identifier, Node, ObjectProperty, Program, Statement } from '@babel/types';
 import { readsRunData } from './checks.ts';
-import type { BrowserCase } from '../../business/browser-cases.ts';
+import { assertExecutableJourneyChecks, type BrowserCase } from '../../business/browser-cases.ts';
 
 // A journey spec is stage data: the actions of one reviewed case, approved by a person. It runs in the same process
 // as the fixture that judges it, so it is an allowlisted grammar, not JavaScript with exceptions: one test of awaited
 // milestones, each a list of awaited Playwright actions on page, its locators, keyboard and mouse, whose arguments
-// are literals, options objects or locators. The one value a spec reads is the run's token, journey.run, alone or in a
+// are literals, options objects or locators. A response wait may be armed before one UI action in Promise.all; no
+// response value escapes that pair. The one value a spec reads is the run's token, journey.run, alone or in a
 // template literal, so a journey can type data no earlier run stored. It names an element or address only after a
 // milestone whose reviewed check shows or reads {run}, and so fails when the data is missing: before one, a control
-// run's blocked save would fail the action that looks for the data instead of a check. No other identifier, assignment, computed access
+// run's blocked save would fail the action that looks for the data instead of a check. Outside the response pair, no other identifier, assignment, computed access
 // or function exists, so checks, page scripts, routing, globals and the runtime stay out of reach. Playwright's bundled Babel parses it,
 // the same parser that compiles it for the run.
 const MAX_BYTES = 200 * 1024;
@@ -85,10 +86,13 @@ function value(node: Node, scope: ReadonlySet<string>, runs: boolean) {
   if (kind(node, scope, runs) !== 'locator') fail(node, ARGUMENTS);
 }
 // read: whether an earlier milestone's reviewed check read {run}, so journey.run may name an element or address.
-function action(statement: Statement, scope: ReadonlySet<string>, read: boolean) {
-  const call = awaited(statement), callee = call?.callee, name = member(callee);
-  if (!call || callee?.type !== 'MemberExpression' || !name) fail(statement, ACTION);
-  if (named(callee.object, 'journey') && scope.has('journey')) return name === 'signIn' && !call.arguments.length || fail(call, 'journey.signIn() is the only journey call inside a milestone.');
+function actionCall(call: CallExpression, scope: ReadonlySet<string>, read: boolean) {
+  const callee = call.callee, name = member(callee);
+  if (callee.type !== 'MemberExpression' || !name) fail(call, ACTION);
+  if (named(callee.object, 'journey') && scope.has('journey')) {
+    if (name !== 'signIn' || call.arguments.length) fail(call, 'journey.signIn() is the only journey call inside a milestone.');
+    return false;
+  }
   const owner = kind(callee.object, scope, read);
   if (allowed(owner, name) !== true) fail(call, `${label(callee)} is not an allowed journey action.`);
   // An address is a literal: journey.run never makes one.
@@ -101,6 +105,25 @@ function action(statement: Statement, scope: ReadonlySet<string>, read: boolean)
     value(item, scope, read);
     fail(item, TYPED);
   });
+  const input = call.arguments[0];
+  return typing && Boolean(input && (token(input, scope) || input.type === 'TemplateLiteral' && input.expressions.some(part => token(part, scope))));
+}
+
+function action(statement: Statement, scope: ReadonlySet<string>, read: boolean) {
+  const call = awaited(statement);
+  if (!call) fail(statement, ACTION);
+  if (call.callee.type !== 'MemberExpression' || !named(call.callee.object, 'Promise')) return actionCall(call, scope, read);
+  // Arm an observed response before its UI action. No response value, predicate, callback or arbitrary parallel work
+  // is exposed. Both real writes and the control's blocked replies settle; reviewed checks still judge the fresh read.
+  const message = 'Only await Promise.all([page.waitForResponse("observed URL pattern"), one UI action]) is allowed.';
+  const pair = call.arguments[0];
+  if (member(call.callee) !== 'all' || call.arguments.length !== 1 || pair?.type !== 'ArrayExpression' || pair.elements.length !== 2) fail(call, message);
+  const [response, trigger] = pair.elements;
+  if (response?.type !== 'CallExpression' || response.callee.type !== 'MemberExpression' || !named(response.callee.object, 'page') || !scope.has('page') || member(response.callee) !== 'waitForResponse'
+    || !text(response.arguments[0]) || response.arguments.length > 2) fail(call, message);
+  response.arguments.forEach(item => value(item, scope, false));
+  if (trigger?.type !== 'CallExpression' || trigger.callee.type !== 'MemberExpression' || !['locator', 'keyboard', 'mouse'].includes(kind(trigger.callee.object, scope, read) ?? '')) fail(call, message);
+  return actionCall(trigger, scope, read);
 }
 
 export const specHash = (code: string | Buffer) => createHash('sha256').update(code).digest('hex');
@@ -108,7 +131,8 @@ export const specHash = (code: string | Buffer) => createHash('sha256').update(c
 export const caseHash = (item: Pick<BrowserCase, 'goal'> & Partial<BrowserCase>) => specHash(JSON.stringify([item.goal, item.preconditions || [], item.steps || [], item.expectedOutcomes || [], item.assertions || []]));
 
 /** The spec's code, when it performs exactly the case's reviewed milestones, in order, in the allowed grammar. */
-export function validateJourneySpec(code: unknown, item: Partial<Pick<BrowserCase, 'steps'>>): string {
+export function validateJourneySpec(code: unknown, item: Partial<Pick<BrowserCase, 'steps' | 'assertions'>>): string {
+  assertExecutableJourneyChecks(item);
   if (typeof code !== 'string' || !code.trim() || Buffer.byteLength(code) > MAX_BYTES || code.includes('\0')) throw new Error('Provide a spec of at most 200 KB.');
   let program: Program;
   try { program = parse(code); } catch (error) { const { loc } = error as { loc?: { line: number } }; throw new Error(`The spec is not valid JavaScript${loc ? ` (line ${loc.line})` : ''}.`); }
@@ -126,17 +150,21 @@ export function validateJourneySpec(code: unknown, item: Partial<Pick<BrowserCas
   // Milestones pair with the reviewed steps in order.
   const steps = item.steps || [], expected = steps.map(step => step.id);
   const order = () => new Error(`Call journey.milestone once per reviewed step, in order, with its literal ID: ${expected.join(', ') || 'none'}.`);
-  let read = false;
+  let read = false, typedRun = false;
+  const requireRunInput = () => { if (!typedRun) throw new Error('A reviewed check reads this run’s data, but no preceding input uses the run token. Type journey.run or a template literal such as `Note ${journey.run}`, never the literal text “journey.run”.'); };
   for (const statement of statements(body.body)) {
     const milestone = awaited(statement), [id, actions] = milestone?.arguments || [];
     if (!milestone || milestone.callee.type !== 'MemberExpression' || !named(milestone.callee.object, 'journey') || member(milestone.callee) !== 'milestone' || !scope.has('journey') || milestone.arguments.length !== 2) fail(statement, MILESTONES);
     if (actions?.type !== 'ArrowFunctionExpression' || !actions.async || actions.params.length || actions.body.type !== 'BlockStatement' || actions.body.directives.length) fail(actions, 'milestone actions are async () => { … }.');
     // The order is judged before the actions, so a milestone's actions are read against its own reviewed step.
     if (ids.push(text(id)) > expected.length || ids.at(-1) !== expected[ids.length - 1]) throw order();
-    for (const step of statements(actions.body)) action(step, scope, read);
-    read ||= (steps[ids.length - 1]?.checks || []).some(readsRunData);
+    for (const step of statements(actions.body)) typedRun = action(step, scope, read) || typedRun;
+    const reads = (steps[ids.length - 1]?.checks || []).some(readsRunData);
+    if (reads) requireRunInput();
+    read ||= reads;
   }
   if (ids.length !== expected.length) throw order();
+  if ((item.assertions ?? []).some(readsRunData)) requireRunInput();
   return code;
 }
 

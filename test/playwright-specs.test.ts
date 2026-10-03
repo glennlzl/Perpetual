@@ -88,6 +88,25 @@ test('a spec reads the run token journey.run, alone or in a template literal, an
   for(const [code,pattern] of rejected)assert.throws(()=>validateJourneySpec(code,journey),pattern,code.slice(90,260));
 });
 
+test('a submission may arm one response wait before one UI action without exposing response data or arbitrary concurrency',()=>{
+  const action=(value:string)=>spec(`await journey.milestone('open',async()=>{${value}});await journey.milestone('rename',async()=>{});`);
+  const pair="await Promise.all([page.waitForResponse('**/save',{timeout:10000}),page.getByRole('button',{name:'Save'}).click()]);";
+  assert.equal(validateJourneySpec(action(pair),journey),action(pair));
+  const owned={...journey,steps:[{...journey.steps[0],checks:[{type:'text-visible' as const,value:'Name {run}'}]},journey.steps[1]]};
+  const typed=action(pair.replace("page.getByRole('button',{name:'Save'}).click()",'page.getByLabel("Name").fill(`Name ${journey.run}`)'));
+  assert.equal(validateJourneySpec(typed,owned),typed,'An input that triggers autosave still counts as real run-owned input.');
+  assert.throws(()=>validateJourneySpec(typed.replace('`Name ${journey.run}`','"Name journey.run"'),owned),/no preceding input uses the run token/);
+  for(const invalid of [
+    pair.replace('Promise.all','Promise.race'),pair.replace('Promise.all',"Promise['all']"),
+    pair.replace("'**/save'",'response => true'),pair.replace("'**/save'",'journey.run'),
+    pair.replace("page.waitForResponse('**/save',{timeout:10000})",'page.reload()'),
+    pair.replace("page.getByRole('button',{name:'Save'}).click()",'page.evaluate(() => true)'),
+    pair.replace("page.getByRole('button',{name:'Save'}).click()",'journey.signIn()'),
+    pair.replace("page.getByRole('button',{name:'Save'}).click()",'Promise.all([])'),
+    pair.replace(']);',',page.reload()]);'),pair.replace("page.waitForResponse('**/save',{timeout:10000})", "page.waitForResponse('**/save').then(response => response.body())"),
+  ])assert.throws(()=>validateJourneySpec(action(invalid),journey),/Line /,invalid);
+});
+
 test('journey.run names an element or address only after a milestone whose reviewed check reads {run}',()=>{
   // Its first step's check reads the item the journey created, so a blocked save fails that check before any action looks for the item.
   const created={...journey,steps:[{id:'create',title:'Create an item',checks:[{type:'text-visible' as const,value:'Item {run}'}]},{id:'open',title:'Open the item',checks:[]}]};
@@ -122,7 +141,7 @@ test('the typing exemption covers only the text a typing action types',()=>{
     assert.throws(()=>validateJourneySpec(actions(line),journey),/journey\.run names an element or address only after a milestone/,line);
   // Playwright types only text, so any other value fails every run, after a {run} check too.
   const created={...journey,steps:[{...journey.steps[0],checks:[{type:'text-visible' as const,value:'Item {run}'}]},journey.steps[1]]};
-  const later=(line:string)=>spec(`  await journey.milestone('open', async () => {});\n  await journey.milestone('rename', async () => {\n    ${line}\n  });`);
+  const later=(line:string)=>spec("  await journey.milestone('open', async () => { await page.getByLabel('Name').fill(`Item ${journey.run}`); });\n"+`  await journey.milestone('rename', async () => {\n    ${line}\n  });`);
   for(const line of ["await page.getByLabel('Name').fill(page.getByRole('link', { name: 'static' }));","await page.getByLabel('Name').fill(['a']);",'await page.getByLabel(`Name`).fill(5);'])
     assert.throws(()=>validateJourneySpec(actions(line),journey),/a typing action types text: a string, journey\.run or a template literal/,line);
   assert.throws(()=>validateJourneySpec(later("await page.getByLabel('Name').fill(page.getByRole('link', { name: journey.run }));"),created),/a typing action types text/);
@@ -140,7 +159,7 @@ test('milestones out of order get the order error before any action is judged',(
 
 test('page.goto never takes journey.run, and says so',()=>{
   const created={...journey,steps:[{id:'open',title:'Create an item',checks:[{type:'text-visible' as const,value:'Item {run}'}]},{id:'rename',title:'Open the item',checks:[]}]};
-  const after=(line:string)=>spec(`  await journey.milestone('open', async () => {});\n  await journey.milestone('rename', async () => {\n    ${line}\n  });`);
+  const after=(line:string)=>spec("  await journey.milestone('open', async () => { await page.getByLabel('Name').fill(`Item ${journey.run}`); });\n"+`  await journey.milestone('rename', async () => {\n    ${line}\n  });`);
   for(const line of ['await page.goto(`/items/${journey.run}`);','await page.goto(journey.run);'])
     assert.throws(()=>validateJourneySpec(after(line),created),/page\.goto takes a literal http\(s\) URL or path; journey\.run never makes its address\./,line);
   assert.equal(validateJourneySpec(after('await page.waitForURL(`**/items/${journey.run}`);'),created),after('await page.waitForURL(`**/items/${journey.run}`);'));

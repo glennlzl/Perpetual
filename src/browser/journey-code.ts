@@ -200,6 +200,12 @@ export function createJourneyCode(storage:Persistence){
         });},
       };
     },
+    generationFeedback(scope:string,caseId:string){
+      const current=storage.read(scope),item=caseOf(current,caseId),draft=current.code.specs[caseId]?.draft;
+      if(!draft||draft.caseHash!==caseHash(item))return undefined;
+      const verification=verificationEvidence(current,caseId,draft)?.view;
+      return verification?.status==='failed'&&verification.error?{error:verification.error}:undefined;
+    },
     clearGenerationFailure(scope:string,caseId:string){
       if(!storage.read(scope).code.generationFailures[caseId])return Promise.resolve();
       return storage.transact(scope,current=>clearFailure(current.code,caseId));
