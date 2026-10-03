@@ -6,6 +6,8 @@ A twin does not clone a production account, copy production data or create Verce
 
 A running twin, a healthy app and a passed business journey are separate states. An app that answers HTTP does not prove that its authentication, payments or database are configured correctly.
 
+The current app runner supplies a Node image. Before creating services or starting paid configuration authoring, automatic environment creation checks the source snapshot for Python web entrypoints corroborated by their project's runtime dependencies (Django WSGI/ASGI, FastAPI and Flask). Such an app stops creation with its source evidence and an instruction to use an existing application URL for browser tests; a runnable Node site in the same repository cannot silently replace it. A person's explicitly saved twin config selects the apps instead, so a supported product may coexist with a runnable tutorial in another language. Generated configs do not count as that selection, even when reused by a gate. This check does not implement Python execution or establish complete runtime coverage. It does not rank folders, remove documentation apps, or treat development-only dependencies, optional extras and quoted examples as products. Existing-URL browser tests remain available independently of twin creation.
+
 Requirements: a local Docker Linux engine with Compose. The first twin pulls images and installs app dependencies, which can take several minutes.
 
 ## From Pipeline to a twin
