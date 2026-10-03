@@ -13,6 +13,7 @@ import { ID } from '../twin/config.ts';
 import { AUTHORING, LOG_LINES, checkWritten, feedbackText, generateTwinConfig, type AttemptOutcome } from './generation.ts';
 import { evidenceText, repositoryFacts, unwiredSummary } from './evidence.ts';
 import { snapshotSource } from './plans.ts';
+import { requireSupportedApplications } from './applications.ts';
 import type { EvidencePackage, RepositoryFacts } from './evidence.ts';
 import type { EnvironmentAccount, EnvironmentApp, EnvironmentRecord, EnvironmentService, StepTiming } from './manager.ts';
 import type { Diagnosis, GenerationDraft, PlanProvenance, StagedFailure } from './generation.ts';
@@ -186,9 +187,11 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     return null;
   }
 
-  async function prepareEnvironment({ dataDir, environment, repoPath, directory, onUpdate, onDraft, cancelled, signal, generate, generated }: {
+  async function prepareEnvironment({ dataDir, environment, repoPath, directory, onUpdate, onDraft, cancelled, signal, generate, generated, selectionReviewed = false }: {
     dataDir: string; environment: Environment; repoPath: string; directory: string; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; cancelled: () => boolean;
     signal?: AbortSignal; generate?: TwinGeneration; generated?: GeneratedPlan; onDraft?: (draft: GenerationDraft) => Promise<void>;
+    /** Only the manager's explicitly saved, non-generated plan establishes a person's application selection. */
+    selectionReviewed?: boolean;
   }): Promise<PreparedEnvironment> {
     const check = () => { if (cancelled()) throw new Error('Environment creation cancelled.'); };
     // How long each step took, kept as it goes, so a slow or failed twin shows where its time went.
@@ -200,6 +203,11 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     // Apps run from this snapshot for the twin's whole life; the user's checkout is never mounted.
     const source = join(directory, 'source');
     const snapshot = await snapshotSource(repoPath, source);
+    check();
+    if (!selectionReviewed) {
+      await onUpdate(next('Checking application runtimes'));
+      await requireSupportedApplications(source);
+    }
     check();
     // Record ownership before the twin allocates anything, so every later failure is cleaned up.
     const owned = { status: 'preparing', snapshot, sandboxId: environment.id } as const;

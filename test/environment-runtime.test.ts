@@ -123,9 +123,10 @@ test('preparation records ownership before the twin allocates and reports its se
   assert.deepEqual({ id: input.id, config: input.config, source: input.source }, { id: 'environment-1', config: plan, source: join(f.directory, 'source') });
   assert.equal(input.inputs?.stripe.secretKey, STRIPE_KEY);
   assert.deepEqual(await readdir(input.source!), ['app.mjs'], 'The twin runs a filtered snapshot, never the checkout.');
-  assert.deepEqual(updates.map(update => update.step), ['Copying source', 'Preparing twin', 'Setting up Mailpit', 'Checking apps']);
-  assert.equal(updates[1].sandboxId, 'environment-1', 'Ownership is recorded before twin setup starts.');
-  assert.equal(updates[1].snapshot?.files, 1);
+  assert.deepEqual(updates.map(update => update.step), ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Setting up Mailpit', 'Checking apps']);
+  const preparing = updates.find(update => update.step === 'Preparing twin');
+  assert.equal(preparing?.sandboxId, 'environment-1', 'Ownership is recorded before twin setup starts.');
+  assert.equal(preparing?.snapshot?.files, 1);
   assert.equal(prepared.status, 'ready', 'Blocked services leave the environment ready.');
   assert.deepEqual(prepared.services, [
     { id: 'mailpit', title: 'Mailpit', fidelity: 'actual', status: 'ready', missing: [] },

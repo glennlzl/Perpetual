@@ -33,7 +33,7 @@ test('a prepared environment lists its twin test accounts without their password
   const prepared = await runtime.prepareEnvironment({ dataDir, environment: { id: 'environment-1', plan }, repoPath, directory, onUpdate: async update => { updates.push(update); }, cancelled: () => false });
   assert.deepEqual(prepared.accounts, [{ id: 'owner', label: 'owner account', username: 'owner@example.test' }]);
   // Each step's duration is recorded when the next step starts, so a failed preparation keeps the steps it finished.
-  assert.deepEqual(prepared.timings.map(item => item.step), ['Copying source', 'Preparing twin', 'Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(prepared.timings.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Starting twin', 'Checking apps']);
   assert.ok(prepared.timings.every(item => Number.isInteger(item.ms) && item.ms >= 0));
   assert.deepEqual(updates.map(update => update.timings?.length), updates.map((_, index) => index));
   assert.ok(!JSON.stringify(prepared).includes(PASSWORD));

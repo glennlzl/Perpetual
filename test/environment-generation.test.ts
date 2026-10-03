@@ -134,7 +134,7 @@ test('the author loop writes the config end to end: an invalid write is refused 
   const f = await fixture(t, { loop: [{ calls: [{ tool: 'read', input: { path: 'repo/app.mjs' } }] }, write({ ...loopConfig, apps: { web_app: loopConfig.apps.web } }), write(loopConfig), { calls: [{ tool: 'done', input: {} }] }] });
   const ready = await f.create();
   assert.equal(ready.status, 'ready', ready.error ?? '');
-  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
   const { plan } = await f.manager.view(f.context), generated = provenance(plan);
   assert.deepEqual(plan, { ...validateTwinConfig(loopConfig, { services }), provenance: { generatedAt: generated?.generatedAt, harness: LOOP, model: `openrouter/${MODEL}`, attempts: 1 } });
   assert.equal(LOOP, 'perpetual-loop@7.0.116');
@@ -162,7 +162,7 @@ test('a config that builds a ready twin on its first attempt becomes the stage p
   assert.deepEqual((await f.manager.view(f.context)).plan, detected);
   const ready = await f.create();
   assert.equal(ready.status, 'ready', ready.error ?? '');
-  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
   assert.deepEqual(ready.accounts, [{ id: 'owner', label: 'owner', username: 'owner@example.test' }]);
   const { plan } = await f.manager.view(f.context), generated = provenance(plan);
   assert.ok(generated && !Number.isNaN(Date.parse(generated.generatedAt)));
@@ -575,7 +575,7 @@ test('an attempt that runs out of time counts with the twin.json it wrote', asyn
   const f = await fixture(t, { script: [{ write: good, stall: true }], timeoutMs: 1000 });
   const ready = await f.create();
   assert.equal(ready.status, 'ready', ready.error ?? '');
-  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
   assert.deepEqual(f.calls.prepare, [validateTwinConfig(good, { services })]);
   assert.equal(provenance((await f.manager.view(f.context)).plan)?.attempts, 1);
 });

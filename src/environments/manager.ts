@@ -61,7 +61,7 @@ type RuntimeCall = { dataDir: string; environment: EnvironmentRecord };
 /** What the manager calls on its runtime (./runtime.ts): a ready result is merged into its environment as it is, but
  * for `generated`, the provenance of a config an agent wrote, which becomes the stage's plan. */
 export interface ManagedRuntime {
-  prepareEnvironment(options: RuntimeCall & { repoPath: string; directory: string; cancelled: () => boolean; signal?: AbortSignal; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; onDraft?: (draft: GenerationDraft) => Promise<void>; generate?: TwinGeneration; generated?: GeneratedPlan }): Promise<Partial<EnvironmentRecord> & { generated?: PlanProvenance }>;
+  prepareEnvironment(options: RuntimeCall & { repoPath: string; directory: string; cancelled: () => boolean; signal?: AbortSignal; onUpdate: (update: Partial<EnvironmentRecord>) => Promise<void>; onDraft?: (draft: GenerationDraft) => Promise<void>; generate?: TwinGeneration; generated?: GeneratedPlan; selectionReviewed?: boolean }): Promise<Partial<EnvironmentRecord> & { generated?: PlanProvenance }>;
   environmentHealth(options: RuntimeCall): Promise<{ status: string; error?: string; final?: boolean }>;
   environmentLogs(options: RuntimeCall): Promise<string>;
   destroySandbox(options: RuntimeCall): Promise<unknown>;
@@ -331,6 +331,9 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       const record = () => { if (recorded) return; recorded = true; const left = (admitted.get(context.key) ?? 1) - 1; if (left) admitted.set(context.key, left); else admitted.delete(context.key); };
       try {
         const saved = owns ? await planFor(context) : await repairPlan(context), stored = configOf(saved), generated = isGenerated(saved);
+        // Only a person's saved config selects the app explicitly. A detected or agent-generated plan must still
+        // establish runtime coverage, including when a gate or a restart reuses it.
+        const selectionReviewed = state.plans[scope] === saved && !Object.hasOwn(state.detected, scope) && !generated;
         const packages = (context.scan.services ?? []).map(({ path, framework }) => ({ path, ...(framework ? { framework } : {}) }));
         const model = owns && generate && (Object.hasOwn(state.detected, scope) || generated && Object.hasOwn(state.drafts, scope)) ? await authoringModel() : null;
         // The agent starts from the stage's draft, else the detected plan, and may add the apps detection missed; it
@@ -356,7 +359,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         enqueue(environment.id, async release => {
           let ready: Awaited<ReturnType<ManagedRuntime['prepareEnvironment']>> | undefined;
           try {
-            ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath: environment.repoPath, directory, signal: controller.signal, cancelled: () => closed || controller.signal.aborted, onUpdate: async update => {
+            ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath: environment.repoPath, directory, selectionReviewed, signal: controller.signal, cancelled: () => closed || controller.signal.aborted, onUpdate: async update => {
               Object.assign(environment, update, { updatedAt: now() });
               if (typeof update.logs === 'string') Object.assign(environment, { logs: diagnosticText(update.logs), logsAt: now() });
               if (environment.cancellationRequestedAt) Object.assign(environment, { status: 'preparing', step: 'Stopping' });
