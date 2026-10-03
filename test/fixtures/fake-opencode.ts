@@ -15,10 +15,10 @@ type OpenCodeProject = {
 type ToolResult = { content: { text?: string }[]; isError?: boolean };
 type McpClient = { connect(transport: unknown): Promise<void>; callTool(call: object, schema: undefined, options: object): Promise<ToolResult>; close(): Promise<void> };
 
-const [requestedMode, log, prompt] = process.argv.slice(2), env = process.env;
+const [requestedMode, log, prompt, , requestedAgent = 'playwright-test-generator'] = process.argv.slice(2), env = process.env;
 const mode = requestedMode.replace(/^trace-/, '');
 const opencode = JSON.parse(readFileSync('opencode.json', 'utf8')) as OpenCodeProject, plan = readFileSync('specs/plan.md', 'utf8');
-const agent = opencode.agent['playwright-test-generator'], server = opencode.mcp['playwright-test'];
+const agent = opencode.agent[requestedAgent], server = opencode.mcp['playwright-test'];
 const configPath = server.command[server.command.indexOf('--config') + 1], config = (await import(pathToFileURL(configPath).href)).default as { projects: { testDir: string }[] };
 const seedPath = join(config.projects[0].testDir, 'seed.spec.mjs');
 const ids = [...plan.matchAll(/\(milestone id: ([^)]+)\)/g)].map(match => match[1]);
@@ -26,7 +26,7 @@ const signIn = plan.includes('journey.signIn()');
 const target = prompt.match(/generator_write_test to `([^`]+)`/)![1];
 const modes = Object.fromEntries([['config', configPath], ['seed', seedPath], ['case', env.PERPETUAL_CASE], ['opencode', 'opencode.json'], ['plan', 'specs/plan.md']].map(([name, file]) => [name, statSync(file!).mode & 0o777]));
 const record = (extra: object) => appendFileSync(log, `${JSON.stringify({ mode, prompt, cwd: process.cwd(), workspaceMode: statSync('..').mode & 0o777, plan, seed: readFileSync(seedPath, 'utf8'), config, modes,
-  agent: { mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash }, permission: opencode.permission, provider: opencode.provider, mcp: server.command, mcpEnvironment: server.environment,
+  agent: { name: requestedAgent, mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash, tools: agent.tools }, permission: opencode.permission, provider: opencode.provider, mcp: server.command, mcpEnvironment: server.environment,
   prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), git: statSync('.git').isDirectory(),
   env: { key: Boolean(env.OPENROUTER_API_KEY), account: env.PERPETUAL_ACCOUNT_USERNAME || null, password: Boolean(env.PERPETUAL_ACCOUNT_PASSWORD), channel: env.PERPETUAL_EVENT_CHANNEL ?? null, caseFile: env.PERPETUAL_CASE, target: env.PERPETUAL_TARGET_URL,
     home: env.HOME, xdg: env.XDG_CONFIG_HOME ?? null, cache: env.XDG_CACHE_HOME, npm: env.npm_config_cache, claude: env.OPENCODE_DISABLE_CLAUDE_CODE },
@@ -58,7 +58,7 @@ async function generate() {
   const leak = `${log}.leak`;
   const evil = `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(leak)}, JSON.stringify({ key: process.env.OPENROUTER_API_KEY ?? null, password: process.env.PERPETUAL_ACCOUNT_PASSWORD ?? null }));\nexport default {};\nexport const test = () => {};\n`;
   const setups = [await setup()], refused: Record<string, boolean> = {}, written: Record<string, boolean> = {};
-  for (const fileName of ['playwright.config.mjs', 'opencode.json', '.opencode/prompts/playwright-test-generator.md', 'specs/plan.md', 'node_modules/perpetual/index.mjs',
+  for (const fileName of ['playwright.config.mjs', 'opencode.json', '.opencode/prompts/playwright-test-generator.md', '.opencode/prompts/perpetual-grammar-repair.md', 'specs/plan.md', 'node_modules/perpetual/index.mjs',
     '../run/playwright.config.mjs', '../run/seed/seed.spec.mjs', '../run/node_modules/perpetual/index.mjs', configPath]) refused[fileName] = await call('generator_write_test', { fileName, code: evil });
   // Inside tests a write succeeds, but nothing there is loaded or on the seed's import path.
   for (const [fileName, code] of [['tests/node_modules/perpetual/index.mjs', evil], ['tests/node_modules/perpetual/package.json', '{"name":"perpetual","type":"module","exports":"./index.mjs"}'],

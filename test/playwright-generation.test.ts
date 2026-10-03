@@ -46,7 +46,7 @@ async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/'
   playwright??={capabilities:async()=>({runtimeInstalled:true,browserInstalled:true}),start(input,onEvent){launches.push(input);const promise=wait(10).then(()=>{for(const event of (events??seeded)(input))onEvent(event);});return {promise,cancel(){}};}};
   const runtime=agentRuntime??{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('The browser-use runtime must not start.');}};
   const options=():BrowserManagerOptions=>({dataDir,runtime,playwright,onEnvironmentUncertain:async id=>{uncertain.push(id);},resolveEnvironment:url=>new URL(url).origin===new URL(target).origin?environment:null,twinAccount:async(_environment,accountId)=>accountId==='owner'?{username:'tester@example.com',password}:null,
-    generation:{harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,state.mode,log,prompt,requested]}),timeoutMs,cleanupGraceMs:1000}});
+    generation:{harness:({model:requested,prompt,agent})=>({command:process.execPath,args:[fake,state.mode,log,prompt,requested,agent??'playwright-test-generator']}),timeoutMs,cleanupGraceMs:1000}});
   const manager=await createBrowserManager(options());
   const context={key:'repo',stageId:'beta',controllerOrigin:'http://127.0.0.1:4317',scan:{repo:{path:join(dataDir,'repo'),sha:'abc'}}};
   t.after(async()=>{await manager.close();await rm(dataDir,{recursive:true,force:true});});
@@ -75,6 +75,7 @@ function heldSeed(){
 
 test('the default harness is OpenCode running Playwright’s generator agent against OpenRouter',()=>{
   assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Go',cwd:'/workspace/project'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--format','json','--agent','playwright-test-generator','--model','openrouter/openai/gpt-4.1-mini','Go']});
+  assert.deepEqual(opencodeHarness({model:`openrouter/${model}`,prompt:'Repair',cwd:'/workspace/project',agent:'perpetual-grammar-repair'}),{command:'npx',args:['-y','opencode-ai@1.18.32','run','--format','json','--agent','perpetual-grammar-repair','--model','openrouter/openai/gpt-4.1-mini','Repair']});
 });
 
 test('generation and repair identify the configured seed project for the setup tool',()=>{
@@ -121,6 +122,19 @@ test('generation and repair receive the complete reviewed acceptance contract in
   }
 });
 
+test('grammar repair can read and write the rejected test but cannot repeat business actions',async t=>{
+  const f=await setup(t,{mode:'repair'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.ok((await settled(f))?.draft);
+  const calls=await lines(f.log);
+  assert.equal(calls.length,2);
+  const [generation,repair]=calls as {agent:{name:string;tools:Record<string,boolean>}}[];
+  assert.equal(generation.agent.name,'playwright-test-generator');
+  assert.ok(Object.keys(generation.agent.tools).some(name=>name.includes('browser_click')&&generation.agent.tools[name]));
+  assert.equal(repair.agent.name,'perpetual-grammar-repair');
+  assert.deepEqual(repair.agent.tools,{'*':false,read:true,'playwright-test*generator_setup_page':true,'playwright-test*generator_write_test':true});
+});
+
 test('the generation rules keep navigation on the current run’s records',()=>{
   const rule="An entity or record URL observed during exploration belongs to that exploration, not to a future run. Reopen data created by this run through its visible links, using journey.run only where the rules allow it. Use `await page.reload();` to check persistence on the current record; never hard-code an explored record's URL in `page.goto`.";
   const rules=generationRules(journey,{signIn:true});
@@ -150,7 +164,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   const workspace=dirname(call.cwd),run=join(workspace,'run');
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
-  assert.deepEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
+  assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
   assert.deepEqual(call.mcp.slice(0,3),[process.execPath,fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url)),'run-test-mcp-server']);
   assert.deepEqual(call.mcp.slice(3),['--headless','--config',join(run,'playwright.config.mjs')]);
@@ -279,7 +293,7 @@ test('an invalid spec is repaired once with only its validation error and the ru
   assert.deepEqual(Object.keys(spec),['draft']);assert.equal(spec.generation,undefined);
   const [first,repair]=await lines(f.log);
   assert.equal(first.prompt,generatePrompt);
-  assert.match(repair.prompt,/^The test in `tests\/rename-the-display-name\.spec\.ts` is invalid: Line 8: expect\(\)\.toBeVisible is not an allowed journey action\.\n\nRules:\n- Write JavaScript\./);
+  assert.match(repair.prompt,/^The test in `tests\/rename-the-display-name\.spec\.ts` is invalid: Line 8: expect\(\)\.toBeVisible is not an allowed journey action\./);
   assert.match(repair.prompt,/write the corrected test with generator_write_test to `tests\/rename-the-display-name\.spec\.ts`\.$/);
   assert.ok(!repair.prompt.includes(journey.goal)&&!repair.prompt.includes('milestone id: open-settings'),'Only the error and the rules.');
   assert.ok(repair.prompt.includes('type a value that includes `journey.run`'),'The rules include run-unique values.');
