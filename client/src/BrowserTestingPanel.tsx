@@ -34,6 +34,7 @@ import { caseDraftKey, caseDraftOriginal, caseDrafts, newTestDraftKey, pruneCase
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 type Row = { key: string; value: string };
+type ReadRequestRow = { key: string; url: string; body: string; reviewed: boolean };
 /** The request fields of an account choice, or none. */
 type AccountFields = AccountRequest | Record<string, never>;
 /** A run the viewer shows: a listed run, or a discovery that has not started yet. */
@@ -166,6 +167,7 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
   const [signInUrl, setSignInUrl] = useState(config.signInUrl || '');
   const [origins, setOrigins] = useState(() => rowsOf(config.externalOrigins || []));
   const [endpoints, setEndpoints] = useState(() => rowsOf(config.authEndpoints || []));
+  const [reads, setReads] = useState<ReadRequestRow[]>(() => (config.readOnlyRequests || []).map(rule => ({ ...rule, key: crypto.randomUUID(), reviewed: true })));
   const [minutes, setMinutes] = useState(() => journeyTimeoutMinutes(config));
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -177,11 +179,12 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
     if (saving) return;
     setAttempted(true); setError('');
     if (!checked.valid) return;
+    if (reads.some(row => !row.reviewed)) { setError('Review each POST request as read-only before saving.'); return; }
     setSaving(true);
-    try { await onSave({ ...config, ...checked.values }); }
+    try { await onSave({ ...config, ...checked.values, readOnlyRequests: reads.map(({ url, body }) => ({ url, body })) }); }
     catch (failure) { setError((failure as Error).message); setSaving(false); }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}><DialogContent aria-describedby={undefined} showCloseButton={!saving} onCloseAutoFocus={returnFocus}>
+  return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}><DialogContent className="max-h-[90vh] overflow-y-auto" aria-describedby={undefined} showCloseButton={!saving} onCloseAutoFocus={returnFocus}>
     <DialogHeader><DialogTitle>Test settings</DialogTitle></DialogHeader>
     <form onSubmit={submit} noValidate className="space-y-4">
       <fieldset disabled={saving} className="space-y-5">
@@ -196,6 +199,21 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
         </Field>
         <ListField id="external-origins" label="External sites allowed in runs" itemLabel="Site" addLabel="Add site" max={10} rows={origins} errors={checked.errors.externalOrigins} listError={shown.externalOriginsList} showErrors={attempted} onChange={setOrigins} />
         <ListField id="auth-endpoints" label="Sign-in API endpoints" itemLabel="Endpoint" addLabel="Add endpoint" max={3} rows={endpoints} errors={checked.errors.authEndpoints} listError={shown.authEndpointsList} showErrors={attempted} onChange={setEndpoints} />
+        <Collapsible className="space-y-3">
+          <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="h-auto w-full justify-between px-0 text-sm">Read-only POST requests<Badge variant="secondary">{reads.length}</Badge><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
+          <CollapsibleContent className="space-y-4">
+            {reads.map((row, index) => {
+              const update = (patch: Partial<ReadRequestRow>) => setReads(current => current.map(item => item.key === row.key ? { ...item, reviewed: false, ...patch } : item));
+              return <div key={row.key} className="space-y-2">
+                <div className="flex items-center justify-between gap-2"><Label htmlFor={`read-url-${row.key}`}>POST URL {index + 1}</Label><Button type="button" variant="ghost" size="icon-sm" aria-label={`Remove read-only request ${index + 1}`} onClick={() => setReads(current => current.filter(item => item.key !== row.key))}><Trash2 /></Button></div>
+                <Input id={`read-url-${row.key}`} type="url" maxLength={2048} autoCapitalize="none" spellCheck={false} value={row.url} onChange={event => update({ url: event.target.value })} />
+                <Field id={`read-body-${row.key}`} label={`Exact JSON body ${index + 1}`}><Textarea id={`read-body-${row.key}`} rows={3} maxLength={4096} spellCheck={false} className="font-mono text-xs" value={row.body} onChange={event => update({ body: event.target.value })} /></Field>
+                <div className="flex items-center gap-2"><Checkbox id={`read-review-${row.key}`} checked={row.reviewed} onCheckedChange={value => update({ reviewed: value === true })} /><Label htmlFor={`read-review-${row.key}`}>I reviewed this request; it only reads data</Label></div>
+              </div>;
+            })}
+            <Button type="button" variant="outline" size="sm" disabled={reads.length >= 10} onClick={() => setReads(current => [...current, { key: crypto.randomUUID(), url: '', body: '{}', reviewed: false }])}><Plus />Add read-only POST</Button>
+          </CollapsibleContent>
+        </Collapsible>
         <Field id="journey-time-limit" label="Journey time limit"><div className="flex items-center gap-2"><Input id="journey-time-limit" type="number" inputMode="decimal" min={1} max={30} step="any" required value={minutes} aria-invalid={Boolean(shown.timeout) || undefined} aria-describedby={described('journey-time-limit', shown.timeout)} className="w-28" onChange={event => setMinutes(event.target.value)} /><span className="text-sm text-muted-foreground">min</span></div><FieldError id="journey-time-limit">{shown.timeout}</FieldError></Field>
       </fieldset>
       <ErrorText>{error}</ErrorText>

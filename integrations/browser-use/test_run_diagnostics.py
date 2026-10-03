@@ -30,6 +30,17 @@ class AgentDiagnostics(unittest.TestCase):
         self.assertEqual(runner.model_failure_kind(TimeoutError("private")), "timeout")
         self.assertEqual(runner.model_failure_kind(ValueError("private")), "other")
 
+class WrappedProviderErrors(unittest.TestCase):
+    def test_structured_provider_status_survives_a_wrapper_without_provider_text(self):
+        for status, message in [(402,'credits are exhausted'),(429,'rate limit'),(401,'authentication failed')]:
+            cause=RuntimeError('private request body and credential')
+            cause.status_code=status
+            wrapper=type('ModelProviderError',(Exception,),{})('private provider response')
+            wrapper.__cause__=cause
+            result=runner.safe_error(wrapper)
+            self.assertIn(message,result)
+            self.assertNotIn('private',result)
+
 
 if __name__ == "__main__":
     unittest.main()

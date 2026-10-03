@@ -25,7 +25,7 @@ Four guardrails:
 - Discovery is unchanged: the browser agent explores the application and proposes reviewable drafts.
 - A run needs Playwright's Chromium and code for each journey, not a model. A journey without current code needs review without a browser; the gate runs approved code only, and a person's run may try a current draft.
 - A verification holds its stage, so a gate waits for it; its runs never count as a journey's status or reach the gate.
-- The control run blocks by HTTP method, so it cannot tell a write from a read sent as a POST (GraphQL, RPC). Such a blocked read cannot establish a caught control; these reads remain unsupported and cannot authorize approval.
+- The original control run blocks by HTTP method, so it cannot tell a write from a read sent as a POST (GraphQL, RPC). Such a blocked read cannot establish a caught control. [ADR 0003](0003-review-fixed-post-reads.md) supersedes this limitation for exact person-reviewed JSON requests; unreviewed POST reads still cannot authorize approval.
 - Writing code needs a more capable model than a run ever does, since a run needs none; a small model can fail to write a valid spec. Generation is a one-time cost per journey.
 - Repairing code after the application changes is not automatic: a person generates, verifies and approves new code.
 

@@ -26,6 +26,18 @@ function literalUrlPassword(text: string): boolean {
 // anywhere, or to an unquoted one on an env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a
 // template, `process.env.X`), a URL or path without a password, or a type is not one.
 const CREDENTIAL_NAME = `[\\w-]*(?:${NAMES})[\\w-]*`;
+const CREDENTIAL_MEMBER = new RegExp(`^${CREDENTIAL_NAME}$`, 'i');
+// Decode URL escapes for inspection without changing ordinary source text. Malformed escapes remain data.
+const decodedUri = (text: string) => {
+  for (let depth = 0; depth < 4; depth += 1) {
+    const value = text.replace(/(?:%[a-f\d]{2})+/gi, encoded => {
+      try { return decodeURIComponent(encoded); }
+      catch { return encoded.replace(/%([0-7][a-f\d])/gi, (_, byte: string) => String.fromCharCode(Number.parseInt(byte, 16))); }
+    });
+    if (value === text) break; text = value;
+  }
+  return text;
+};
 const NOT_LITERAL = '(?![$<{%/]|\\w+://)';
 const QUOTED_LITERAL = new RegExp(`\\b${CREDENTIAL_NAME}["']?\\s*[=:]\\s*(["'])${NOT_LITERAL}[^"'\\s]{8,}\\1`, 'i');
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
@@ -39,8 +51,8 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
  * and user info in any URL. Ordinary text, however long, comes back unchanged.
  */
-export function redact(input: unknown = ''): string {
-  return String(input)
+export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?: boolean } = {}): string {
+  return (decodeUri ? decodedUri(String(input)) : String(input))
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block))
     .replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`)
@@ -57,7 +69,8 @@ export function redact(input: unknown = ''): string {
  * Whether text holds a credential as a literal value: a known token shape, a URL with a password, or a credential
  * name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted one counts.
  */
-export function hasCredential(input: string, { code = false }: { code?: boolean } = {}): boolean {
+export function hasCredential(input: string, { code = false, url = false }: { code?: boolean; url?: boolean } = {}): boolean {
+  if (url) { const value = decodedUri(input); return redact(value) !== value; }
   return new RegExp(TOKEN_SHAPE.source).test(input) || literalUrlPassword(input)
     || QUOTED_LITERAL.test(input) || !code && UNQUOTED_LITERAL.test(input);
 }
@@ -66,9 +79,9 @@ export function hasCredential(input: string, { code = false }: { code?: boolean 
  * A strong secret literal in editable data: known token shapes, key/certificate blocks, literal URL
  * passwords, or a supplied secret. Ordinary values under names such as SESSION_SECRET remain valid. Every quoted JSON
  * string is decoded before inspection, including duplicate members and otherwise valid strings missing their closing quote. A field name
- * alone is not a credential rule, but can contain a known token or supplied value. No input text is rewritten.
+ * alone is not a credential rule, but can contain a known token or supplied value. No input text is rewritten. Durable fixed requests may additionally refuse credential-shaped JSON members regardless of value length; original lexemes preserve escaped and duplicate names.
  */
-export function hasSecretLiteral(input: string, secrets: Iterable<unknown> = []): boolean {
+export function hasSecretLiteral(input: string, secrets: Iterable<unknown> = [], { credentialMembers = false }: { credentialMembers?: boolean } = {}): boolean {
   const remove = hide(secrets, { marker: '' });
   const literal = (text: string) => new RegExp(TOKEN_SHAPE.source).test(text) || new RegExp(PEM.source).test(text)
     || literalUrlPassword(text) || remove(text) !== text;
@@ -81,7 +94,7 @@ export function hasSecretLiteral(input: string, secrets: Iterable<unknown> = [])
     while (end < input.length && input[end] !== '"') end += input[end] === '\\' ? 2 : 1;
     try {
       const value: unknown = JSON.parse(input.slice(start, end + 1) + (end >= input.length ? '"' : ''));
-      if (typeof value === 'string' && literal(value)) return true;
+      if (typeof value === 'string' && (literal(value) || credentialMembers && CREDENTIAL_MEMBER.test(value) && input.slice(end + 1).trimStart().startsWith(':'))) return true;
     } catch { /* An invalid escape remains raw draft text. */ }
     start = end;
   }

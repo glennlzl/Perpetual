@@ -10,21 +10,21 @@ import type { Verification, SpecVerification, SpecSummary, SpecCodeReply } from 
 export type { Verification, SpecSummary } from '../../contract/browser.ts';
 
 type VerificationState=Omit<SpecVerification,'status'>&{status:Exclude<SpecVerification['status'],'running'>};
-type StoredVerification=VerificationState&{id:string;checkVersion:number;runIds:string[]};
+type StoredVerification=VerificationState&{id:string;checkVersion:number;readPolicy?:string;runIds:string[]};
 type StoredSpec={code:string;hash:string;caseHash:string;savedAt:string;provenance?:unknown;verification?:StoredVerification};
-type ApprovedSpec=StoredSpec&{approvedAt:string;approvedRunIds:string[];checkVersion?:number};
+type ApprovedSpec=StoredSpec&{approvedAt:string;approvedRunIds:string[];checkVersion?:number;readPolicy?:string};
 type CaseSpecs={approved:ApprovedSpec|null;draft:StoredSpec|null};
 type LegacySpec=StoredSpec&{approvedAt?:string;approvedRunId?:string};
 export type GenerationFailure={caseHash:string;error:string;rejected?:string};
 /** Durable journey code belongs to the browser manager's state file, never a second store. */
 export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>;authoring?:Record<string,AuthoringRecord[]>};
-export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number};
+export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number;readPolicy?:string};
 type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
 type LiveVerification=VerificationIdentity&{caseId:string;done:boolean;error?:string};
 type LiveGeneration={status:'running'|'failed';step?:string;error?:string;rejected?:string;discarded?:true};
 export type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
 /** Read at the call/commit, including current execution facts; the code owner never retains a worker or lease. */
-export type JourneyCodeSnapshot={cases:readonly BrowserCase[];code:JourneyCodeState;runs:readonly VerificationRun[];verifications:readonly LiveVerification[];generations:ReadonlyMap<string,LiveGeneration>};
+export type JourneyCodeSnapshot={readPolicy?:string;cases:readonly BrowserCase[];code:JourneyCodeState;runs:readonly VerificationRun[];verifications:readonly LiveVerification[];generations:ReadonlyMap<string,LiveGeneration>};
 type Persistence={
   read(scope:string):JourneyCodeSnapshot;
   transact(scope:string,change:(current:JourneyCodeSnapshot)=>JourneyCodeState):Promise<void>;
@@ -37,6 +37,7 @@ const NO_CODE='Generate and approve code for this journey.',STALE_CODE='The appr
 const OLD_CODE='Reuse and verify the approved code again: its control evidence is out of date.';
 const UNREAD='The control did not check freshly read business data. Reload after the change, then check a run-unique value or a number against its earlier value.';
 const MISSED='The journey passed with every change blocked. Strengthen its checks.',UNJUDGED='No reviewed check noticed the blocked changes.',CHANGED='The journey changed during its verification. Verify its code again.';
+const policyMatches=(current:JourneyCodeSnapshot,value:{readPolicy?:string}|null|undefined)=>(current.readPolicy??'')===(value?.readPolicy??'');
 const active=(run:VerificationRun)=>['queued','running'].includes(run.status);
 const drafted=(item:BrowserCase,code:string,provenance?:unknown):StoredSpec=>({code,hash:specHash(code),caseHash:caseHash(item),savedAt:now(),...(provenance?{provenance:structuredClone(provenance)}:{})});
 const caseOf=(current:JourneyCodeSnapshot,id:unknown)=>{
@@ -100,12 +101,12 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
 // than historical attempts even when its verification failed before admitting a run. Only unrecorded drafts use history.
 function verificationEvidence(current:JourneyCodeSnapshot,caseId:string,draft:StoredSpec):{view:SpecVerification;runIds:string[]}|null{
   const live=current.verifications.find(item=>item.caseId===caseId);
-  const matches=(value:{hash:string;caseHash:string;checkVersion?:number}|undefined)=>value?.hash===draft.hash&&value.caseHash===draft.caseHash&&(value.checkVersion??1)===CHECK_VERSION;
-  const record=draft.verification?.checkVersion===CHECK_VERSION?draft.verification:null;
+  const matches=(value:{hash:string;caseHash:string;checkVersion?:number;readPolicy?:string}|undefined)=>value?.hash===draft.hash&&value.caseHash===draft.caseHash&&(value.checkVersion??1)===CHECK_VERSION&&policyMatches(current,value);
+  const record=draft.verification?.checkVersion===CHECK_VERSION&&policyMatches(current,draft.verification)?draft.verification:null;
   const id=matches(live)?live!.id:record?.id??current.runs.find(run=>run.caseIds[0]===caseId&&matches(run.verification))?.verification?.id;
   const running=Boolean(live&&live.id===id&&!live.done);
   if(!running&&record&&(!id||id===record.id)){
-    const {id:_id,checkVersion:_version,runIds,...view}=record;return {view,runIds};
+    const {id:_id,checkVersion:_version,readPolicy:_policy,runIds,...view}=record;return {view,runIds};
   }
   if(!id)return null;
   const {status,error,...counts}=verificationState(current,caseId,id,live?.id===id?live.error:undefined);
@@ -131,7 +132,7 @@ export function createJourneyCode(storage:Persistence){
         const generation=current.generations.get(item.id)||(storedFailure?{status:'failed' as const,...storedFailure}:undefined);
         const provenance=(spec:StoredSpec)=>spec.provenance?{provenance:structuredClone(spec.provenance)}:{};
         return [item.id,{
-          ...(approved?{approved:{hash:approved.hash,stale:approved.caseHash!==caseHash(item)||(approved.checkVersion??1)!==CHECK_VERSION,approvedAt:approved.approvedAt,...provenance(approved)}}:{}),
+          ...(approved?{approved:{hash:approved.hash,stale:approved.caseHash!==caseHash(item)||(approved.checkVersion??1)!==CHECK_VERSION||!policyMatches(current,approved),approvedAt:approved.approvedAt,...provenance(approved)}}:{}),
           ...(draft?{draft:{hash:draft.hash,stale:draft.caseHash!==caseHash(item),...provenance(draft),...(verification?{verification}:{})}}:{}),
           ...(generation?{generation:{status:generation.status,...(generation.step?{step:generation.step}:{}),...(generation.error?{error:generation.error}:{}),...(generation.rejected?{rejected:generation.rejected}:{})}}:{}),
         }];
@@ -142,9 +143,9 @@ export function createJourneyCode(storage:Persistence){
       return {...(current.code.authoring?.[item.id]?.length?{authoring:structuredClone(current.code.authoring[item.id])}:{}),...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
     },
     runnable(scope:string,item:BrowserCase,{manual=false,verification}:{manual?:boolean;verification?:Verification}={}):RunnableCode{
-      const {approved,draft}=storage.read(scope).code.specs[item.id]||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);
-      const approvedCurrent=current(approved)&&(approved?.checkVersion??1)===CHECK_VERSION;
-      const spec=verification?(draft?.hash===verification.hash&&draft.caseHash===verification.caseHash&&current(draft)?draft:null):approvedCurrent?approved:manual&&current(draft)?draft:null;
+      const snapshot=storage.read(scope),{approved,draft}=snapshot.code.specs[item.id]||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);
+      const approvedCurrent=current(approved)&&(approved?.checkVersion??1)===CHECK_VERSION&&policyMatches(snapshot,approved);
+      const spec=verification?(draft?.hash===verification.hash&&draft.caseHash===verification.caseHash&&current(draft)&&policyMatches(snapshot,verification)?draft:null):approvedCurrent?approved:manual&&current(draft)?draft:null;
       if(!spec)return {missing:verification?CHANGED:approved&&!current(approved)?STALE_CODE:approved&&!approvedCurrent?OLD_CODE:NO_CODE};
       try{validateJourneySpec(spec.code,item);}catch(error){return {missing:`Generate code for this journey again: ${(error as Error).message}`};}
       return {code:spec.code,hash:spec.hash,checkVersion:spec===approved?approved.checkVersion??1:CHECK_VERSION};
@@ -167,16 +168,16 @@ export function createJourneyCode(storage:Persistence){
       const evidence=verificationEvidence(current,item.id,draft);
       if(evidence?.view.status!=='passed')throw conflict('Verify this code first: it needs three passing runs and a caught control run.');
       const {verification:ended,...code}=draft;
-      return {approved:{...code,approvedAt:now(),approvedRunIds:[...evidence.runIds],checkVersion:CHECK_VERSION},draft:null};
+      return {approved:{...code,approvedAt:now(),approvedRunIds:[...evidence.runIds],checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{})},draft:null};
     });},
     discard(scope:string,caseId:string,hash:unknown){return changeSpec(scope,caseId,(_,item,{approved,draft})=>{
       if(!draft)throw Object.assign(new Error('This test has no draft code.'),{statusCode:404});
       if(typeof hash!=='string'||draft.hash!==hash)throw conflict('The code changed. Reload it and discard again.');
       return {approved,draft:null};
     });},
-    reuse(scope:string,caseId:string){return changeSpec(scope,caseId,(_,item,{approved,draft})=>{
+    reuse(scope:string,caseId:string){return changeSpec(scope,caseId,(current,item,{approved,draft})=>{
       if(!approved)throw Object.assign(new Error('This test has no approved code to reuse.'),{statusCode:404});
-      if(approved.caseHash===caseHash(item)&&(approved.checkVersion??1)===CHECK_VERSION)throw conflict('The approved code is current.');
+      if(approved.caseHash===caseHash(item)&&(approved.checkVersion??1)===CHECK_VERSION&&policyMatches(current,approved))throw conflict('The approved code is current.');
       if(draft&&draft.caseHash===caseHash(item))throw conflict('Discard the draft first.');
       let code:string;try{code=validateJourneySpec(approved.code,item);}catch(error){throw new Error(`Generate code for this test again: ${(error as Error).message}`);}
       return {approved,draft:drafted(item,code,approved.provenance)};
@@ -188,14 +189,14 @@ export function createJourneyCode(storage:Persistence){
       if(!draft)throw Object.assign(new Error('Generate code for this test first.'),{statusCode:404});
       if(typeof hash!=='string'||draft.hash!==hash)throw conflict('The code changed. Reload it and verify again.');
       if(draft.caseHash!==caseHash(item))throw conflict('The test changed after this code was saved. Generate it again.');
-      const identity:Readonly<VerificationIdentity>=Object.freeze({id:randomUUID(),hash:draft.hash,caseHash:draft.caseHash,checkVersion:CHECK_VERSION});
+      const identity:Readonly<VerificationIdentity>=Object.freeze({id:randomUUID(),hash:draft.hash,caseHash:draft.caseHash,checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{})});
       return {
         identity,
         // Start before admitting an attempt, checkpoint after each, and finish before releasing the live activity.
         checkpoint(error?:string){return storage.transact(scope,current=>{
           const draft=current.code.specs[caseId]?.draft;
           if(draft?.hash!==identity.hash||draft.caseHash!==identity.caseHash)return current.code;
-          const verification:StoredVerification={id:identity.id,checkVersion:identity.checkVersion,...verificationState(current,caseId,identity.id,error),runIds:attemptsOf(current,identity.id).map(run=>run.id)};
+          const verification:StoredVerification={id:identity.id,checkVersion:identity.checkVersion,...(identity.readPolicy?{readPolicy:identity.readPolicy}:{}),...verificationState(current,caseId,identity.id,error),runIds:attemptsOf(current,identity.id).map(run=>run.id)};
           return {...current.code,specs:{...current.code.specs,[caseId]:{...current.code.specs[caseId],draft:{...draft,verification}}}};
         });},
       };

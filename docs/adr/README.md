@@ -13,3 +13,5 @@ An architecture decision record (ADR) notes one decision that is hard to reverse
 
 - [0001: Gate and manual runs execute approved Playwright code](0001-gate-runs-approved-playwright-code.md) (accepted)
 - [0002: A repair merges itself only after CI and every journey gate pass at its exact head](0002-repairs-merge-after-ci-and-journey-gates.md) (accepted)
+
+- [0003: A person reviews fixed POST reads before discovery and control admit them](0003-review-fixed-post-reads.md) (accepted)

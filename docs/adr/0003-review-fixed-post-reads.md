@@ -1,0 +1,5 @@
+# 3. A person reviews fixed POST reads before discovery and control admit them
+
+Method-only blocking made applications with POST-based reads unreadable, but permitting an endpoint or an agent-labelled GraphQL operation would also permit writes. A person therefore reviews each exact application URL and complete fixed JSON body; discovery and the write-blocked control admit only those bounded requests, with read redirects and automatic retries disabled, and the policy identity binds verification and approval. For a managed twin, policy identity binds the application service and fixed path/body so rebuilding that same service on a new port preserves CI/CD approval; ambiguous targets suspend rules and another application service receives none. Fresh GET evidence and an independently failed reviewed business outcome remain mandatory, while dynamic payloads, unreviewed reads and socket reads retain their existing restrictions.
+
+Status: accepted; supersedes only ADR 0001's blanket POST-read limitation.

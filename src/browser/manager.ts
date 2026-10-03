@@ -5,7 +5,8 @@ import {randomUUID} from 'node:crypto';
 import {mkdir,lstat,readdir,rm} from 'node:fs/promises';
 import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
-import {hide} from '../redaction.ts';
+import {hide,redact} from '../redaction.ts';
+import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
 import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
@@ -29,7 +30,7 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {ModelSettingsReply} from '../../contract/settings.ts';
-import type {BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
+import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
 export type {BrowserConfig,PublicRun,RunSummary} from '../../contract/browser.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
@@ -68,7 +69,7 @@ type Preparation=BrowserPreparation;
 type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
-  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;signInPath?:string}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
+  preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;applicationId?:string;signInPath?:string;suspendedReads?:{applicationId?:string;requests:ReadOnlyRequest[]}}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
 };
 /**
  * keepLease takes the run's lease as the run ends, instead of it being released, for a caller that goes on using the twin.
@@ -101,7 +102,7 @@ const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
 const publicRun=({scope,approvedCases,environmentUseUncertain,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
-const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
+const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
 function summaryRun({progress,...run}:BrowserRun,withProgress:boolean):RunSummary{
@@ -188,8 +189,9 @@ function normalizedConfig(input:unknown,context:{controllerOrigin?:string}):Brow
   const maxSteps=input.maxSteps??defaults.maxSteps;if(typeof maxSteps!=='number'||!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>100)throw new Error('Choose 1–100 browser actions per case.');
   const journeyTimeoutSeconds=input.journeyTimeoutSeconds??defaults.journeyTimeoutSeconds;if(typeof journeyTimeoutSeconds!=='number'||!Number.isInteger(journeyTimeoutSeconds)||journeyTimeoutSeconds<60||journeyTimeoutSeconds>1800)throw new Error('Choose a journey time limit of 60–1800 seconds.');
   const targetUrl=input.targetUrl?validateBrowserTarget(String(input.targetUrl),context):'';
+  const reads=validateReadRequests(input.readOnlyRequests===undefined?[]:input.readOnlyRequests,targetUrl);
   // scope and requirements are strings or empty now.
-  return {targetUrl,signInUrl:signInPage(input.signInUrl,targetUrl),scope:(input.scope||'') as string,requirements:(input.requirements||'') as string,maxSteps,journeyTimeoutSeconds,externalOrigins:externalOrigins(input.externalOrigins??[],context),authEndpoints:authEndpoints(input.authEndpoints??[],targetUrl)};
+  return {targetUrl,signInUrl:signInPage(input.signInUrl,targetUrl),scope:(input.scope||'') as string,requirements:(input.requirements||'') as string,maxSteps,journeyTimeoutSeconds,externalOrigins:externalOrigins(input.externalOrigins??[],context),authEndpoints:authEndpoints(input.authEndpoints??[],targetUrl),...(reads.length?{readOnlyRequests:reads}:{})};
 }
 
 // Mirrors the runner: evaluated checks accompany completed or failed milestones only,
@@ -243,6 +245,30 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};
   {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
   for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
+  // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
+  // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
+  for(const config of Object.values(state.configs))if(config.readOnlyRequests!==undefined){
+    try{config.readOnlyRequests=validateReadRequests(config.readOnlyRequests,config.targetUrl);}catch{throw new Error('Invalid stored read-only POST requests.');}
+  }
+  for(const target of Object.values(state.configTargets)){
+    if(target.applicationId!==undefined&&(typeof target.applicationId!=='string'||!target.applicationId||target.applicationId.length>1024))throw new Error('Invalid stored POST-read application.');
+    if(target.suspendedReads!==undefined){
+      const suspended:unknown=target.suspendedReads;
+      try{
+        if(!isRecord(suspended)||suspended.applicationId!==undefined&&(typeof suspended.applicationId!=='string'||!suspended.applicationId||suspended.applicationId.length>1024)||!Array.isArray(suspended.requests))throw new Error();
+        const first=suspended.requests[0];
+        target.suspendedReads={...(typeof suspended.applicationId==='string'?{applicationId:suspended.applicationId}:{}),requests:validateReadRequests(suspended.requests,isRecord(first)&&typeof first.url==='string'?first.url:'')};
+      }catch{throw new Error('Invalid stored read-only POST requests.');}
+    }
+  }
+  for(const run of state.runs)if(run.blockedRequests!==undefined){
+    const found:BlockedRequest[]=[];
+    for(const item of Array.isArray(run.blockedRequests)?run.blockedRequests:[]){
+      const request=isRecord(item)?blockedRequest(item.method,item.url):null;
+      if(request&&found.length<10&&!found.some(value=>value.method===request.method&&value.url===request.url))found.push(request);
+    }
+    run.blockedRequests=found;
+  }
   const external:unknown=state.externalOperations??{};
   if(!isRecord(external)||Object.entries(external).some(([origin,item])=>{
     if(!isRecord(item)||typeof item.id!=='string'||typeof item.scope!=='string'||typeof item.startedAt!=='string'||typeof item.operation!=='string'||!['run','discover','generate'].includes(item.operation)||item.cleanupIncomplete!==undefined&&item.cleanupIncomplete!==true)return true;
@@ -355,7 +381,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   await persist();
   const codeState=(scope:string):JourneyCodeState=>({specs:state.specs[scope]||{},generationFailures:state.generationFailures[scope]||{},authoring:retainAuthoring(state.authoring,state.cases)[scope]||{}});
   const codeSnapshot=(scope:string):JourneyCodeSnapshot=>({
-    code:codeState(scope),cases:state.cases[scope]||[],runs:state.runs.filter(run=>run.scope===scope),
+    readPolicy:readPolicyHash(state.configs[scope]?.readOnlyRequests,state.configTargets[scope]?.url===state.configs[scope]?.targetUrl?state.configTargets[scope]?.applicationId:undefined),code:codeState(scope),cases:state.cases[scope]||[],runs:state.runs.filter(run=>run.scope===scope),
     verifications:[...verifications.values()].filter(entry=>entry.scope===scope),
     generations:new Map((state.cases[scope]||[]).flatMap(item=>{const entry=generations.get(generationKey(scope,item.id));return entry?[[item.id,entry] as const]:[];})),
   });
@@ -710,6 +736,14 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             return;
           }
           if(['skipping','cancelling','skipped','cancelled'].includes(progress.status))return;
+          if(event.type==='blocked-request'){
+            const remove=hide(Object.values(credentials??{}));
+            const request=blockedRequest(event.method,event.url,value=>safeText(remove(redact(value,{decodeUri:true})),512));
+            if(request&&!(run.blockedRequests??[]).some(item=>item.method===request.method&&item.url===request.url)){
+              if((run.blockedRequests??[]).length<10)(run.blockedRequests??=[]).push(request);touch(run);
+            }
+            return;
+          }
           if(event.type==='frame'){acceptFrame(run,event,progress);touch(run);return;}
           if(event.type==='case'){
             if(mode==='discover')progress.status='running';
@@ -728,7 +762,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           // the target environment's apps and receives auth endpoints only with a supplied test account.
           // Validate worker input inside the terminal handler so refusal also settles the run and its lease.
           const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)];
-          const workerInput={mode,targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
+          const workerInput={mode,...(config.readOnlyRequests?.length?{readOnlyRequests:config.readOnlyRequests}:{}),targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
             ...(mode==='discover'?{scope:config.scope,requirements:config.requirements,sourceContext,maxSteps:config.maxSteps,...(discoveryEndpoints?{authEndpoints:discoveryEndpoints}:{})}:{})};
           run.status='running';run.startedAt=now();await persist();
           if(closed||entry?.cancelled)throw new Error('Browser operation cancelled.');
@@ -819,7 +853,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 // A journey the controller cannot accept is named in the summary; the valid ones are kept.
                 const {cases:drafts,omitted}=discoveredBrowserCases(event.cases,sourceContext);
                 const note=safeText(omitted.map(item=>`Omitted “${item.name}”: ${item.reason}`).join('\n'),2000);
-                discovery={cases:drafts,summary:[safeText(event.summary,note?3999-note.length:4000),note].filter(Boolean).join('\n'),authenticated:!!credentials&&event.authenticated===true};omittedCount=omitted.length;
+                const blockedNote=run.blockedRequests?.length?`Blocked ${run.blockedRequests.slice(0,3).map(item=>`${item.method} ${item.url}`).join('; ')}. Review read-only POST requests in Test settings.`:'';
+                const suffix=[note,blockedNote].filter(Boolean).join('\n');
+                discovery={cases:drafts,summary:[safeText(event.summary,4000-(suffix?1+suffix.length:0)),suffix].filter(Boolean).join('\n'),authenticated:!!credentials&&event.authenticated===true};omittedCount=omitted.length;
               }else if(event.type==='result')throw new Error('Browser runtime returned unexpected results.');
               else if(event.type==='sign-in-page'){
                 // Where the account signed in becomes the stage's sign-in page while it has none, so a person's value
@@ -854,6 +890,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           }
         }catch(error){
           run.status=entry?.cancelled?'cancelled':'failed';run.error=browserError(messageOf(error)||String(error));
+          if(mode==='discover'&&run.blockedRequests?.length)run.error=safeText(`${run.error} Blocked ${run.blockedRequests.slice(0,3).map(item=>`${item.method} ${item.url}`).join('; ')}. Review read-only POST requests in Test settings.`,4000);
           for(const item of run.progress.cases)if(['pending','queued','running','skipping','cancelling'].includes(item.status)){item.status=run.status;settleSteps(item,run.status);}
           touch(run);
           if((error as WorkerError|undefined)?.cleanupIncomplete===true&&external)external.entry.cleanupIncomplete=true;
@@ -897,6 +934,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       // The inspector opens this URL in an ordinary host browser. Preserve its route and the stored config.
       const origin=externalOrigin(app.url);
       config.targetUrl=`${origin}${signInPath(target.href)}`;
+      if(config.readOnlyRequests)config.readOnlyRequests=moveReads(config.readOnlyRequests,config.targetUrl);
       if(config.signInUrl&&originOf(config.signInUrl)===target.origin)config.signInUrl=`${origin}${signInPath(config.signInUrl)}`;
     }catch{/* An invalid saved URL remains available for the person to edit. */}
     return config;
@@ -913,6 +951,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
    * origin, as a changed port does, the sign-in page moves with it; the stage's cases are reused without discovery, so
    * nothing else would record it again. null when the twin has no single application URL, which clears an automatic target.
    */
+  const moveReads=(requests:readonly ReadOnlyRequest[],targetUrl:string)=>requests.map(rule=>({...rule,url:`${new URL(targetUrl).origin}${new URL(rule.url).pathname}`}));
   function retarget(scope:string,context:BrowserStageContext,environment:TargetEnvironment){
     const config=normalizedConfig(state.configs[scope]||defaults,context);
     const previousTarget=state.configTargets[scope];
@@ -921,13 +960,19 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     // hash wait beside it for the next twin, so a person's value is not dropped silently.
     const path=config.signInUrl?signInPath(config.signInUrl):previousTarget?.signInPath;
     const url=applicationUrl(environment,context.scan);
+    const previousApp=previousTarget?.applicationId;
+    const suspended=previousTarget?.suspendedReads??(config.readOnlyRequests?.length?{...(previousApp?{applicationId:previousApp}:{}),requests:config.readOnlyRequests}:undefined);
     if(!url){
-      if(previousTarget){state.configs[scope]={...config,targetUrl:'',signInUrl:''};state.configTargets[scope]={environmentId:environment.id,url:'',...(path?{signInPath:path}:{})};}
+      if(previousTarget){state.configs[scope]={...config,targetUrl:'',signInUrl:'',readOnlyRequests:undefined};state.configTargets[scope]={environmentId:environment.id,url:'',...(path?{signInPath:path}:{}),...(suspended?{suspendedReads:suspended}:{})};}
       return null;
     }
     config.targetUrl=validateBrowserTarget(url,context);
     if(path&&(!config.signInUrl||originOf(config.signInUrl)!==originOf(config.targetUrl)))config.signInUrl=movedSignInPage(path,config.targetUrl);
-    state.configs[scope]=config;state.configTargets[scope]={environmentId:environment.id,url:config.targetUrl};
+    const application=applications(environment).find(app=>originOf(app.url)===originOf(config.targetUrl));
+    const applicationId=typeof application?.id==='string'?application.id:undefined;
+    const restored=suspended?.applicationId&&suspended.applicationId===applicationId;
+    if(suspended)config.readOnlyRequests=restored?moveReads(suspended.requests,config.targetUrl):undefined;
+    state.configs[scope]=config;state.configTargets[scope]={environmentId:environment.id,url:config.targetUrl,...(applicationId?{applicationId}:{}),...(suspended&&!restored?{suspendedReads:suspended}:{})};
     return config;
   }
   async function prepareEnvironment(context:BrowserStageContext,environment:TargetEnvironment,{isCurrent=()=>true}:{isCurrent?:()=>boolean}={}){
@@ -978,6 +1023,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context),target=state.configTargets[scope];
       const sameTarget=target?.url===state.configs[scope]?.targetUrl&&publicConfig(scope).targetUrl===normalized.targetUrl;
       state.configs[scope]=normalized;
+      if(target)delete target.suspendedReads;
       if(target?.url!==normalized.targetUrl){if(target&&sameTarget)target.url=normalized.targetUrl;else delete state.configTargets[scope];}
       // A saved target settles the setup an automatic preparation asked for; Generate stays the person's to start.
       if(normalized.targetUrl&&state.preparations[scope]?.status==='needs_setup')delete state.preparations[scope];

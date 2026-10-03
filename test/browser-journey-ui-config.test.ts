@@ -36,7 +36,7 @@ test('the test settings dialog saves the sign-in page from one labelled field be
   const dialog = panel.slice(panel.indexOf('function TestSettingsDialog'), panel.indexOf('type GenerateTestsDialogProps'));
   assert.match(dialog, /const \[signInUrl, setSignInUrl\] = useState\(config\.signInUrl \|\| ''\);/);
   assert.match(dialog, /validateTestSettings\(\{ targetUrl, signInUrl, externalOrigins:/);
-  assert.match(dialog, /await onSave\(\{ \.\.\.config, \.\.\.checked\.values \}\)/);
+  assert.match(dialog, /await onSave\(\{ \.\.\.config, \.\.\.checked\.values(?:, [^\n]*)? \}\)/);
   const field = dialog.slice(dialog.indexOf('<Field id="test-sign-in-url"'), dialog.indexOf('<ListField id="external-origins"'));
   // A label and the field's error only: no helper text or placeholder. The error describes the field it is about.
   assert.equal(field.trim(), `<Field id="test-sign-in-url" label="Sign-in page">

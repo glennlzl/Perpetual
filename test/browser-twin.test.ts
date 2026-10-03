@@ -173,3 +173,25 @@ test('a twin ready while its stage is busy moves the target at once and prepares
   await f.manager.prepareEnvironment(beta,next);
   assert.equal(f.requests.filter(input=>input.mode==='discover').length,1,'The stage\'s cases are reused.');
 });
+
+
+test('reviewed reads follow the same owned application through host links, rebuilt ports and ambiguity', async t => {
+  const owned={...twin,sandboxId:twin.id};
+  const next={...owned,id:'rebuilt-reads',sandboxId:'rebuilt-reads',apps:[{id:'service-web',url:'http://127.0.0.1:43300'}]};
+  const ambiguous={...owned,id:'ambiguous-reads',sandboxId:'ambiguous-reads'};
+  const restored={...next,id:'restored-reads',sandboxId:'restored-reads',apps:[{id:'service-web',url:'http://127.0.0.1:43400'}]};
+  const other={...next,id:'different-reads',sandboxId:'different-reads',apps:[{id:'other-app',url:'http://127.0.0.1:43500'}]};
+  const f=await fixture(t,{environments:[owned,next,ambiguous,restored,other],events:discovered}),beta=f.context('beta');
+  await f.manager.prepareEnvironment(beta,owned);await prepared(f,beta);
+  const config=(await f.manager.view(beta)).config;
+  await f.manager.saveConfig(beta,{...config,readOnlyRequests:[{url:'http://127.0.0.1:43100/rpc',body:'{}'}]});
+  await f.manager.prepareEnvironment(beta,next);await prepared(f,beta);
+  assert.deepEqual((await f.manager.view(beta)).config.readOnlyRequests,[{url:'http://127.0.0.1:43300/rpc',body:'{}'}]);
+  const unknown={...beta,scan:{...beta.scan,services:[]}};
+  await f.manager.prepareEnvironment(unknown,ambiguous);await prepared(f,beta);
+  assert.equal((await f.manager.view(beta)).config.targetUrl,'');
+  await f.manager.prepareEnvironment(beta,restored);await prepared(f,beta);
+  assert.deepEqual((await f.manager.view(beta)).config.readOnlyRequests,[{url:'http://127.0.0.1:43400/rpc',body:'{}'}]);
+  await f.manager.prepareEnvironment(beta,other);await prepared(f,beta);
+  assert.deepEqual((await f.manager.view(beta)).config.readOnlyRequests??[],[],'Read authority cannot transfer to another app service.');
+});

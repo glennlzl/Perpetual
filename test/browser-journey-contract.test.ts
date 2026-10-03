@@ -493,3 +493,44 @@ test('the agent runtime marks only its own time limit, discovers only, and disco
   await assert.rejects(job.promise,/cancelled/);
   assert.throws(()=>runtime.start({mode:'preflight',credentials:{username:'u@example.test',password:'p'}},()=>{}),/test account/);
 });
+
+test('read-only POST selection keeps an exact reviewed request and rejects unsafe or ambiguous rules', async t => {
+  const f=await fixture(t), targetUrl='http://localhost:3000/', readOnlyRequests=[{url:'http://localhost:3000/rpc',body:'{"operation":"readWorkspace"}'}];
+  const saved=(await f.manager.saveConfig(f.context,{targetUrl,readOnlyRequests})).config;
+  assert.deepEqual((saved as unknown as {readOnlyRequests:unknown}).readOnlyRequests,readOnlyRequests);
+  for(const rules of [null,42,[{url:'http://other.test/rpc',body:'{}'}],[{url:'http://localhost:3000/rpc?token=secret',body:'{}'}],[{url:'http://localhost:3000/rpc',body:'[]'}],[{url:'http://localhost:3000/rpc',body:'not json'}],[{url:'http://localhost:3000/rpc',body:'{"password":"private-value"}'}],Array.from({length:11},()=>readOnlyRequests[0])]) {
+    await assert.rejects(f.manager.saveConfig(f.context,{targetUrl,readOnlyRequests:rules}), /read-only|JSON|secret|credentials/i);
+  }
+  const reopened=await f.reopen();
+  assert.deepEqual(((await reopened.view(f.context)).config as unknown as {readOnlyRequests:unknown}).readOnlyRequests,readOnlyRequests);
+});
+
+test('failed discovery retains bounded blocked-request evidence and an actionable explanation without request secrets', async t => {
+  const f=await fixture(t), {run}=await f.manager.discover(f.context);
+  await until(()=>f.workers.length===1);
+  for(let index=0;index<14;index++) f.workers[0].event({type:'blocked-request',method:'POST',url:`http://localhost:3000/rpc/${index}?password=do-not-retain#private`});
+  f.workers[0].gate.reject(new Error('The model provider rejected the request.'));
+  const report=await f.terminal(run.id);
+  assert.equal(report.run.status,'failed');
+  assert.equal(report.run.blockedRequests?.length,10);
+  assert.match(report.run.error??'',/read-only POST requests/);
+  assert.equal(JSON.stringify(report.run).includes('do-not-retain'),false);
+  const reopened=await f.reopen();
+  assert.equal((await reopened.runProgress(f.context,run.id)).run.blockedRequests?.length,10);
+});
+
+
+test('restart validates fixed read rules and re-bounds blocked request evidence before returning a view', async t => {
+  const f=await fixture(t),{run}=await f.manager.discover(f.context,{});await until(()=>f.workers.length);
+  f.workers[0].event({type:'error',error:'Discovery refused.'});f.workers[0].gate.resolve();await f.terminal(run.id);
+  const file=join(f.dataDir,'browser','state.json'),saved=JSON.parse(await readFile(file,'utf8')),scope=Object.keys(saved.configs)[0];
+  for (const readOnlyRequests of [null,{},[{url:'http://localhost:3000/rpc',body:'{"password":"short"}'}]]) {
+    await writeFile(file,JSON.stringify({...saved,configs:{...saved.configs,[scope]:{...saved.configs[scope],readOnlyRequests}}}));
+    await assert.rejects(f.reopen(),/stored read-only|stored POST/);
+  }
+  saved.runs[0].blockedRequests=Array.from({length:14},(_,index)=>({method:'POST',url:'https://user:pass@app.example.test/sk%2Dabcdefghijklmnop/'+index+'?password=private'}));
+  await writeFile(file,JSON.stringify(saved));
+  const reopened=await f.reopen(),view=await reopened.view(f.context),blocked=view.runs[0].blockedRequests!;
+  assert.equal(blocked.length,10);
+  assert.ok(blocked.every(item=>!item.url.includes('abcdefghijklmnop')&&!item.url.includes('private')&&!item.url.includes('@')));
+});

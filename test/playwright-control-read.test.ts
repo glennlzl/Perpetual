@@ -9,15 +9,25 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false } = {}) {
-  let value = 'Original', persist = true;
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, readRedirect = false, authenticated = false, popupRead = false } = {}) {
+  let value = 'Original', persist = true, writes = 0;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
-      if (req.url === '/save') { setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
-      if (req.url === '/read') { res.end(value); return; }
+      if (req.url === '/signin') {
+        const data=new URLSearchParams(body);
+        if(data.get('username')!=='viewer@example.test'||data.get('password')!=='fixture-password'){res.writeHead(403);res.end();return;}
+        res.writeHead(303,{'Set-Cookie':'session=fixture-session; HttpOnly; SameSite=Strict','Location':'/'});res.end();return;
+      }
+      if (authenticated&&!req.headers.cookie?.includes('session=fixture-session')) {
+        res.setHeader('Content-Type','text/html');
+        res.end('<form method=post action=/signin><label>Username<input name=username></label><label>Password<input name=password type=password></label><button type=submit>Sign in</button></form>');return;
+      }
+      if (popupRead&&req.url==='/popup') { res.setHeader('Content-Type','text/html');res.end("<h1>Reader</h1><script>fetch('/read',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{}).finally(()=>{opener.readerFinished=(opener.readerFinished||0)+1;opener.document.getElementById('popup').textContent='Reader finished '+opener.readerFinished;});</script>");return; }
+      if (req.url === '/save') { writes++; setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
+      if (req.url === '/read') { if(readRedirect){res.writeHead(307,{Location:'/save'});res.end();return;}res.end(value); return; }
       res.setHeader('Content-Type', 'text/html');
       res.end(`<h1>Settings</h1><label>Name<input id=name></label><p id=kept>${postRead ? '' : value}</p><p id=loaded></p><p id=ack></p><p id=finished></p><button id=save>Save</button>
-        <script>${postRead ? "fetch('/read',{method:'POST'}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});" : ''}
+        ${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}<script>${postRead ? "fetch('/read',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});" : ''}
         save.onclick=async()=>{const response=await fetch('/save',{method:'POST',body:document.querySelector('input').value});ack.textContent=response.ok?'Saved':'Unavailable';finished.textContent='Finished';};</script>`);
     });
   });
@@ -31,21 +41,21 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
     steps: [{ id: 'open', title: 'Open settings', checks: [{ type: 'text-visible', value: postRead ? 'Read ready' : 'Settings' }] },
       { id: 'save', title: 'Save workspace name', checks: [{ type: 'text-visible', value: reopen ? 'Name {run}' : 'Saved' }] }],
     expectedOutcomes: ['The new name is stored'] };
-  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60 });
+  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60, ...(reviewedRead ? {readOnlyRequests:[{url:`http://127.0.0.1:${address.port}/read`,body:'{}'}]} : {}) });
   await manager.saveCases(context, [item]);
   const submit = responseWait ? "await Promise.all([page.waitForResponse('**/save'),page.getByRole('button',{name:'Save',exact:true}).click()]);"
     : "await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});";
-  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);" + submit + (reopen ? 'await page.reload();' : '') + '});});';
+  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{" + (authenticated ? "await journey.signIn();" : "") + "});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);" + submit + (reopen ? 'await page.reload();' : '') + '});});';
   const saved = await manager.saveSpec(context, { caseId: item.id, code }); const hash = saved.spec.draft!.hash;
   async function verify() {
-    await manager.verifySpec(context, { caseId: item.id, hash });
+    await manager.verifySpec(context, { caseId: item.id, hash, ...(authenticated?{credentials:{username:'viewer@example.test',password:'fixture-password'}}:{}) });
     for (const end = Date.now() + 60000; Date.now() < end; await new Promise(resolve => setTimeout(resolve, 50))) {
       const state = (await manager.view(context)).specs[item.id].draft?.verification;
       if (state && state.status !== 'running') return state;
     }
     throw new Error('Verification did not settle');
   }
-  return { manager, context, item, hash, verify, breakPersistence() { persist = false; } };
+  return { manager, context, item, hash, verify, writes:()=>writes, breakPersistence() { persist = false; } };
 }
 
 test('an acknowledgement-only journey cannot be approved because the control removed its success response', { timeout: 90000 }, async t => {
@@ -83,4 +93,47 @@ test('blocking a read-only POST before the journey changes anything never counts
   assert.equal(verification.status, 'failed');
   assert.equal(verification.control, 'missed');
   await assert.rejects(f.manager.approveSpec(f.context, { caseId: f.item.id, hash: f.hash }), { statusCode: 409 });
+});
+
+// This catches a read exception accidentally permitting writes, or a changed policy retaining approval.
+test('reviewed POST readback catches a blocked save and a changed read policy makes approval stale', { timeout: 90000 }, async t => {
+  const f = await setup(t, { postRead: true, reopen: true, reviewedRead: true, authenticated: true });
+  assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
+  await f.manager.approveSpec(f.context, { caseId: f.item.id, hash: f.hash });
+  const {config} = await f.manager.view(f.context);
+  await f.manager.saveConfig(f.context, {...config, readOnlyRequests: []});
+  assert.equal((await f.manager.view(f.context)).specs[f.item.id].approved?.stale, true);
+  const {run} = await f.manager.run(f.context, {caseIds:[f.item.id]});
+  for (const end=Date.now()+10000; Date.now()<end; await new Promise(resolve=>setTimeout(resolve,50))) {
+    const report=await f.manager.runProgress(f.context,run.id);
+    if (['queued','running'].includes(report.run.status)) continue;
+    assert.equal(report.run.status,'needs_review');
+    await f.manager.reuseSpec(f.context,{caseId:f.item.id});
+    assert.ok((await f.manager.view(f.context)).specs[f.item.id].draft); return;
+  }
+  assert.fail('The stale approval did not settle');
+});
+
+test('a reviewed POST read redirect is guarded at every hop in a real control browser', { timeout:30000 }, async t => {
+  const f=await setup(t,{postRead:true,readRedirect:true,reviewedRead:true}), {config,cases}=await f.manager.view(f.context);
+  const draft=(await f.manager.specCode(f.context,{caseId:f.item.id})).draft!;
+  let result:unknown;
+  const job=createPlaywrightRuntime({checkTimeoutMs:300}).start({mode:'run',case:cases[0],spec:draft,targetUrl:config.targetUrl,allowedOrigins:[new URL(config.targetUrl).origin],readOnlyRequests:config.readOnlyRequests,blockWrites:true,timeoutSeconds:15},event=>{if(event.type==='result')result=event.result;});
+  await job.promise;
+  assert.equal(f.writes(),0,'The unreviewed redirect must never reach the write handler.');
+  assert.ok(result);
+  assert.notEqual((result as {controlRead?:unknown}).controlRead,true,'An unreadable redirected request is never caught control evidence.');
+});
+
+
+test('an immediate reviewed read in a popup never follows its write redirect', {timeout:30000}, async t => {
+  const f=await setup(t,{popupRead:true,readRedirect:true,reviewedRead:true}),{config,cases}=await f.manager.view(f.context);
+  const code="import { test } from 'perpetual'; test('Read workspace',async({page,journey})=>{await journey.milestone('open',async()=>{});await journey.milestone('save',async()=>{"+Array.from({length:8},()=>"await page.getByRole('button',{name:'Open reader',exact:true}).click();").join('')+"await page.getByText('Reader finished 8',{exact:true}).waitFor({state:'visible'});});});";
+  await f.manager.saveSpec(f.context,{caseId:f.item.id,code});
+  const draft=(await f.manager.specCode(f.context,{caseId:f.item.id})).draft!;
+  let completed=false;const observed:unknown[]=[];
+  const item={...cases[0],steps:cases[0].steps!.map(step=>({...step,checks:[{type:'text-visible' as const,value:'Settings'}]}))};
+  await createPlaywrightRuntime({checkTimeoutMs:300}).start({mode:'run',case:item,spec:draft,targetUrl:config.targetUrl,allowedOrigins:[new URL(config.targetUrl).origin],readOnlyRequests:config.readOnlyRequests,blockWrites:true,timeoutSeconds:15},event=>{if(event.type!=='frame')observed.push(event);if(event.type==='journey-step'&&event.stepId==='save'&&event.status==='completed')completed=true;}).promise;
+  assert.equal(completed,true,'The page must observe every popup read settling before checking server writes: '+JSON.stringify(observed));
+  assert.equal(f.writes(),0,'The popup read must never follow a redirect into a write.');
 });

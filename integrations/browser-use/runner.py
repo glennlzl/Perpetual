@@ -21,9 +21,10 @@ import signal
 import sys
 import tempfile
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 import uuid
 
+from read_requests import validate_read_requests, reviewed_read
 from action_output import single_action_output
 from journey_steps import validate_steps
 from model_settings import ModelConfigurationError, model_config
@@ -262,6 +263,10 @@ def validate_payload(raw):
             raise InputError("Sign-in endpoints must be absolute URLs with a path on the target host.")
         endpoints[index] = endpoint_url(value)
     payload["authEndpoints"] = list(dict.fromkeys(endpoints))
+    try:
+        payload["readOnlyRequests"] = validate_read_requests(payload.get("readOnlyRequests", []), payload["targetUrl"])
+    except ValueError as error:
+        raise InputError(str(error)) from None
     for field, default, maximum in [("maxSteps", 30, 100), ("timeoutSeconds", 300, 1800)]:
         value = payload.get(field, default)
         if type(value) is not int or value < 1 or value > maximum:
@@ -351,6 +356,7 @@ class OwnedBrowser:
         self.targets = {}
         self.cdp_sessions = []
         self.blocked_navigations = 0
+        self.blocked_requests = set()
         self.guard_error = False
         self.model_error = None
         self.auth_exchanges = 0
@@ -410,9 +416,22 @@ class OwnedBrowser:
         # Authenticated discovery may submit only the configured sign-in request.
         return bool(self.payload.get("credentials")) and method == "POST" and endpoint_allowed(url, self.payload.get("authEndpoints", []))
 
-    def mutation_blocked(self, method, url):
+    def mutation_blocked(self, method, url, body=None, headers=None):
         # Discovery is read-only.
-        return method not in {"GET", "HEAD", "OPTIONS"} and not self.auth_exchange(method, url)
+        return method not in {"GET", "HEAD", "OPTIONS"} and not self.auth_exchange(method, url) and not reviewed_read(self.payload.get("readOnlyRequests", []), method, url, body, headers)
+
+    def record_blocked_request(self, method, url):
+        # Drop query values, userinfo, fragments and path parameters before the pipe. The controller redacts the path.
+        try:
+            address = urlsplit(url)
+            path = '/'.join(segment.split(';')[0] for segment in address.path.split('/'))
+            safe = origin(url) + path
+        except ValueError:
+            return
+        key = (method, safe)
+        if key not in self.blocked_requests and len(self.blocked_requests) < 10:
+            self.blocked_requests.add(key)
+            self.emit_event({"type":"blocked-request", "method":method, "url":safe})
 
     def track_auth_response(self, response):
         if self.auth_exchange(response.request.method, response.url) and response.status < 400:
@@ -421,11 +440,29 @@ class OwnedBrowser:
     async def route_initial_request(self, route):
         request = route.request
         forbidden_navigation = request.is_navigation_request() and not navigation_allowed(request.url, set(self.payload["allowedOrigins"]))
-        forbidden_mutation = self.mutation_blocked(request.method, request.url)
+        forbidden_mutation = self.mutation_blocked(request.method, request.url, getattr(request, "post_data", None), getattr(request, "headers", {}))
         if forbidden_navigation or forbidden_mutation:
             self.blocked_navigations += int(forbidden_navigation)
+            if forbidden_mutation:
+                self.record_blocked_request(request.method, request.url)
             await route.abort("blockedbyclient")
         else:
+            # Context routes miss redirect hops and a popup can read before its CDP guard attaches. Fetch only
+            # the fixed reviewed request, with no redirects/retries, and pass its non-redirect response to the page.
+            if reviewed_read(self.payload.get("readOnlyRequests", []), request.method, request.url, getattr(request, "post_data", None), getattr(request, "headers", {})):
+                try:
+                    response = await route.fetch(max_redirects=0, max_retries=0, timeout=30000)
+                    if 300 <= response.status < 400:
+                        location = response.headers.get('location')
+                        destination = urljoin(request.url, location) if location else request.url
+                        self.record_blocked_request(request.method, destination)
+                        await route.fulfill(status=503)
+                    else:
+                        await route.fulfill(response=response)
+                    await response.dispose()
+                except Exception:
+                    await route.abort("blockedbyclient")
+                return
             await route.continue_()
 
     async def intercept_request(self, cdp, event):
@@ -436,7 +473,8 @@ class OwnedBrowser:
             self.blocked_navigations += 1
             await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "BlockedByClient"})
             return
-        if self.mutation_blocked(request["method"], request["url"]):
+        if self.mutation_blocked(request["method"], request["url"], request.get("postData"), request.get("headers", {})):
+            self.record_blocked_request(request["method"], request["url"])
             await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "BlockedByClient"})
             return
         await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"]})
@@ -862,8 +900,14 @@ def safe_error(error):
     # Only our input validation messages are intentionally safe for the UI.
     if isinstance(error, (InputError, ModelConfigurationError)):
         return str(error)[:400]
-    kind = type(error).__name__
-    status = getattr(error, "status_code", None)
+    chain, seen = [], set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        chain.append(error)
+        error = error.__cause__ or error.__context__
+    known = next((item for item in chain if getattr(item, "status_code", None) in {401,402,403,429} or type(item).__name__ in {"AuthenticationError","RateLimitError","ModelRateLimitError","APIConnectionError","APITimeoutError","ModelOutputTruncatedError"}), chain[0])
+    kind = type(known).__name__
+    status = getattr(known, "status_code", None)
     if kind == "AuthenticationError" or status in {401, 403}:
         return "Model authentication failed. Check the configured model API key and access."
     if kind in {"RateLimitError", "ModelRateLimitError"} or status == 429:
@@ -876,9 +920,11 @@ def safe_error(error):
         return "Model credits are exhausted. Add credits or choose another configured model."
     if kind == "ModelOutputTruncatedError":
         return "The model response was truncated. Choose a model with a larger output limit."
-    if isinstance(error, TimeoutError):
+    if any(isinstance(item, TimeoutError) for item in chain):
         return "Browser task exceeded its time limit."
-    return f"Browser task failed ({type(error).__name__})."
+    if any(type(item).__name__ == "ModelProviderError" for item in chain):
+        return "The model provider rejected the request. Check credits and model access, or choose another model."
+    return f"Browser task failed ({type(chain[0]).__name__})."
 
 
 async def execute(payload):
