@@ -129,7 +129,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
               if (facts.stopCause === 'action' || facts.stopCause === 'deadline' || Array.isArray(facts.assertions) && facts.assertions.some(value => value && typeof value === 'object' && value.passed === false)) failed = true;
             }
             onEvent(event);
-          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], unavailable: 'Playwright is unavailable. Run npm install.',
+          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], errorSecrets: [credentials?.username], unavailable: 'Playwright is unavailable. Run npm install.',
             ...(diagnostic.enabled ? {
               onLifecycle: event => diagnostic.record({ ...event, source: 'supervisor' }),
               onDiagnostic: value => {

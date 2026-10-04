@@ -7,7 +7,7 @@ import { readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FullResult, Reporter, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter';
 import { SIGN_IN_ACTION, STEPS, approvedCase, type ApprovedCase } from './checks.ts';
-import { hide } from '../../redaction.ts';
+import { hide, failureText } from '../../redaction.ts';
 import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
 
 /** One journey action in the live list, as the browser worker contract reports it. */
@@ -35,12 +35,12 @@ export default class JourneyReporter implements Reporter {
     // The runtime writes the approved case snapshot for every journey process.
     this.approved = approvedCase(JSON.parse(readFileSync(env.PERPETUAL_CASE!, 'utf8')));
     this.videoDir = env.PERPETUAL_VIDEO_DIR;
-    this.secrets = [env.PERPETUAL_ACCOUNT_PASSWORD].filter((value): value is string => Boolean(value));
+    this.secrets = [env.PERPETUAL_ACCOUNT_USERNAME, env.PERPETUAL_ACCOUNT_PASSWORD].filter((value): value is string => Boolean(value));
   }
   // The event protocol owns stdout, so Playwright adds no reporter of its own.
   printsToStdio() { return true; }
   write(event: unknown) { process.stdout.write(`${JSON.stringify(event)}\n`); }
-  safe(text: unknown) { return hide(this.secrets)(plain(text).split('\n')[0].trim()).slice(0, 300); }
+  safe(text: unknown) { return failureText(hide(this.secrets)(plain(text)).split('\n')[0].trim(), 300); }
   diagnostic(value: unknown) {
     if (!this.diagnostics) return;
     const event = lifecycleEvent(value);

@@ -19,7 +19,7 @@ export type GenerationFailure={caseHash:string;error:string;rejected?:string};
 /** Durable journey code belongs to the browser manager's state file, never a second store. */
 export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>;authoring?:Record<string,AuthoringRecord[]>};
 export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number;readPolicy?:string};
-type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
+type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;codeFeedback?:Record<string,string>;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
 type LiveVerification=VerificationIdentity&{caseId:string;done:boolean;error?:string};
 type LiveGeneration={status:'running'|'failed';step?:string;error?:string;rejected?:string;discarded?:true};
 export type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
@@ -204,8 +204,29 @@ export function createJourneyCode(storage:Persistence){
     generationFeedback(scope:string,caseId:string){
       const current=storage.read(scope),item=caseOf(current,caseId),draft=current.code.specs[caseId]?.draft;
       if(!draft||draft.caseHash!==caseHash(item))return undefined;
-      const verification=verificationEvidence(current,caseId,draft)?.view;
-      return verification?.status==='failed'&&verification.error?{error:verification.error}:undefined;
+      const evidence=verificationEvidence(current,caseId,draft),verification=evidence?.view;
+      if(verification?.status!=='failed'||!verification.error)return undefined;
+      const failures=current.runs.filter(run=>{
+        const identity=run.verification,result=run.results?.find(result=>result.caseId===caseId);
+        return identity&&!identity.control&&identity.caseHash===draft.caseHash&&identity.checkVersion===CHECK_VERSION&&policyMatches(current,identity)
+          &&run.caseIds.includes(caseId)&&run.specHashes?.[caseId]===identity.hash&&['failed','needs_review','blocked'].includes(run.status)
+          &&result&&['failed','needs_review','blocked'].includes(result.status)&&run.codeFeedback?.[caseId];
+      });
+      // Only terminal summaries scrubbed with the account of that run may reach a later model.
+      // A current account cannot remove a former account's username from legacy raw diagnostics.
+      const latest=failures.find(run=>evidence!.runIds.includes(run.id)&&run.verification?.hash===draft.hash);
+      const error=latest?.codeFeedback?.[caseId];
+      if(!error)return undefined;
+      // A later replacement must not forget an earlier locator or navigation failure of this same contract.
+      // Retain diagnostics only, never historical code or input literals, and never expected control failures.
+      const previousErrors:string[]=[],seen=new Set([error]);
+      for(const run of failures){
+        const error=run.codeFeedback?.[caseId];
+        if(!error||seen.has(error))continue;
+        seen.add(error);previousErrors.push(error);
+        if(previousErrors.length===3)break;
+      }
+      return {error,...(previousErrors.length?{previousErrors}:{})};
     },
     clearGenerationFailure(scope:string,caseId:string){
       if(!storage.read(scope).code.generationFailures[caseId])return Promise.resolve();

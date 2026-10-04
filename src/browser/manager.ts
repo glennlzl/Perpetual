@@ -62,7 +62,7 @@ type Discovery=BrowserDiscovery;
 type Analysis=BrowserAnalysis;
 /** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. */
 export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engine'>&{
-  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;
+  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;
 };
 type Preparation=BrowserPreparation;
 /** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
@@ -101,7 +101,7 @@ const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&
 const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
-const publicRun=({scope,approvedCases,environmentUseUncertain,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
+const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
 const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
@@ -260,6 +260,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         target.suspendedReads={...(typeof suspended.applicationId==='string'?{applicationId:suspended.applicationId}:{}),requests:validateReadRequests(suspended.requests,isRecord(first)&&typeof first.url==='string'?first.url:'')};
       }catch{throw new Error('Invalid stored read-only POST requests.');}
     }
+  }
+  for(const run of state.runs)if(run.codeFeedback!==undefined){
+    const feedback:unknown=run.codeFeedback;
+    if(!isRecord(feedback)||Object.keys(feedback).length>30||Object.entries(feedback).some(([id,error])=>!run.caseIds.includes(id)||typeof error!=='string'||!error||error.length>4000))throw new Error('Invalid stored code feedback.');
+    run.codeFeedback=Object.fromEntries(Object.entries(feedback).map(([id,error])=>[id,generationDiagnostic(error,4000)]));
   }
   for(const run of state.runs)if(run.blockedRequests!==undefined){
     const found:BlockedRequest[]=[];
@@ -721,6 +726,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});
       if(closed){run.status='cancelled';run.completedAt=now();await persist();throw conflict('The controller is shutting down.');}
       const execution=async()=>{
+        const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,Object.values(credentials??{}));
         // Set by the worker's discovery event.
         let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown;
         // Registered before execution starts.
@@ -795,7 +801,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 if(!['queued','running','skipping','cancelling'].includes(status)){
                   progress.completedAt=now();
                   // A worker error is the journey's exception; skipped and cancelled journeys have no verdict.
-                  const result=item.result||(status==='failed'?journeyResult(item.item,{caseId,stopCause:'exception',error:browserError(messageOf(item.error)||String(item.error))},progress.steps):{caseId,status:status as JourneyResult['status'],assertions:[]});
+                  const result=item.result||(status==='failed'?journeyResult(item.item,{caseId,stopCause:'exception',error:diagnostic(item.error)},progress.steps):{caseId,status:status as JourneyResult['status'],assertions:[]});
                   run.results=[...(run.results||[]).filter(previous=>previous.caseId!==caseId),result].sort((a,b)=>run.caseIds.indexOf(a.caseId)-run.caseIds.indexOf(b.caseId));
                   // An unreported milestone is unconfirmed, never a blocked prerequisite.
                   settleSteps(progress,status);
@@ -811,7 +817,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const onEvent=(event:WorkerEvent)=>{
                   if(event.type==='result'){
                     if(facts)throw new Error('Browser runtime returned duplicate results.');
-                    facts=event.result;
+                    // Scrub only diagnostics before journeyResult bounds them; check identities stay unchanged.
+                    facts=isRecord(event.result)&&typeof event.result.error==='string'?{...event.result,error:diagnostic(event.result.error,4000)}:event.result;
                   }else if(event.type==='discovery')throw new Error('Browser runtime returned unexpected discovery.');
                   else progressEvent(event,item.id);
                 };
@@ -843,7 +850,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             const uncertain=finished.find(item=>(item.error as WorkerError|null)?.cleanupIncomplete);
             if(uncertain)throw uncertain.error;
             const errors=finished.filter(item=>item.error&&item.status==='failed');
-            if(errors.length)run.error=browserError(messageOf(errors[0].error)||String(errors[0].error));
+            if(errors.length)run.error=diagnostic(errors[0].error);
             // Every journey has a result row by now.
             run.status=runStatus(run.results!);
           }else{
@@ -889,7 +896,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             run.discovery=discovery;run.status='completed';run.progress.cases[0].status='completed';touch(run);
           }
         }catch(error){
-          run.status=entry?.cancelled?'cancelled':'failed';run.error=browserError(messageOf(error)||String(error));
+          run.status=entry?.cancelled?'cancelled':'failed';run.error=diagnostic(error);
           if(mode==='discover'&&run.blockedRequests?.length)run.error=safeText(`${run.error} Blocked ${run.blockedRequests.slice(0,3).map(item=>`${item.method} ${item.url}`).join('; ')}. Review read-only POST requests in Test settings.`,4000);
           for(const item of run.progress.cases)if(['pending','queued','running','skipping','cancelling'].includes(item.status)){item.status=run.status;settleSteps(item,run.status);}
           touch(run);
@@ -900,6 +907,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           }
         }finally{
           run.completedAt=now();
+          // Retain model feedback while this run's account is still available. Historical UI evidence
+          // stays as recorded; its raw errors never substitute for these private, bounded summaries.
+          if(mode==='run')run.codeFeedback=Object.fromEntries(cases.flatMap(item=>{
+            const result=run.results?.find(result=>result.caseId===item.id),error=result?.error||run.error;
+            return error&&result&&['failed','needs_review','blocked'].includes(result.status)?[[item.id,generationDiagnostic(error,4000,Object.values(credentials??{}))]]:[];
+          }));
           if(preparation?.runId===run.id){
             const empty=run.status==='completed'&&!(state.cases[scope]||[]).length;
             Object.assign(preparation,{status:empty?'needs_setup':run.status==='completed'?'completed':'failed',completedAt:run.completedAt,...(empty?{error:'No integration cases were discovered. Set a scope or add a case.'}:run.error?{error:run.error}:{})});
