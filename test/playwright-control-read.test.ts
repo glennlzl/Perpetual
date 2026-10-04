@@ -87,6 +87,12 @@ test('a delayed submission settles before fresh readback and the blocked-write r
   assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
 });
 
+test('a reviewed POST read keeps the blocked submission observable to a paired response wait', {timeout:90000},async t=>{
+  const f=await setup(t,{reopen:true,postRead:true,responseWait:true,reviewedRead:true,bodylessRead:true,authenticated:true});
+  assert.deepEqual(await f.verify(),{status:'passed',passes:3,control:'caught'});
+  assert.equal(f.writes(),3,'Neither interception layer lets the control save.');
+});
+
 test('blocking a read-only POST before the journey changes anything never counts as a caught control', { timeout: 90000 }, async t => {
   const f = await setup(t, { postRead: true });
   const verification = await f.verify();

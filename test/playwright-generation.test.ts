@@ -324,7 +324,7 @@ test('the plan names the milestones where journey.run may name an element, as th
     steps:[{id:'create',title:'Create the item',checks:checks.create||[{type:'text-visible' as const,value:'Saved'}]},{id:'open',title:'Open the item',checks:[]},{id:'verify',title:'See the item kept',checks:checks.verify||[{type:'text-visible' as const,value:'Opened'}]}],
     assertions:[{type:'text-visible' as const,value:'Item {run}'}]});
   const named=item({create:[{type:'text-visible',value:'Item {run}'}]}),late=item({verify:[{type:'text-visible',value:'Item {run}'}]}),none=item({}),absent=item({create:[{type:'text-absent',value:'Could not save Item {run}'}]});
-  const from="`journey.run` names an element or a `waitForURL` address only from milestone open on, after milestone create's reviewed check shows or reads `{run}`";
+  const from="`journey.run` names an element, a `waitForURL` address or the URL template inside a paired `waitForResponse` only from milestone open on, after milestone create's reviewed check shows or reads `{run}`";
   assert.ok(generationRules(named,{signIn:false}).some(rule=>rule.startsWith(from)));
   for(const other of [late,none,absent]){
     assert.ok(generationRules(other,{signIn:false}).some(rule=>rule.startsWith('`journey.run` names no element or address in this journey')),JSON.stringify(other.steps));

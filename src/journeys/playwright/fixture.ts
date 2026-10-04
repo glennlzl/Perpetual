@@ -306,10 +306,12 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       const cdp = await context.newCDPSession(target), { targetInfo } = await cdp.send('Target.getTargetInfo');
       diagnostic?.cdp(target, cdp, targetInfo);
       synchronizeReload(target, cdp, action => base.step(STEPS.reloadReady, action));
-      cdp.on('Fetch.requestPaused', ({ requestId, request, frameId, resourceType }) => {
+      // First requests must reach Playwright's route so it reports their blocked response to response waits.
+      // CDP still guards every navigation and blocks write redirect hops, which context routes never see.
+      cdp.on('Fetch.requestPaused', ({ requestId, request, frameId, resourceType, redirectedRequestId }) => {
         const navigation = resourceType === 'Document';
         const refused = navigation ? refuse(request.url, frameId === targetInfo.targetId) : stripeLive(request.url);
-        if (!refused && BLOCK_WRITES && !signingIn && !READS.has(request.method) && !reviewedRead(readRequests, request.method, request.url, request.postData, request.headers)) {
+        if (!refused && redirectedRequestId && BLOCK_WRITES && !signingIn && !READS.has(request.method) && !reviewedRead(readRequests, request.method, request.url, request.postData, request.headers)) {
           control?.blocked(target);
           cdp.send('Fetch.fulfillRequest', { requestId, responseCode: navigation ? 204 : 503 }).catch(() => {}); return;
         }

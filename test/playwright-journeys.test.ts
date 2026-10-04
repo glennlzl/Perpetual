@@ -58,7 +58,7 @@ function application({persist=true}:{persist?:boolean}={}){
       // A rename saved by a script's request, whose field keeps what was typed; the page shows the name only in that field.
       if(url.pathname==='/rename'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.name=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/rename')return send(page('Rename',`<h1>Rename</h1><label>Display name <input id=rename value="${state.name}"></label><button id=save>Rename</button>
-        <script>save.onclick=()=>fetch('/rename',{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+        <script>save.onclick=()=>fetch(${url.searchParams.has('query')?"'/rename?name='+encodeURIComponent(rename.value)":"'/rename'"},{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -179,6 +179,24 @@ async function verified({manager,context}:Progress,{id=journey.id,seconds=90}={}
   throw new Error('The verification did not finish.');
 }
 
+test('a later response wait follows run-owned request data through three saves and a caught control',{timeout:90000},async t=>{
+  const item={...journey,id:'create-update',name:'Create and update a profile',steps:[
+    {id:'create',title:'Save and read the new name',checks:[{type:'text-visible' as const,value:'Saved {run}'}]},
+    {id:'update',title:'Update and read the saved name',checks:[{type:'text-visible' as const,value:'Updated {run}'}]},
+  ],assertions:[]};
+  const f=await setup(t,{item});
+  const code="import { test } from 'perpetual';\ntest('Create and update a profile', async ({page,journey}) => {\n"+
+    "await journey.milestone('create',async()=>{ await journey.signIn(); await page.getByLabel('Display name').fill(`Saved ${journey.run}`); await Promise.all([page.waitForResponse('**/settings'),page.getByRole('button',{name:'Save'}).click()]); await page.goto('/profile'); });\n"+
+    "await journey.milestone('update',async()=>{ await page.goto('/rename?query=yes'); await page.getByLabel('Display name').fill(`Updated ${journey.run}`); await Promise.all([page.waitForResponse(`**/rename?name=Updated%20${journey.run}`),page.getByRole('button',{name:'Rename'}).click()]); await page.goto('/profile'); });\n});";
+  const draft=await f.draft(code);assert.ok(draft.draft);
+  await f.manager.verifySpec(f.context,{caseId:item.id,hash:draft.draft.hash,credentials:account});
+  assert.deepEqual(await verified(f,{id:item.id}),{status:'passed',passes:3,control:'caught'});
+  const attempts=(await f.manager.view(f.context)).runs.filter(run=>run.verification);
+  assert.equal(attempts.length,4);assert.equal(attempts.filter(run=>run.status==='passed').length,3);
+  assert.equal(attempts.find(run=>run.verification?.control)?.results?.[0].controlRead,true);
+  assert.equal(f.app.state.credits,7,'The control cannot save another profile.');
+});
+
 test('a draft spec passes its reviewed journey with live frames, actions and a recording, and is approved after its verification',{timeout:180000},async t=>{
   const persisted={...journey,steps:journey.steps.map(step=>step.id==='save-name'?{...step,checks:step.checks.filter(check=>check.type!=='text-visible')}:step)};
   const f=await setup(t,{item:persisted});
@@ -224,7 +242,7 @@ test('a control run blocks every write from the page but lets the fixture sign i
   const events=await runSpec(target,spec(),{blockWrites:true});
   assert.deepEqual(f.app.posts,['POST /login'],'The sign-in form posted; the settings form never reached the application.');
   assert.deepEqual([f.app.state.name,f.app.state.credits],['Original Name',10]);
-  // The blocked submission left the page as it was, so the reviewed check judged it and noticed nothing was saved.
+  // A failed check on the blocked submission itself cannot certify that the application kept nothing.
   const steps=events.filter(event=>event.type==='journey-step');
   assert.deepEqual(steps.map(event=>`${event.stepId}:${event.status}`),['open-settings:running','open-settings:completed','save-name:running','save-name:failed']);
   assert.equal(steps.at(-1)?.evidence,'Reviewed check failed: Text visible “Saved”.');
