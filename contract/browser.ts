@@ -19,7 +19,8 @@ export interface BrowserCase {
 /** Immutable run snapshot projection. Older approvals are never normalized as current editable cases. */
 export type CaseSummary = Pick<BrowserCase, 'id' | 'name' | 'steps' | 'isolation'>
   & Partial<Pick<BrowserCase, 'goal' | 'preconditions' | 'expectedOutcomes' | 'assertions'>>;
-export interface ReadOnlyRequest { url: string; body: string }
+/** null explicitly reviews a bodyless POST with no Content-Type; a string reviews exact JSON bytes. */
+export interface ReadOnlyRequest { url: string; body: string | null }
 export interface BlockedRequest { method: string; url: string }
 export interface BrowserConfig {
   targetUrl: string; signInUrl: string; scope: string; requirements: string; maxSteps: number;

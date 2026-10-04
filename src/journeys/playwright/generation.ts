@@ -125,6 +125,7 @@ export function generationRules(item: Pick<ApprovedCase, 'name' | 'steps' | 'ass
     "An entity or record URL observed during exploration belongs to that exploration, not to a future run. Reopen data created by this run through its visible links, using journey.run only where the rules allow it. Use `await page.reload();` to check persistence on the current record; never hard-code an explored record's URL in `page.goto`.",
     "Locate controls by names that stay the same across runs, apart from this run's own data where `journey.run` may name it: never by a fixed text this journey types or saves, nor by text an earlier run may have saved, such as a name shown in an account menu; when a control's name holds such text, use its stable part, such as a label, an email or a test id.",
     'Prefer role, label or id locators from the log.',
+    'Disambiguate each action within this run’s record and use exact control names when record text can also match them; an arbitrary first or nth match does not identify the intended record. Response waits must match the full observed request URL, including query values: Playwright glob `*` cannot match a slash, while `**` can. A return address in a query can contain slashes. Choose the pattern from the observed request, not a guessed endpoint.',
   ];
 }
 

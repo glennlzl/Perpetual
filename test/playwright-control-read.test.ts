@@ -9,7 +9,7 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, readRedirect = false, authenticated = false, popupRead = false } = {}) {
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false } = {}) {
   let value = 'Original', persist = true, writes = 0;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
@@ -26,8 +26,9 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
       if (req.url === '/save') { writes++; setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
       if (req.url === '/read') { if(readRedirect){res.writeHead(307,{Location:'/save'});res.end();return;}res.end(value); return; }
       res.setHeader('Content-Type', 'text/html');
+      const readOptions=bodylessRead ? "{method:'POST'}" : "{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}";
       res.end(`<h1>Settings</h1><label>Name<input id=name></label><p id=kept>${postRead ? '' : value}</p><p id=loaded></p><p id=ack></p><p id=finished></p><button id=save>Save</button>
-        ${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}<script>${postRead ? "fetch('/read',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});" : ''}
+        ${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}<script>${postRead ? `fetch('/read',${readOptions}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});` : ''}
         save.onclick=async()=>{const response=await fetch('/save',{method:'POST',body:document.querySelector('input').value});ack.textContent=response.ok?'Saved':'Unavailable';finished.textContent='Finished';};</script>`);
     });
   });
@@ -41,7 +42,7 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
     steps: [{ id: 'open', title: 'Open settings', checks: [{ type: 'text-visible', value: postRead ? 'Read ready' : 'Settings' }] },
       { id: 'save', title: 'Save workspace name', checks: [{ type: 'text-visible', value: reopen ? 'Name {run}' : 'Saved' }] }],
     expectedOutcomes: ['The new name is stored'] };
-  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60, ...(reviewedRead ? {readOnlyRequests:[{url:`http://127.0.0.1:${address.port}/read`,body:'{}'}]} : {}) });
+  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60, ...(reviewedRead ? {readOnlyRequests:[{url:`http://127.0.0.1:${address.port}/read`,body:bodylessRead?null:'{}'}]} : {}) });
   await manager.saveCases(context, [item]);
   const submit = responseWait ? "await Promise.all([page.waitForResponse('**/save'),page.getByRole('button',{name:'Save',exact:true}).click()]);"
     : "await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});";
@@ -112,6 +113,26 @@ test('reviewed POST readback catches a blocked save and a changed read policy ma
     assert.ok((await f.manager.view(f.context)).specs[f.item.id].draft); return;
   }
   assert.fail('The stale approval did not settle');
+});
+
+test('a reviewed bodyless bootstrap stays readable while a signed-in save is caught and changing body mode invalidates approval', {timeout:90000},async t=>{
+  const f=await setup(t,{postRead:true,reopen:true,reviewedRead:true,bodylessRead:true,authenticated:true});
+  assert.deepEqual(await f.verify(),{status:'passed',passes:3,control:'caught'});
+  assert.equal(f.writes(),3,'Only the three normal saves reach the application.');
+  await f.manager.approveSpec(f.context,{caseId:f.item.id,hash:f.hash});
+  const {config}=await f.manager.view(f.context);
+  await f.manager.saveConfig(f.context,{...config,readOnlyRequests:config.readOnlyRequests!.map(rule=>({...rule,body:'{}'}))});
+  assert.equal((await f.manager.view(f.context)).specs[f.item.id].approved?.stale,true);
+});
+
+test('a reviewed bodyless read cannot follow a redirect into a write', {timeout:30000},async t=>{
+  const f=await setup(t,{postRead:true,readRedirect:true,reviewedRead:true,bodylessRead:true}),{config,cases}=await f.manager.view(f.context);
+  const draft=(await f.manager.specCode(f.context,{caseId:f.item.id})).draft!;
+  let result:unknown;
+  await createPlaywrightRuntime({checkTimeoutMs:300}).start({mode:'run',case:cases[0],spec:draft,targetUrl:config.targetUrl,allowedOrigins:[new URL(config.targetUrl).origin],readOnlyRequests:config.readOnlyRequests,blockWrites:true,timeoutSeconds:15},event=>{if(event.type==='result')result=event.result;}).promise;
+  assert.equal(f.writes(),0);
+  assert.ok(result);
+  assert.notEqual((result as {controlRead?:unknown}).controlRead,true);
 });
 
 test('a reviewed POST read redirect is guarded at every hop in a real control browser', { timeout:30000 }, async t => {

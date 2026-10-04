@@ -5,6 +5,23 @@ import { reviewedRead, validateReadRequests, readPolicyHash, blockedRequest } fr
 const body='{"query":"query Workspace { workspace { title } }","variables":{}}';
 const rule={url:'https://app.example.test/graphql',body}, headers={'Content-Type':'application/json; charset=utf-8'};
 
+test('an explicitly reviewed bodyless read admits no JSON, form, override or neighboring operation', () => {
+  const url='https://app.example.test/bootstrap', rules=validateReadRequests([{url,body:null}],'https://app.example.test/');
+  for(const data of [undefined,null,'']) assert.equal(reviewedRead(rules,'POST',url,data,{}),true);
+  for(const [method,address,data,head] of [
+    ['PUT',url,null,{}],['POST',url+'/write',null,{}],['POST',url+'?write=yes',null,{}],
+    ['POST',url,'{}',headers],['POST',url,' ',{}],['POST',url,'change=true',{}],
+    ['POST',url,null,headers],['POST',url,null,{'Content-Type':'application/x-www-form-urlencoded'}],
+    ['POST',url,null,{'X-HTTP-Method-Override':'DELETE'}],
+  ] as const) assert.equal(reviewedRead(rules,method,address,data,head),false);
+  const json=validateReadRequests([{url,body:'{}'}],'https://app.example.test/');
+  assert.notEqual(readPolicyHash(rules),readPolicyHash(json));
+  assert.equal(readPolicyHash([...rules,...json]),readPolicyHash([...json,...rules]));
+  assert.equal(readPolicyHash(rules,'app'),readPolicyHash([{url:'https://rebuilt.example.test/bootstrap',body:null}],'app'));
+  assert.throws(()=>validateReadRequests([...rules,...rules],'https://app.example.test/'),/duplicate/);
+  for(const invalid of [undefined,'',false,[],{}]) assert.throws(()=>validateReadRequests([{url,body:invalid}],'https://app.example.test/'));
+});
+
 test('a reviewed read admits only its complete request, not other operations at a shared endpoint', () => {
   const rules=validateReadRequests([rule],'https://app.example.test/');
   assert.equal(reviewedRead(rules,'POST',rule.url,body,headers),true);

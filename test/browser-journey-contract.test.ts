@@ -495,7 +495,7 @@ test('the agent runtime marks only its own time limit, discovers only, and disco
 });
 
 test('read-only POST selection keeps an exact reviewed request and rejects unsafe or ambiguous rules', async t => {
-  const f=await fixture(t), targetUrl='http://localhost:3000/', readOnlyRequests=[{url:'http://localhost:3000/rpc',body:'{"operation":"readWorkspace"}'}];
+  const f=await fixture(t), targetUrl='http://localhost:3000/', readOnlyRequests=[{url:'http://localhost:3000/rpc',body:'{"operation":"readWorkspace"}'},{url:'http://localhost:3000/bootstrap',body:null}];
   const saved=(await f.manager.saveConfig(f.context,{targetUrl,readOnlyRequests})).config;
   assert.deepEqual((saved as unknown as {readOnlyRequests:unknown}).readOnlyRequests,readOnlyRequests);
   for(const rules of [null,42,[{url:'http://other.test/rpc',body:'{}'}],[{url:'http://localhost:3000/rpc?token=secret',body:'{}'}],[{url:'http://localhost:3000/rpc',body:'[]'}],[{url:'http://localhost:3000/rpc',body:'not json'}],[{url:'http://localhost:3000/rpc',body:'{"password":"private-value"}'}],Array.from({length:11},()=>readOnlyRequests[0])]) {

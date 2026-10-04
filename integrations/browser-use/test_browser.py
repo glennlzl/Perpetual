@@ -29,7 +29,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", f"http://127.0.0.1:{self.server.other_port}/outside")
             self.end_headers()
             return
-        if self.path in {"/post-read", "/post-read-redirect"}:
+        if self.path in {"/post-read", "/post-read-redirect", "/post-read-bodyless", "/post-read-bodyless-redirect"}:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -38,7 +38,9 @@ fetch('/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"
 .then(r=>r.json()).then(data=>document.querySelector('h1').textContent=data.title).catch(()=>document.querySelector('h1').textContent='Unavailable');
 change.onclick=()=>Promise.all([fetch('/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"operation":"write"}'}),fetch('/private?secret=do-not-retain',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})]).catch(()=>document.querySelector('button').textContent='Blocked');
 </script>'''
-            if self.path == '/post-read-redirect':
+            if 'bodyless' in self.path:
+                html = html.replace(b"headers:{'Content-Type':'application/json'},body:'{\"operation\":\"read\"}'", b'')
+            if self.path.endswith('-redirect'):
                 html = html.replace(b"'/rpc'", b"'/rpc-redirect'")
             self.wfile.write(html)
             return
@@ -132,6 +134,30 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             page = await owned.active_page()
             await page.get_by_role("heading",name="Unavailable",exact=True).wait_for(timeout=3000)
         self.assertEqual(POST_REQUESTS[before:], [("/rpc-redirect", b'{"operation":"read"}')])
+        self.assertTrue(any(event['type']=='blocked-request' and event['url']==url+'/rpc-write' for event in events))
+
+    async def test_reviewed_bodyless_bootstrap_loads_but_json_changes_stay_blocked(self):
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = {"mode":"discover", "targetUrl":url+"/post-read-bodyless", "allowedOrigins":[url],
+                   "readOnlyRequests":[{"url":url+"/rpc","body":None}]}
+        events, before = [], len(POST_REQUESTS)
+        async with runner.OwnedBrowser(payload, events.append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role('heading',name='Workspace ready',exact=True).wait_for(timeout=3000)
+            await page.get_by_role('button',name='Change',exact=True).click()
+            await page.get_by_role('button',name='Blocked',exact=True).wait_for(timeout=3000)
+        self.assertEqual(POST_REQUESTS[before:], [('/rpc',b'')])
+        self.assertTrue(any(event['type']=='blocked-request' and event['url']==url+'/rpc' for event in events))
+
+    async def test_reviewed_bodyless_redirect_never_reaches_a_write(self):
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = {"mode":"discover", "targetUrl":url+"/post-read-bodyless-redirect", "allowedOrigins":[url],
+                   "readOnlyRequests":[{"url":url+"/rpc-redirect","body":None}]}
+        events, before = [], len(POST_REQUESTS)
+        async with runner.OwnedBrowser(payload, events.append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role('heading',name='Unavailable',exact=True).wait_for(timeout=3000)
+        self.assertEqual(POST_REQUESTS[before:], [('/rpc-redirect',b'')])
         self.assertTrue(any(event['type']=='blocked-request' and event['url']==url+'/rpc-write' for event in events))
 
     async def test_reviewed_popup_read_never_follows_a_redirect(self):

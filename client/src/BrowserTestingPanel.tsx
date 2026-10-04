@@ -34,7 +34,7 @@ import { caseDraftKey, caseDraftOriginal, caseDrafts, newTestDraftKey, pruneCase
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 type Row = { key: string; value: string };
-type ReadRequestRow = { key: string; url: string; body: string; reviewed: boolean };
+type ReadRequestRow = import('../../contract/browser.ts').ReadOnlyRequest & { key: string; reviewed: boolean };
 /** The request fields of an account choice, or none. */
 type AccountFields = AccountRequest | Record<string, never>;
 /** A run the viewer shows: a listed run, or a discovery that has not started yet. */
@@ -207,7 +207,8 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
               return <div key={row.key} className="space-y-2">
                 <div className="flex items-center justify-between gap-2"><Label htmlFor={`read-url-${row.key}`}>POST URL {index + 1}</Label><Button type="button" variant="ghost" size="icon-sm" aria-label={`Remove read-only request ${index + 1}`} onClick={() => setReads(current => current.filter(item => item.key !== row.key))}><Trash2 /></Button></div>
                 <Input id={`read-url-${row.key}`} type="url" maxLength={2048} autoCapitalize="none" spellCheck={false} value={row.url} onChange={event => update({ url: event.target.value })} />
-                <Field id={`read-body-${row.key}`} label={`Exact JSON body ${index + 1}`}><Textarea id={`read-body-${row.key}`} rows={3} maxLength={4096} spellCheck={false} className="font-mono text-xs" value={row.body} onChange={event => update({ body: event.target.value })} /></Field>
+                <Field id={`read-mode-${row.key}`} label={`Request body ${index + 1}`}><Select value={row.body === null ? 'none' : 'json'} onValueChange={value => update({ body: value === 'none' ? null : '{}' })}><SelectTrigger id={`read-mode-${row.key}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="json">JSON</SelectItem><SelectItem value="none">No body</SelectItem></SelectContent></Select></Field>
+                {row.body !== null && <Field id={`read-body-${row.key}`} label={`Exact JSON body ${index + 1}`}><Textarea id={`read-body-${row.key}`} rows={3} maxLength={4096} spellCheck={false} className="font-mono text-xs" value={row.body} onChange={event => update({ body: event.target.value })} /></Field>}
                 <div className="flex items-center gap-2"><Checkbox id={`read-review-${row.key}`} checked={row.reviewed} onCheckedChange={value => update({ reviewed: value === true })} /><Label htmlFor={`read-review-${row.key}`}>I reviewed this request; it only reads data</Label></div>
               </div>;
             })}
