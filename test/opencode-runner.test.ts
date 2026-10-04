@@ -177,6 +177,30 @@ for (const ignoreTermination of [false, true]) test(`deadline and cleanup owners
 
 const jsonTool=(tool='playwright-test_browser_click',status='completed')=>JSON.stringify({type:'tool_use',timestamp:1700000000000,sessionID:'ses_private',part:{id:'prt_private',type:'tool',tool,callID:'private-call',state:{status,input:{url:'https://private.invalid/account',password:'personal-password'},output:'Private page and account contents',time:{start:1700000000000,end:1700000000001}}}})+'\n';
 const jsonFinish=JSON.stringify({type:'step_finish',timestamp:1700000000002,part:{type:'step-finish',reason:'stop',cost:0.001,tokens:{input:10,output:20,reasoning:2,cache:{read:3,write:0}}}})+'\n';
+test('a JSON tool failure retains its safe category after the event limit, never its page or error text',async t=>{
+  const failure=JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_handle_dialog',state:{status:'error',error:'Error: No dialog visible\nPrivate account contents and personal-password',input:{password:'personal-password'}}}})+'\n';
+  const result=await capture(t,[jsonTool().repeat(65),failure,jsonFinish],{structuredOutput:true});
+  assert.deepEqual(result.evidence.lastToolError,{tool:'browser_handle_dialog',kind:'no-native-dialog'});
+  assert.equal(result.evidence.events.length,64);
+  assert.equal(result.output,'');
+  for(const privateText of ['Private account','personal-password','No dialog visible'])assert.ok(!JSON.stringify(result).includes(privateText));
+});
+
+test('tool failures allowlist categories and hide supplied values before classifying',async t=>{
+  for(const [text,kind,secrets] of [
+    ['Ref e12 not found in the current page snapshot. Private page','stale-reference',[]],
+    ['locator.click: strict mode violation: private account','ambiguous-locator',[]],
+    ['TimeoutError: private request','timeout',[]],
+    ['Unknown private request failure','unknown',[]],
+    ['TimeoutError: private request','unknown',['TimeoutError']],
+  ] as const)await t.test(kind,async t=>{
+    const event=JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_click',state:{status:'error',error:text}}})+'\n';
+    const result=await capture(t,[event],{structuredOutput:true,secrets:[...secrets]});
+    assert.deepEqual(result.evidence.lastToolError,{tool:'browser_click',kind});
+    assert.ok(!JSON.stringify(result).includes('private'));
+  });
+});
+
 test('the actual harness stream retains only structured safe tool outcomes and provider metadata',async t=>{
   const result=await capture(t,[jsonTool(),jsonFinish]) as unknown as {evidence:{outcome:string;events:unknown[];reportedFinishReason:string;usage:unknown;outputHash:string;outputBytes:number}};
   assert.ok(result.evidence,'Successful harness output must retain safe authoring evidence.');

@@ -398,6 +398,7 @@ function AuthoringDetails({ records }: { records: AuthoringRecord[] }) {
           <ItemTitle>{attempt.phase === 'generation' ? 'Generation' : 'Grammar repair'}<Badge variant="outline">{attempt.outcome}</Badge></ItemTitle>
           <div>Finish reason: {attempt.reportedFinishReason === 'unknown' ? 'Unknown' : attempt.reportedFinishReason}</div>
           <div>Last step usage: {attempt.usage ? `${attempt.usage.input} input · ${attempt.usage.output} output` : 'Unknown'}</div>
+          {attempt.lastToolError && <div>Last tool error: {attempt.lastToolError.tool.replaceAll('_', ' ')} · {attempt.lastToolError.kind.replaceAll('-', ' ')}</div>}
           {attempt.events.length ? <ItemGroup>{attempt.events.map((event, eventIndex) => <Item key={eventIndex} size="sm"><ItemContent><ItemTitle className="flex-wrap"><span>{event.tool.replaceAll('_', ' ')}</span><Badge variant="outline">{event.outcome === 'error' ? 'Tool error' : 'Tool completed'}</Badge></ItemTitle></ItemContent></Item>)}</ItemGroup> : <div>No tool outcomes recorded</div>}
           {attempt.eventsTruncated && <div>Evidence limit reached</div>}
         </ItemContent></Item>)}

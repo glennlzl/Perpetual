@@ -73,6 +73,7 @@ async function generate() {
 if (requestedMode.startsWith('trace-')) {
   console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),sessionID:'private-session',part:{id:'private-part',type:'tool',tool:'playwright-test_generator_setup_page',state:{status:'completed',input:{plan},output:`${env.OPENROUTER_API_KEY} ${env.PERPETUAL_ACCOUNT_USERNAME} ${env.PERPETUAL_ACCOUNT_PASSWORD}`,time:{start:Date.now(),end:Date.now()}}}}));
   console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),part:{type:'tool',tool:'playwright-test_browser_click',state:{status:mode==='fail'?'error':'completed',input:{element:'Private account Save'},output:'Private browser contents',error:'Private error'}}}));
+  if (mode === 'missing') console.log(JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_handle_dialog',state:{status:'error',error:'No dialog visible'}}}));
   if (mode !== 'hang') console.log(JSON.stringify({type:'step_finish',timestamp:Date.now(),part:{type:'step-finish',reason:mode==='fail'?'error':'stop',cost:0.001,tokens:{input:11,output:12,reasoning:0,cache:{read:0,write:0}}}}));
 }
 

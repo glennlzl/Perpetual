@@ -830,14 +830,20 @@ test('successful authoring survives workspace removal and restart as private sco
 });
 
 for(const mode of ['trace-repair','trace-invalid','trace-fail','trace-missing'])test(`authoring retains grammar repair and failed harness evidence: ${mode}`,async t=>{
-  const f=await setup(t,{mode});await f.manager.generateSpec(f.context,{caseId:journey.id});await settled(f);
+  const f=await setup(t,{mode});await f.manager.generateSpec(f.context,{caseId:journey.id});const spec=await settled(f);
   const records=(await f.manager.specCode(f.context,{caseId:journey.id}) as unknown as {authoring?:import('../contract/authoring.ts').AuthoringRecord[]}).authoring;
   assert.equal(records?.length,1);
   const record=records![0];assert.equal(record.outcome,mode==='trace-repair'?'draft':'failed');
   assert.deepEqual(record.attempts.map(attempt=>attempt.phase),mode==='trace-fail'||mode==='trace-missing'?['generation']:['generation','grammar-repair']);
   assert.equal(record.attempts[0].outcome,mode==='trace-fail'?'failed':'completed');
   assert.equal(record.attempts[0].events[1].outcome,mode==='trace-fail'?'error':'completed');
-  if(mode==='trace-missing')assert.equal(record.attempts[0].codeHash,null);
+  if(mode==='trace-missing'){
+    assert.equal(record.attempts[0].codeHash,null);
+    assert.deepEqual(record.attempts[0].lastToolError,{tool:'browser_handle_dialog',kind:'no-native-dialog'});
+    assert.match(spec?.generation?.error??'',/Last observed tool error: browser_handle_dialog/);
+    assert.match(spec?.generation?.error??'',/No native browser dialog was visible/);
+    assert.equal((await lines(f.log)).length,1,'A safe tool diagnostic does not trigger paid exploration or repair.');
+  }
   else if(mode!=='trace-fail')assert.match(record.attempts[0].codeHash!,/^[a-f0-9]{64}$/);
   assert.equal(record.cleanup,'complete');
 });

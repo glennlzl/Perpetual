@@ -1,18 +1,28 @@
 // OpenCode v1.18.32 cli/cmd/run.ts emits newline-delimited {type, timestamp, part} in --format json.
-// Project only tool_use part.state.status and step_finish metadata. Text, tool input/output, session ids and errors
-// are never diagnostics. See docs/journeys.md for the pinned upstream contract and explicit bounds.
+// Project tool_use status, its last fixed error category, and step_finish metadata. Text, tool input/output,
+// session ids and error prose are never diagnostics. See docs/journeys.md for the pinned contract and bounds.
 import { createHash } from 'node:crypto';
 import { redact } from '../redaction.ts';
-import type { AuthoringFinishReason, AuthoringTool, AuthoringUsage, HarnessEvidence } from '../../contract/authoring.ts';
+import type { AuthoringFinishReason, AuthoringTool, AuthoringToolError, AuthoringUsage, HarnessEvidence } from '../../contract/authoring.ts';
 
 const TOOLS: readonly AuthoringTool[] = ['generator_setup_page','generator_read_log','generator_write_test','browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_snapshot','browser_take_screenshot','browser_wait_for','browser_tabs','browser_handle_dialog','browser_file_upload','browser_evaluate','browser_run_code','browser_console_messages','browser_network_requests','browser_close'];
 const REASONS: readonly AuthoringFinishReason[] = ['stop','length','tool-calls','content-filter','error','other'];
+const ERRORS: readonly AuthoringToolError[] = ['stale-reference','ambiguous-locator','no-native-dialog','timeout'];
 export const MAX_AUTHORING_EVENTS = 64;
 const LINE_BYTES = 64 * 1024, STREAM_BYTES = 1024 * 1024;
 export const object = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const number = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 export const finishReason = (value: unknown): AuthoringFinishReason => REASONS.includes(value as AuthoringFinishReason) ? value as AuthoringFinishReason : 'unknown';
 export const toolName = (value: unknown): AuthoringTool => TOOLS.includes(value as AuthoringTool) ? value as AuthoringTool : 'unknown';
+export const toolErrorKind = (value: unknown): AuthoringToolError => ERRORS.includes(value as AuthoringToolError) ? value as AuthoringToolError : 'unknown';
+/** Fixed upstream error categories only; neither an error's contents nor page data leaves this projection. */
+function classifyToolError(tool: AuthoringTool, text: string): AuthoringToolError {
+  if (tool === 'browser_handle_dialog' && /\bNo dialog visible\b/i.test(text)) return 'no-native-dialog';
+  if (/\bRef \S+ not found in the current page snapshot\b/i.test(text)) return 'stale-reference';
+  if (/\bstrict mode violation\b/i.test(text)) return 'ambiguous-locator';
+  if (/\b(?:TimeoutError|Timeout \d+ms exceeded)\b/i.test(text)) return 'timeout';
+  return 'unknown';
+}
 export function authoringUsage(value: unknown): AuthoringUsage | null {
   const usage = object(value);
   if (!usage || !['input','output','reasoning','cacheRead','cacheWrite','cost'].every(key => number(usage[key]))) return null;
@@ -24,6 +34,7 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
   const started = Date.now(), hashes = { stdout: createHash('sha256'), stderr: createHash('sha256') };
   let outputBytes = 0, scanned = 0, pending = '', discarding = false, eventsTruncated = false;
   let reportedFinishReason: AuthoringFinishReason = 'unknown', usage: AuthoringUsage | null = null;
+  let lastToolError: HarnessEvidence['lastToolError'];
   const events: HarnessEvidence['events'] = [];
   const safe = (value: unknown) => typeof value === 'string' ? redact(hide(value)) : '';
   function line(text: string) {
@@ -38,6 +49,7 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
       if (state?.status !== 'completed' && state?.status !== 'error') return;
       // OpenCode preserves the configured MCP server's name when prefixing the tool.
       const tool = safe(part.tool).replace(/^playwright[-_]test_/, '');
+      if (state.status === 'error') lastToolError = { tool: toolName(tool), kind: classifyToolError(toolName(tool), safe(state.error)) };
       if (events.length < MAX_AUTHORING_EVENTS) events.push({ tool: toolName(tool), outcome: state.status });
       else eventsTruncated = true;
     }
@@ -66,7 +78,7 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
       // A partial final line is not a complete harness envelope. Missing metadata remains unknown.
       const completed = Date.now();
       return { startedAt: new Date(started).toISOString(), completedAt: new Date(completed).toISOString(), durationMs: Math.max(0, completed - started), outcome,
-        outputHash: createHash('sha256').update(hashes.stdout.digest('hex')).update(hashes.stderr.digest('hex')).digest('hex'), outputBytes, eventsTruncated, events, reportedFinishReason, usage, ...(cleanupIncomplete ? { cleanupIncomplete: true } : {}) };
+        outputHash: createHash('sha256').update(hashes.stdout.digest('hex')).update(hashes.stderr.digest('hex')).digest('hex'), outputBytes, eventsTruncated, events, reportedFinishReason, usage, ...(lastToolError ? { lastToolError } : {}), ...(cleanupIncomplete ? { cleanupIncomplete: true } : {}) };
     },
   };
 }
