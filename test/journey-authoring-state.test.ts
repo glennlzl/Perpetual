@@ -7,6 +7,16 @@ import type { AuthoringRecord } from '../contract/authoring.ts';
 const now=Date.now(),when=new Date(now).toISOString();
 const record:AuthoringRecord={id:'11111111-1111-1111-1111-111111111111',startedAt:when,completedAt:when,durationMs:0,caseHash:'a'.repeat(64),outcome:'draft',outputHash:'b'.repeat(64),cleanup:'complete',provenance:{harness:'opencode@1.18.32',generator:'playwright-test-generator@1.63.0',model:'openrouter/example/model'},attempts:[{phase:'generation',startedAt:when,completedAt:when,durationMs:0,outcome:'completed',outputHash:'c'.repeat(64),codeHash:'b'.repeat(64),outputBytes:20,eventsTruncated:false,events:[{tool:'browser_click',outcome:'completed'}],reportedFinishReason:'unknown',usage:null}]};
 
+test('a tool failure category survives restart while arbitrary stored diagnostic text is discarded',()=>{
+  const saved={...record,attempts:[{...record.attempts[0],lastToolError:{tool:'browser_handle_dialog',kind:'no-native-dialog',error:'private page contents'}}]};
+  const restored=restoreAuthoringRecord(saved,hide([]));
+  assert.deepEqual(restored.attempts[0].lastToolError,{tool:'browser_handle_dialog',kind:'no-native-dialog'});
+  assert.ok(!JSON.stringify(restored).includes('private page'));
+  const unknown=restoreAuthoringRecord({...record,attempts:[{...record.attempts[0],lastToolError:{tool:'private-tool',kind:'private-account'}}]},hide([]));
+  assert.deepEqual(unknown.attempts[0].lastToolError,{tool:'unknown',kind:'unknown'});
+  assert.equal(restoreAuthoringRecord(record,hide([])).attempts[0].lastToolError,undefined,'Existing records remain valid.');
+});
+
 test('authoring retention bounds all sources together and removes deleted cases',()=>{
   const cases=Object.fromEntries(Array.from({length:110},(_,i)=>[`source-${i}`,[{id:'journey'}]]));
   const history=Object.fromEntries(Object.keys(cases).map((scope,i)=>[scope,{journey:[{...record,completedAt:new Date(now-i*1000).toISOString()}]}]));

@@ -1,6 +1,6 @@
 // Durable diagnostics are part of the browser manager's private state and its save queue.
 import type { AuthoringRecord, HarnessEvidence } from '../../contract/authoring.ts';
-import { authoringUsage, finishReason, object, toolName, MAX_AUTHORING_EVENTS } from '../agents/authoring-evidence.ts';
+import { authoringUsage, finishReason, object, toolName, toolErrorKind, MAX_AUTHORING_EVENTS } from '../agents/authoring-evidence.ts';
 import { redact } from '../redaction.ts';
 
 export type AuthoringHistory = Record<string, Record<string, AuthoringRecord[]>>;
@@ -31,10 +31,13 @@ export function restoreAuthoringRecord(value: unknown, hide: (value: unknown) =>
       if (!event || !['completed','error'].includes(String(event.outcome))) return bad();
       return { tool: toolName(redact(hide(event.tool))), outcome: event.outcome as 'completed' | 'error' };
     });
+    const error = object(attempt.lastToolError);
+    if (attempt.lastToolError !== undefined && !error) return bad();
+    const lastToolError = error ? { tool: toolName(redact(hide(error.tool))), kind: toolErrorKind(redact(hide(error.kind))) } : undefined;
     return { phase: attempt.phase as 'generation' | 'grammar-repair', startedAt: attempt.startedAt, completedAt: attempt.completedAt, durationMs: attempt.durationMs,
       outcome: attempt.outcome as HarnessEvidence['outcome'], outputHash: attempt.outputHash, outputBytes: attempt.outputBytes, eventsTruncated: attempt.eventsTruncated, events,
       reportedFinishReason: finishReason(redact(hide(attempt.reportedFinishReason))), usage: authoringUsage(attempt.usage), codeHash: attempt.codeHash as string | null,
-      ...(attempt.cleanupIncomplete ? { cleanupIncomplete: true } : {}) };
+      ...(lastToolError ? { lastToolError } : {}), ...(attempt.cleanupIncomplete ? { cleanupIncomplete: true } : {}) };
   });
   const safe: AuthoringRecord = { id: record.id, startedAt: record.startedAt, completedAt: record.completedAt, durationMs: record.durationMs, caseHash: record.caseHash,
     outcome: record.outcome as AuthoringRecord['outcome'], outputHash: record.outputHash as string | null, attempts, cleanup: record.cleanup as AuthoringRecord['cleanup'],
