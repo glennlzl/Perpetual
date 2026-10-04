@@ -17,6 +17,16 @@ test('a tool failure category survives restart while arbitrary stored diagnostic
   assert.equal(restoreAuthoringRecord(record,hide([])).attempts[0].lastToolError,undefined,'Existing records remain valid.');
 });
 
+test('a reported blocker survives restart with no arbitrary text and older records remain valid',()=>{
+  const saved={...record,attempts:[{...record.attempts[0],reportedFinishReason:'stop',reportedBlocker:{milestone:2,kind:'request-unobserved',detail:'private page'}}]};
+  const restored=restoreAuthoringRecord(saved,hide([]));
+  assert.deepEqual(restored.attempts[0].reportedBlocker,{milestone:2,kind:'request-unobserved'});
+  assert.ok(!JSON.stringify(restored).includes('private page'));
+  assert.equal(restoreAuthoringRecord(record,hide([])).attempts[0].reportedBlocker,undefined);
+  for(const report of [null,{milestone:13,kind:'unknown'},{milestone:2,kind:'private page'}])assert.throws(()=>restoreAuthoringRecord({...record,attempts:[{...record.attempts[0],reportedBlocker:report}]},hide([])),/Unsupported journey authoring state/);
+  for(const terminal of [{outcome:'failed'},{reportedFinishReason:'unknown'}])assert.throws(()=>restoreAuthoringRecord({...saved,attempts:[{...saved.attempts[0],...terminal}]},hide([])),/Unsupported journey authoring state/);
+});
+
 test('authoring retention bounds all sources together and removes deleted cases',()=>{
   const cases=Object.fromEntries(Array.from({length:110},(_,i)=>[`source-${i}`,[{id:'journey'}]]));
   const history=Object.fromEntries(Object.keys(cases).map((scope,i)=>[scope,{journey:[{...record,completedAt:new Date(now-i*1000).toISOString()}]}]));
