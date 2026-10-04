@@ -32,10 +32,11 @@ export type FixtureEvent =
 
 /**
  * The version of what the fixture's reviewed checks read. A verification's attempts and an approval record it, so approved
- * code keeps running under the checks its control run was caught with. 1: text checks read visible text. 2: they also read
+ * code must be verified again when those semantics change. 1: text checks read visible text. 2: they also read
  * what the application put in visible form fields. 3: a caught control requires a fresh persistence read.
+ * 4: declared search controls never supply stored-result text evidence.
  */
-export const CHECK_VERSION = 3;
+export const CHECK_VERSION = 4;
 
 // Named fixture steps keep checks private and report sign-in as one action and reload readiness as a wait.
 export const STEPS = { checks: 'Perpetual reviewed checks', signIn: 'Perpetual sign-in', reloadReady: 'Perpetual reload readiness' };

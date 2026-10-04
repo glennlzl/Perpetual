@@ -129,3 +129,10 @@ test('an event whose JSON a secret also matches stops the run instead of throwin
   const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"case",caseId:"c",actionCount:1234}))'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent(){},secrets:['1234']});
   await assert.rejects(job.promise,/could not be redacted/);
 });
+
+test('error-only account values are masked before clipping without changing business evidence',async()=>{
+  const username=`former-${'x'.repeat(900)}`,events:WorkerEvent[]=[];
+  const job=superviseWorker({command:process.execPath,args:['-e','const username=process.argv[1]; console.log(JSON.stringify({type:"journey-step",checks:[{type:"text-visible",value:username,passed:true}]})); console.log(JSON.stringify({type:"error",error:"Missing control for "+username}));',username],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent:event=>{events.push(event);},errorSecrets:[username]});
+  await assert.rejects(job.promise,(error:Error)=>error.message.includes('[REDACTED]')&&!error.message.includes(username.slice(0,50)));
+  assert.deepEqual(events,[{type:'journey-step',checks:[{type:'text-visible',value:username,passed:true}]}]);
+});

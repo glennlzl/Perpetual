@@ -40,11 +40,12 @@ test('browser API exposes an owned legacy target as a host-browser link after re
   }
   assert.equal(prepared, true, 'The owned environment settles without starting discovery.');
   const legacy = 'http://host.docker.internal:50397/workspace?mode=uat', signIn = 'http://host.docker.internal:50397/login?next=%2Fworkspace#form';
-  await post('/api/browser/config', { ...context, config: { targetUrl: legacy, signInUrl: signIn } });
+  await post('/api/browser/config', { ...context, config: { targetUrl: legacy, signInUrl: signIn, readOnlyRequests:[{url:'http://host.docker.internal:50397/rpc',body:'{}'}] } });
   await app.close(); app = await start(); token = (await (await fetch(app.url + '/api/session')).json()).token;
   const current = await view();
   assert.equal(current.config.targetUrl, 'http://127.0.0.1:50397/workspace?mode=uat');
   assert.equal(current.config.signInUrl, 'http://127.0.0.1:50397/login?next=%2Fworkspace#form');
+  assert.deepEqual(current.config.readOnlyRequests,[{url:'http://127.0.0.1:50397/rpc',body:'{}'}]);
   const stored = JSON.parse(await readFile(join(dataDir, 'browser', 'state.json'), 'utf8'));
   const saved = Object.values(stored.configs) as { targetUrl: string; signInUrl: string }[];
   assert.deepEqual(saved.map(config => [config.targetUrl, config.signInUrl]), [[legacy, signIn]]);

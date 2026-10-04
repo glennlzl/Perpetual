@@ -21,9 +21,10 @@ import signal
 import sys
 import tempfile
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 import uuid
 
+from read_requests import validate_read_requests, reviewed_read
 from action_output import single_action_output
 from journey_steps import validate_steps
 from model_settings import ModelConfigurationError, model_config
@@ -99,13 +100,25 @@ DISCOVERY_INSTRUCTIONS = """Understand this product from its current browser pag
 Each case must represent one meaningful user goal, from entry and prerequisites through its final business outcome. Keep the connected actions needed to achieve that goal in one journey, preserving the same login session, created records, identifiers and business state. Do not split a journey into isolated page opens, clicks, individual functions, internal schemas, or fragments extracted from source files. Intermediate checks support the final outcome; they are not separate business successes. Do not move the normal work of the journey into preconditions merely to make a smaller test.
 Prioritize two to four complete business journeys when supported: the primary happy path through its actual result and usage/credit effect, a separate payment or subscription lifecycle, and durable settings changes. These are categories to investigate, not features to invent. For a billing journey include payment handling and changed balance or entitlement, and refund/upgrade/downgrade only if supported; otherwise explicitly state missing coverage. A happy path must include doing the product's useful work and checking its outcome, not stop at login, creating a shell, saving a draft, or reaching a page. It observes the completed, successful result of that work before any credit or usage milestone; a credit decrease after a failed run is a failure, not a pass. Determine the actual journey from this product and the user's goal. Return fewer cases when warranted, never pad to a count. The response capacity is four complete journeys. State remaining coverage gaps in the summary.
 Each journey contains 2–12 ordered steps, each with a unique stable id and a concise title describing a business milestone. Keep login, connected work, and verification of the final effect inside the same journey and browser session. These milestones are not click scripts, selectors, or implementation checks. Do not split a happy path into login, page access, schema, and persistence cases. All generated cases use shared test data; only the user can approve independent test data for parallel execution.
-Before finalizing, inspect relevant accessible screens through read-only navigation to ground the journeys. Discovery itself is read-only: do not submit forms, create or delete records, send messages, purchase, or attempt to execute the proposed journeys. HTTP mutation requests are blocked. Stay within allowed origins. Do not invent browsing activity or claim inaccessible behavior was observed.
+Before finalizing, inspect the relevant input and stored-result screens through read-only navigation when accessible, not just their links on an index page. An empty create form and an existing record's local detail/edit view can establish which fields exist and how saved values are displayed without creating anything. Keep these observations distinct from executing the journey. Discovery itself is read-only: do not submit forms, create or delete records, send messages, purchase, or attempt to execute the proposed journeys. HTTP mutation requests are blocked. Stay within allowed origins. Do not invent browsing activity or claim inaccessible behavior was observed.
 Preconditions must identify required test accounts, permissions, fixtures and working dependency connections. Missing login credentials, authenticated access, data, payment/email/provider test integrations, or unknown business rules are explicit blockers in the summary and affected cases. You may propose a journey supported by source despite a blocker, but must distinguish that proposal from observed behavior. Never invent credentials, fabricate service responses, or substitute a simulated success for a real business outcome.
 Expected outcomes must describe the final user-visible result, including persistence and external effects when essential to that goal. API, database and provider evidence may support that outcome; internal schema or function checks do not replace exercising the user journey. Runs independently check final-page URL/text assertions and optional milestone checks, evaluated on the live page when the run reaches that milestone: url-contains, text-visible and text-absent with a value; read-number, which captures under a name the number shown right after a visible label such as Credits; and compare-number, which reads that label again and compares it using <, >, = or != with an earlier read-number capture named in than. When a visible balance, credit or usage value supports the outcome, propose a read-number check in an early milestone, and a compare-number check only in a milestone after the one whose checks confirm the successful result, such as a visible success message. Use at most six checks per milestone, only with labels observed on the page or in supplied source. Supply checks only when they genuinely support the outcome, and identify additional required evidence when they cannot prove it. An opened page or successful click alone is not proof of a larger journey's completion.
 For every milestone and final outcome, ask whether each proposed check could still pass if the intended action failed or never ran. If so, it is supporting context, not completion evidence: buttons, navigation tabs, headings and unchanged starting states cannot alone prove an action completed. Ground the terminal success state and goal-specific result contents in observed pages or supplied source, observing actual output rather than echoed input or a generic result heading. Distinguish success of the whole operation from success of an individual step. For asynchronous work, queued, running or accepted states are not completion. When the requested goal is specifically saving a draft, a persisted draft can be valid evidence; judge checks against the goal, not a list of forbidden words.
 If read-only discovery and supplied source do not establish the completion state or result contents, leave the unsupported checks empty and identify the evidence gap in preconditions and the summary for human review. Keep the intended business outcome; do not replace it with an easier page or control check, or invent an exact success label. Do not perform mutations to fill the gap.
 Runs share backend data. For new user-entered data, choose a concrete expected template in the milestone and its check, for example title "Research note {run}" and text-visible "Research note {run}" after saving and reopening. {run} is the only supported run token: the system resolves it separately for every run. Do not use unresolved descriptions such as <the unique title entered>, {{title}}, or "the value entered". Choosing new test input is allowed; inventing a success message or existing fixture is not. Keep the same run-owned record through the journey, with an independently checked fresh read before later actions locate it. If the outcome is not user-entered text, use observed completion evidence or a numeric before/after check, or leave the evidence gap explicit.
 Use only observed page facts or supplied source as evidence. Source evidence requires an exact supplied repository path AND its positive original line number from the line-numbered source text. Never use line 0, a guessed number or a URL as a source path. For page-only observations use evidence: [] rather than inventing citations. Every case needs at least one concrete expected outcome. Produce goals and acceptance outcomes, not click scripts or CSS selectors. All proposals require human review.
+
+Draft construction rules:
+- Each journey starts with its own prerequisite data or creates its own data inside the journey. Never depend on another journey creating a record with the same {run}: each journey and each verification attempt gets a different token.
+- Choose exact proposed test inputs for writable fields whose storage/readback is supported by pages or source. These are future inputs to review, not claims that discovery saved them. State the actual templates in the milestone title, not just "unique title", "same notes" or "run-scoped data". For a neutral note editor, a save/reopen milestone could choose title "Research {run}" and body "Detail {run}", then a later fresh-read milestone checks text-visible "Research {run}" and "Detail {run}". Follow the actual product's fields and readback; this example is not a fixture or a product feature to invent.
+- Readback text checks include values the application populates in visible form fields after a fresh open; the runner excludes fields the journey has just typed. So a supported saved editable field can be checked even when no literal static success message exists. Do not assert field labels instead of the chosen stored values.
+- A declared {run} outcome needs a run-owned text observation or a before/after number comparison; URL routes, search query echoes and static View/Edit buttons cannot establish it. If the stored output is unknown, leave that gap explicit for review instead of filling assertions with navigation.
+- Assertions apply only to the final page. Put archive/restore, edit and other intermediate state checks at the appropriate milestones, keeping the same entity inside that journey and observing both sides of each transition. Do not put mutually exclusive states in the final assertions.
+- All checks of one milestone evaluate once on its one ending page. An outcome about two pages or filtered views therefore needs separate readback milestones within the same journey, not a title claiming both views with one presence check. For a collection transition, independently check the run-owned record in its destination and its absence from its previous collection; each milestone also identifies its actual view with an evidence-supported URL or visible context check. A missing record on the wrong page cannot establish a successful transition.
+- Put the first run-owned persistence check immediately after the creating action and a fresh read of an observed stable page, before searching for or opening the created entity. Both a saved write and a blocked write must reach that same readback milestone, where the independent check detects missing data. Later search, selection, editing and state transitions can then use the independently established entity; do not defer the first persistence check until after actions that already require the write to have succeeded.
+- A search or filter milestone checks both its evidence-supported view/query state and the run-owned result. The result's presence on an unfiltered list does not prove the search completed, and the query echo alone does not prove the record persisted. Keep all these observations inside one coherent journey and the 12-milestone limit; combine setup actions where appropriate, never drop the observations needed by an outcome.
+- Identical checks on the same ending page have identical meaning; a summary cannot reinterpret one as the query and another as the result. text-visible ignores a field the journey just typed and all declared search controls, even after a fresh page populates their query. Ground query/view state in an observed URL or distinct visible context supported by the check types; if those types cannot distinguish the required views, state the evidence gap rather than duplicate a condition or invent a scoped assertion.
+- Before returning the draft, map each expected outcome to the proposed checks and their ending pages. If the same presence check would pass with a claimed state change never performed, it does not cover that change. Supply the missing supported observations or name the unsupported outcome explicitly for review; do not silently claim it is verified.
 """
 
 AUTHENTICATED_DISCOVERY = """A run-only test account is supplied for this exploration. Sign in with it to observe authenticated screens; only the configured sign-in request may submit, and every other mutation stays blocked.
@@ -262,6 +275,10 @@ def validate_payload(raw):
             raise InputError("Sign-in endpoints must be absolute URLs with a path on the target host.")
         endpoints[index] = endpoint_url(value)
     payload["authEndpoints"] = list(dict.fromkeys(endpoints))
+    try:
+        payload["readOnlyRequests"] = validate_read_requests(payload.get("readOnlyRequests", []), payload["targetUrl"])
+    except ValueError as error:
+        raise InputError(str(error)) from None
     for field, default, maximum in [("maxSteps", 30, 100), ("timeoutSeconds", 300, 1800)]:
         value = payload.get(field, default)
         if type(value) is not int or value < 1 or value > maximum:
@@ -351,6 +368,7 @@ class OwnedBrowser:
         self.targets = {}
         self.cdp_sessions = []
         self.blocked_navigations = 0
+        self.blocked_requests = set()
         self.guard_error = False
         self.model_error = None
         self.auth_exchanges = 0
@@ -410,9 +428,22 @@ class OwnedBrowser:
         # Authenticated discovery may submit only the configured sign-in request.
         return bool(self.payload.get("credentials")) and method == "POST" and endpoint_allowed(url, self.payload.get("authEndpoints", []))
 
-    def mutation_blocked(self, method, url):
+    def mutation_blocked(self, method, url, body=None, headers=None):
         # Discovery is read-only.
-        return method not in {"GET", "HEAD", "OPTIONS"} and not self.auth_exchange(method, url)
+        return method not in {"GET", "HEAD", "OPTIONS"} and not self.auth_exchange(method, url) and not reviewed_read(self.payload.get("readOnlyRequests", []), method, url, body, headers)
+
+    def record_blocked_request(self, method, url):
+        # Drop query values, userinfo, fragments and path parameters before the pipe. The controller redacts the path.
+        try:
+            address = urlsplit(url)
+            path = '/'.join(segment.split(';')[0] for segment in address.path.split('/'))
+            safe = origin(url) + path
+        except ValueError:
+            return
+        key = (method, safe)
+        if key not in self.blocked_requests and len(self.blocked_requests) < 10:
+            self.blocked_requests.add(key)
+            self.emit_event({"type":"blocked-request", "method":method, "url":safe})
 
     def track_auth_response(self, response):
         if self.auth_exchange(response.request.method, response.url) and response.status < 400:
@@ -421,11 +452,29 @@ class OwnedBrowser:
     async def route_initial_request(self, route):
         request = route.request
         forbidden_navigation = request.is_navigation_request() and not navigation_allowed(request.url, set(self.payload["allowedOrigins"]))
-        forbidden_mutation = self.mutation_blocked(request.method, request.url)
+        forbidden_mutation = self.mutation_blocked(request.method, request.url, getattr(request, "post_data", None), getattr(request, "headers", {}))
         if forbidden_navigation or forbidden_mutation:
             self.blocked_navigations += int(forbidden_navigation)
+            if forbidden_mutation:
+                self.record_blocked_request(request.method, request.url)
             await route.abort("blockedbyclient")
         else:
+            # Context routes miss redirect hops and a popup can read before its CDP guard attaches. Fetch only
+            # the fixed reviewed request, with no redirects/retries, and pass its non-redirect response to the page.
+            if reviewed_read(self.payload.get("readOnlyRequests", []), request.method, request.url, getattr(request, "post_data", None), getattr(request, "headers", {})):
+                try:
+                    response = await route.fetch(max_redirects=0, max_retries=0, timeout=30000)
+                    if 300 <= response.status < 400:
+                        location = response.headers.get('location')
+                        destination = urljoin(request.url, location) if location else request.url
+                        self.record_blocked_request(request.method, destination)
+                        await route.fulfill(status=503)
+                    else:
+                        await route.fulfill(response=response)
+                    await response.dispose()
+                except Exception:
+                    await route.abort("blockedbyclient")
+                return
             await route.continue_()
 
     async def intercept_request(self, cdp, event):
@@ -436,7 +485,8 @@ class OwnedBrowser:
             self.blocked_navigations += 1
             await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "BlockedByClient"})
             return
-        if self.mutation_blocked(request["method"], request["url"]):
+        if self.mutation_blocked(request["method"], request["url"], request.get("postData"), request.get("headers", {})):
+            self.record_blocked_request(request["method"], request["url"])
             await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "BlockedByClient"})
             return
         await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"]})
@@ -573,7 +623,7 @@ def discovery_schema():
 
     class Assertion(ContractModel):
         type: Literal["url-contains", "text-visible", "text-absent"]
-        value: ItemText
+        value: ItemText = Field(description="Exact final-page expected value. For new stored text, choose a concrete future test-input template such as Research {run}, then check its fresh readback. Static controls cannot prove persistence; invented success labels are forbidden.")
 
     class Evidence(ContractModel):
         path: SourcePath = Field(description="Exact repository-relative path from supplied source reference data. Omit the entire evidence entry for a webpage-only observation.")
@@ -588,7 +638,7 @@ def discovery_schema():
 
     class TextCheck(ContractModel):
         type: Literal["url-contains", "text-visible", "text-absent"]
-        value: CheckValue
+        value: CheckValue = Field(description="Exact observed page text or a concrete chosen test-input template for supported saved data, such as Research {run}. text-visible also observes application-populated visible form fields after a fresh open, never an input just typed by the journey.")
 
     class ReadNumber(ContractModel):
         type: Literal["read-number"]
@@ -604,15 +654,15 @@ def discovery_schema():
 
     class JourneyStep(ContractModel):
         id: StepId
-        title: StepTitle
+        title: StepTitle = Field(description="Business milestone, including exact proposed input templates when it creates or edits data, and a fresh read before judging saved data. Choose inputs such as Research {run}; never assume another journey created this run's record.")
         # A plain union becomes anyOf, which strict structured output accepts.
-        checks: list[TextCheck | ReadNumber | CompareNumber] = Field(default_factory=list, max_length=6, description="Optional independent checks evaluated on the live page when a run reaches this milestone.")
+        checks: list[TextCheck | ReadNumber | CompareNumber] = Field(default_factory=list, max_length=6, description="Independent observations evaluated together on this milestone's one ending page. Split different views into separate milestones in the same journey. Identify the actual view/query state before checking run-owned presence or absence. For stored input, check chosen {run} values after fresh readback; for a numeric effect compare with an earlier baseline. Static controls alone cannot prove completion; leave unknown outcome checks empty.")
 
     class Candidate(ContractModel):
         name: Name = Field(description="The meaningful user outcome of this complete journey, not a function, schema or isolated click.")
         goal: Goal = Field(description="One coherent user journey from entry through the final business result, preserving session and business state between its connected actions.")
         steps: list[JourneyStep] = Field(min_length=2, max_length=12, description="Ordered business milestones, each with a unique id and concise business title; not click scripts or selectors.")
-        preconditions: list[ItemText] = Field(max_length=20, description="Required test accounts, permissions, fixtures and dependencies; state missing prerequisites explicitly. Do not move normal journey actions into setup.")
+        preconditions: list[ItemText] = Field(max_length=20, description="Required test accounts, permissions, fixtures and dependencies; state missing prerequisites explicitly. Every journey has its own {run}; never require a record created by another journey's token. Do not move normal journey actions into setup.")
         expectedOutcomes: list[ItemText] = Field(min_length=1, max_length=20, description="Concrete final business outcomes, including persistence or external effects when required; intermediate UI actions alone are not completion.")
         assertions: list[Assertion] = Field(max_length=20, description="Independent final-page observations that support the business outcome. Do not invent unsupported checks or use these to claim an unobserved external effect.")
         evidence: list[Evidence] = Field(default_factory=list, max_length=40, description="Only exact supplied source citations; use [] for page-only observations, never fabricate file paths or line numbers.")
@@ -862,8 +912,14 @@ def safe_error(error):
     # Only our input validation messages are intentionally safe for the UI.
     if isinstance(error, (InputError, ModelConfigurationError)):
         return str(error)[:400]
-    kind = type(error).__name__
-    status = getattr(error, "status_code", None)
+    chain, seen = [], set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        chain.append(error)
+        error = error.__cause__ or error.__context__
+    known = next((item for item in chain if getattr(item, "status_code", None) in {401,402,403,429} or type(item).__name__ in {"AuthenticationError","RateLimitError","ModelRateLimitError","APIConnectionError","APITimeoutError","ModelOutputTruncatedError"}), chain[0])
+    kind = type(known).__name__
+    status = getattr(known, "status_code", None)
     if kind == "AuthenticationError" or status in {401, 403}:
         return "Model authentication failed. Check the configured model API key and access."
     if kind in {"RateLimitError", "ModelRateLimitError"} or status == 429:
@@ -876,9 +932,11 @@ def safe_error(error):
         return "Model credits are exhausted. Add credits or choose another configured model."
     if kind == "ModelOutputTruncatedError":
         return "The model response was truncated. Choose a model with a larger output limit."
-    if isinstance(error, TimeoutError):
+    if any(isinstance(item, TimeoutError) for item in chain):
         return "Browser task exceeded its time limit."
-    return f"Browser task failed ({type(error).__name__})."
+    if any(type(item).__name__ == "ModelProviderError" for item in chain):
+        return "The model provider rejected the request. Check credits and model access, or choose another model."
+    return f"Browser task failed ({type(chain[0]).__name__})."
 
 
 async def execute(payload):

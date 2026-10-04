@@ -107,6 +107,20 @@ test('a submission may arm one response wait before one UI action without exposi
   ])assert.throws(()=>validateJourneySpec(action(invalid),journey),/Line /,invalid);
 });
 
+test('a response wait may identify this run only after independent reviewed data exists',()=>{
+  const created={...journey,steps:[{...journey.steps[0],checks:[{type:'text-visible' as const,value:'Item {run}'}]},journey.steps[1]]};
+  const pair='await Promise.all([page.waitForResponse(`**/items/change?name=Item%20${journey.run}`,{timeout:10000}),page.getByRole("button",{name:"Update"}).click()]);';
+  const after=spec(`  await journey.milestone('open', async () => { await page.getByLabel('Name').fill(\`Item \${journey.run}\`); });\n  await journey.milestone('rename', async () => { ${pair} });`);
+  assert.equal(validateJourneySpec(after,created),after);
+  const before=spec(`  await journey.milestone('open', async () => { ${pair} });\n  await journey.milestone('rename', async () => {});`);
+  assert.throws(()=>validateJourneySpec(before,created),/journey.run names an element or address only after a milestone/);
+  for(const pattern of ['journey.run','`${journey.run}`','`**/items/${process.env.SECRET}`','response => true']){
+    const unsafe=after.replace('`**/items/change?name=Item%20${journey.run}`',pattern);
+    assert.throws(()=>validateJourneySpec(unsafe,created),/Only await Promise.all|action arguments/);
+  }
+  assert.throws(()=>validateJourneySpec(after.replace('timeout:10000','timeout:journey.run'),created),/journey.run names an element or address only after a milestone/);
+});
+
 test('journey.run names an element or address only after a milestone whose reviewed check reads {run}',()=>{
   // Its first step's check reads the item the journey created, so a blocked save fails that check before any action looks for the item.
   const created={...journey,steps:[{id:'create',title:'Create an item',checks:[{type:'text-visible' as const,value:'Item {run}'}]},{id:'open',title:'Open the item',checks:[]}]};

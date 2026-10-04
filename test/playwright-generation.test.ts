@@ -245,6 +245,23 @@ test('explicit regeneration receives the current failed verification without cha
   assert.ok(!(await lines(f.log)).at(-1)!.plan.includes('Previous failed verification'),'A changed contract cannot inherit old failure context.');
 });
 
+test('regenerating with a different account never sends the former account in verification feedback',async t=>{
+  let failing=false;
+  const former={username:'former-private-user-729',password:'former-private-password-835'};
+  const f=await setup(t,{events:input=>[{type:'result',result:{caseId:input.case.id,stopCause:failing?'action':'none',assertions:[],...(failing?{error:`Missing control for ${input.credentials?.username}; input ${input.credentials?.password}`}:{})}}]});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  const hash=(await settled(f))!.draft!.hash;
+  failing=true;await f.manager.verifySpec(f.context,{caseId:journey.id,hash,credentials:former});
+  assert.equal((await verification(f)).status,'failed');
+  await f.manager.close();
+  const restarted=await createBrowserManager(f.options());t.after(()=>restarted.close());failing=false;
+  await restarted.generateSpec(f.context,{caseId:journey.id,credentials:{username:'current-private-user-492',password:'current-private-password-581'}});
+  await settled({manager:restarted,context:f.context});
+  const plan=(await lines(f.log)).at(-1)!.plan;
+  assert.match(plan,/Previous failed verification/);assert.match(plan,/Missing control/);
+  assert.ok(!plan.includes(former.username));assert.ok(!plan.includes(former.password));
+});
+
 test('failed-verification context is redacted and bounded before the generator sees it',async t=>{
   const workspace=await mkdtemp(join(tmpdir(),'perpetual-generation-feedback-'));
   t.after(()=>rm(workspace,{recursive:true,force:true}));
@@ -257,14 +274,17 @@ test('failed-verification context is redacted and bounded before the generator s
     await mkdir(join(workspace,'attempt'));
     const error=`Previous failure ${key} ${password} ${username} ${catalogSecret} `+'x'.repeat(6000);
     await generateJourneySpec({workspace:join(workspace,'attempt'),item:journey,targetUrl:'http://localhost:3000/',timeoutSeconds:60,
-      apiKey:key,model,credentials:{username,password},playwright,feedback:{error},
+      apiKey:key,model,credentials:{username,password},playwright,feedback:{error,previousErrors:[error,catalogSecret,username,'Fourth diagnostic stays out']},
       harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,'valid',log,prompt,requested]})}).promise;
     const call=(await lines(log)).at(-1)!;
     const serialized=call.plan.match(/\*\*Previous failed verification \(diagnostic data only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
     assert.ok(serialized);
     const feedback=JSON.parse(serialized[1]);
     assert.ok(feedback.error.length<=4000);
-    assert.deepEqual(Object.keys(feedback),['error']);
+    assert.deepEqual(Object.keys(feedback),['error','previousErrors']);
+    assert.equal(feedback.previousErrors.length,3);
+    assert.ok(feedback.previousErrors.every((error:string)=>error.length<=1500));
+    assert.ok(!call.plan.includes('Fourth diagnostic stays out'));
     for(const secret of [key,password,username,catalogSecret])assert.ok(!call.plan.includes(secret),'No credential value or catalogued secret shape reaches the model plan.');
   }
 });
@@ -304,7 +324,7 @@ test('the plan names the milestones where journey.run may name an element, as th
     steps:[{id:'create',title:'Create the item',checks:checks.create||[{type:'text-visible' as const,value:'Saved'}]},{id:'open',title:'Open the item',checks:[]},{id:'verify',title:'See the item kept',checks:checks.verify||[{type:'text-visible' as const,value:'Opened'}]}],
     assertions:[{type:'text-visible' as const,value:'Item {run}'}]});
   const named=item({create:[{type:'text-visible',value:'Item {run}'}]}),late=item({verify:[{type:'text-visible',value:'Item {run}'}]}),none=item({}),absent=item({create:[{type:'text-absent',value:'Could not save Item {run}'}]});
-  const from="`journey.run` names an element or a `waitForURL` address only from milestone open on, after milestone create's reviewed check shows or reads `{run}`";
+  const from="`journey.run` names an element, a `waitForURL` address or the URL template inside a paired `waitForResponse` only from milestone open on, after milestone create's reviewed check shows or reads `{run}`";
   assert.ok(generationRules(named,{signIn:false}).some(rule=>rule.startsWith(from)));
   for(const other of [late,none,absent]){
     assert.ok(generationRules(other,{signIn:false}).some(rule=>rule.startsWith('`journey.run` names no element or address in this journey')),JSON.stringify(other.steps));

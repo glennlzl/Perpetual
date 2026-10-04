@@ -59,6 +59,21 @@ test('results survive public run history, changed case drafts and controller res
   assert.deepEqual((await restarted.view(f.context)).runs[0].results,report.results);
 });
 
+test('code feedback is scrubbed with its originating account, stays private and survives restart',async t=>{
+  const username=`former-${'y'.repeat(305)}`,password='former-private-test-password';
+  const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error:`Missing link ${'detail '.repeat(85)} ${username}; input ${password}`,assertions:[]}}]);
+  const {run}=await f.manager.run(f.context,{credentials:{username,password}},manual);
+  const report=await completed(f,run.id);await f.manager.close();
+  const stored=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8')).runs.find((item:{id:string})=>item.id===run.id);
+  assert.ok(stored.codeFeedback[scenario.id].includes('Missing link'));
+  assert.ok(!JSON.stringify(stored.codeFeedback).includes(username));assert.ok(!JSON.stringify(stored.codeFeedback).includes(password));
+  assert.ok(!JSON.stringify(stored.codeFeedback).includes(username.slice(0,50)));
+  assert.ok(!('codeFeedback' in report.run));
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  assert.ok(!('codeFeedback' in (await restarted.runProgress(f.context,run.id)).run));
+  assert.ok(!('codeFeedback' in (await restarted.view(f.context)).runs[0]));
+});
+
 test('unverified passed claims and missing results cannot become business passes',async t=>{
   const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',status:'passed',agentCompleted:true,assertions:[]}}]);
   const {run}=await f.manager.run(f.context,{},manual);const report=await completed(f,run.id);assert.equal(report.run.status,'needs_review');assert.equal(report.results[0].status,'needs_review');
@@ -169,7 +184,7 @@ test('public browser projections keep full evidence, graph summaries and code re
   const {run}=await f.manager.run(f.context,{},manual),report=await completed(f,run.id);
   const view=await f.manager.view(f.context),summary=f.manager.summary(f.context),listed=summary.runs[0];
   for(const value of [report.run,view.runs[0],listed]){
-    for(const privateField of ['scope','approvedCases','environmentUseUncertain','credentials'])assert.equal(Object.hasOwn(value,privateField),false,privateField);
+    for(const privateField of ['scope','approvedCases','environmentUseUncertain','credentials','codeFeedback'])assert.equal(Object.hasOwn(value,privateField),false,privateField);
     assert.deepEqual(Object.keys(value.caseSummaries[0]).sort(),['assertions','expectedOutcomes','goal','id','isolation','name','preconditions','steps']);
   }
   assert.deepEqual(report.progress.cases[0].actions,[{type:'click',status:'passed'}]);

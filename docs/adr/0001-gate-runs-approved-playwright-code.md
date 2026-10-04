@@ -25,7 +25,7 @@ Four guardrails:
 - Discovery is unchanged: the browser agent explores the application and proposes reviewable drafts.
 - A run needs Playwright's Chromium and code for each journey, not a model. A journey without current code needs review without a browser; the gate runs approved code only, and a person's run may try a current draft.
 - A verification holds its stage, so a gate waits for it; its runs never count as a journey's status or reach the gate.
-- The control run blocks by HTTP method, so it cannot tell a write from a read sent as a POST (GraphQL, RPC). Such a blocked read cannot establish a caught control; these reads remain unsupported and cannot authorize approval.
+- The original control run blocks by HTTP method, so it cannot tell a write from a read sent as a POST (GraphQL, RPC). Such a blocked read cannot establish a caught control. [ADR 0003](0003-review-fixed-post-reads.md) supersedes this limitation for exact person-reviewed JSON requests; unreviewed POST reads still cannot authorize approval.
 - Writing code needs a more capable model than a run ever does, since a run needs none; a small model can fail to write a valid spec. Generation is a one-time cost per journey.
 - Repairing code after the application changes is not automatic: a person generates, verifies and approves new code.
 
@@ -38,3 +38,10 @@ A fresh browser session does not reset the twin's data. A journey that saved a f
 A failed “Saved” acknowledgement or a blocked POST read could previously count as caught without testing what the application kept. Version 3 requires an eligible reviewed check to fail after a blocked request or socket send and a successful fresh top-level GET of the page being judged, with no later blocked request, failed read or unguarded write. The check must read run-owned text (`{run}`), or compare a finite observed number against a baseline captured before the blocked change; a missing number, static acknowledgement or URL alone cannot qualify. The fixture reports `controlRead` for that failed check, and the controller requires both pieces of evidence. Unsupported reads remain missed controls and refuse approval; this is bounded browser evidence, not an independent database or payment oracle.
 
 Earlier approvals become stale while their code, approval records and history remain. A person may explicitly reuse the approved code as a draft, verify it under version 3, and approve it again; a saved-state load or controller restart starts no generation or verification.
+
+
+## Amendment: query controls in check version 4
+
+A fresh page can populate its search field from the URL even when no matching record was saved. Reading that field let a query satisfy a result-presence check and prevented a correct result-absence check from passing. Version 4 excludes declared search controls from form-value observations: native search inputs, ARIA searchboxes, and fields inside native or ARIA search landmarks. Visible result text and ordinary application-populated stored fields remain readable. The rule uses declared DOM semantics, with no application names or inferred field-name heuristics; undeclared query echoes still require distinct reviewed result evidence.
+
+Approvals and verifications from versions 1 through 3 become stale. Their code and evidence remain historical; explicit reuse, verification and approval under version 4 are required before any gate run. Restarting the controller starts no paid work.

@@ -120,8 +120,12 @@ function action(statement: Statement, scope: ReadonlySet<string>, read: boolean)
   if (member(call.callee) !== 'all' || call.arguments.length !== 1 || pair?.type !== 'ArrayExpression' || pair.elements.length !== 2) fail(call, message);
   const [response, trigger] = pair.elements;
   if (response?.type !== 'CallExpression' || response.callee.type !== 'MemberExpression' || !named(response.callee.object, 'page') || !scope.has('page') || member(response.callee) !== 'waitForResponse'
-    || !text(response.arguments[0]) || response.arguments.length > 2) fail(call, message);
-  response.arguments.forEach(item => value(item, scope, false));
+    || response.arguments.length > 2) fail(call, message);
+  const pattern=response.arguments[0];
+  if(!text(pattern)&&!(pattern?.type==='TemplateLiteral'&&pattern.quasis.some(part=>Boolean(part.value.cooked))&&runText(pattern,scope)))fail(call,message);
+  // Like a locator or URL wait, a later response pattern may identify data already proved by a reviewed check.
+  // The token is never a bare address or an option value, and before that proof only literal patterns are allowed.
+  response.arguments.forEach((item,index) => value(item, scope, index===0&&read));
   if (trigger?.type !== 'CallExpression' || trigger.callee.type !== 'MemberExpression' || !['locator', 'keyboard', 'mouse'].includes(kind(trigger.callee.object, scope, read) ?? '')) fail(call, message);
   return actionCall(trigger, scope, read);
 }

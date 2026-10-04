@@ -47,10 +47,18 @@ function application({persist=true}:{persist?:boolean}={}){
         <label>Plan <select><option>Basic plan</option><option selected>Pro plan</option></select></label><label>Password <input type=password value="Field Secret"></label>
         <input type=hidden value="Field Hidden"><div hidden><input value="Field Invisible"></div><label>Box <input type=checkbox value="Field Box"></label>
         <label>Late <input id=late></label></form><script>setTimeout(()=>{document.getElementById('late').value='Field Late';},800);</script>`));
+      // A fresh GET echoes the query in declared search controls, without a matching record.
+      if(url.pathname==='/search-readback')return send(page('Search results',`<h1>Search results</h1>
+        <input type=search value="Native query"><input role=searchbox value="ARIA query">
+        <search><input value="Landmark query"></search><form role=search><textarea>Form query</textarea><select><option selected>Filter query</option></select></form>
+        <search><x-query></x-query></search><div role=searchbox><x-searchbox></x-searchbox></div>
+        <x-slotted-field><input slot=q value="Slotted field query"></x-slotted-field><x-slotted-text><span slot=q>Slotted text query</span></x-slotted-text>
+        <label>Stored name<input value="Kept name"></label><input type=search value="Kept result"><search><article>Kept result</article></search>
+        <script>document.querySelector('x-query').attachShadow({mode:'open'}).innerHTML='<input value="Shadow field query">';document.querySelector('x-searchbox').attachShadow({mode:'open'}).innerHTML='<span>Shadow text query</span>';document.querySelector('x-slotted-field').attachShadow({mode:'open'}).innerHTML='<search><slot name=q></slot></search>';document.querySelector('x-slotted-text').attachShadow({mode:'open'}).innerHTML='<div role=searchbox><slot name=q></slot></div>';</script>`));
       // A rename saved by a script's request, whose field keeps what was typed; the page shows the name only in that field.
       if(url.pathname==='/rename'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.name=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/rename')return send(page('Rename',`<h1>Rename</h1><label>Display name <input id=rename value="${state.name}"></label><button id=save>Rename</button>
-        <script>save.onclick=()=>fetch('/rename',{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+        <script>save.onclick=()=>fetch(${url.searchParams.has('query')?"'/rename?name='+encodeURIComponent(rename.value)":"'/rename'"},{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -171,6 +179,24 @@ async function verified({manager,context}:Progress,{id=journey.id,seconds=90}={}
   throw new Error('The verification did not finish.');
 }
 
+test('a later response wait follows run-owned request data through three saves and a caught control',{timeout:90000},async t=>{
+  const item={...journey,id:'create-update',name:'Create and update a profile',steps:[
+    {id:'create',title:'Save and read the new name',checks:[{type:'text-visible' as const,value:'Saved {run}'}]},
+    {id:'update',title:'Update and read the saved name',checks:[{type:'text-visible' as const,value:'Updated {run}'}]},
+  ],assertions:[]};
+  const f=await setup(t,{item});
+  const code="import { test } from 'perpetual';\ntest('Create and update a profile', async ({page,journey}) => {\n"+
+    "await journey.milestone('create',async()=>{ await journey.signIn(); await page.getByLabel('Display name').fill(`Saved ${journey.run}`); await Promise.all([page.waitForResponse('**/settings'),page.getByRole('button',{name:'Save'}).click()]); await page.goto('/profile'); });\n"+
+    "await journey.milestone('update',async()=>{ await page.goto('/rename?query=yes'); await page.getByLabel('Display name').fill(`Updated ${journey.run}`); await Promise.all([page.waitForResponse(`**/rename?name=Updated%20${journey.run}`),page.getByRole('button',{name:'Rename'}).click()]); await page.goto('/profile'); });\n});";
+  const draft=await f.draft(code);assert.ok(draft.draft);
+  await f.manager.verifySpec(f.context,{caseId:item.id,hash:draft.draft.hash,credentials:account});
+  assert.deepEqual(await verified(f,{id:item.id}),{status:'passed',passes:3,control:'caught'});
+  const attempts=(await f.manager.view(f.context)).runs.filter(run=>run.verification);
+  assert.equal(attempts.length,4);assert.equal(attempts.filter(run=>run.status==='passed').length,3);
+  assert.equal(attempts.find(run=>run.verification?.control)?.results?.[0].controlRead,true);
+  assert.equal(f.app.state.credits,7,'The control cannot save another profile.');
+});
+
 test('a draft spec passes its reviewed journey with live frames, actions and a recording, and is approved after its verification',{timeout:180000},async t=>{
   const persisted={...journey,steps:journey.steps.map(step=>step.id==='save-name'?{...step,checks:step.checks.filter(check=>check.type!=='text-visible')}:step)};
   const f=await setup(t,{item:persisted});
@@ -216,7 +242,7 @@ test('a control run blocks every write from the page but lets the fixture sign i
   const events=await runSpec(target,spec(),{blockWrites:true});
   assert.deepEqual(f.app.posts,['POST /login'],'The sign-in form posted; the settings form never reached the application.');
   assert.deepEqual([f.app.state.name,f.app.state.credits],['Original Name',10]);
-  // The blocked submission left the page as it was, so the reviewed check judged it and noticed nothing was saved.
+  // A failed check on the blocked submission itself cannot certify that the application kept nothing.
   const steps=events.filter(event=>event.type==='journey-step');
   assert.deepEqual(steps.map(event=>`${event.stepId}:${event.status}`),['open-settings:running','open-settings:completed','save-name:running','save-name:failed']);
   assert.equal(steps.at(-1)?.evidence,'Reviewed check failed: Text visible “Saved”.');
@@ -534,4 +560,17 @@ test('a text-absent check passes when only the search field the journey typed in
   const events=await runSpec(target,code,{item:search});
   assert.deepEqual(ended(events),['search:completed']);
   assert.deepEqual(events.at(-1)?.result?.assertions,[{type:'text-absent',value:'Nightly sync',passed:true}]);
+});
+
+test('fresh search query controls prove neither result presence nor result absence, while stored fields and results remain readable',{timeout:60000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const queries=['Native query','ARIA query','Landmark query','Form query','Filter query','Shadow field query','Shadow text query','Slotted field query','Slotted text query'];
+  const search={...journey,id:'search-readback',steps:[{id:'search',title:'Read search results',checks:[{type:'text-visible' as const,value:'Search results'},{type:'text-visible' as const,value:'Kept name'}]}],
+    assertions:[...queries.flatMap(value=>[{type:'text-visible' as const,value},{type:'text-absent' as const,value}]),
+      {type:'text-visible' as const,value:'Kept result'},{type:'text-absent' as const,value:'Kept result'}]};
+  const code="import { test } from 'perpetual'; test('Read search results',async({page,journey})=>{await journey.milestone('search',async()=>{await page.goto('/search-readback');});});";
+  validateJourneySpec(code,search);
+  const events=await runSpec(target,code,{item:search});
+  assert.deepEqual(ended(events),['search:completed']);
+  assert.deepEqual(events.at(-1)?.result?.assertions.map(check=>check.passed),[false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,true,false]);
 });

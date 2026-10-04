@@ -96,13 +96,13 @@ test('evidence naming the test account is kept as the worker reported it', async
   assert.deepEqual([report.results[0].caseId, report.progress.cases[0].steps![0].evidence], [scenario.id, evidence]);
 });
 
-test('a failed account-backed worker keeps its error, with bearer tokens scrubbed', async t => {
+test('a failed account-backed worker keeps its reason with account values and bearer tokens scrubbed', async t => {
   const f = await fixture(t);
   f.runtime.start = input => ({ promise: Promise.reject(new Error(`Rejected ${input.credentials!.username} with Bearer fixture-token-value`)), cancel() {} });
   const { run } = await f.manager.run(f.context, { credentials }, manual);
   const report = await f.terminal(run.id);
   assert.equal(report.run.status, 'failed');
-  assert.equal(report.results[0].error, `Rejected ${credentials.username} with Bearer [REDACTED]`);
+  assert.equal(report.results[0].error, 'Rejected [REDACTED] with Bearer [REDACTED]');
 });
 
 test('worker protocol keeps test account values but scrubs the model key from events and terminal errors', async t => {

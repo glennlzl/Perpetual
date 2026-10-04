@@ -7,6 +7,28 @@ import { join } from 'node:path';
 const steps = [{id:'create',title:'Create and save workflow'},{id:'verify',title:'Reopen and verify the saved workflow'}];
 const scenario = (changes: Record<string, unknown> = {}) => ({ id: 'persist-workflow', name: 'Workflow persists', goal: 'Create a workflow, save it, reload and reopen it.', preconditions: ['A dedicated test account exists.'], expectedOutcomes: ['The saved workflow and its nodes remain after reload.'], assertions: [{ type: 'text-visible', value: 'My test workflow' }], selected: false, needsReview: true, ...changes });
 
+test('review refuses run-owned outcomes backed only by unchanged navigation', async () => {
+  const { validateBrowserCases, assertReviewedJourneys, assertExecutableJourneyChecks, discoveredBrowserCases } = await import('../src/business/browser-cases.ts');
+  const proposal = scenario({ steps, expectedOutcomes: ['The saved workflow for {run} remains after reopening.'], assertions: [{ type: 'text-visible', value: 'Edit' }, { type: 'url-contains', value: '/workflows' }] });
+  const drafts = discoveredBrowserCases([proposal]).cases;
+  assert.equal(drafts[0].needsReview, true, 'Keep the incomplete proposal for a person to correct.');
+  assert.doesNotThrow(() => assertReviewedJourneys(drafts));
+  const reviewed = validateBrowserCases([{ ...drafts[0], needsReview: false }]);
+  assert.throws(() => assertReviewedJourneys(reviewed, drafts), /persisted outcome check/i);
+  assert.throws(() => assertExecutableJourneyChecks(reviewed[0]), /persisted outcome check/i, 'Code generation must reject this gap too, including a stored reviewed case.');
+  for (const type of ['text-visible', 'text-absent']) {
+    const corrected = validateBrowserCases([{ ...reviewed[0], assertions: [{ type, value: 'Workflow {run}' }] }]);
+    assert.doesNotThrow(() => assertReviewedJourneys(corrected, drafts));
+  }
+  const numeric = validateBrowserCases([{ ...reviewed[0], steps: [{ id: 'before', title: 'Read existing balance', checks: [{ type: 'read-number', label: 'Balance', name: 'before' }] }, { id: 'after', title: 'Save and reopen the workflow and read balance', checks: [{ type: 'compare-number', label: 'Balance', name: 'after', op: '<', than: 'before' }] }] }]);
+  assert.doesNotThrow(() => assertReviewedJourneys(numeric, drafts), 'A reviewed before/after number can establish a run outcome without run-owned text.');
+  const urlOnly = validateBrowserCases([{ ...reviewed[0], assertions: [{ type: 'url-contains', value: '/workflows?q={run}' }] }]);
+  assert.throws(() => assertReviewedJourneys(urlOnly, drafts), /persisted outcome check/i, 'A search query echo cannot establish persistence.');
+  const pageOnly = validateBrowserCases([scenario({ steps, expectedOutcomes: ['The workspace is accessible.'], assertions: [{ type: 'text-visible', value: 'Workspace' }], needsReview: false })]);
+  assert.doesNotThrow(() => assertReviewedJourneys(pageOnly), 'Do not infer writes or ban legitimate static page observations.');
+  assert.doesNotThrow(() => assertReviewedJourneys(reviewed, reviewed), 'Unchanged legacy definitions remain readable and selectable.');
+});
+
 test('browser cases preserve business goals and reject executable script fields', async () => {
   const { validateBrowserCases } = await import('../src/business/browser-cases.ts');
   const [result] = validateBrowserCases([scenario()]);

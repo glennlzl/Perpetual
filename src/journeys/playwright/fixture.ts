@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
+import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads } from './control.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
@@ -25,12 +26,13 @@ type Held = { actions: number; signedAt: number; signingIn: boolean };
 // this module: they leave the environment before any spec runs, so neither a spec nor the browser Playwright launches
 // later can read them there. A spec reads the token only as journey.run, which checks never read back.
 const env = { ...process.env }, write = process.stdout.write;
-if (env.TEST_WORKER_INDEX !== undefined) for (const key of ['PERPETUAL_EVENT_CHANNEL', 'PERPETUAL_ACCOUNT_USERNAME', 'PERPETUAL_ACCOUNT_PASSWORD', 'PERPETUAL_SIGN_IN_URL', 'PERPETUAL_RUN_TOKEN']) delete process.env[key];
+if (env.TEST_WORKER_INDEX !== undefined) for (const key of ['PERPETUAL_EVENT_CHANNEL', 'PERPETUAL_ACCOUNT_USERNAME', 'PERPETUAL_ACCOUNT_PASSWORD', 'PERPETUAL_SIGN_IN_URL', 'PERPETUAL_RUN_TOKEN', 'PERPETUAL_READ_REQUESTS']) delete process.env[key];
 // The runtime sets the case snapshot, the target URL and the allowed origins for every journey process.
 const approved: ApprovedCase = approvedCase(JSON.parse(readFileSync(env.PERPETUAL_CASE!, 'utf8')));
 const origins: unknown = JSON.parse(env.PERPETUAL_ALLOWED_ORIGINS || '[]');
 if (!Array.isArray(origins) || !origins.every((origin): origin is string => typeof origin === 'string')) throw new Error('The allowed origins are unreadable.');
 const allowed = new Set(origins);
+const readRequests = validateReadRequests(JSON.parse(env.PERPETUAL_READ_REQUESTS || '[]'), env.PERPETUAL_TARGET_URL!);
 const account = env.PERPETUAL_ACCOUNT_USERNAME && env.PERPETUAL_ACCOUNT_PASSWORD ? { username: env.PERPETUAL_ACCOUNT_USERNAME, password: env.PERPETUAL_ACCOUNT_PASSWORD } : null;
 // The stage's sign-in page, where the account signs in when the application URL shows no sign-in form.
 const SIGN_IN_URL = env.PERPETUAL_SIGN_IN_URL || '';
@@ -85,11 +87,25 @@ function markEdits(key: string) {
   Object.defineProperty(window, Symbol.for(key), { value: edited });
   for (const type of ['input', 'change']) window.addEventListener(type, event => { const target = event.composedPath()[0]; if (target) edited.add(target); }, true);
 }
-// Whether visible form fields hold the text as the application put it there, matched as getByText matches: ignoring case
-// and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
+// Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
+// matches: ignoring case and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
 // field is never read, nor a field edited in the current document, nor any field of a document the browser returned to
 // through history, into which it restores what was typed before. Without the marks, no field is read.
-function fieldsHold(nodes: Element[], [text, key]: [string, string]) {
+// From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
+function holds(nodes: Element[], [text, key, version, fields]: [string, string, number, boolean]) {
+  const query = (node: Element) => {
+    let control = false;
+    // Playwright pierces open shadow roots, so the exclusion must follow their hosts too.
+    for (let parent: Element | null = node; parent;) {
+      control ||= parent.matches('input, textarea, select');
+      if (parent.matches('input[type="search" i], [role~="searchbox" i]') || control && parent.matches('search, [role~="search" i]')) return true;
+      const root = parent.getRootNode();
+      parent = parent.assignedSlot || parent.parentElement || (root instanceof ShadowRoot ? root.host : null);
+    }
+    return false;
+  };
+  nodes = nodes.filter(node => version < 4 || !query(node));
+  if (!fields) return nodes.length > 0;
   const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
@@ -102,9 +118,11 @@ function fieldsHold(nodes: Element[], [text, key]: [string, string]) {
 // Text a person sees on the page: visible text, or what the application put in a visible form field, as a saved value is
 // often shown. text-absent passes exactly when this is false.
 async function shows(page: Page, text: string) {
-  if (await page.getByText(text).filter({ visible: true }).count()) return true;
+  const nodes = page.getByText(text).filter({ visible: true });
+  // A textarea's server-rendered query is textContent too; exclude search controls from both observation paths.
+  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, [text, EDITED, CHECKS, false] as [string, string, number, boolean])) return true;
   if (CHECKS < 2) return false;
-  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(fieldsHold, [text, EDITED] as [string, string]);
+  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, [text, EDITED, CHECKS, true] as [string, string, number, boolean]);
 }
 
 async function observe(page: Page, check: Check, captures: Captures): Promise<Observation> {
@@ -253,10 +271,20 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     // Playwright's routes see only the first request of a redirect chain, so each page also pauses every document hop
     // over CDP. Routes still cover a popup's first request, which precedes its page's CDP session, keep live Stripe
     // resources out of every frame, and in a control run answer every write, a form's submission included.
-    await context.route('**/*', route => {
+    await context.route('**/*', async route => {
       const request = route.request(), url = request.url(), navigation = request.isNavigationRequest();
       if (navigation ? refuse(url, topLevel(request)) : stripeLive(url)) return route.abort('blockedbyclient').catch(() => {});
-      if (BLOCK_WRITES && !signingIn && !READS.has(request.method())) { control?.blockedRequest(request); return route.fulfill({ status: navigation ? 204 : 503 }).catch(() => {}); }
+      if (BLOCK_WRITES && !signingIn && !READS.has(request.method()) && !reviewedRead(readRequests, request.method(), url, request.postData(), request.headers())) { control?.blockedRequest(request); return route.fulfill({ status: navigation ? 204 : 503 }).catch(() => {}); }
+      // Context routes never see redirect hops, and a popup can issue reads before CDP attaches. Fetch exactly the
+      // reviewed request with redirects/retries disabled, then give its response to the page. A redirect is not authority.
+      if(BLOCK_WRITES&&reviewedRead(readRequests,request.method(),url,request.postData(),request.headers())){
+        try{
+          const response=await route.fetch({maxRedirects:0,maxRetries:0,timeout:30000});
+          if(response.status()>=300&&response.status()<400){control?.blockedRequest(request);await response.dispose();await route.fulfill({status:503});return;}
+          try{await route.fulfill({response});}finally{await response.dispose();}
+          return;
+        }catch{return route.abort('blockedbyclient').catch(()=>{});}
+      }
       return route.continue().catch(() => {});
     });
     // Routes never see a WebSocket's messages, so a control run also routes every page's sockets to their server,
@@ -278,11 +306,18 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       const cdp = await context.newCDPSession(target), { targetInfo } = await cdp.send('Target.getTargetInfo');
       diagnostic?.cdp(target, cdp, targetInfo);
       synchronizeReload(target, cdp, action => base.step(STEPS.reloadReady, action));
-      cdp.on('Fetch.requestPaused', ({ requestId, request, frameId }) => {
-        const refused = refuse(request.url, frameId === targetInfo.targetId);
+      // First requests must reach Playwright's route so it reports their blocked response to response waits.
+      // CDP still guards every navigation and blocks write redirect hops, which context routes never see.
+      cdp.on('Fetch.requestPaused', ({ requestId, request, frameId, resourceType, redirectedRequestId }) => {
+        const navigation = resourceType === 'Document';
+        const refused = navigation ? refuse(request.url, frameId === targetInfo.targetId) : stripeLive(request.url);
+        if (!refused && redirectedRequestId && BLOCK_WRITES && !signingIn && !READS.has(request.method) && !reviewedRead(readRequests, request.method, request.url, request.postData, request.headers)) {
+          control?.blocked(target);
+          cdp.send('Fetch.fulfillRequest', { requestId, responseCode: navigation ? 204 : 503 }).catch(() => {}); return;
+        }
         cdp.send(refused ? 'Fetch.failRequest' : 'Fetch.continueRequest', refused ? { requestId, errorReason: 'BlockedByClient' } : { requestId }).catch(() => {});
       });
-      await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }] });
+      await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', ...(BLOCK_WRITES && readRequests.length ? {} : { resourceType: 'Document' }), requestStage: 'Request' }] });
       if (!BLOCK_WRITES) return;
       cdp.on('Target.targetCreated', ({ targetInfo: created }) => { if (created.type === 'shared_worker') unguarded = true; });
       await cdp.send('Target.setDiscoverTargets', { discover: true });

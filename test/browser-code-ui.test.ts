@@ -178,14 +178,11 @@ test('journey authoring offers account choices and an actionable missing-check s
     assert.equal(requests.length, 1, 'A failed approval is never retried automatically.');
     assert.equal(requests[0].input.hash, hash, 'Approval still names the exact reviewed code.');
     const code = dialog.locator('pre');
+    const lastLine = code.getByText("await page.getByText('Workflow saved').waitFor();", { exact: false });
+    await expect(lastLine).not.toBeInViewport();
     await code.focus();
-    for (let pageDown = 0; pageDown < 6; pageDown++) {
-      const before = await code.evaluate(element => ({ top: element.scrollTop, end: element.scrollHeight - element.clientHeight }));
-      if (before.top >= before.end - 1) break;
-      await page.keyboard.press('PageDown');
-      await expect.poll(() => code.evaluate(element => element.scrollTop)).toBeGreaterThan(before.top);
-    }
-    await expect(dialog.locator('pre').getByText("await page.getByText('Workflow saved').waitFor();", { exact: false })).toBeInViewport();
+    await page.keyboard.press('End');
+    await expect(lastLine).toBeInViewport();
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(opener).toBeFocused();
   });
@@ -227,5 +224,24 @@ test('journey authoring offers account choices and an actionable missing-check s
     const selection = page.getByRole('checkbox', { name: `Select ${journey.name}` });
     await expect(selection).not.toBeChecked(); await expect(selection).toBeDisabled();
     assert.deepEqual(item.assertions, []);
+  });
+  await t.test('changing the reviewed request body mode requires review again and saves a bodyless rule explicitly', async t => {
+    requests.length = 0; item = structuredClone(journey); reviewMode = 'none';
+    const page=await browser.newPage();t.after(()=>page.close());await page.goto(url);
+    await page.getByRole('button',{name:'Edit test settings',exact:true}).click();
+    const dialog=page.getByRole('dialog');
+    await dialog.getByRole('button',{name:/Read-only POST requests/}).click();
+    await dialog.getByRole('button',{name:'Add read-only POST',exact:true}).click();
+    await dialog.getByLabel('POST URL 1',{exact:true}).fill('http://127.0.0.1:3000/bootstrap');
+    const mode=dialog.getByRole('combobox',{name:'Request body 1',exact:true}),review=dialog.getByRole('checkbox',{name:'I reviewed this request; it only reads data',exact:true});
+    await expect(mode).toHaveText('JSON');
+    await review.check();await mode.click();await page.getByRole('option',{name:'No body',exact:true}).click();
+    await expect(review).not.toBeChecked();await expect(dialog.getByLabel('Exact JSON body 1',{exact:true})).toHaveCount(0);
+    await dialog.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(dialog.getByRole('alert')).toContainText('Review each POST');assert.equal(requests.length,0);
+    await review.check();await dialog.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(dialog).toBeHidden();
+    const config=requests.find(item=>item.path==='/api/browser/config')?.input.config as {readOnlyRequests:unknown};
+    assert.deepEqual(config.readOnlyRequests,[{url:'http://127.0.0.1:3000/bootstrap',body:null}]);
   });
 });

@@ -18,7 +18,7 @@ export type WorkerError=Error&{cleanupIncomplete?:true;timedOut?:true};
 export type WorkerJob<T=void>={promise:Promise<T>;cancel():void};
 /** Supervisor-owned facts; child diagnostics use a separate, untrusted callback. Neither carries error text. */
 export type WorkerLifecycle={name:'worker-start'|'worker-stop'|'worker-signal'|'worker-exit'|'worker-close'|'worker-done'|'worker-diagnostic-truncated';reason?:'cancel'|'deadline'|'protocol'|'consumer'|'descendants';signal?:string;code?:number;failed?:boolean;cleanupIncomplete?:boolean;timedOut?:boolean};
-export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];unavailable?:string;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
+export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];errorSecrets?:unknown[];unavailable?:string;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
   // A worker speaks the event protocol, or only prints output.
   &({onEvent:(event:WorkerEvent)=>void;onOutput?:undefined}|{onOutput:(chunk:string,stream:WorkerStream)=>void;onEvent?:undefined});
 /** What a browser worker reads on its stdin: its mode and that mode's inputs. */
@@ -68,7 +68,7 @@ export function workerTimeoutMs({mode,timeoutSeconds}:{mode?:string;timeoutSecon
  * owned processes remaining. stopSignal asks it to clean up before the group is killed.
  * With onOutput, the process speaks no event protocol: its stdout and stderr chunks go to onOutput, and a zero exit completes it.
  */
-export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],unavailable='Browser runtime is unavailable.'}:SuperviseWorkerOptions):WorkerJob {
+export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],errorSecrets=[],unavailable='Browser runtime is unavailable.'}:SuperviseWorkerOptions):WorkerJob {
   const child=spawn(command,args,{stdio:onDiagnostic?['pipe','pipe','pipe','pipe']:['pipe','pipe','pipe'],env,cwd,detached:process.platform!=='win32'}) as ChildProcessWithoutNullStreams;
   const lifecycle=(event:WorkerLifecycle)=>{try{onLifecycle?.(event);}catch{/* Evidence cannot interfere with supervision. */}};
   lifecycle({name:'worker-start'});
@@ -87,7 +87,8 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     if(pending.length>2048){pending='';truncate();}
   });}
   const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value));
-  const failure=(error:unknown)=>browserError(hide(hidden)(String(messageOf(error)||error||'Browser operation failed.')),env);
+  // Error-only account values must be hidden before clipping without rewriting reviewed check evidence.
+  const failure=(error:unknown)=>browserError(hide([...hidden,...errorSecrets])(String(messageOf(error)||error||'Browser operation failed.')),env);
   let buffer='',eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
   function signal(name:NodeJS.Signals){lifecycle({name:'worker-signal',signal:name});try{if(process.platform!=='win32'&&child.pid)process.kill(-child.pid,name);else child.kill(name);}catch{}}
   function groupAlive(){if(process.platform==='win32'||!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code!=='ESRCH';}}

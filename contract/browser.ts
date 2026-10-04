@@ -19,9 +19,12 @@ export interface BrowserCase {
 /** Immutable run snapshot projection. Older approvals are never normalized as current editable cases. */
 export type CaseSummary = Pick<BrowserCase, 'id' | 'name' | 'steps' | 'isolation'>
   & Partial<Pick<BrowserCase, 'goal' | 'preconditions' | 'expectedOutcomes' | 'assertions'>>;
+/** null explicitly reviews a bodyless POST with no Content-Type; a string reviews exact JSON bytes. */
+export interface ReadOnlyRequest { url: string; body: string | null }
+export interface BlockedRequest { method: string; url: string }
 export interface BrowserConfig {
   targetUrl: string; signInUrl: string; scope: string; requirements: string; maxSteps: number;
-  journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[];
+  journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[]; readOnlyRequests?: ReadOnlyRequest[];
 }
 export interface BrowserPreparation { environmentId: string; status: string; createdAt: string; targetUrl?: string; runId?: string; error?: string; completedAt?: string }
 export interface BrowserDiscovery { cases: BrowserCase[]; summary: string; authenticated: boolean }
@@ -49,11 +52,11 @@ export interface RunProgress { revision?: number; cases: CaseProgress[] }
 export type SummaryCaseProgress = Omit<CaseProgress, 'actions'>;
 export interface SummaryProgress { revision?: number; cases: SummaryCaseProgress[] }
 /** Older verification attempts predate independently versioned checks. */
-export interface Verification { id: string; hash: string; caseHash: string; checkVersion?: number; attempt: number; control: boolean }
+export interface Verification { id: string; hash: string; caseHash: string; checkVersion?: number; readPolicy?: string; attempt: number; control: boolean }
 /** Public run projection; historical status strings are kept. Ownership scopes, credentials and approvedCases are private. */
 export interface PublicRun {
   id: string; stageId: string; mode: 'run' | 'discover'; status: string; createdAt: string; startedAt?: string; completedAt?: string;
-  targetUrl: string; sourceRevision: string | null; caseIds: string[]; caseSummaries: CaseSummary[]; progress?: RunProgress; results?: JourneyResult[]; error?: string;
+  targetUrl: string; sourceRevision: string | null; caseIds: string[]; caseSummaries: CaseSummary[]; progress?: RunProgress; results?: JourneyResult[]; error?: string; blockedRequests?: BlockedRequest[];
   engine?: 'playwright' | 'browser-use'; concurrency?: number; effectiveConcurrency?: number; concurrencyLimit?: ConcurrencyLimit; specHashes?: Record<string, string>;
   environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; frameUpdatedAt?: string; frameCapturedAt?: string;
 }
