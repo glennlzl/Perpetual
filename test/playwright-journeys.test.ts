@@ -47,6 +47,14 @@ function application({persist=true}:{persist?:boolean}={}){
         <label>Plan <select><option>Basic plan</option><option selected>Pro plan</option></select></label><label>Password <input type=password value="Field Secret"></label>
         <input type=hidden value="Field Hidden"><div hidden><input value="Field Invisible"></div><label>Box <input type=checkbox value="Field Box"></label>
         <label>Late <input id=late></label></form><script>setTimeout(()=>{document.getElementById('late').value='Field Late';},800);</script>`));
+      // A fresh GET echoes the query in declared search controls, without a matching record.
+      if(url.pathname==='/search-readback')return send(page('Search results',`<h1>Search results</h1>
+        <input type=search value="Native query"><input role=searchbox value="ARIA query">
+        <search><input value="Landmark query"></search><form role=search><textarea>Form query</textarea><select><option selected>Filter query</option></select></form>
+        <search><x-query></x-query></search><div role=searchbox><x-searchbox></x-searchbox></div>
+        <x-slotted-field><input slot=q value="Slotted field query"></x-slotted-field><x-slotted-text><span slot=q>Slotted text query</span></x-slotted-text>
+        <label>Stored name<input value="Kept name"></label><input type=search value="Kept result"><search><article>Kept result</article></search>
+        <script>document.querySelector('x-query').attachShadow({mode:'open'}).innerHTML='<input value="Shadow field query">';document.querySelector('x-searchbox').attachShadow({mode:'open'}).innerHTML='<span>Shadow text query</span>';document.querySelector('x-slotted-field').attachShadow({mode:'open'}).innerHTML='<search><slot name=q></slot></search>';document.querySelector('x-slotted-text').attachShadow({mode:'open'}).innerHTML='<div role=searchbox><slot name=q></slot></div>';</script>`));
       // A rename saved by a script's request, whose field keeps what was typed; the page shows the name only in that field.
       if(url.pathname==='/rename'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.name=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/rename')return send(page('Rename',`<h1>Rename</h1><label>Display name <input id=rename value="${state.name}"></label><button id=save>Rename</button>
@@ -534,4 +542,17 @@ test('a text-absent check passes when only the search field the journey typed in
   const events=await runSpec(target,code,{item:search});
   assert.deepEqual(ended(events),['search:completed']);
   assert.deepEqual(events.at(-1)?.result?.assertions,[{type:'text-absent',value:'Nightly sync',passed:true}]);
+});
+
+test('fresh search query controls prove neither result presence nor result absence, while stored fields and results remain readable',{timeout:60000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const queries=['Native query','ARIA query','Landmark query','Form query','Filter query','Shadow field query','Shadow text query','Slotted field query','Slotted text query'];
+  const search={...journey,id:'search-readback',steps:[{id:'search',title:'Read search results',checks:[{type:'text-visible' as const,value:'Search results'},{type:'text-visible' as const,value:'Kept name'}]}],
+    assertions:[...queries.flatMap(value=>[{type:'text-visible' as const,value},{type:'text-absent' as const,value}]),
+      {type:'text-visible' as const,value:'Kept result'},{type:'text-absent' as const,value:'Kept result'}]};
+  const code="import { test } from 'perpetual'; test('Read search results',async({page,journey})=>{await journey.milestone('search',async()=>{await page.goto('/search-readback');});});";
+  validateJourneySpec(code,search);
+  const events=await runSpec(target,code,{item:search});
+  assert.deepEqual(ended(events),['search:completed']);
+  assert.deepEqual(events.at(-1)?.result?.assertions.map(check=>check.passed),[false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,true,false]);
 });

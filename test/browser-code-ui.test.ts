@@ -178,14 +178,11 @@ test('journey authoring offers account choices and an actionable missing-check s
     assert.equal(requests.length, 1, 'A failed approval is never retried automatically.');
     assert.equal(requests[0].input.hash, hash, 'Approval still names the exact reviewed code.');
     const code = dialog.locator('pre');
+    const lastLine = code.getByText("await page.getByText('Workflow saved').waitFor();", { exact: false });
+    await expect(lastLine).not.toBeInViewport();
     await code.focus();
-    for (let pageDown = 0; pageDown < 6; pageDown++) {
-      const before = await code.evaluate(element => ({ top: element.scrollTop, end: element.scrollHeight - element.clientHeight }));
-      if (before.top >= before.end - 1) break;
-      await page.keyboard.press('PageDown');
-      await expect.poll(() => code.evaluate(element => element.scrollTop)).toBeGreaterThan(before.top);
-    }
-    await expect(dialog.locator('pre').getByText("await page.getByText('Workflow saved').waitFor();", { exact: false })).toBeInViewport();
+    await page.keyboard.press('End');
+    await expect(lastLine).toBeInViewport();
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(opener).toBeFocused();
   });

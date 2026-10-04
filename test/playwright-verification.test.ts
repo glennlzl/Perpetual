@@ -290,7 +290,7 @@ test('a draft verified under older checks must be verified again before its code
   assert.deepEqual(await ran(9),[CHECK_VERSION,'passed']);
 });
 
-for(const checkVersion of [undefined,1,2]){
+for(const checkVersion of [undefined,1,2,3]){
   test(`an approval with ${checkVersion===undefined?'unversioned':`version ${checkVersion}`} control evidence stays historical until explicit reuse and verification`,async t=>{
     const f=await setup(t);
     await f.manager.saveCases(f.context,[{...journey,selected:true}]);
@@ -325,14 +325,14 @@ for(const checkVersion of [undefined,1,2]){
     await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
     for(let attempt=5;attempt<=8;attempt++)(await f.worker(attempt)).finish(attempt===8?unkept:passing);
     assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
-    assert.deepEqual(f.workers.slice(4).map(worker=>worker.input.checkVersion),[3,3,3,3]);
+    assert.deepEqual(f.workers.slice(4).map(worker=>worker.input.checkVersion),[CHECK_VERSION,CHECK_VERSION,CHECK_VERSION,CHECK_VERSION]);
     await f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash});
     const current=await stored(f),currentApproval=current.specs[scope][journey.id].approved!;
-    assert.equal(currentApproval.checkVersion,3);
+    assert.equal(currentApproval.checkVersion,CHECK_VERSION);
     assert.deepEqual(current.runs.filter(run=>legacy.runs.some(old=>old.id===run.id)),legacy.runs,'Reverification does not rewrite previous results.');
     assert.ok(currentApproval.approvedRunIds?.every(id=>!legacy.runs.some(run=>run.id===id)));
     const {run}=await f.manager.run(f.context,{}),worker=await f.worker(9);
-    assert.equal(worker.input.checkVersion,3);worker.finish(passing);await idle(f,f.context);
+    assert.equal(worker.input.checkVersion,CHECK_VERSION);worker.finish(passing);await idle(f,f.context);
     assert.equal((await f.manager.runProgress(f.context,run.id)).run.status,'passed');
   });
 }

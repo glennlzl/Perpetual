@@ -523,6 +523,8 @@ test('failed discovery retains bounded blocked-request evidence and an actionabl
 test('restart validates fixed read rules and re-bounds blocked request evidence before returning a view', async t => {
   const f=await fixture(t),{run}=await f.manager.discover(f.context,{});await until(()=>f.workers.length);
   f.workers[0].event({type:'error',error:'Discovery refused.'});f.workers[0].gate.resolve();await f.terminal(run.id);
+  // Terminal progress precedes the final save: drain its owner before simulating corruption on disk.
+  await f.manager.close();
   const file=join(f.dataDir,'browser','state.json'),saved=JSON.parse(await readFile(file,'utf8')),scope=Object.keys(saved.configs)[0];
   for (const readOnlyRequests of [null,{},[{url:'http://localhost:3000/rpc',body:'{"password":"short"}'}]]) {
     await writeFile(file,JSON.stringify({...saved,configs:{...saved.configs,[scope]:{...saved.configs[scope],readOnlyRequests}}}));

@@ -38,3 +38,10 @@ A fresh browser session does not reset the twin's data. A journey that saved a f
 A failed “Saved” acknowledgement or a blocked POST read could previously count as caught without testing what the application kept. Version 3 requires an eligible reviewed check to fail after a blocked request or socket send and a successful fresh top-level GET of the page being judged, with no later blocked request, failed read or unguarded write. The check must read run-owned text (`{run}`), or compare a finite observed number against a baseline captured before the blocked change; a missing number, static acknowledgement or URL alone cannot qualify. The fixture reports `controlRead` for that failed check, and the controller requires both pieces of evidence. Unsupported reads remain missed controls and refuse approval; this is bounded browser evidence, not an independent database or payment oracle.
 
 Earlier approvals become stale while their code, approval records and history remain. A person may explicitly reuse the approved code as a draft, verify it under version 3, and approve it again; a saved-state load or controller restart starts no generation or verification.
+
+
+## Amendment: query controls in check version 4
+
+A fresh page can populate its search field from the URL even when no matching record was saved. Reading that field let a query satisfy a result-presence check and prevented a correct result-absence check from passing. Version 4 excludes declared search controls from form-value observations: native search inputs, ARIA searchboxes, and fields inside native or ARIA search landmarks. Visible result text and ordinary application-populated stored fields remain readable. The rule uses declared DOM semantics, with no application names or inferred field-name heuristics; undeclared query echoes still require distinct reviewed result evidence.
+
+Approvals and verifications from versions 1 through 3 become stale. Their code and evidence remain historical; explicit reuse, verification and approval under version 4 are required before any gate run. Restarting the controller starts no paid work.

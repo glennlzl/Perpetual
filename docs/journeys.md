@@ -86,7 +86,7 @@ A milestone may carry up to 6 checks, which the fixture evaluates on the live pa
 
 A text check's value or a number check's label may name the run's token as `{run}`; see [Run-unique values](#run-unique-values).
 
-`text-visible` also passes when a visible text field, text area or select holds the text as the application put it there, matched as visible text is (ignoring case and runs of whitespace), so a saved value shown in an editable field can be checked; `text-absent` passes exactly when `text-visible` would fail. A password field is never read, nor a field the journey edited on the current page, nor any field of a page the browser returned to through history, which restores what was typed before. A journey's own typing therefore never passes its check: reloading or reopening the page shows what was kept.
+`text-visible` also passes when a visible text field, text area or select holds the text as the application put it there, matched as visible text is (ignoring case and runs of whitespace), so a saved value shown in an editable field can be checked; `text-absent` passes exactly when `text-visible` would fail. A password field is never read, nor a field the journey edited on the current page, nor any field of a page the browser returned to through history, which restores what was typed before. Declared search controls (`input[type=search]`, `role=searchbox`, or fields inside `search` or `role=search` landmarks) are excluded even after a fresh GET: the application echoing a query is no evidence of a saved result. Other application-populated fields remain readable after reloading or reopening the page. These bounded DOM observations cannot identify every application-specific query echo; review must choose distinct result evidence when context and stored content overlap.
 
 Final assertions (`url-contains`, `text-visible`, `text-absent`) describe the page the journey ends on. These checks observe page text, form fields the application filled, URLs and numbers; they do not independently prove database persistence, payment settlement or email delivery.
 
@@ -94,7 +94,7 @@ A milestone's checks all judge its one ending page. An outcome involving two pag
 
 The first run-owned persistence check follows creation and a fresh read of a stable page, before search or selection actions require the entity to exist. A saved write and a blocked write must reach that same readback checkpoint; only subsequent actions depend on its independent evidence. Drafting asks for this order, while verification still decides whether the generated actions actually let the control reach its check.
 
-Identical checks on the same page observe the same condition; a discovery summary cannot give them different meanings. A search field the journey typed is excluded from text observations. Query or collection scope therefore needs an observed URL or distinct visible context that the supported checks can actually judge; unsupported scope remains a review gap.
+Identical checks on the same page observe the same condition; a discovery summary cannot give them different meanings. Search controls are excluded from field observations, including application-populated queries. Query or collection scope therefore needs an observed URL or distinct visible context that the supported checks can actually judge; unsupported scope remains a review gap.
 
 ## Discovery
 
@@ -140,7 +140,7 @@ Twin test accounts are generated local test data, so evidence, results, live fra
 
 Journey code is the Playwright actions of one reviewed journey, saved as stage data. A journey has at most one **approved** code and one **draft** beside it. Generated or saved code is always the draft and never replaces the approved code by itself. Editing the goal, preconditions, milestones, checks, expected outcomes or final assertions makes both stale; renaming or selecting does not. Stale approved code whose actions still fit the edited journey's milestones can be taken as its draft again with **Reuse approved code**, to verify and approve like any draft, so an edit to a check needs no model. Removing a case removes its code. Code references call it the journey's spec.
 
-Changing the reviewed POST-read requests makes old verification evidence inapplicable and approved code **Stale**. Reuse the code as a draft, verify and approve it again; this needs no model. Reordering unchanged rules preserves their policy identity. When a managed twin rebuilds the same identified application service on a different host alias or port, its fixed paths and bodies follow that service and preserve policy identity; every worker still receives exact URLs for the current origin. An ambiguous target suspends these rules, and another application service never inherits them. An explicitly changed application origin uses a different policy identity and requires verification again. Stages without these rules retain their original version 3 evidence.
+Changing the reviewed POST-read requests makes old verification evidence inapplicable and approved code **Stale**. Reuse the code as a draft, verify and approve it again; this needs no model. Reordering unchanged rules preserves their policy identity. When a managed twin rebuilds the same identified application service on a different host alias or port, its fixed paths and bodies follow that service and preserve policy identity; every worker still receives exact URLs for the current origin. An ambiguous target suspends these rules, and another application service never inherits them. An explicitly changed application origin uses a different policy identity and requires verification again. Stages without these rules retain evidence only under the current check version.
 
 ### Grammar
 
@@ -154,7 +154,7 @@ The token only fills in the reviewed text: it never changes which check runs, an
 
 ### Check version
 
-The check version is 3 (`CHECK_VERSION` in `src/journeys/playwright/checks.ts`): a caught control requires a failed eligible outcome check after a successful fresh page read. Version 1 read visible text only; version 2 also read values the application put in form fields. Each verification and approval records its version.
+The check version is 4 (`CHECK_VERSION` in `src/journeys/playwright/checks.ts`): declared search controls cannot supply stored-result text evidence, even when a fresh page populates them. Version 1 read visible text only; version 2 also read values the application put in form fields; version 3 required a failed eligible outcome check after a successful fresh page read to catch a control. Each verification and approval records its version.
 
 An approval under an older version is **Stale** and cannot authorize a gate run. Its code, approval and history are preserved. Choose **Reuse approved code**, then **Verify code** and **Approve code** to use it under the current version; reuse needs no model. Drafts verified under an older version also need verification again. Loading saved state or restarting the controller never starts generation or verification.
 

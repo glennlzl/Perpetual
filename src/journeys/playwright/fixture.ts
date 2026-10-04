@@ -87,11 +87,25 @@ function markEdits(key: string) {
   Object.defineProperty(window, Symbol.for(key), { value: edited });
   for (const type of ['input', 'change']) window.addEventListener(type, event => { const target = event.composedPath()[0]; if (target) edited.add(target); }, true);
 }
-// Whether visible form fields hold the text as the application put it there, matched as getByText matches: ignoring case
-// and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
+// Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
+// matches: ignoring case and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
 // field is never read, nor a field edited in the current document, nor any field of a document the browser returned to
 // through history, into which it restores what was typed before. Without the marks, no field is read.
-function fieldsHold(nodes: Element[], [text, key]: [string, string]) {
+// From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
+function holds(nodes: Element[], [text, key, version, fields]: [string, string, number, boolean]) {
+  const query = (node: Element) => {
+    let control = false;
+    // Playwright pierces open shadow roots, so the exclusion must follow their hosts too.
+    for (let parent: Element | null = node; parent;) {
+      control ||= parent.matches('input, textarea, select');
+      if (parent.matches('input[type="search" i], [role~="searchbox" i]') || control && parent.matches('search, [role~="search" i]')) return true;
+      const root = parent.getRootNode();
+      parent = parent.assignedSlot || parent.parentElement || (root instanceof ShadowRoot ? root.host : null);
+    }
+    return false;
+  };
+  nodes = nodes.filter(node => version < 4 || !query(node));
+  if (!fields) return nodes.length > 0;
   const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
@@ -104,9 +118,11 @@ function fieldsHold(nodes: Element[], [text, key]: [string, string]) {
 // Text a person sees on the page: visible text, or what the application put in a visible form field, as a saved value is
 // often shown. text-absent passes exactly when this is false.
 async function shows(page: Page, text: string) {
-  if (await page.getByText(text).filter({ visible: true }).count()) return true;
+  const nodes = page.getByText(text).filter({ visible: true });
+  // A textarea's server-rendered query is textContent too; exclude search controls from both observation paths.
+  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, [text, EDITED, CHECKS, false] as [string, string, number, boolean])) return true;
   if (CHECKS < 2) return false;
-  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(fieldsHold, [text, EDITED] as [string, string]);
+  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, [text, EDITED, CHECKS, true] as [string, string, number, boolean]);
 }
 
 async function observe(page: Page, check: Check, captures: Captures): Promise<Observation> {
