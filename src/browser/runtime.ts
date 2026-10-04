@@ -8,7 +8,7 @@ import {hide,redact} from '../redaction.ts';
 import {resolveBrowserModel,browserModelEnvironment} from './model-policy.ts';
 import type {BrowserModelConfiguration,BrowserModelSettings} from './model-policy.ts';
 import {validateRunCredentials} from './run-credentials.ts';
-import {HOST as TWIN_HOST} from '../twin/compose.ts';
+import {localBrowserHost} from './local-host.ts';
 
 /** One JSON event a worker printed on its stdout: untrusted until its consumer checks it. */
 export type WorkerEvent=Record<string,unknown>;
@@ -33,15 +33,12 @@ const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&
 const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&'message' in error?error.message:undefined;
 
 const base=fileURLToPath(new URL('../../integrations/browser-use/',import.meta.url));
-// The runner's Chromium resolves the twin host to loopback, like the twin's containers reach the host.
-const localHost=(host:string)=>host==='localhost'||host.endsWith('.localhost')||host==='[::1]'||/^127\./.test(host)||host===TWIN_HOST;
-
 export function validateBrowserTarget(value:string,{controllerOrigin}:{controllerOrigin?:string}={}):string {
   let url;try{url=new URL(value);}catch{throw new Error('Enter a valid application URL.');}
   const host=url.hostname.toLowerCase().replace(/\.$/,'');
   if(value.length>2048||url.username||url.password||!['http:','https:'].includes(url.protocol))throw new Error('Use an application URL without embedded credentials.');
-  if(url.protocol==='http:'&&!localHost(host))throw new Error('Use HTTPS for previews or localhost for a local application.');
-  if(!localHost(host)&&(host.includes(':')||/^(?:0\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)||host.endsWith('.internal')||host==='metadata'))throw new Error('This address is not an application test target.');
+  if(url.protocol==='http:'&&!localBrowserHost(host))throw new Error('Use HTTPS for previews or localhost for a local application.');
+  if(!localBrowserHost(host)&&(host.includes(':')||/^(?:0\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)||host.endsWith('.internal')||host==='metadata'))throw new Error('This address is not an application test target.');
   if(controllerOrigin){const controller=new URL(controllerOrigin);if(url.port===controller.port)throw new Error('Choose the application URL, not the Perpetual controller.');}
   url.hash='';return url.href;
 }

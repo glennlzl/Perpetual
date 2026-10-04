@@ -64,6 +64,17 @@ test('stage settings bound journey time, reviewed external HTTPS origins and tar
   assert.equal(view.journeyTimeoutSeconds,900,'A stored config without a time limit uses the default.');assert.deepEqual(view.externalOrigins,[]);
 });
 
+test('reviewed local dependency origins survive saving and cannot admit a controller or remote HTTP origin',async t=>{
+  const f=await fixture(t),context={...f.context,controllerOrigin:'http://127.0.0.1:4317'};
+  const externalOrigins=['http://localhost:55888/', 'http://127.0.0.1:55889', 'http://[::1]:55890', 'http://host.docker.internal:55891', 'http://ui.localhost:55892'];
+  const saved=(await f.manager.saveConfig(context,{targetUrl:'http://localhost:3000/login',externalOrigins})).config;
+  assert.deepEqual(saved.externalOrigins,['http://localhost:55888','http://127.0.0.1:55889','http://[::1]:55890','http://host.docker.internal:55891','http://ui.localhost:55892']);
+  for(const origin of ['http://localhost:4317','http://127.1:4317','http://[::1]:4317','http://host.docker.internal:4317','http://ui.localhost:4317','http://localhost.example.com:55888','http://127.example.com:55888','http://10.0.0.1:55888','http://169.254.169.254','http://gateway.docker.internal:55888','http://localhost:55888/path','http://localhost:55888/?key=value','http://user:secret@localhost:55888']) await assert.rejects(f.manager.saveConfig(context,{...saved,externalOrigins:[origin]}),/external origins/i,origin);
+  assert.deepEqual((await f.manager.view(context)).config.externalOrigins,saved.externalOrigins,'A refused rule cannot replace the reviewed rules.');
+  await f.manager.close();
+  assert.deepEqual((await (await f.reopen()).view(context)).config.externalOrigins,saved.externalOrigins);
+});
+
 test('the sign-in page is optional, on the application URL’s origin without credentials, and keeps a hash route',async t=>{
   const f=await fixture(t);
   const base={targetUrl:'http://localhost:3000/'},save=(config:Record<string,unknown>)=>f.manager.saveConfig(f.context,{...base,...config});
