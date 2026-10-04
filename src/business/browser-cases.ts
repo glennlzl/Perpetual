@@ -80,13 +80,18 @@ function journeySteps(value: unknown): JourneyStep[] {
 export const hasJourneyChecks = (item: Pick<BrowserCase, 'steps' | 'assertions'>): boolean => item.assertions.length > 0 || item.steps.some(step => Boolean(step.checks?.length));
 
 /** Catch whole-value descriptive placeholders; markup/template syntax may itself be legitimate literal content. */
-export function assertExecutableJourneyChecks(item: Partial<Pick<BrowserCase, 'steps' | 'assertions'>>): void {
+export function assertExecutableJourneyChecks(item: Partial<Pick<BrowserCase, 'steps' | 'assertions' | 'expectedOutcomes'>>): void {
   const checks = [...(item.steps ?? []).flatMap(step => step.checks ?? []), ...(item.assertions ?? [])];
   for (const check of checks) {
     const value = 'value' in check ? check.value : check.label;
     if (/^<(?:the\s+)?(?:unique|generated|entered|saved|created)\s+[\p{L}][\p{L}\p{N} _-]{0,160}>$/iu.test(value.trim())) {
       throw new Error('Replace the unresolved check placeholder with a concrete expected value. Use {run} for this run’s data, for example “Note {run}”.');
     }
+  }
+  // Only an explicit run-owned outcome triggers this admission rule. Do not guess
+  // whether a goal writes data, or classify business meaning from UI words.
+  if (item.expectedOutcomes?.some(outcome => outcome.includes('{run}')) && !checks.some(check => check.type === 'compare-number' || (check.type === 'text-visible' || check.type === 'text-absent') && check.value.includes('{run}'))) {
+    throw new Error('Add a persisted outcome check using {run}, or a before/after number comparison. Navigation and static labels alone cannot verify this run’s outcome.');
   }
 }
 

@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import aiPackage from 'ai/package.json' with { type: 'json' };
 import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
 import { CHANGE_APPROACH, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
@@ -37,6 +38,16 @@ type ToolMessage = { role: string; content: { type: string; output?: { type: str
 /** The tool results a model received with its call. */
 const received = (call: Pick<ModelCall, 'prompt'>) => ((call.prompt.at(-1) as ToolMessage).content).map(part => part.output?.value);
 const jsonLines = async <Line>(file: string): Promise<Line[]> => (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line) as Line);
+
+/** Cancelling an in-flight request needs evidence that startup reached the model, not a one-second guess. */
+async function waitForModelCall(calls: () => Promise<unknown[]>) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if ((await calls()).length) return;
+    await delay(20);
+  }
+  throw new Error('The fixture author did not reach its model request.');
+}
 
 /** An authoring workspace as the controller prepares one: the project with its instructions, evidence, draft and repo/. */
 async function workspace(t: TestContext, files: Record<string, string> = {}) {
@@ -79,7 +90,10 @@ async function loopProcess(t: TestContext, steps: ScriptedStep[], { signal }: { 
   return new Promise<{ code: number | null; stdout: string[]; stderr: string[] }>(resolve => {
     const child = execFile(process.execPath, [FIXTURE, script, log, path, MODEL, 'Go'], { env: { PATH: process.env.PATH, OPENROUTER_API_KEY: KEY } }, (error, stdout, stderr) =>
       resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout: stdout.split('\n').filter(Boolean), stderr: stderr.split('\n').filter(Boolean) }));
-    if (signal && child.pid !== undefined) signal(child.pid);
+    if (signal && child.pid !== undefined) {
+      const pid = child.pid;
+      void waitForModelCall(() => jsonLines(log)).then(() => signal(pid), () => child.kill('SIGKILL'));
+    }
   });
 }
 
@@ -483,11 +497,14 @@ test('provider errors protect credential shapes before clipping without a suppli
 });
 
 test('SIGTERM stops the loop at once, so cancelling an attempt confirms its process stopped', async t => {
-  const stopped = await loopProcess(t, [{ hang: true }], { signal: pid => setTimeout(() => { try { process.kill(pid, 'SIGTERM'); } catch { /* Already exited, which the assertions report. */ } }, 1000) });
+  const stopped = await loopProcess(t, [{ hang: true }], { signal: pid => process.kill(pid, 'SIGTERM') });
   assert.equal(stopped.code, 1);
   assert.deepEqual(stopped.stderr, ['The twin config author was stopped.']);
-  const { job } = await attempt(t, [{ hang: true }]);
-  setTimeout(() => job.cancel(), 1000);
+  const { job, calls } = await attempt(t, [{ hang: true }]);
+  const settled = job.promise.then(() => undefined, () => undefined);
+  t.after(async () => { job.cancel(); await settled; });
+  await waitForModelCall(calls);
+  job.cancel();
   await assert.rejects(job.promise, (failure: Error & { cleanupIncomplete?: true }) => {
     assert.equal(failure.message, CANCELLED);
     assert.equal(failure.cleanupIncomplete, undefined);
