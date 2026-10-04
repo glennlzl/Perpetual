@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 // The project the controller wrote, as far as this stand-in reads it; the tests assert what it records.
 type OpenCodeProject = {
   agent: Record<string, { mode: unknown; model: unknown; tools: Record<string, unknown> }>;
-  mcp: Record<string, { command: string[]; environment?: Record<string, string> }>; permission: unknown; provider: unknown;
+  mcp: Record<string, { command: string[]; environment?: Record<string, string> }>; permission: unknown; provider: unknown; small_model?: unknown;
 };
 type ToolResult = { content: { text?: string }[]; isError?: boolean };
 type McpClient = { connect(transport: unknown): Promise<void>; callTool(call: object, schema: undefined, options: object): Promise<ToolResult>; close(): Promise<void> };
@@ -26,7 +26,7 @@ const signIn = plan.includes('journey.signIn()');
 const target = prompt.match(/generator_write_test to `([^`]+)`/)![1];
 const modes = Object.fromEntries([['config', configPath], ['seed', seedPath], ['case', env.PERPETUAL_CASE], ['opencode', 'opencode.json'], ['plan', 'specs/plan.md']].map(([name, file]) => [name, statSync(file!).mode & 0o777]));
 const record = (extra: object) => appendFileSync(log, `${JSON.stringify({ mode, prompt, cwd: process.cwd(), workspaceMode: statSync('..').mode & 0o777, plan, seed: readFileSync(seedPath, 'utf8'), config, modes,
-  agent: { name: requestedAgent, mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash, tools: agent.tools }, permission: opencode.permission, provider: opencode.provider, mcp: server.command, mcpEnvironment: server.environment,
+  agent: { name: requestedAgent, mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash, tools: agent.tools }, permission: opencode.permission, provider: opencode.provider, smallModel: opencode.small_model, mcp: server.command, mcpEnvironment: server.environment,
   prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), git: statSync('.git').isDirectory(),
   env: { key: Boolean(env.OPENROUTER_API_KEY), account: env.PERPETUAL_ACCOUNT_USERNAME || null, password: Boolean(env.PERPETUAL_ACCOUNT_PASSWORD), channel: env.PERPETUAL_EVENT_CHANNEL ?? null, caseFile: env.PERPETUAL_CASE, target: env.PERPETUAL_TARGET_URL,
     home: env.HOME, xdg: env.XDG_CONFIG_HOME ?? null, cache: env.XDG_CACHE_HOME, npm: env.npm_config_cache, claude: env.OPENCODE_DISABLE_CLAUDE_CODE },

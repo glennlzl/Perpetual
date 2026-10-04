@@ -32,7 +32,7 @@ export const opencodeRun = (agent: string, { json = false } = {}): Harness => ({
 
 /** Settings every use's opencode.json carries: no update or sharing, only its OpenRouter model, and its permission. */
 export const opencodeSettings = ({ model, permission, modelOptions }: { model: string; permission: Record<string, unknown>; modelOptions?: Record<string, unknown> }) =>
-  ({ autoupdate: false, share: 'disabled', permission, provider: { openrouter: { models: { [model]: modelOptions ? { options: modelOptions } : {} } } } });
+  ({ autoupdate: false, share: 'disabled', small_model: `openrouter/${model}`, permission, provider: { openrouter: { models: { [model]: modelOptions ? { options: modelOptions } : {} } } } });
 
 const exec = promisify(execFile);
 const TAIL = 4000;

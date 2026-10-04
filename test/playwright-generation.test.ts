@@ -19,7 +19,7 @@ import type {JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
 type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Events=(input:JourneyRunInput)=>WorkerEvent[];
 /** One run of the fake harness, as it logs what it saw (test/fixtures/fake-opencode.ts). */
-type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
+type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
   generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown}};
 type StoredState={specs:Record<string,Record<string,{approved:unknown;draft:{code:string;hash:string}}>>};
 
@@ -33,10 +33,10 @@ const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch(error){ret
 const wait=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 const lines=async(file:string):Promise<HarnessCall[]>=>(await readFile(file,'utf8').catch(()=>'')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
 
-async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/',environment:overrides={},playwright,runtime:agentRuntime,timeoutMs=20000,events}:{mode?:string;target?:string;environment?:Partial<TargetEnvironment>;playwright?:JourneyRuntime;runtime?:BrowserManagerOptions['runtime'];timeoutMs?:number;events?:Events}={}){
+async function setup(t:TestContext,{mode='valid',target='http://localhost:3000/',environment:overrides={},playwright,runtime:agentRuntime,timeoutMs=20000,events,reasoning=true}:{mode?:string;target?:string;environment?:Partial<TargetEnvironment>;playwright?:JourneyRuntime;runtime?:BrowserManagerOptions['runtime'];timeoutMs?:number;events?:Events;reasoning?:boolean}={}){
   const fetch=globalThis.fetch;
   t.mock.method(globalThis,'fetch',async(input:Parameters<typeof fetch>[0],options?:RequestInit)=>String(input)==='https://openrouter.ai/api/v1/models'
-    ?Response.json({data:[{id:model,name:'Fixture model',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],reasoning:{supported_efforts:['medium']}}]})
+    ?Response.json({data:[{id:model,name:'Fixture model',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],...(reasoning?{reasoning:{supported_efforts:['medium']}}:{})}]})
     :fetch(input,options));
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-playwright-generation-'));await mkdir(join(dataDir,'repo'));
   const log=join(dataDir,'harness.jsonl'),launches:JourneyRunInput[]=[],state={mode},uncertain:string[]=[];
@@ -103,7 +103,8 @@ test('generation and repair receive the complete reviewed acceptance contract in
   const calls=await lines(f.log);
   assert.equal(calls.length,2,'An invalid first spec causes the existing grammar repair.');
   for(const call of calls){
-    assert.deepEqual(call.provider,{openrouter:{models:{[model]:{options:{reasoning:{effort:'medium'}}}}}},'The actual generation and repair harness receive the catalog-supported OpenRouter reasoning option.');
+    assert.equal(call.smallModel,`openrouter/${model}`,'Auxiliary title work must not silently choose an unselected provider model.');
+    assert.deepEqual(call.provider,{openrouter:{models:{[model]:{options:{parallel_tool_calls:false,reasoning:{effort:'medium'}}}}}},'Generation and repair request one tool call per observation, preserving supported reasoning.');
     const serialized=call.plan.match(/\*\*Reviewed acceptance contract \(read-only\):\*\*\n\n```json\n([\s\S]*?)\n```/);
     assert.ok(serialized,'The actual harness input must include every reviewed expectation, not just milestone titles and {run} texts.');
     assert.deepEqual(JSON.parse(serialized[1]),{
@@ -120,6 +121,15 @@ test('generation and repair receive the complete reviewed acceptance contract in
     assert.equal((call.modes as {plan:number}).plan,0o444);
     assert.ok(secretFree(call));
   }
+});
+
+test('generation requests sequential tool calls even without reasoning capability metadata',async t=>{
+  const f=await setup(t,{reasoning:false});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.ok((await settled(f))?.draft);
+  const calls=await lines(f.log);
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].provider,{openrouter:{models:{[model]:{options:{parallel_tool_calls:false}}}}},'A catalog without reasoning metadata must still disable parallel calls on the shared browser.');
 });
 
 test('grammar repair can read and write the rejected test but cannot repeat business actions',async t=>{
