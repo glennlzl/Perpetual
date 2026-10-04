@@ -74,7 +74,7 @@ if (requestedMode.startsWith('trace-')) {
   console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),sessionID:'private-session',part:{id:'private-part',type:'tool',tool:'playwright-test_generator_setup_page',state:{status:'completed',input:{plan},output:`${env.OPENROUTER_API_KEY} ${env.PERPETUAL_ACCOUNT_USERNAME} ${env.PERPETUAL_ACCOUNT_PASSWORD}`,time:{start:Date.now(),end:Date.now()}}}}));
   console.log(JSON.stringify({type:'tool_use',timestamp:Date.now(),part:{type:'tool',tool:'playwright-test_browser_click',state:{status:mode==='fail'?'error':'completed',input:{element:'Private account Save'},output:'Private browser contents',error:'Private error'}}}));
   if (mode === 'missing') console.log(JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_handle_dialog',state:{status:'error',error:'No dialog visible'}}}));
-  if (mode !== 'hang') console.log(JSON.stringify({type:'step_finish',timestamp:Date.now(),part:{type:'step-finish',reason:mode==='fail'?'error':'stop',cost:0.001,tokens:{input:11,output:12,reasoning:0,cache:{read:0,write:0}}}}));
+  if (mode !== 'hang' && !mode.startsWith('blocked')) console.log(JSON.stringify({type:'step_finish',timestamp:Date.now(),part:{type:'step-finish',reason:mode==='fail'?'error':'stop',cost:0.001,tokens:{input:11,output:12,reasoning:0,cache:{read:0,write:0}}}}));
 }
 
 if (mode === 'hang') {
@@ -88,12 +88,16 @@ if (mode === 'hang') {
   process.exit(3);
 } else if (mode === 'seed') {
   record({ generation: await generate() });
-} else if (mode === 'missing') {
+} else if (mode === 'missing' || mode === 'blocked' || mode === 'blocked-outside-case') {
   record({});
-  process.stdout.write(`${repairing ? 'generator_write_test: No test runner found.' : 'generator_setup_page: The seed could not pause.'} Key ${env.OPENROUTER_API_KEY}; account ${env.PERPETUAL_ACCOUNT_PASSWORD}\n`);
+  if (!requestedMode.startsWith('trace-')) process.stdout.write(`${repairing ? 'generator_write_test: No test runner found.' : 'generator_setup_page: The seed could not pause.'} Key ${env.OPENROUTER_API_KEY}; account ${env.PERPETUAL_ACCOUNT_PASSWORD}\n`);
 } else {
   record({});
-  process.stdout.write(`Using ${env.OPENROUTER_API_KEY}\n`);
+  if (!requestedMode.startsWith('trace-')) process.stdout.write(`Using ${env.OPENROUTER_API_KEY}\n`);
   if (mode === 'tamper') { chmodSync(env.PERPETUAL_CASE!, 0o644); writeFileSync(env.PERPETUAL_CASE!, '{}'); }
   write(mode === 'repair' && !repairing ? 'tests/rename-the-display-name.spec.ts' : target, mode === 'invalid' || mode === 'repair' && !repairing ? invalid() : valid());
+}
+if (requestedMode.startsWith('trace-') && mode.startsWith('blocked')) {
+  console.log(JSON.stringify({type:'text',part:{type:'text',text:JSON.stringify({perpetual_blocker:{milestone:mode==='blocked-outside-case'?12:2,kind:'request-unobserved'}}),time:{start:Date.now(),end:Date.now()}}}));
+  console.log(JSON.stringify({type:'step_finish',timestamp:Date.now(),part:{type:'step-finish',reason:'stop',cost:0.001,tokens:{input:11,output:12,reasoning:0,cache:{read:0,write:0}}}}));
 }

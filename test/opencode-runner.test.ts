@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOpencodeRunner, openrouterRefusal, type RunFailure } from '../src/agents/opencode.ts';
+import { captureAuthoringEvidence } from '../src/agents/authoring-evidence.ts';
+import { hide } from '../src/redaction.ts';
 
 const refusal = 'This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.';
 const advice = 'Wait for active OpenRouter requests to finish or add credits, then try again.';
@@ -177,6 +179,79 @@ for (const ignoreTermination of [false, true]) test(`deadline and cleanup owners
 
 const jsonTool=(tool='playwright-test_browser_click',status='completed')=>JSON.stringify({type:'tool_use',timestamp:1700000000000,sessionID:'ses_private',part:{id:'prt_private',type:'tool',tool,callID:'private-call',state:{status,input:{url:'https://private.invalid/account',password:'personal-password'},output:'Private page and account contents',time:{start:1700000000000,end:1700000000001}}}})+'\n';
 const jsonFinish=JSON.stringify({type:'step_finish',timestamp:1700000000002,part:{type:'step-finish',reason:'stop',cost:0.001,tokens:{input:10,output:20,reasoning:2,cache:{read:3,write:0}}}})+'\n';
+const jsonText=(text:string)=>JSON.stringify({type:'text',part:{type:'text',text,time:{start:1700000000000,end:1700000000001}}})+'\n';
+const blockerText='{"perpetual_blocker":{"milestone":2,"kind":"request-unobserved"}}';
+
+test('a completed final model report retains only its fixed blocker category and milestone',async t=>{
+  const report=jsonText(blockerText);
+  const result=await capture(t,[jsonText('Private page and account contents'),report.slice(0,55),report.slice(55),jsonFinish],{structuredOutput:true});
+  assert.deepEqual(result.evidence.reportedBlocker,{milestone:2,kind:'request-unobserved'});
+  assert.equal(result.output,'');
+  assert.ok(!JSON.stringify(result).includes('Private page'));
+});
+
+test('model stop reports reject prose, unknown values and incomplete or excess fields',()=>{
+  for(const text of [
+    'Blocked: '+blockerText, '```json\n'+blockerText+'\n```', blockerText+'{}',
+    '{"perpetual_blocker":{"milestone":0,"kind":"request-unobserved"}}',
+    '{"perpetual_blocker":{"milestone":13,"kind":"request-unobserved"}}',
+    '{"perpetual_blocker":{"milestone":1.5,"kind":"request-unobserved"}}',
+    '{"perpetual_blocker":{"milestone":2,"kind":"private account"}}',
+    '{"perpetual_blocker":{"milestone":2,"kind":"request-unobserved","detail":"Private page"}}',
+    '{"perpetual_blocker":{"milestone":2,"kind":"request-unobserved"},"account":"private"}',
+  ]){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonText(text)+jsonFinish,'stdout');
+    assert.equal(evidence.finish('completed').reportedBlocker,undefined,text);
+  }
+  const hidden=captureAuthoringEvidence(hide(['request-unobserved']));hidden.write(jsonText(blockerText)+jsonFinish,'stdout');
+  assert.equal(hidden.finish('completed').reportedBlocker,undefined,'Supplied values are hidden before projecting the report.');
+});
+
+test('a model report is not terminal after more activity, partial metadata or a stopped process',()=>{
+  const report=jsonText(blockerText);
+  for(const after of [jsonTool(),JSON.stringify({type:'step_start',part:{type:'step-start'}})+'\n',jsonText('Continuing exploration'),jsonText('x'.repeat(70000)),jsonText('x'.repeat(1100000))]){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(report+after+jsonFinish,'stdout');
+    assert.equal(evidence.finish('completed').reportedBlocker,undefined);
+  }
+  for(const outcome of ['failed','cancelled','timed-out'] as const){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(report+jsonFinish,'stdout');
+    assert.equal(evidence.finish(outcome).reportedBlocker,undefined);
+  }
+  for(const text of [report,report+jsonFinish+'{"type":"text"',JSON.stringify({type:'text',part:{type:'text',text:blockerText}})+'\n'+jsonFinish,JSON.stringify({type:'text',part:{type:'text',text:blockerText,time:{end:0}}})+'\n'+jsonFinish]){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(text,'stdout');
+    assert.equal(evidence.finish('completed').reportedBlocker,undefined);
+  }
+});
+
+test('a final blocker needs stop metadata after its own report, never a previous step',()=>{
+  const evidence=captureAuthoringEvidence(hide([]));
+  evidence.write(jsonFinish+JSON.stringify({type:'step_start',part:{type:'step-start'}})+'\n'+jsonText(blockerText),'stdout');
+  const result=evidence.finish('completed');
+  assert.equal(result.reportedBlocker,undefined);
+  assert.equal(result.reportedFinishReason,'stop','The last observed finish metadata stays truthful.');
+});
+
+test('a blocker cannot survive malformed output or an earlier gap in the scanned stream',()=>{
+  for(const output of [jsonText(blockerText)+jsonFinish+'{"type":"text"\n',jsonText('x'.repeat(70000))+jsonText(blockerText)+jsonFinish]){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(output,'stdout');
+    assert.equal(evidence.finish('completed').reportedBlocker,undefined);
+  }
+});
+
+test('later incomplete or non-stop step metadata disqualifies an earlier report',()=>{
+  for(const finish of [{type:'step_finish'},{type:'step_finish',part:{type:'wrong'}},{type:'step_finish',part:{type:'step-finish',reason:'length'}}]){
+    const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonText(blockerText)+jsonFinish+JSON.stringify(finish)+'\n'+jsonFinish,'stdout');
+    assert.equal(evidence.finish('completed').reportedBlocker,undefined);
+  }
+});
+
+test('the tool-event retention limit does not discard a fully scanned final report',()=>{
+  const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonTool().repeat(65)+jsonText(blockerText)+jsonFinish,'stdout');
+  const result=evidence.finish('completed');
+  assert.equal(result.eventsTruncated,true);assert.equal(result.events.length,64);
+  assert.deepEqual(result.reportedBlocker,{milestone:2,kind:'request-unobserved'});
+});
+
 test('a JSON tool failure retains its safe category after the event limit, never its page or error text',async t=>{
   const failure=JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_handle_dialog',state:{status:'error',error:'Error: No dialog visible\nPrivate account contents and personal-password',input:{password:'personal-password'}}}})+'\n';
   const result=await capture(t,[jsonTool().repeat(65),failure,jsonFinish],{structuredOutput:true});

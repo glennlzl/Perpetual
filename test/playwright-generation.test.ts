@@ -829,6 +829,31 @@ test('successful authoring survives workspace removal and restart as private sco
   assert.equal((await lines(f.log)).length,1,'Reading diagnostics and restarting perform no paid work.');
 });
 
+for(const mode of ['trace-blocked','trace-blocked-code'])test(`a generator-reported blocker rejects code without a paid retry and survives restart: ${mode}`,async t=>{
+  const f=await setup(t,{mode});await f.manager.saveSpec(f.context,{caseId:journey.id,code:codeFor(journey)});
+  const before=(await f.manager.specCode(f.context,{caseId:journey.id})).draft;
+  await f.manager.generateSpec(f.context,{caseId:journey.id});const spec=await settled(f);
+  assert.equal(spec?.generation?.status,'failed');
+  assert.match(spec?.generation?.error??'',/generator reported .*milestone 2/i);
+  assert.equal(spec?.draft?.hash,before?.hash);assert.equal(spec?.approved,undefined);
+  const reply=await f.manager.specCode(f.context,{caseId:journey.id});
+  assert.deepEqual(reply.draft,before);
+  assert.equal(reply.authoring?.[0].outcome,'failed');
+  assert.deepEqual(reply.authoring?.[0].attempts[0].reportedBlocker,{milestone:2,kind:'request-unobserved'});
+  assert.equal(reply.authoring?.[0].outputHash,null);
+  assert.equal((await lines(f.log)).length,1,'Reporting a blocker does not start grammar repair or another model call.');
+  assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[]);
+  await f.manager.close();const restart=await createBrowserManager(f.options());t.after(()=>restart.close());
+  assert.deepEqual(await restart.specCode(f.context,{caseId:journey.id}),reply);
+});
+
+test('a generator report outside this reviewed case stays unknown rather than inventing a milestone',async t=>{
+  const f=await setup(t,{mode:'trace-blocked-outside-case'});await f.manager.generateSpec(f.context,{caseId:journey.id});const spec=await settled(f);
+  assert.equal(spec?.generation?.status,'failed');assert.match(spec?.generation?.error??'',/No test file/);
+  assert.equal((await f.manager.specCode(f.context,{caseId:journey.id})).authoring?.[0].attempts[0].reportedBlocker,undefined);
+  assert.equal((await lines(f.log)).length,1);
+});
+
 for(const mode of ['trace-repair','trace-invalid','trace-fail','trace-missing'])test(`authoring retains grammar repair and failed harness evidence: ${mode}`,async t=>{
   const f=await setup(t,{mode});await f.manager.generateSpec(f.context,{caseId:journey.id});const spec=await settled(f);
   const records=(await f.manager.specCode(f.context,{caseId:journey.id}) as unknown as {authoring?:import('../contract/authoring.ts').AuthoringRecord[]}).authoring;
