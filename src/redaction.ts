@@ -5,10 +5,11 @@
 
 export const REDACTED = '[REDACTED]';
 // Credential names, found inside a longer name such as STRIPE_SECRET_KEY; a short one, PASS or PWD, only where a name
-// ends, so BYPASS and PASS_COUNT are not one. Redaction also hides a name that ends in KEY, such as ENCRYPTION_KEY,
-// which the change and request rules leave to ordinary values such as a cache key.
+// ends, so BYPASS and PASS_COUNT are not one. Redaction also hides the keys that read as secrets, such as ENCRYPTION_KEY
+// or SUPABASE_SERVICE_ROLE_KEY, which the change and request rules leave to ordinary values; a key that is no secret,
+// such as a primary, foreign, cache or publishable key, is ordinary text.
 const NAMES = 'token|secret|password|passphrase|(?<![a-z])(?:pass|pwd)(?![\\w-])|api[-_]?key|access[-_]?(?:key|token)|private[-_]?key|authorization';
-const SECRET_NAMES = `${NAMES}|[-_]key(?![\\w-])`;
+const SECRET_NAMES = `${NAMES}|(?:encryption|signing|master|license|service[-_]?role|hmac|jwt)[-_]?key`;
 const PRIVATE_KEY = '[A-Z ]*PRIVATE KEY(?: BLOCK)?';
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
 const PEM = new RegExp(`-----BEGIN (?:${PRIVATE_KEY}|CERTIFICATE)-----[\\s\\S]*?(?:-----END (?:${PRIVATE_KEY}|CERTIFICATE)-----|(?![\\s\\S]))`, 'g');
@@ -19,12 +20,16 @@ const QUOTED_KEY = new RegExp(`(\\\\?["'])([\\w-]*(?:${SECRET_NAMES})[\\w-]*)\\1
 // annotation is set to (`password: string = "…"`).
 const QUOTED_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'`, WORD = `["']*[^\\s,;"']+(?:[,;"']+[^\\s,;"']+)*`;
 const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${SECRET_NAMES})[\\w-]*\\s*[=:]\\s*)(?:${QUOTED_VALUE}|${WORD}(?:[ \\t]*=[ \\t]*(?:${QUOTED_VALUE}))?)`, 'gi');
-// An env-file or YAML line: an unquoted value runs on over spaces, up to the next name set with = or :.
-const LINE_VALUE = new RegExp(`^([ \\t]*(?:export[ \\t]+|-[ \\t]+)?[\\w-]*(?:${SECRET_NAMES})[\\w-]*[ \\t]*[=:][ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
+// A YAML line: an unquoted value runs on over spaces, up to the next name set with = or :. A shell line's value ends at
+// its first space, where its command starts (`NPM_TOKEN=… npm publish`).
+const LINE_VALUE = new RegExp(`^([ \\t]*(?:-[ \\t]+)?[\\w-]*(?:${SECRET_NAMES})[\\w-]*[ \\t]*:[ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
 const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
 const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
-// An Authorization value of any scheme, through the end of its line or its closing quote.
-const AUTHORIZATION = /(Authorization\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"'][^\r\n"']*)/gi;
+// An Authorization value of any scheme. On a header line, at the start of a line or a quoted string, it runs through the
+// end of the line or the closing quote. Elsewhere, as in code, it is a quoted value, or a scheme and its credential up to
+// the space, ; , ) or } that ends the expression.
+const AUTHORIZATION_HEADER = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[^\s"'][^\r\n"']*/gim;
+const AUTHORIZATION = /(Authorization\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
 const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
@@ -74,6 +79,7 @@ export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?:
   return (decodeUri ? decodedUri(String(input)) : String(input))
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block))
+    .replace(AUTHORIZATION_HEADER, `$1${REDACTED}`)
     .replace(AUTHORIZATION, `$1${REDACTED}`)
     .replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`)
     .replace(QUOTED_KEY, `$1$2$1$3$4${REDACTED}$4`)
