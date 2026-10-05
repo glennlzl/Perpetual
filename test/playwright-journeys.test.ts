@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
 import type {AddressInfo} from 'node:net';
 import {createBrowserManager} from '../src/browser/manager.ts';
-import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
+import {createPlaywrightRuntime,headlessChromiumPath} from '../src/journeys/playwright/runtime.ts';
 import {specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
 import {journeyResult} from '../src/browser/results.ts';
 import type {BrowserManager,BrowserStageContext} from '../src/browser/manager.ts';
@@ -657,6 +657,13 @@ test('a number is read after its label standing on its own, never after a longer
   const balance={...cart,steps:[{...cart.steps[0],checks:[{type:'read-number' as const,label:'Balance',name:'balance'}]}]};
   const failed=(await runSpec(target,code,{item:balance})).find(event=>event.type==='journey-step'&&event.status!=='running') as RunEvent&{checks?:{passed:boolean;error?:string}[]};
   assert.deepEqual([failed?.status,failed?.checks?.map(check=>[check.passed,check.error])],['failed',[[false,'The number after this label is in an unsupported format.']]]);
+});
+
+test('the Chromium preflight checks the build a journey launches, not the full browser',{timeout:60000},async()=>{
+  const {chromium}=await import('@playwright/test');
+  const server=await chromium.launchServer({headless:true});
+  try{assert.equal(server.process().spawnfile,headlessChromiumPath());}finally{await server.close();}
+  assert.notEqual(headlessChromiumPath(),chromium.executablePath());
 });
 
 test('a journey given no recording folder records no video',{timeout:120000},async t=>{

@@ -35,6 +35,17 @@ const require = createRequire(import.meta.url);
 export const PLAYWRIGHT_CLI = require.resolve('@playwright/test/cli');
 export const PLAYWRIGHT_VERSION = String(require('@playwright/test/package.json').version);
 const fixture = new URL('./fixture.ts', import.meta.url).href, reporter = fileURLToPath(new URL('./reporter.ts', import.meta.url));
+/**
+ * The Chromium a journey launches: headless with no channel, which is Playwright's headless shell rather than the full
+ * browser chromium.executablePath() names. The pinned Playwright's registry finds it; its untyped export is checked.
+ */
+export function headlessChromiumPath(): string {
+  const bundle: unknown = createRequire(require.resolve('@playwright/test'))('playwright-core/lib/coreBundle');
+  const registry = (bundle as { registry?: { registry?: { findExecutable?: (name: string) => { executablePath?: () => unknown } | undefined } } } | null)?.registry?.registry;
+  const path = registry?.findExecutable?.('chromium-headless-shell')?.executablePath?.();
+  if (typeof path !== 'string') throw new Error("Playwright's browser registry is unavailable. Run npm install.");
+  return path;
+}
 const VIEWPORT = { width: 1280, height: 800 };
 const TOKEN_LETTERS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 /** A run's token, journey.run: 8 random lowercase letters or digits, new for every journey process. */
@@ -97,8 +108,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
   return {
     async capabilities(): Promise<PlaywrightCapabilities> {
       if (!preflight || Date.now() - checkedAt > 15000) {
-        const { chromium } = await import('@playwright/test');
-        preflight = { runtimeInstalled: true, browserInstalled: await access(chromium.executablePath()).then(() => true, () => false) };
+        preflight = { runtimeInstalled: true, browserInstalled: await access(headlessChromiumPath()).then(() => true, () => false) };
         checkedAt = Date.now();
       }
       return preflight;
