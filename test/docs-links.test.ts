@@ -37,3 +37,9 @@ test('the gate documents name every gate Badge the pipeline shows, Build admissi
     assert.deepEqual([...new Set(Object.values(GATE_LABELS))].filter(label => !text.includes(`\`${label}\``)), [], file);
   }
 });
+
+test('no current document says Perpetual renews a provisioned sandbox: only a person provisions one again', async () => {
+  for (const file of ['CHANGELOG.md', 'README.md', ...await documents('docs')]) {
+    assert.doesNotMatch(await readFile(join(root, file), 'utf8'), /(?<!never )\brenews\b/, file);
+  }
+});
