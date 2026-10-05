@@ -160,6 +160,16 @@ test('a stop rejects the attempt; an OpenRouter refusal returns what a person do
   assert.ok(outage.error && !outage.error.includes(KEY), 'Provider errors are redacted.');
 });
 
+test('an attempt reports its usage after each step, so one that is stopped still says what it cost', async t => {
+  const f = await workspace(t);
+  const stop = new AbortController(), usage: { inputTokens: number; outputTokens: number; cost: number }[] = [];
+  const listing = (cost: number): ScriptedStep => ({ calls: [{ tool: 'list', input: {} }], cost });
+  const running = runAttempt({ model: scriptedModel([listing(0.25), listing(0.5), { hang: true }]), box: f.box, prompt: 'x', signal: stop.signal,
+    onStep: step => { usage.push(step); if (usage.length === 2) stop.abort(new Error('Stopped.')); } });
+  await assert.rejects(running, /Stopped\./);
+  assert.deepEqual(usage, [{ inputTokens: 100, outputTokens: 20, cost: 0.25 }, { inputTokens: 200, outputTokens: 40, cost: 0.75 }]);
+});
+
 test('a box removed for writing too much ends the attempt with why, whatever the model does', async t => {
   const f = await workspace(t);
   const removed = new AbortController();

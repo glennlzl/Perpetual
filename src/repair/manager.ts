@@ -70,10 +70,12 @@ export interface RepairOutcome { status: 'ready' | 'merged' | 'failed' | 'needs-
  * triage failures (jobs, failed steps, redacted log and diagnosis), the account and the managed source copy.
  * directory is <dataDir>/repairs/<id> (0700), owned until resource cleanup succeeds. report()
  * rejects once the repair stopped; a push or pull request it names is still recorded first, and the pull request stays
- * open, and so is a merge. repair.pushed is what an earlier repair of the same commit last pushed. autoMerge() reads the
- * pipeline's auto-merge switch, the Build stage's Autopilot mode, when it is called.
+ * open, and so is a merge, and its attempts with what they cost. repair.pushed is what an earlier repair of the same
+ * commit last pushed. autoMerge() reads the pipeline's auto-merge switch, the Build stage's Autopilot mode, when it is
+ * called. spendable, for a repair Autopilot started by itself, is the dollars left of its pipeline's daily cost cap,
+ * which bounds it below its own cap.
  */
-export interface RepairContext { repair: Repair; directory: string; report(progress: RepairProgress): Promise<void>; autoMerge(): boolean }
+export interface RepairContext { repair: Repair; directory: string; report(progress: RepairProgress): Promise<void>; autoMerge(): boolean; spendable?: number }
 export interface RepairSteps {
   /** Why the agent cannot start, such as a missing OpenRouter API key; empty when it can. */
   unavailable?(): string | null | undefined | Promise<string | null | undefined>;
@@ -113,8 +115,11 @@ export interface RepairView { repairs: PublicRepair[]; head?: { sha: string; bra
 type Managed = RepairSource & { repository: string; branch: string; checkoutPath: string; rootDirectory: string };
 type Connection = { login: string; repository: string };
 type Followed = { branch: string; login: string; sha: string; read: Set<string>; waits: number };
-/** autoMerge holds the auto-merge switch per pipeline key; a pipeline without an entry merges. */
-interface RepairState { version: 1; repairs: Repair[]; autoMerge?: Record<string, boolean> }
+/**
+ * autoMerge holds the auto-merge switch per pipeline key; a pipeline without an entry merges. passed holds, per pipeline
+ * key, when a watched head last passed, which ends a run of failed repairs.
+ */
+interface RepairState { version: 1; repairs: Repair[]; autoMerge?: Record<string, boolean>; passed?: Record<string, string> }
 
 export const ACTIVE: readonly RepairStatus[] = Object.freeze(['triaging', 'rerunning', 'repairing', 'verifying-ci', 'verifying-gates']);
 const STATUSES: Record<RepairStatus, true> = { triaging: true, rerunning: true, repairing: true, 'verifying-ci': true, 'verifying-gates': true, ready: true, merged: true, flaky: true, 'needs-person': true, failed: true, superseded: true, cancelled: true };
@@ -144,6 +149,12 @@ const LIMIT = 100;
 const READ_LIMIT = 128 * 1024 * 1024, SAVE_LIMIT = 8 * 1024 * 1024;
 /** Checks a failing head waits for the loop guard to judge it before it needs a person. */
 const GUARD = 10;
+/**
+ * Repairs of one failure that failed in a row before Autopilot opens the next for a person, without the agent, and
+ * the dollars a pipeline's repairs may cost in a day before Autopilot starts no more of them by itself.
+ */
+export const BREAKER = 3, DAILY_COST = 10;
+const DAY = 24 * 60 * 60_000;
 const RUN_ID = /^\d{1,20}$/;
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string';
@@ -166,6 +177,7 @@ const validSha = (value: unknown): value is string => isText(value) && SHA.test(
 const validGates = (value: unknown): value is RepairGate[] => Array.isArray(value) && value.length <= 24 && value.every(item => isRecord(item)
   && isText(item.gateId) && item.gateId.length <= 64 && isText(item.stageId) && item.stageId.length <= 200 && validSha(item.sha) && isText(item.status) && /^[a-z-]{1,20}$/.test(item.status));
 const validAutoMerge = (value: unknown): value is Record<string, boolean> => isRecord(value) && Object.values(value).every(item => typeof item === 'boolean');
+const validPassed = (value: unknown): value is Record<string, string> => isRecord(value) && Object.values(value).every(isText);
 /** A stored repair with every field detection, triage and the view read. */
 const validRepair = (value: unknown): value is Repair => isRecord(value)
   && (['id', 'key', 'repository', 'branch', 'sha', 'login', 'checkoutPath', 'rootDirectory', 'createdAt', 'updatedAt'] as const).every(field => isText(value[field]))
@@ -219,8 +231,9 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   let state: RepairState = { version: 1, repairs: [] };
   const saved = await readStateFile(file, { limit: READ_LIMIT, invalid: 'Unsupported repair state.' });
   if (saved !== undefined) {
-    if (!isRecord(saved) || saved.version !== 1 || !Array.isArray(saved.repairs) || !saved.repairs.every(validRepair) || saved.autoMerge !== undefined && !validAutoMerge(saved.autoMerge)) throw new Error('Unsupported repair state.');
-    state = { version: 1, repairs: saved.repairs, ...(saved.autoMerge ? { autoMerge: saved.autoMerge } : {}) };
+    if (!isRecord(saved) || saved.version !== 1 || !Array.isArray(saved.repairs) || !saved.repairs.every(validRepair) || saved.autoMerge !== undefined && !validAutoMerge(saved.autoMerge)
+      || saved.passed !== undefined && !validPassed(saved.passed)) throw new Error('Unsupported repair state.');
+    state = { version: 1, repairs: saved.repairs, ...(saved.autoMerge ? { autoMerge: saved.autoMerge } : {}), ...(saved.passed ? { passed: saved.passed } : {}) };
   }
   // Work the controller stopped during is never resumed: a restart starts no paid work, and its pull request stays open.
   // One whose pull request merged before the restart is merged.
@@ -296,6 +309,35 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const verified = (repair: Repair) => repair.status === 'ready' && repair.pullRequest?.draft === false;
   // The auto-merge switch of a pipeline, on until a person chooses Ask first.
   const autoMerge = (key: string) => !state.autoMerge || !Object.hasOwn(state.autoMerge, key) || state.autoMerge[key];
+  // The failure a repair is of, as triage read it and a finished repair keeps it in brief: each failed workflow with the
+  // steps its jobs failed at and its diagnosis.
+  const failureOf = (repair: Repair) => JSON.stringify((repair.failures ?? []).slice(0, 5).map(brief).map(failure => [
+    repair.runs.find(run => run.id === failure.runId)?.path ?? '', failure.diagnosis.category,
+    failure.jobs.filter(job => job.failedSteps.length).map(job => [job.name, ...job.failedSteps].join('\n')).sort(),
+  ]).sort());
+  // Why a repair Autopilot opened by itself goes to a person: the repairs of the same failure before it, of its pipeline
+  // and branch since a head last passed, failed BREAKER times in a row, every attempt of each failing. A repair the agent
+  // never tried, one a person or a newer head stopped and one a restart or an error cut short neither count nor end the
+  // run; a fix, or a repair of another failure, ends it.
+  function breaker(repair: Repair) {
+    const failure = failureOf(repair), since = state.passed?.[repair.key] ?? '';
+    let count = 0;
+    for (const item of state.repairs) {
+      if (item === repair || item.key !== repair.key || item.branch !== repair.branch) continue;
+      if (item.createdAt <= since || item.status === 'ready' || item.status === 'merged') break;
+      if (item.status !== 'failed' && item.status !== 'needs-person' || !item.attempts?.length || !item.attempts.every(attempt => attempt.failure)) continue;
+      if (failureOf(item) !== failure) break;
+      if (++count < BREAKER) continue;
+      return `The last ${BREAKER} repairs of ${[...new Set(repair.runs.map(run => run.name || run.path || run.id))].slice(0, 3).join(', ')} failed. Start Repair to try again.`;
+    }
+    return null;
+  }
+  // What a pipeline's repairs cost in the last day, from their attempts, one cut short included.
+  const spentToday = (key: string) => {
+    const since = Date.parse(now()) - DAY;
+    return state.repairs.filter(repair => repair.key === key).flatMap(repair => repair.attempts ?? [])
+      .filter(attempt => !(Date.parse(attempt.startedAt) < since)).reduce((total, attempt) => total + (attempt.cost ?? 0), 0);
+  };
 
   // A repair of a commit an earlier repair pushed for continues its branch from that push.
   function open(current: Managed, login: string, sha: string, runs: readonly WorkflowRun[], trigger: Repair['trigger']) {
@@ -428,10 +470,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const opened = fields.pullRequest && fields.pullRequest.url !== repair.pullRequest?.url ? fields.pullRequest : null;
     if (closed || signal.aborted || !ACTIVE.includes(repair.status)) {
       // A push, pull request or merge the step made while it unwinds is still recorded, never left unseen: a pull request
-      // stays open, and a merged one makes the repair merged, whatever stopped it.
-      const { pushed, merged } = fields;
-      if (opened || pushed || merged) {
-        Object.assign(repair, opened ? { pullRequest: opened } : {}, pushed ? { pushed } : {}, merged ? { merged, status: 'merged', completedAt: repair.completedAt ?? now() } : {}, { updatedAt: now() });
+      // stays open, and a merged one makes the repair merged, whatever stopped it. So are its attempts, with what one cut
+      // short cost, which the pipeline's daily cost cap counts.
+      const { pushed, merged, attempts } = fields;
+      if (opened || pushed || merged || attempts) {
+        Object.assign(repair, opened ? { pullRequest: opened } : {}, pushed ? { pushed } : {}, attempts ? { attempts } : {}, merged ? { merged, status: 'merged', completedAt: repair.completedAt ?? now() } : {}, { updatedAt: now() });
         if (merged) delete repair.reason;
         if (opened) prune(repair);
         await persist();
@@ -473,11 +516,21 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       const agent = steps.repair, blocked = await steps.unavailable?.() || (agent ? null : NO_AGENT);
       if (!live()) return;
       if (blocked || !agent) return await settle(repair, 'needs-person', text(blocked || NO_AGENT));
+      // A repair Autopilot opened by itself waits for a person, without the agent, after its failure's breaker or once
+      // its pipeline's repairs cost the daily cap; a person's Repair still starts. One that starts spends no more than
+      // what is left of that cap.
+      let spendable: number | undefined;
+      if (repair.trigger === 'push') {
+        const held = breaker(repair);
+        if (held) return await settle(repair, 'needs-person', held);
+        spendable = DAILY_COST - spentToday(repair.key);
+        if (spendable <= 0) return await settle(repair, 'needs-person', `Repairs reached this pipeline's $${DAILY_COST.toFixed(2)} daily cost cap. Start Repair to try again.`);
+      }
       if (steps.cleanup) { repair.cleanup = { status: 'pending' }; await persist(); }
       const directory = await workspace(repair.id);
       if (!live() || !await connected()) return;
       await transition(repair, 'repairing');
-      const outcome: unknown = await agent({ repair: structuredClone(repair), directory, report: progress => report(repair, signal, progress), autoMerge: () => autoMerge(repair.key) }, signal);
+      const outcome: unknown = await agent({ repair: structuredClone(repair), directory, report: progress => report(repair, signal, progress), autoMerge: () => autoMerge(repair.key), ...(spendable === undefined ? {} : { spendable }) }, signal);
       if (isRecord(outcome) && outcome.status === 'merged' && validSha(outcome.merged)) repair.merged = outcome.merged.toLowerCase();
       if (!live()) return;
       if (!isRecord(outcome) || !isText(outcome.status) || !OUTCOMES.has(outcome.status) || outcome.status === 'merged' && !validSha(outcome.merged)) return await settle(repair, 'needs-person', 'The repair ended without a result.');
@@ -593,12 +646,15 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const completed = completedRuns(latest, current.branch);
     if (!completed) return;
     if (completed.passed) {
+      // A head that passed ends a run of failed repairs, which the breaker counts.
+      const fresh = passing.get(current.key) !== sha;
+      if (fresh) state.passed = { ...state.passed, [current.key]: now() };
       passing.set(current.key, sha);
       // A repair is retired only once each workflow whose failure it fixes passed at this head; one that did not run
       // here, such as one its paths filter skipped, has not shown the branch fixed, so the fix stays open.
       const retired = stale().filter(repair => repair.runs.every(item => !item.path || latest.some(run => run.path === item.path && passedRun(run))));
       for (const repair of retired) retire(repair, sha);
-      if (retired.length) await persist();
+      if (retired.length || fresh) await persist();
       closeQueued();
       return;
     }

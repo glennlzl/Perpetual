@@ -21,7 +21,7 @@ const LOGS = {
 };
 const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: 'perpetual/repair/bbbbbbb' };
 type HttpError = Error & { statusCode?: number };
-type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean> };
+type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean>; passed?: Record<string, string> };
 const run = (id: string, sha: string, conclusion: string | null, { status = conclusion ? 'completed' : 'in_progress', attempt = 1, path = CI, branch = 'main', event = 'push' } = {}): WorkflowRun =>
   ({ id, workflowId: path === LINT ? '8' : '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 // A failed run as the view names it.
@@ -57,9 +57,10 @@ function agent(behaviour: (context: RepairContext, signal: AbortSignal) => Promi
 }
 
 // Injected source and GitHub record what the manager read; nothing reaches the network, a model or Docker.
-async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' } }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null } = {}) {
+// clock: the milliseconds after 10:00 its clock starts at, such as a later start of the same controller.
+async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' }, clock = 0 }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null; clock?: number } = {}) {
   const dir = dataDir ?? await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
-  let tick = 0;
+  let tick = clock;
   const now = () => new Date(Date.UTC(2026, 8, 25, 10, 0, 0, tick++)).toISOString();
   const current: RepairSource = { key: KEY, branch: 'main', repository: 'owner/app', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/' };
   // hold, while set, keeps failure reads waiting; onRuns runs, and is awaited, within each runs read.
@@ -693,6 +694,93 @@ test('a stopped rerun stays stopped when its attempt passes', async t => {
   h.github.runs[B] = [run('2', B, 'success', { attempt: 2 })];
   await h.poll();
   assert.equal(h.repair(B)?.status, 'cancelled');
+});
+
+// An agent step whose one attempt fails, as the agent step records it, costing `cost` dollars; the repair ends failed.
+const fruitless = (cost = 0.5) => agent(async context => {
+  const at = '2026-09-25T10:00:00.000Z';
+  await context.report({ attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: at, completedAt: at, failure: 'The model stopped without calling done.', cost }] });
+  return { status: 'failed', reason: 'The build was not fixed in 4 attempts.' };
+});
+// Failing heads one after another, each repair ending before the next head.
+async function failHeads(h: Awaited<ReturnType<typeof harness>>, heads: [string, WorkflowRun[]][]) {
+  for (const [sha, runs] of heads) { await h.failHead(runs, sha); await h.manager.idle(); }
+}
+
+test('after three repairs of the same failure failed in a row, the next waits for a person without the agent, who may still start Repair', async t => {
+  const a = fruitless();
+  const h = await harness(t, { steps: a.steps });
+  await failHeads(h, [[B, [run('2', B, 'failure')]], [C, [run('3', C, 'failure')]], [D, [run('4', D, 'failure')]]]);
+  assert.deepEqual([h.repair(D)?.status, a.contexts.length], ['failed', 3]);
+  await failHeads(h, [[E, [run('5', E, 'failure')]]]);
+  assert.deepEqual([h.repair(E)?.status, h.repair(E)?.reason, a.contexts.length], ['needs-person', 'The last 3 repairs of CI failed. Start Repair to try again.', 3], 'The agent does not start.');
+  assert.deepEqual([h.calls.failures, h.manager.view().head?.failed], [['2', '3', '4', '5'], [shown('5')]], 'Triage still read the failure, and Build offers Repair.');
+  await h.manager.repair({ runId: '5' });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(E)?.trigger, h.repair(E)?.status, a.contexts.length], ['person', 'failed', 4], 'A person\'s Repair starts the agent.');
+});
+
+test('a run of failed repairs ends at a head that passed, remembered across a restart, and at a repair of another failure', async t => {
+  const [F, G, H, I, J] = ['1', '2', '3', '4', '5'].map(digit => digit.repeat(40));
+  const a = fruitless();
+  const h = await harness(t, { steps: a.steps });
+  await failHeads(h, [[B, [run('2', B, 'failure')]], [C, [run('3', C, 'failure')]], [D, [run('4', D, 'failure')]]]);
+  h.github.head = E;
+  h.github.runs[E] = [run('5', E, 'success')];
+  await h.poll();
+  assert.equal(typeof (await h.saved()).passed?.[KEY], 'string', 'The pass is kept with the repairs.');
+  await failHeads(h, [[F, [run('6', F, 'failure')]]]);
+  assert.deepEqual([h.repair(F)?.status, a.contexts.length], ['failed', 4], 'The same failure after a pass is a new run.');
+  await h.manager.close();
+  const b = fruitless();
+  const restarted = await harness(t, { dataDir: h.dataDir, steps: b.steps, clock: 60_000 });
+  // F and G are two failed repairs of CI since the pass; Lint's at H ends that run, so I and J make two again.
+  await failHeads(restarted, [[G, [run('7', G, 'failure')]], [H, [run('8', H, 'failure', { path: LINT })]], [I, [run('9', I, 'failure')]], [J, [run('10', J, 'failure')]]]);
+  assert.deepEqual([G, H, I, J].map(sha => restarted.repair(sha)?.status), ['failed', 'failed', 'failed', 'failed']);
+  assert.equal(b.contexts.length, 4, 'Every run ended before it reached three.');
+});
+
+test('once a pipeline\'s repairs cost $10 in a day, a failing head\'s repair waits for a person, whose Repair may spend past it', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:30:00.000Z', yesterday = '2026-09-24T09:30:00.000Z';
+  const attempt = (startedAt: string, cost: number) => ({ number: 1, model: 'openai/gpt-6-luna', startedAt, completedAt: startedAt, cost });
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'merged', runs: [], createdAt: at, updatedAt: at };
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [
+    { ...base, id: 'today', sha: '5'.repeat(40), merged: '6'.repeat(40), attempts: [attempt(at, 6), attempt(at, 3)] },
+    { ...base, id: 'yesterday', sha: '7'.repeat(40), merged: '8'.repeat(40), attempts: [attempt(yesterday, 5)] },
+    { ...base, id: 'other', key: 'github:owner/other:/', repository: 'owner/other', sha: '9'.repeat(40), merged: '0'.repeat(40), attempts: [attempt(at, 5)] },
+  ] }));
+  // Each repair spends what it may: what is left of the cap for one Autopilot started, $2 for a person's.
+  const a = agent(async context => {
+    await context.report({ attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: '2026-09-25T10:00:00.000Z', cost: context.spendable ?? 2 }] });
+    return { status: 'ready' };
+  });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  await failHeads(h, [[B, [run('2', B, 'failure')]]]);
+  assert.deepEqual([h.repair(B)?.status, a.contexts[0].spendable], ['ready', 1], 'Only today\'s $9 of this pipeline counts, leaving $1.');
+  await failHeads(h, [[C, [run('3', C, 'failure')]]]);
+  assert.deepEqual([h.repair(C)?.status, h.repair(C)?.reason, a.contexts.length], ['needs-person', 'Repairs reached this pipeline\'s $10.00 daily cost cap. Start Repair to try again.', 1]);
+  await h.manager.repair({ runId: '3' });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(C)?.status, a.contexts.length, a.contexts[1].spendable], ['ready', 2, undefined], 'A person\'s Repair starts the agent, bounded by its own cap only.');
+});
+
+test('attempts a stopped repair reports while it unwinds are recorded with what they cost', async t => {
+  const started = '2026-09-25T10:00:00.000Z';
+  const a = agent(async (context, signal) => {
+    await context.report({ status: 'repairing', attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: started }] });
+    await aborted(signal);
+    await assert.rejects(context.report({ attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: started, completedAt: started, cost: 0.4 }] }), (error: HttpError) => error.statusCode === 409);
+    return { status: 'ready' };
+  });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'repairing');
+  await h.manager.stop({ id: h.repair(B)!.id });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.attempts], ['cancelled', [{ number: 1, model: 'openai/gpt-6-luna', cost: 0.4 }]]);
+  assert.equal((await h.saved()).repairs[0].attempts?.[0].cost, 0.4);
 });
 
 test('a controller restart ends active repairs as needing a person, keeps finished ones, and starts no work', async t => {

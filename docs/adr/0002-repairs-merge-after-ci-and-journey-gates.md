@@ -32,6 +32,7 @@ Guardrails:
    - A moved base is verified again. A new push therefore does not supersede a repair whose gates or merge are under way until that push passes (amended 2026-09-25).
 4. **Bounded.**
    - Four attempts, escalating the model after two, under a cost cap.
+   - A repair Perpetual opens by itself goes to a person, without the agent, after three repairs of the same failure failed in a row or once the pipeline's repairs cost a fixed daily cap, which also bounds what it spends; a person's Repair may still start it (amended 2026-10-05).
    - A failure of a commit Perpetual merged from a repair needs a person.
    - The agent never pushes the target branch.
 
