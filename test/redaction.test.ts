@@ -37,6 +37,10 @@ test('a long run of name characters is read once, so a log of hyphenated or base
     assert.ok(performance.now() - started < 2000, `${run.slice(0, 20)}… took ${Math.round(performance.now() - started)} ms`);
   }
   assert.equal(redact(`${'a-'.repeat(30000)} token=abc`), `${'a-'.repeat(30000)} token=${REDACTED}`, 'A name after the run is still found.');
+  // A run of spaces after a credential name is read once too, where a type annotation could start.
+  const spaced = `password:${' '.repeat(60000)}${'x'.repeat(60000)}`, started = performance.now();
+  hasCredential(spaced); hasCredential(spaced, { code: true });
+  assert.ok(performance.now() - started < 2000, `A run of spaces took ${Math.round(performance.now() - started)} ms`);
 });
 
 test('an Authorization value of any scheme and every part of a named value or URL user info are hidden', () => {
