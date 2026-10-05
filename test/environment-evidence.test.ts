@@ -309,6 +309,19 @@ test('the work list names each edge function, whether the twin serves it, and wh
   assert.match(section(evidenceText(facts, own), 'Unwired variables'), /- `edge\/supabase\/functions\/ping`: served; nothing unwired\n/);
 });
 
+test('a method called on process.env is no variable, and an example file is looked up by its own name only', async t => {
+  assert.deepEqual(readVariables("if (process.env.hasOwnProperty('CI')) log(process.env.toString?.(), import.meta.env.valueOf ());\nprocess.env.API_URL;"), ['API_URL']);
+  const { repo } = await fixture(t, {
+    'package.json': manifest('web', { express: '5.0.0' }, { start: 'node server.js' }),
+    'server.js': "if (process.env.hasOwnProperty('CI')) start();\nexport const api = process.env.API_URL, made = process.env.constructor;\n",
+    '.env.example': 'API_URL=\n',
+  });
+  const draft = JSON.stringify({ services: {}, apps: { web: { directory: '.', start: 'npm start', port: 3000 } } });
+  const list = section(evidenceText(await repositoryFacts({ source: repo, checkout: repo, draft }), draft), 'Unwired variables');
+  assert.match(list, /\n- API_URL: `server\.js:2`; in `\.env\.example`\n- constructor: `server\.js:2`\n/);
+  assert.doesNotMatch(list, /hasOwnProperty|native code/);
+});
+
 test('a config.toml beside functions is a Supabase-style project only when it reads as Supabase’s', async t => {
   const draft = JSON.stringify({ services: {}, apps: { site: { directory: '.', start: 'npm start', port: 3000 } } });
   // A site's own config.toml beside its serverless handlers: their reads are the app's.

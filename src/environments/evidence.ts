@@ -78,11 +78,12 @@ const PUBLIC_PREFIX = /^(?:NEXT_PUBLIC_|VITE_|REACT_APP_|EXPO_PUBLIC_|PUBLIC_|NU
 // A package.json script's variables: NAME=value before a command, and $NAME or ${NAME}; the shell's own are left out.
 const SCRIPT_VARIABLE = /(?:^|[\s;&|(])([A-Z][A-Z0-9_]*)=|\$\{?([A-Z][A-Z0-9_]*)/g, SHELL = new Set(['HOME', 'PATH', 'PWD', 'OLDPWD', 'SHELL', 'USER', 'TMPDIR', 'IFS']);
 
-// How code reads a variable, by name only: process.env, import.meta.env, Deno.env and Python's os.environ.
-const NAME = '(?<name>[A-Za-z_][A-Za-z0-9_]*)', QUOTED = (quotes: string) => String.raw`(?<quote>[${quotes}])${NAME}\k<quote>`;
+// How code reads a variable, by name only: process.env, import.meta.env, Deno.env and Python's os.environ. A method
+// called on process.env or import.meta.env, such as hasOwnProperty, is no variable.
+const NAME = '(?<name>[A-Za-z_][A-Za-z0-9_]*)', QUOTED = (quotes: string) => String.raw`(?<quote>[${quotes}])${NAME}\k<quote>`, NOT_CALLED = String.raw`\b(?!\s*(?:\?\.)?\()`;
 const READS = [
-  String.raw`\bprocess\.env\.${NAME}`, String.raw`\bprocess\.env\[\s*${QUOTED('\'"`')}\s*\]`,
-  String.raw`\bimport\.meta\.env\.${NAME}`, String.raw`\bimport\.meta\.env\[\s*${QUOTED('\'"`')}\s*\]`,
+  String.raw`\bprocess\.env\.${NAME}${NOT_CALLED}`, String.raw`\bprocess\.env\[\s*${QUOTED('\'"`')}\s*\]`,
+  String.raw`\bimport\.meta\.env\.${NAME}${NOT_CALLED}`, String.raw`\bimport\.meta\.env\[\s*${QUOTED('\'"`')}\s*\]`,
   String.raw`\bDeno\.env\.get\(\s*${QUOTED('\'"`')}`,
   String.raw`\bos\.environ\[\s*${QUOTED('\'"')}\s*\]`, String.raw`\bos\.environ\.get\(\s*${QUOTED('\'"')}`, String.raw`\bos\.getenv\(\s*${QUOTED('\'"')}`,
 ].map(source => new RegExp(source, 'g'));
@@ -450,7 +451,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
       const text = await readExample(file);
       if (text === null) continue;
       const names = sorted(envNames(text));
-      for (const name of names) examples[name] ??= file;
+      for (const name of names) if (!Object.hasOwn(examples, name)) examples[name] = file;
       exampleLines.push(`- ${code(file)}: ${names.map(word).join(', ') || 'no variables'}`);
     }
     if (exampleLines.length) exampleLines.unshift(`Not in ${code(shown)}; their variable names only.`, '');
@@ -602,7 +603,7 @@ export function unwiredVariables(facts: WorkFacts & Pick<RepositoryFacts, 'servi
     const isServed = servedFolder !== null && posix.dirname(folder) === servedFolder, unwired = new Map<string, UnwiredVariable>();
     for (const read of reads) {
       if (unwired.has(read.name) || read.name.startsWith('SUPABASE_') || (isServed && functionEnv.has(read.name))) continue;
-      unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(facts.examples[read.name] ? { example: facts.examples[read.name] } : {}), public: false });
+      unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(Object.hasOwn(facts.examples, read.name) ? { example: facts.examples[read.name] } : {}), public: false });
     }
     // A folder whose name starts with _ is code the functions share, never a function of its own.
     return { folder, served: isServed, shared: posix.basename(folder).startsWith('_'), unwired: [...unwired.values()].sort((one, other) => byText(one.name, other.name)) };
@@ -627,7 +628,7 @@ export function unwiredVariables(facts: WorkFacts & Pick<RepositoryFacts, 'servi
         if (unwired.has(read.name) || provided.has(read.name) || mapped.has(read.name)) continue;
         const owner = innermost(owners, read.file);
         if (owner === null || !reached.has(owner)) continue;
-        unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(facts.examples[read.name] ? { example: facts.examples[read.name] } : {}), public: PUBLIC_PREFIX.test(read.name) });
+        unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(Object.hasOwn(facts.examples, read.name) ? { example: facts.examples[read.name] } : {}), public: PUBLIC_PREFIX.test(read.name) });
       }
       return { id, directory, unwired: [...unwired.values()].sort((one, other) => byText(one.name, other.name)) };
     }),
