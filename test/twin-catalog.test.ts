@@ -24,6 +24,8 @@ test('The service catalog lists every registered service with its options, varia
   const stripe = entries.find(entry => entry.startsWith('`stripe`:'))!;
   assert.match(stripe, /Inputs created on request or supplied once by the user/);
   assert.match(stripe, /Perpetual can create its inputs when the user asks\./);
+  // An author never relies on a part of Trigger.dev the shared instance does not run.
+  assert.match(entries.find(entry => entry.startsWith('`trigger-dev`:'))!, /runs no Electric or object store: Realtime run subscriptions/);
 });
 
 test('A catalog comes from whichever registry it is given, described or not', () => {
@@ -55,6 +57,13 @@ test('Service options are checked as each service reads them, with placeholders 
   ]);
   // A service without a description is checked by its own validate only.
   assert.deepEqual(serviceOptionErrors({ services: { database: { anything: true } } }, { services: fixtures }), []);
+});
+
+test('An SQL fixture is refused when the config is saved unless its service provides DATABASE_URL', () => {
+  const config = validateTwinConfig({ services: { redis: {}, postgres: {}, supabase: {} }, fixtures: [
+    { service: 'redis', query: 'select 1' }, { service: 'postgres', query: 'select 1' }, { service: 'supabase', sql: 'seed.sql' }, { service: 'redis', command: 'npm run seed' },
+  ] });
+  assert.deepEqual(serviceOptionErrors(config), ['fixtures[0]: redis does not provide DATABASE_URL, which SQL fixtures use.']);
 });
 
 test('A placeholder names a variable and a port its service declares, so a typo is refused when the config is saved', () => {

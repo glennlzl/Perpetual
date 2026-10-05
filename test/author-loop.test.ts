@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import aiPackage from 'ai/package.json' with { type: 'json' };
 import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
-import { CHANGE_APPROACH, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
+import { CHANGE_APPROACH, CONTEXT_FULL, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
 import { OPENCODE } from '../src/agents/opencode.ts';
 import type { Harness } from '../src/agents/opencode.ts';
 import { evidenceText, repositoryFacts } from '../src/environments/evidence.ts';
@@ -291,6 +291,13 @@ test('initial instructions, evidence, prompt and feedback protect known values a
   ]);
 });
 
+test('the evidence keeps its credential-named variables with their lines, in the instructions and when it is read', async t => {
+  const evidence = '# Repository evidence\n\n- SESSION_SECRET: `repo/app.mjs:1`\n- NPM_TOKEN: script, `repo/Dockerfile:2`\n- HTTP_AUTHORIZATION: runtime, `repo/server.js:4`\n';
+  const { calls } = await loop(t, [call('read', { path: 'EVIDENCE.md' }), done], { files: { 'EVIDENCE.md': evidence } });
+  assert.equal(calls[0].prompt[0].content, `${twinInstructions(services)}\n\n${evidence}`);
+  assert.deepEqual(received(calls[1]), [{ ok: true, path: 'EVIDENCE.md', lines: 5, content: evidence.trimEnd().split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'), truncated: false }]);
+});
+
 test('tool paths, list entries, refusals and logs are protected before metadata is clipped', async t => {
   const known = `caller-only-value-${'m'.repeat(90)}`, token = 'sk-list-entry-fixture-12345', absolute = `/${'x'.repeat(190)}${known}`;
   const { calls, out } = await loop(t, [{ calls: [
@@ -485,6 +492,15 @@ test('a long provider error is redacted before it is clipped, so its Error: line
   const { code: status, message } = JSON.parse(stderr[1].replace(/^Error: /, '')) as { code: number; message: string };
   assert.deepEqual([status, message], [402, `${'x'.repeat(ERROR_MESSAGE_CHARS - 5)}[REDA…`]);
   assert.ok(!stderr.some(line => line.includes(KEY.slice(0, 5))));
+});
+
+test('a history that outgrows the model’s context ends the attempt with what it wrote, not as a refusal', async t => {
+  const overflow = { error: { status: 400, message: 'This endpoint\'s maximum context length is 200000 tokens. However, you requested about 250000 tokens.' } };
+  const { job } = await attempt(t, [{ calls: [write(valid)] }, overflow]);
+  const written = await job.promise;
+  assert.equal(written.error, undefined);
+  assert.equal(written.text, valid);
+  assert.deepEqual(written.logs?.split('\n'), ['✓ write_config', CONTEXT_FULL, 'Usage: 1 step, 100 input tokens, 20 output tokens.']);
 });
 
 test('provider errors protect credential shapes before clipping without a supplied secret value', async t => {

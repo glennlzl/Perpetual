@@ -86,6 +86,42 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   assert.deepEqual(supabase.containers(), []); // the CLI owns the stack's containers
 });
 
+test('Supabase starts its stack with every env() name of its config.toml and SUPABASE_ setting unset, whatever the controller exports', async t => {
+  // The controller's environment, as a developer's shell exports it: stack settings and a credential the CLI would take
+  // over the config, and the CLI's own image mirror and telemetry choice, which stay.
+  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1' };
+  const exported = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('SUPABASE_')));
+  for (const name of Object.keys(exported)) delete process.env[name];
+  Object.assign(process.env, host);
+  t.after(() => { for (const name of Object.keys(host)) delete process.env[name]; Object.assign(process.env, exported); });
+  const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
+  await supabaseSource(ctx);
+  await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), `${CONFIG}
+[studio]
+openai_api_key = "env(OPENAI_API_KEY)"
+
+[auth]
+additional_redirect_urls = ["env(REDIRECT_URL)", "http://127.0.0.1:3000"]
+
+[edge_runtime.secrets]
+token = "env(GH_TOKEN)"
+`);
+  await supabase.setup(ctx);
+  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written.
+  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '' };
+  const cli = (name: string) => ctx.calls.find(call => call.command === 'npx' && call.args.includes(name));
+  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
+});
+
+test('Supabase names its project directory before running the CLI when the repository has no project there', async () => {
+  for (const options of [{}, { directory: 'services/api/supabase' }]) {
+    const ctx = await context<SupabaseContext>({ options });
+    await mkdir(join(ctx.source, 'services/api/supabase'), { recursive: true }); // a folder without config.toml
+    await assert.rejects(supabase.setup(ctx), { message: `The repository has no Supabase project at ${options.directory ?? 'supabase'}: set supabase.directory to the folder that holds its config.toml.` });
+    assert.deepEqual(ctx.calls, []);
+  }
+});
+
 test('Supabase does not start its stack when the private mount is unavailable to Docker', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ image, args }) => {
     if (image) throw new Error('Private mount unavailable');
@@ -278,6 +314,13 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
   });
   ctx.inputs.publishableKey = 'pk_test_pub';
   assert.equal(stripe.env(ctx).STRIPE_PUBLISHABLE_KEY, 'pk_test_pub');
+});
+
+test('Stripe names a fixtures file the repository does not have before running its CLI', async () => {
+  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key' }, options: { fixtures: 'billing/stripe.json' } });
+  await mkdir(ctx.dir, { recursive: true });
+  await assert.rejects(stripe.setup(ctx), { message: 'stripe.fixtures billing/stripe.json is not a file in the repository.' });
+  assert.deepEqual(ctx.calls, []);
 });
 
 test('Stripe runs an inline fixtures document when the repository has none, and provides its env names', async () => {

@@ -49,25 +49,32 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * certificate blocks blanked line by line, so line numbers hold; Authorization and Bearer values;
  * named values in JSON, YAML, env and CLI form (`API_KEY=…`, `"token": "…"`, `--password …`,
  * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
- * and user info in any URL. Ordinary text, however long, comes back unchanged.
+ * and user info in any URL. Ordinary text, however long, comes back unchanged. `names: false` leaves the
+ * values after credential names and Authorization alone, for text formatted from values already redacted one
+ * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced.
  */
-export function redact(input: unknown = '', { decodeUri = false, secrets = [] }: { decodeUri?: boolean; secrets?: Iterable<unknown> } = {}): string {
+export function redact(input: unknown = '', { decodeUri = false, names = true, secrets = [] }: { decodeUri?: boolean; names?: boolean; secrets?: Iterable<unknown> } = {}): string {
   // A shaped substring may be only part of a supplied credential. Hide that whole value first,
   // after optional URI decoding, so shape replacements cannot leave its prefix or suffix behind.
   const values = [...secrets], known = hide(decodeUri ? [...values, ...values.filter((value): value is string => typeof value === 'string').map(decodedUri)] : values);
-  const text = known(input);
-  return (decodeUri ? known(decodedUri(text)) : text)
+  const supplied = known(input);
+  let text = (decodeUri ? known(decodedUri(supplied)) : supplied)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
-    .replace(PEM, block => redactedLines(block))
-    .replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`)
-    .replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`)
+    .replace(PEM, block => redactedLines(block));
+  if (names) text = text.replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`);
+  text = text.replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`);
+  if (names) text = text
     .replace(QUOTED_KEY, `$1$2$1$3$4${REDACTED}$4`)
     .replace(NAMED_VALUE, namedValue)
     .replace(FLAG_VALUE, namedValue)
-    .replace(QUERY_VALUE, `$1${REDACTED}`)
+    .replace(QUERY_VALUE, `$1${REDACTED}`);
+  return text
     .replace(TOKEN_SHAPE, REDACTED)
     .replace(USER_INFO, `$1${REDACTED}@`);
 }
+
+/** Whether text ends inside a private key or certificate block, which the next chunk of the same stream continues. */
+export const openBlock = (text: string) => [...String(text).matchAll(PEM)].some(([block]) => !block.includes('-----END '));
 
 /** Diagnostic URI text is opaque if bounded decoding leaves escapes another boundary could reveal. */
 export function redactUri(input: unknown, secrets: Iterable<unknown> = []): string {

@@ -12,7 +12,8 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 
 // Official local Trigger.dev: one self-hosted webapp stack per machine (Compose project `perpetual-trigger`),
 // one Trigger project per twin, and a per-twin `trigger dev` worker that runs the repository's tasks.
-// Deploy-only parts of the official stack (registry, supervisor, Docker socket proxy) are left out.
+// Deploy-only parts of the official stack (registry, supervisor, Docker socket proxy) are left out, and so are Electric,
+// which serves Realtime run subscriptions, and the object store for large payloads, as the catalog says.
 export const VERSION = '4.6.4';
 export const PROJECT = 'perpetual-trigger';
 export const BOT_EMAIL = 'trigger@perpetual.localhost'; // the only address the instance accepts
@@ -112,8 +113,17 @@ export function webappEnv(port: number, secrets: Record<string, string>) {
 // The stack's .env: single-quoted, so Compose interpolates nothing. Its secrets are read back on every start.
 const formatEnv = (env: Record<string, string>) => Object.entries(env).map(([key, value]) => `${key}='${value}'\n`).join('');
 const parseEnv = (text: string) => Object.fromEntries([...text.matchAll(/^(\w+)='([^'\n]*)'$/gm)].map(([, key, value]) => [key, value]));
+// Each database reads its password from an env file of its own: Compose would fill a `${...}` reference from a variable of
+// the same name in the controller's environment before the stack's .env.
+const PASSWORDS = { postgres: 'POSTGRES_PASSWORD', clickhouse: 'CLICKHOUSE_PASSWORD' };
+const passwordFile = (service: string) => `${service}.env`;
+/** The label naming, on each of the instance's volumes, the secrets its data was set up with: a database keeps its first password. */
+export const INSTANCE_LABEL = 'perpetual.trigger-dev.instance';
+/** The id of an instance's secrets: a digest of its database password, which it does not reveal. */
+export const instanceId = (secrets: Record<string, string>) => createHash('sha256').update(`${PROJECT}:${secrets.POSTGRES_PASSWORD}`).digest('hex').slice(0, 16);
 
-export function stack(port: number) {
+/** `instance` labels the volumes Compose creates; an instance whose volumes predate the label leaves them as they are. */
+export function stack(port: number, instance?: string) {
   const healthy = Object.fromEntries(['postgres', 'redis', 'clickhouse'].map(name => [name, { condition: 'service_healthy' }]));
   const check = (test: string[]) => ({ test, interval: '5s', timeout: '10s', retries: 60 });
   // The instance outlives any one twin, so it comes back with Docker unless someone stops it.
@@ -123,14 +133,14 @@ export function stack(port: number) {
       // The first boot applies every database and ClickHouse migration before the server listens.
       webapp: { image: IMAGES.webapp, ...common, env_file: ['.env'], ports: [`127.0.0.1:${port}:3000`], depends_on: healthy,
         extra_hosts: ['host.docker.internal:host-gateway'], healthcheck: { ...check(['CMD', 'node', '-e', HEALTH]), start_period: FIRST_BOOT } },
-      postgres: { image: IMAGES.postgres, ...common, command: ['-c', 'wal_level=logical'], environment: { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' },
+      postgres: { image: IMAGES.postgres, ...common, command: ['-c', 'wal_level=logical'], env_file: [passwordFile('postgres')],
         volumes: ['postgres:/var/lib/postgresql/data'], healthcheck: check(['CMD', 'pg_isready', '-U', 'postgres']) },
       redis: { image: IMAGES.redis, ...common, volumes: ['redis:/data'], healthcheck: check(['CMD', 'redis-cli', 'ping']) },
-      clickhouse: { image: IMAGES.clickhouse, ...common, environment: { CLICKHOUSE_PASSWORD: '${CLICKHOUSE_PASSWORD}', CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
+      clickhouse: { image: IMAGES.clickhouse, ...common, env_file: [passwordFile('clickhouse')], environment: { CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
         ulimits: { nofile: { soft: 262144, hard: 262144 } }, volumes: ['clickhouse:/var/lib/clickhouse'],
         healthcheck: check(['CMD-SHELL', 'clickhouse-client --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1"']) },
     },
-    volumes: { postgres: {}, redis: {}, clickhouse: {} },
+    volumes: Object.fromEntries(['postgres', 'redis', 'clickhouse'].map(name => [name, instance ? { labels: { [INSTANCE_LABEL]: instance } } : {}])),
   };
 }
 
@@ -167,6 +177,19 @@ export async function bootstrapToken(ctx: Pick<Context, 'fetch' | 'shared' | 'ex
   return minted;
 }
 
+/**
+ * The instance label of each volume of the machine's instance, where its bot, organization and projects live: none
+ * before it first started, and empty on a volume created before volumes carried one.
+ */
+const volumeLabels = async (ctx: Pick<Context, 'exec'>) => (await ctx.exec('docker', ['volume', 'ls', '--filter', `label=com.docker.compose.project=${PROJECT}`,
+  '--format', `{{.Name}} {{.Label "${INSTANCE_LABEL}"}}`])).stdout.split('\n').filter(line => line.trim()).map(line => line.trim().replace(/^\S+\s*/, ''));
+/**
+ * Whether the instance's data belongs to secrets this data directory does not have: its volumes carry another id, or
+ * carry none while this directory holds no secrets, as when another Perpetual data directory set the instance up.
+ */
+const another = (labels: string[], kept: Record<string, string>) => labels.length > 0
+  && (!kept.POSTGRES_PASSWORD || labels.some(label => label !== '' && label !== instanceId(kept)));
+
 // Twins set up at the same time share the instance, so it is started, signed in and given its organization one at a time.
 let turn: Promise<unknown> = Promise.resolve();
 const inTurn = <T>(work: () => Promise<T>) => { const next = turn.then(work); turn = next.catch(() => {}); return next; };
@@ -180,9 +203,15 @@ const instance = (ctx: Context) => inTurn(async () => {
   const state: Instance = { ...saved, port: await ctx.sharedPort(PROJECT, saved.port) };
   const save = () => writeStateFile(file, JSON.stringify(state));
   const kept = parseEnv(await readFile(envFile, 'utf8').catch(absent('')));
+  // The project's name is the machine's, its secrets a data directory's: other secrets, new or kept from an instance since
+  // removed, would start its existing database with a password it never had, and move the port other twins use.
+  const labels = await volumeLabels(ctx);
+  if (another(labels, kept)) throw new Error(`The machine's Trigger.dev instance (Docker Compose project ${PROJECT}) was set up with secrets this data directory does not have, as from another Perpetual data directory: use that one, or remove the project and its volumes.`);
   const secrets = Object.fromEntries(SECRETS.map(name => [name, kept[name] || randomBytes(16).toString('hex')]));
   await writeFile(envFile, formatEnv(webappEnv(state.port, secrets)), { mode: 0o600 });
-  await writeFile(join(dir, 'compose.yaml'), stringify(stack(state.port)));
+  for (const [service, name] of Object.entries(PASSWORDS)) await writeFile(join(dir, passwordFile(service)), formatEnv({ [name]: secrets[name] }), { mode: 0o600 });
+  // Volumes created before they carried an id keep their definition, which Compose would otherwise offer to recreate.
+  await writeFile(join(dir, 'compose.yaml'), stringify(stack(state.port, labels.includes('') ? undefined : instanceId(secrets))));
   await save();
   await compose(ctx, 'up', '--detach', '--wait');
   // A saved token belongs to the instance's database. Once its volumes are removed the database starts empty and
@@ -213,7 +242,8 @@ const findProject = async (ctx: Pick<Context, 'project'>, call: Api, org: string
 
 export default {
   id: 'trigger-dev', title: 'Trigger.dev', fidelity: 'official-sandbox',
-  detect: { packages: ['@trigger.dev/sdk', 'trigger.dev'], env: [/^TRIGGER_/] },
+  // The config file gives the worker its directory, as in a monorepo that keeps its tasks in their own package.
+  detect: { files: [/(?:^|\/)trigger\.config\.(?:ts|mts|js|mjs)$/], packages: ['@trigger.dev/sdk', 'trigger.dev'], env: [/^TRIGGER_/] },
   describe: {
     summary: 'Self-hosted Trigger.dev, one instance per machine: each twin gets its own project and a `trigger dev` worker running the repository\'s tasks.',
     options: {
@@ -222,6 +252,7 @@ export default {
       env: 'The worker\'s own variables, which its tasks read, as an app\'s env.',
     },
     provides: ['TRIGGER_API_URL', 'TRIGGER_SECRET_KEY'],
+    notes: ['The instance runs no Electric or object store: Realtime run subscriptions, such as useRealtimeRun or runs.subscribeToRun, and payloads large enough to be offloaded do not work.'],
   },
   validate: options => {
     cliVersion(options);
@@ -249,6 +280,11 @@ export default {
     if (!token || !org) return;
     // The port is saved before the token, so a state without one cannot reach the project: a cleanup failure, not nothing to do.
     if (typeof port !== 'number') throw new Error('Trigger.dev instance state has no port');
+    // The project is a record of this data directory's instance, gone with its volumes or with another instance in their place.
+    const labels = await volumeLabels(ctx);
+    if (!labels.length || another(labels, parseEnv(await readFile(join(home(ctx), '.env'), 'utf8').catch(absent(''))))) return;
+    // A stopped instance starts again as it was, so deleting a twin never waits for another twin's setup to start it.
+    await inTurn(() => compose(ctx, 'up', '--detach', '--wait', '--no-recreate'));
     const call = api(ctx, { port, token, org }), project = await findProject(ctx, call, org);
     if (project) await call('DELETE', `/api/v1/projects/${text(project, 'externalRef', 'a project reference')}`);
   },

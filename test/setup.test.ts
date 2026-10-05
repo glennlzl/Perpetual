@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
+import { TWINS_NEED_DESKTOP, engineNote, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
 
 const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -22,6 +22,14 @@ test('the setup report names what was installed, each missing tool with its fix,
     ['Installed: dependencies, Chromium.', 'OpenCode 1.0.0 was not fetched; it downloads on first use.', 'Missing:', '  Docker: Start Docker.',
       '  GitHub CLI: Install the GitHub CLI (https://cli.github.com/).', 'Then start Perpetual:', `  ${SERVE}`].join('\n'));
   assert.equal(report({ installed: ['dependencies'], tools: tools.map(tool => ({ ...tool, ready: true })) }), `Installed: dependencies.\nStart Perpetual:\n  ${SERVE}`);
+});
+
+test('setup says twins need Docker Desktop on a native Linux engine, which stays ready for build repair', () => {
+  // `docker info --format {{.OperatingSystem}}` names the engine's system: the distribution on a native engine.
+  assert.equal(engineNote('linux', 'Ubuntu 24.04.1 LTS\n'), TWINS_NEED_DESKTOP);
+  for (const [platform, system] of [['linux', 'Docker Desktop\n'], ['darwin', 'Docker Desktop\n'], ['win32', 'Docker Desktop'], ['linux', null]] as const) assert.equal(engineNote(platform, system), null, `${platform}: ${system}`);
+  const tools = [{ name: 'Docker', ready: true, fix: 'Start Docker.' }];
+  assert.equal(report({ installed: ['dependencies'], tools, notes: [TWINS_NEED_DESKTOP] }), `Installed: dependencies.\n${TWINS_NEED_DESKTOP}\nStart Perpetual:\n  ${SERVE}`);
 });
 
 test('the Quickstart, the contributor guide and package.json name the one setup command', async () => {

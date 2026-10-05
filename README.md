@@ -91,7 +91,7 @@ Twins use test credentials and fixtures, not copies of production customer data.
 
 ## Quickstart
 
-You need **Node.js 24.12+**, **Docker** for twins and build repair, the **GitHub CLI**, and **[uv](https://docs.astral.sh/uv/)**. Setup installs the project dependencies, interface, Chromium and browser runtime, and reports missing prerequisites.
+You need **Node.js 24.12+**, **Docker** for build repair and **Docker Desktop** for twins (twins do not work on a native Linux engine), the **GitHub CLI**, and **[uv](https://docs.astral.sh/uv/)**. Setup installs the project dependencies, interface, Chromium and browser runtime, and reports missing prerequisites.
 
 ```sh
 git clone https://github.com/willlzl/Perpetual.git && cd Perpetual

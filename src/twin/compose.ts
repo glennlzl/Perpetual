@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import { APPS, INSTALL, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
+import { APPS, INSTALL, PORT_VARIABLE, SOURCE, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
 import { relative } from './paths.ts';
 import { loopbackCommand } from './loopback.ts';
 import { containerLogging } from './logging.ts';
@@ -26,19 +27,24 @@ export const LABELS = { owner: 'perpetual.owner', environment: 'perpetual.enviro
 // also supports Node 25, unlike the newer Corepack line requiring Node 26 or an LTS.
 // Official images may already have Yarn binaries: replace those shims inside this container.
 const PACKAGE_MANAGERS = '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?';
-/** One machine-wide volume Perpetual owns, where package managers keep downloads, so a rebuilt twin installs from cache. */
-export const PACKAGE_CACHE = 'perpetual-package-cache';
+/**
+ * Where package managers keep downloads, and Corepack the package managers it installs, so a rebuilt twin installs from
+ * cache: one external volume per repository, which Perpetual owns, the repository's twins share and deleting a twin keeps.
+ * It is named from a digest of the repository's identity, so another repository's twins never mount it.
+ */
+export const repositoryCache = (repository: string) => `perpetual-package-cache-${createHash('sha256').update(repository).digest('hex').slice(0, 16)}`;
+/** A twin's own package cache, a volume of its project like its workspace: empty at first, and removed with the twin. */
+export const OWN_CACHE_VOLUME = 'package-cache';
 const CACHE = '/perpetual-cache';
+/** A `docker run` volume that mounts a package cache where package managers look for it. */
+export const cacheMount = (volume: string) => `${volume}:${CACHE}`;
 // Each manager's documented cache location. pnpm needs its store named: on another filesystem than the
 // project it would otherwise make one at the project's root, inside the workspace.
 export const PACKAGE_CACHE_ENV = { COREPACK_HOME: `${CACHE}/corepack`, npm_config_cache: `${CACHE}/npm`, npm_config_store_dir: `${CACHE}/pnpm-store`, XDG_CACHE_HOME: `${CACHE}/xdg-cache`, YARN_CACHE_FOLDER: `${CACHE}/yarn`, BUN_INSTALL_CACHE_DIR: `${CACHE}/bun` };
-/** The one-shot service that copies the source snapshot into the twin's workspace volume. */
-export const SOURCE = 'source';
+// The config names these, so its validation keeps every app off them.
+export { PORT_VARIABLE, SOURCE };
 /** The twin's own volume holding its source, dependencies and build output; removed with the twin. */
 export const WORKSPACE_VOLUME = 'workspace';
-export const PACKAGE_CACHE_MOUNT = `${PACKAGE_CACHE}:${CACHE}`;
-/** The variable every app gets its port in. */
-export const PORT_VARIABLE = 'PORT';
 const SERVICE_HEALTH = { interval: '2s', timeout: '5s', retries: 90 };
 const APP_HEALTH = { interval: '5s', timeout: '5s', retries: 3, start_period: '30m' };
 
@@ -106,17 +112,18 @@ function healthcheck(container: ServiceContainer, where: string): ComposeHealthc
  * A container is { name, image, command?, env?, ports?: { name: containerPort }, health?, directory? };
  * `directory` runs it in that snapshot directory, like an app; `workspace` lists those containers, which need the install first.
  * ports: { '<service>.<port name>' | 'apps.<id>': hostPort }. source: absolute snapshot path.
+ * cache: the repository's package cache (repositoryCache), which its twins share; without one, the twin's own.
  */
-export function composeTwin({ project, owner, environment: id, source, config, services, ports, appImage: fallback = APP_IMAGE }: {
-  project: string; owner: string; environment: string; source: string; config: TwinConfig; services: ResolvedService[]; ports: HostPorts; appImage?: string;
+export function composeTwin({ project, owner, environment: id, source, config, services, ports, appImage: fallback = APP_IMAGE, cache }: {
+  project: string; owner: string; environment: string; source: string; config: TwinConfig; services: ResolvedService[]; ports: HostPorts; appImage?: string; cache?: string;
 }) {
-  const appImage = nodeImage(config, fallback);
+  const appImage = nodeImage(config, fallback), cacheVolume = cache ?? OWN_CACHE_VOLUME;
   const dotenv: Record<string, string> = {}, compose: ComposeFile = { name: project, services: {} }, dependsOn: Record<string, { condition: string }> = {}, inWorkspace: string[] = [];
   const common = { extra_hosts: [HOST_GATEWAY], labels: { [LABELS.owner]: owner, [LABELS.environment]: id }, logging: containerLogging() };
   const hostPort = (key: string) => ports[key] ?? fail(`No host port was allocated for ${key}.`);
   // Repository code runs from a Docker volume, not a host bind mount: installs and builds write many small files,
-  // which a host mount makes several times slower on Docker Desktop.
-  const workspace = (directory: string): Pick<ComposeService, 'working_dir' | 'volumes'> => ({ working_dir: posix.join(WORKSPACE, directory), volumes: [{ type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }, { type: 'volume', source: PACKAGE_CACHE, target: CACHE }] });
+  // which a host mount makes several times slower on Docker Desktop. A directory is config text, so Compose keeps it literal.
+  const workspace = (directory: string): Pick<ComposeService, 'working_dir' | 'volumes'> => ({ working_dir: literal(posix.join(WORKSPACE, directory)), volumes: [{ type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }, { type: 'volume', source: cacheVolume, target: CACHE }] });
   const ready = services.filter(service => service.status === 'ready');
   const blocked = new Set<string | undefined>(services.filter(service => service.status !== 'ready').map(service => service.id));
   const provided = Object.fromEntries(ready.map(service => [service.id, service.env ?? {}]));
@@ -146,7 +153,7 @@ export function composeTwin({ project, owner, environment: id, source, config, s
   for (const service of ready) for (const [variable, value] of Object.entries(provided[service.id])) (offered[variable] ??= new Map()).set(service.id, value);
   const apps: { id: string; url: string; directory: string }[] = [];
   for (const [appId, app] of Object.entries(config.apps)) {
-    if (compose.services[appId]) fail(`App "${appId}" has the same name as a service container; rename the app.`);
+    if (Object.hasOwn(compose.services, appId)) fail(`App "${appId}" has the same name as a service container; rename the app.`);
     const automatic: Record<string, string> = {};
     for (const [variable, sources] of Object.entries(offered)) {
       if (Object.hasOwn(app.env, variable)) continue;
@@ -171,19 +178,24 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       environment: { ...PACKAGE_CACHE_ENV, ...environment(appId, { ...automatic, [PORT_VARIABLE]: String(app.port), ...explicit }, dotenv) },
       ports: [`${LOOPBACK}:${port}:${app.port}`],
       ...common,
-      healthcheck: { test: ['CMD', 'node', '-e', `fetch('http://${LOOPBACK}:${app.port}/').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))`], ...APP_HEALTH },
+      // A redirect is an answer, as the controller's check counts it, and is never followed: it may lead off the twin.
+      healthcheck: { test: ['CMD', 'node', '-e', `fetch('http://${LOOPBACK}:${app.port}/',{redirect:'manual'}).then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))`], ...APP_HEALTH },
       ...(Object.keys(dependsOn).length ? { depends_on: { ...dependsOn } } : {}),
     };
     // App links are opened on the host; each env placeholder explicitly chooses browser or container reachability.
     apps.push({ id: appId, url: `http://${LOOPBACK}:${port}`, directory: app.directory });
   }
 
-  // The workspace volume is the twin's own; the cache is external, so tearing a twin down (down --volumes) keeps it.
+  // The workspace volume and a twin's own cache are the twin's, which tearing it down (down --volumes) removes; a
+  // repository's cache is external, so that keeps it.
   if (Object.values(compose.services).some(service => service.volumes?.some(volume => volume.source === WORKSPACE_VOLUME))) {
     if (compose.services[SOURCE]) fail(`A service container is named ${SOURCE}, which copying the source uses.`);
-    compose.services[SOURCE] = { image: appImage, volumes: [{ type: 'bind', source: literal(source), target: '/snapshot', read_only: true }, { type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }],
+    // The copy, the twin's first container, also mounts the twin's own cache, so Compose creates that volume before a
+    // command fixture mounts it by name.
+    const ownCache: ComposeVolume[] = cache ? [] : [{ type: 'volume', source: OWN_CACHE_VOLUME, target: CACHE }];
+    compose.services[SOURCE] = { image: appImage, volumes: [{ type: 'bind', source: literal(source), target: '/snapshot', read_only: true }, { type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }, ...ownCache],
       command: ['sh', '-c', `cp -a /snapshot/. ${WORKSPACE}/`], profiles: [SOURCE], ...common };
-    compose.volumes = { [WORKSPACE_VOLUME]: {}, [PACKAGE_CACHE]: { external: true } };
+    compose.volumes = { [WORKSPACE_VOLUME]: {}, [cacheVolume]: cache ? { external: true } : {} };
   }
   const summary = services.map((service): ServiceSummary => ({ id: service.id, fidelity: service.fidelity, status: service.status, ...(service.status === 'ready' ? {} : { missing: service.missing }) }));
   return { compose, env: dotenv, services: summary, apps, workspace: inWorkspace };
