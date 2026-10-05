@@ -103,6 +103,11 @@ test('restart refuses malformed stored control limitations before publishing run
     const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
     await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control transport evidence/);
   }
+  const read={resourceType:'fetch',method:'GET',url:'http://app.test/api/name',status:500};
+  for(const fields of [{controlRead:false,controlReadReason:'read-failed',controlFailedRead:{}},{controlRead:false,controlReadReason:'read-failed',controlFailedRead:{...read,body:'private'}},{controlRead:false,controlReadReason:'url-changed',controlFailedRead:read},{controlRead:false,controlFailedRead:read}]){
+    const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored failed control read/);
+  }
   await writeFile(file,JSON.stringify(saved));
   const restored=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restored.close());
   assert.deepEqual((await restored.runProgress(f.context,run.id)).results,report.results,'Legacy evidence without a limitation stays unchanged.');
@@ -118,6 +123,17 @@ test('control transport evidence is scrubbed with the run account and survives h
   const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
   assert.deepEqual((await restarted.runProgress(f.context,run.id)).results,report.results);
   assert.deepEqual((await restarted.view(f.context)).runs[0].results,report.results);
+});
+
+test('a failed control read is scrubbed with the run account and survives history and restart',async t=>{
+  const username='viewer@example.test',password='private-'+ 'p'.repeat(600);
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',controlRead:false,controlReadReason:'read-failed',controlFailedRead:{resourceType:'fetch',method:'GET',url:`http://app.test/users/${encodeURIComponent(username)}/${encodeURIComponent(password)}?secret=private`,status:500},assertions:[{...scenario.assertions[0],passed:false}]}}]);
+  const {run}=await f.manager.run(f.context,{credentials:{username,password}},manual),report=await completed(f,run.id);
+  assert.deepEqual(report.results[0].controlFailedRead,{resourceType:'fetch',method:'GET',url:'http://app.test/users/[REDACTED]/[REDACTED]',status:500});
+  assert.equal(report.run.status,'failed');
+  await f.manager.close();
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.runProgress(f.context,run.id)).results,report.results);
 });
 
 test('unverified passed claims and missing results cannot become business passes',async t=>{

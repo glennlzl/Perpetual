@@ -10,16 +10,16 @@ import { SIGN_IN_ACTION, STEPS, approvedCase, type ApprovedCase } from './checks
 import { hide, failureText } from '../../redaction.ts';
 import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
 import { controlBlockerText, controlReadReasonText } from './control.ts';
-import { controlBlocks } from '../../browser/control-evidence.ts';
+import { controlBlocks, controlFailedRead } from '../../browser/control-evidence.ts';
 import { accountSecrets } from '../../browser/run-credentials.ts';
-import type { ControlBlocker, ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
+import type { ControlBlocker, ControlReadReason, ControlBlockedTransport, ControlFailedRead } from '../../../contract/browser.ts';
 
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
-export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[]; error?: string; actionFeedback?: string };
+export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[]; controlFailedRead?: ControlFailedRead; error?: string; actionFeedback?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
-type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; reason?: unknown; controlBlocks?: unknown; lifecycle?: unknown; feedback?: unknown };
+type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; reason?: unknown; controlBlocks?: unknown; controlFailedRead?: unknown; lifecycle?: unknown; feedback?: unknown };
 
 // Journey actions by Playwright step title; fixture reads stay private while explicit readiness waits are visible.
 const ACTIONS: [RegExp, string][] = [[/^(?:Navigate|Go forward)\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag|Mouse (?:down|up))\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear|Insert)\b/, 'input'], [/^(?:Press|Key (?:down|up))\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^(?:Hover|Mouse move)\b/, 'hover'], [/^(?:Scroll|Mouse wheel)\b/, 'scroll'], [/^Focus\b/, 'focus'], [/^Blur\b/, 'blur'], [/^Wait for (?:timeout|URL|navigation|load state|selector)\b/i, 'wait']];
@@ -31,6 +31,7 @@ export default class JourneyReporter implements Reporter {
   controlRead: boolean | undefined;
   controlReadReason: ControlReadReason | undefined;
   controlBlocks: ControlBlockedTransport[] | undefined;
+  controlFailedRead: ControlFailedRead | undefined;
   actionFeedback: string | undefined;
   diagnostics = process.env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && process.env.PERPETUAL_BLOCK_WRITES !== '1';
   diagnosticBytes = 0; diagnosticDropped = 0;
@@ -82,11 +83,13 @@ export default class JourneyReporter implements Reporter {
       } else if (event.type === 'assertions' && Array.isArray(event.assertions)) this.assertions = event.assertions;
       else if (event.type === 'action-feedback' && typeof event.feedback === 'string' && event.feedback.length <= 2000) this.actionFeedback = failureText(hide(this.secrets)(event.feedback), 2000);
       else if (event.type === 'control-read' && typeof event.eligible === 'boolean') {
-        const transports = controlBlocks(event.controlBlocks, this.secrets);
-        const valid = (event.reason === undefined || event.eligible === false && Boolean(controlReadReasonText(event.reason))) && transports !== null && (event.controlBlocks === undefined || event.eligible === false);
+        const transports = controlBlocks(event.controlBlocks, this.secrets), failedRead = controlFailedRead(event.controlFailedRead, this.secrets);
+        const valid = (event.reason === undefined || event.eligible === false && Boolean(controlReadReasonText(event.reason))) && transports !== null && (event.controlBlocks === undefined || event.eligible === false)
+          && failedRead !== null && (event.controlFailedRead === undefined || event.eligible === false && event.reason === 'read-failed');
         this.controlRead = valid && event.eligible;
         this.controlReadReason = valid && event.eligible === false ? event.reason as ControlReadReason | undefined : undefined;
         this.controlBlocks = valid && event.eligible === false && transports?.length ? transports : undefined;
+        this.controlFailedRead = valid && failedRead ? failedRead : undefined;
       }
       else if (event.type === 'journey-stop' && typeof event.error === 'string') this.stop ||= event.error;
     }
@@ -115,7 +118,7 @@ export default class JourneyReporter implements Reporter {
   facts(): JourneyFacts {
     const { id: caseId, steps = [] } = this.approved, result = this.result;
     const controlBlocker = this.controlRead === false ? (['shared-worker', 'unguarded-transport'] as const).find(value => controlBlockerText(value) === this.stop) : undefined;
-    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }), ...(controlBlocker ? { controlBlocker } : {}), ...(this.controlReadReason ? { controlReadReason: this.controlReadReason } : {}), ...(this.controlBlocks ? { controlBlocks: this.controlBlocks } : {}) };
+    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }), ...(controlBlocker ? { controlBlocker } : {}), ...(this.controlReadReason ? { controlReadReason: this.controlReadReason } : {}), ...(this.controlBlocks ? { controlBlocks: this.controlBlocks } : {}), ...(this.controlFailedRead ? { controlFailedRead: this.controlFailedRead } : {}) };
     if (result?.status === 'passed') return { ...base, stopCause: 'none' };
     if (result?.status === 'timedOut') return { ...base, stopCause: 'deadline' };
     // An unguarded control is inconclusive even when an independently reviewed check failed.

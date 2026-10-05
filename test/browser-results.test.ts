@@ -63,6 +63,15 @@ test('control transport evidence stays bounded and cannot qualify a failed contr
   for(const invalid of [null,{},Array(11).fill(controlBlocks[0]),[{...controlBlocks[0],body:'private'}],[{...controlBlocks[1],message:'private'}],[{...controlBlocks[0],afterRead:'true'}]])assert.throws(()=>verdict({controlRead:false,controlBlocks:invalid}),/control transport evidence/);
 });
 
+test('a failed read names its request only for a read rejected because a request failed',()=>{
+  const controlFailedRead={resourceType:'fetch',method:'GET',url:'https://viewer:secret@app.test/api/name;token=private?secret=private',status:500};
+  const result=verdict({controlRead:false,controlReadReason:'read-failed',controlFailedRead},progress('completed','failed'));
+  assert.equal(result.status,'failed');assert.equal(result.controlRead,false);
+  assert.deepEqual(result.controlFailedRead,{resourceType:'fetch',method:'GET',url:'https://app.test/api/name',status:500});
+  for(const changes of [{controlRead:true},{controlRead:undefined},{controlReadReason:'url-changed'},{controlReadReason:undefined}])assert.throws(()=>verdict({controlRead:false,controlReadReason:'read-failed',controlFailedRead,...changes}),/control read/,JSON.stringify(changes));
+  for(const invalid of [null,{},{...controlFailedRead,resourceType:'image'},{...controlFailedRead,status:'500'},{...controlFailedRead,headers:'private'}])assert.throws(()=>verdict({controlRead:false,controlReadReason:'read-failed',controlFailedRead:invalid}),/failed control read/);
+});
+
 test('one precedence decides status and message: failed, blocked, needs review, then passed',()=>{
   const failedCheck=[{...journey.steps[0],status:'completed'},{...journey.steps[1],status:'failed',checks:[{type:'compare-number',label:'Credits',name:'after',op:'>',than:'before',passed:false,observed:10,provenance:'independent'}]}];
   const table:[string,Record<string,unknown>,MilestoneState[],string,string|undefined][]=[

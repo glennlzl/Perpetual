@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { controlBlocks } from '../src/browser/control-evidence.ts';
+import { controlBlocks, controlFailedRead } from '../src/browser/control-evidence.ts';
 
 test('control diagnostics hide full credentials before path parameters are discarded',()=>{
   for(const secret of ['private;tail','private%21','private%2521','private-sk-1234567890!tail'])for(const value of [secret,encodeURIComponent(secret),encodeURIComponent(encodeURIComponent(secret))]){
@@ -33,4 +33,14 @@ test('unresolved nested URI encodings stay opaque across secret-free revalidatio
   const result=controlBlocks([{kind:'http',method:'X-%74%65%73%74',url:'https://app.example/read',afterRead:true}],['test']);
   assert.deepEqual(result,[{kind:'http',method:'[REDACTED]',url:'https://app.example/read',afterRead:true}]);
   assert.deepEqual(controlBlocks(result),result);
+});
+
+test('a failed read keeps only its kind, method, origin, path and status, with credentials hidden',()=>{
+  const read={resourceType:'fetch',method:'GET',url:'https://viewer:private@app.test/users/private-user;jsessionid=private?token=private#private',status:500};
+  const result=controlFailedRead(read,['private-user']);
+  assert.deepEqual(result,{resourceType:'fetch',method:'GET',url:'https://app.test/users/[REDACTED]',status:500});
+  assert.deepEqual(controlFailedRead(result),result,'Already concealed evidence survives every downstream boundary.');
+  assert.deepEqual(controlFailedRead({resourceType:'script',method:'GET',url:'https://app.test/app.js'}),{resourceType:'script',method:'GET',url:'https://app.test/app.js'},'A request with no response has no status.');
+  assert.equal(controlFailedRead(undefined),undefined);
+  for(const invalid of [null,[],{...read,resourceType:'image'},{...read,body:'private'},{...read,status:'500'},{...read,status:99},{...read,status:500.5},{...read,method:'bad method'},{...read,url:'file:///private'}])assert.equal(controlFailedRead(invalid),null,JSON.stringify(invalid));
 });

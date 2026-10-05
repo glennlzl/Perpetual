@@ -10,7 +10,7 @@ import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTem
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads, controlBlockerText } from './control.ts';
-import type { ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
+import type { ControlReadReason, ControlBlockedTransport, ControlFailedRead } from '../../../contract/browser.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
@@ -358,7 +358,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false, sharedWorker = false;
     const controlRefusal = () => sharedWorker ? SHARED_WORKER : UNGUARDED;
     const controlFailures: (() => boolean)[] = [];
-    const controlReasons: { reason: () => ControlReadReason | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
+    const controlReasons: { reason: () => ControlReadReason | undefined; failedRead: () => ControlFailedRead | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
     let controlCheckFailed = false;
     const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, accountSecrets(account)) : undefined;
     const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
@@ -369,7 +369,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       return (check: EvaluatedCheck) => {
         control.captured(check);
         controlCheckFailed ||= !check.passed;
-        if (!check.passed) controlReasons.push({ reason: observed.reason(check), blocks: () => control.blocks(target) });
+        if (!check.passed) controlReasons.push({ reason: observed.reason(check), failedRead: observed.failedRead(check), blocks: () => control.blocks(target) });
         const witness = observed(check);
         if (witness && !unguarded) controlFailures.push(witness);
       };
@@ -557,8 +557,8 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (control && controlCheckFailed) {
         const eligible = !unguarded && controlFailures.some(valid => valid());
         const rejected = eligible || unguarded ? undefined : controlReasons.find(observed => observed.reason());
-        const reason = rejected?.reason(), controlBlocks = rejected?.blocks();
-        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}), ...(controlBlocks?.length ? { controlBlocks } : {}) });
+        const reason = rejected?.reason(), controlBlocks = rejected?.blocks(), controlFailedRead = reason === 'read-failed' ? rejected?.failedRead() : undefined;
+        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}), ...(controlBlocks?.length ? { controlBlocks } : {}), ...(controlFailedRead ? { controlFailedRead } : {}) });
       }
     }
   },

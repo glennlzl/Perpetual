@@ -1,6 +1,6 @@
 import { blockedHttpMethod, blockedRequestUrl } from './read-requests.ts';
 import { redactUri, REDACTED } from '../redaction.ts';
-import type { ControlBlockedTransport } from '../../contract/browser.ts';
+import type { ControlBlockedTransport, ControlFailedRead } from '../../contract/browser.ts';
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** Validate the whole bounded diagnostic list; decoded credentials are hidden before URL clipping. */
@@ -28,4 +28,22 @@ export function controlBlocks(value: unknown, secrets: Iterable<unknown> = []): 
     if (!found.some(previous => JSON.stringify(previous) === JSON.stringify(block))) found.push(block);
   }
   return found;
+}
+
+const READ_TYPES: ReadonlySet<unknown> = new Set<ControlFailedRead['resourceType']>(['document', 'script', 'xhr', 'fetch', 'eventsource']);
+const METHOD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$/;
+/**
+ * Validate the one failed read of a rejected control whole, undefined when there is none: its kind, method, origin and
+ * path, and the status it answered with. Decoded credentials are hidden before URL clipping, as for blocked transports.
+ */
+export function controlFailedRead(value: unknown, secrets: Iterable<unknown> = []): ControlFailedRead | null | undefined {
+  if (value === undefined) return undefined;
+  if (!record(value) || Object.keys(value).some(key => !['resourceType', 'method', 'url', 'status'].includes(key)) || !READ_TYPES.has(value.resourceType)) return null;
+  if (value.method !== REDACTED && (typeof value.method !== 'string' || !METHOD.test(value.method))) return null;
+  if (value.status !== undefined && (typeof value.status !== 'number' || !Number.isInteger(value.status) || value.status < 100 || value.status > 599)) return null;
+  if (value.url !== REDACTED && blockedRequestUrl(value.url) === null) return null;
+  const known = [...secrets];
+  const url = value.url === REDACTED ? REDACTED : blockedRequestUrl(redactUri(value.url, known), text => redactUri(text, known)) ?? REDACTED;
+  const method = redactUri(value.method, known);
+  return { resourceType: value.resourceType as ControlFailedRead['resourceType'], method: METHOD.test(method) ? method : REDACTED, url, ...(value.status === undefined ? {} : { status: value.status }) };
 }

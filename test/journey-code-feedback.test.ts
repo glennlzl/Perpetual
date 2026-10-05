@@ -45,3 +45,16 @@ test('regeneration receives an ineligible control diagnosis without its raw erro
   assert.match(feedback?.error||'',/address changed/);
   assert.ok(!JSON.stringify(feedback).includes('private'));
 });
+
+test('a failed read reaches the person and regeneration as its kind and status, never its address',()=>{
+  const [item]=validateBrowserCases([{id:'rename',name:'Rename workspace',goal:'Save and reopen my workspace name',steps:[{id:'save',title:'Save and reopen',checks:[{type:'text-visible',value:'Workspace {run}'}]}],expectedOutcomes:['The new name persists'],needsReview:false}]);
+  const code='historical private input',hash=specHash(code),contract=caseHash(item);
+  const controlFailedRead={resourceType:'fetch' as const,method:'GET',url:'http://app.test/private-path',status:500};
+  const runs:JourneyCodeSnapshot['runs']=Array.from({length:4},(_,index)=>({id:`run-${index}`,status:index===3?'failed':'passed',caseIds:[item.id],specHashes:{[item.id]:hash},verification:{id:'verify',hash,caseHash:contract,checkVersion:CHECK_VERSION,attempt:index+1,control:index===3},results:[{caseId:item.id,status:index===3?'failed':'passed',assertions:[],...(index===3?{controlRead:false,controlReadReason:'read-failed' as const,controlFailedRead}:{})}],progress:{cases:[{id:item.id,steps:[{status:index===3?'failed':'completed'}]}]}}));
+  const snapshot:JourneyCodeSnapshot={cases:[item],generations:new Map(),verifications:[],runs,code:{generationFailures:{},specs:{[item.id]:{approved:null,draft:{code,hash,caseHash:contract,savedAt:'2026-10-01T00:00:00.000Z'}}}}};
+  const owner=createJourneyCode({read:()=>snapshot,transact:async()=>{throw new Error('Reading feedback must not write.');}});
+  const verification=owner.summary('scope')[item.id].draft?.verification;
+  assert.deepEqual(verification,{status:'failed',passes:3,control:'missed',error:'A request carrying the judged page or its data failed. Resolve the failed read before checking persistence. The failed request was a fetch request (HTTP 500).'});
+  assert.deepEqual(owner.generationFeedback('scope',item.id),{error:verification!.error});
+  assert.ok(!JSON.stringify(owner.generationFeedback('scope',item.id)).includes('private'));
+});

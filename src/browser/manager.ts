@@ -14,7 +14,7 @@ import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-mo
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
 import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
-import {controlBlocks} from './control-evidence.ts';
+import {controlBlocks,controlFailedRead} from './control-evidence.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createJourneyCode,restoreJourneyCode,replaceJourneyCases} from './journey-code.ts';
 import type {GenerationFailure,JourneyCodeState,JourneyCodeSnapshot,Verification,VerificationIdentity,RunnableCode} from './journey-code.ts';
@@ -263,6 +263,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const transports=controlBlocks(facts.controlBlocks);
     if(!transports||facts.controlBlocks!==undefined&&facts.controlRead!==false)throw new Error('Invalid stored control transport evidence.');
     if(facts.controlBlocks!==undefined)result.controlBlocks=transports;
+    const failedRead=controlFailedRead(facts.controlFailedRead);
+    if(failedRead===null||facts.controlFailedRead!==undefined&&(facts.controlRead!==false||facts.controlReadReason!=='read-failed'))throw new Error('Invalid stored failed control read.');
+    if(failedRead)result.controlFailedRead=failedRead;
   }
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
@@ -855,6 +858,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                     // Scrub only diagnostics before journeyResult bounds them; check identities stay unchanged.
                     facts=isRecord(event.result)&&typeof event.result.error==='string'?{...event.result,error:diagnostic(event.result.error,4000)}:event.result;
                     if(isRecord(facts)&&facts.controlBlocks!==undefined)facts={...facts,controlBlocks:controlBlocks(facts.controlBlocks,accountSecrets(credentials))??facts.controlBlocks};
+                    if(isRecord(facts)&&facts.controlFailedRead!==undefined)facts={...facts,controlFailedRead:controlFailedRead(facts.controlFailedRead,accountSecrets(credentials))??facts.controlFailedRead};
                   }else if(event.type==='discovery')throw new Error('Browser runtime returned unexpected discovery.');
                   else progressEvent(event,item.id);
                 };

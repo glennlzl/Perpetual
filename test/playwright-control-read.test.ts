@@ -10,7 +10,7 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false, hashRoute = false, socketRead = false, readCount = 1, readBody = '{}' } = {}) {
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false, hashRoute = false, socketRead = false, brokenAssets = false, failingRead = false, readCount = 1, readBody = '{}' } = {}) {
   let value = 'Original', persist = true, writes = 0;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
@@ -25,11 +25,15 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
       }
       if (popupRead&&req.url==='/popup') { res.setHeader('Content-Type','text/html');res.end("<h1>Reader</h1><script>fetch('/read',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{}).finally(()=>{opener.readerFinished=(opener.readerFinished||0)+1;opener.document.getElementById('popup').textContent='Reader finished '+opener.readerFinished;});</script>");return; }
       if (req.url === '/save') { writes++; setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
+      // An avatar and a stylesheet the page names but nobody serves, and a data request the application fails.
+      if (req.url === '/missing.png' || req.url === '/missing.css') { res.writeHead(404); res.end(); return; }
+      if (req.url === '/broken') { res.writeHead(500); res.end(); return; }
       if (req.url === '/read') { if(readRedirect){res.writeHead(307,{Location:'/save'});res.end();return;}res.end(value); return; }
       res.setHeader('Content-Type', 'text/html');
       const readOptions=bodylessRead ? "{method:'POST'}" : `{method:'POST',headers:{'Content-Type':'application/json'},body:${JSON.stringify(readBody)}}`;
       res.end(`<h1>Settings</h1><label>Name<input id=name></label><p id=kept>${postRead ? '' : value}</p><p id=loaded></p><p id=ack></p><p id=finished></p><button id=save>Save</button>
-        ${socketRead ? '<p id=ready></p><button id=refresh>Refresh</button>' : ''}${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}<script>${socketRead ? "const socket=new WebSocket(location.origin.replace('http','ws')+'/socket');socket.onopen=()=>{ready.textContent='Socket ready';};refresh.onclick=()=>{socket.send('read');};" : ''}${postRead ? `fetch('/read',${readOptions}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});` : ''}
+        ${socketRead ? '<p id=ready></p><button id=refresh>Refresh</button>' : ''}${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}
+        ${brokenAssets ? '<img src="/missing.png" alt=""><link rel=stylesheet href="/missing.css"><iframe src="https://refused.invalid/"></iframe><script src="http://127.0.0.1:1/analytics.js"></script>' : ''}${failingRead ? "<script>fetch('/broken').catch(()=>{});</script>" : ''}<script>${socketRead ? "const socket=new WebSocket(location.origin.replace('http','ws')+'/socket');socket.onopen=()=>{ready.textContent='Socket ready';};refresh.onclick=()=>{socket.send('read');};" : ''}${postRead ? `fetch('/read',${readOptions}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});` : ''}
         save.onclick=async()=>{const response=await fetch('/save',{method:'POST',body:document.querySelector('input').value});ack.textContent=response.ok?'Saved':'Unavailable';finished.textContent='Finished';};</script>`);
     });
   });
@@ -90,6 +94,23 @@ test('a fresh page read catches the blocked write and the approved journey detec
 test('a fresh read of a hash-routed page catches the blocked write', { timeout: 90000 }, async t => {
   const f = await setup(t, { reopen: true, hashRoute: true });
   assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
+});
+
+test('a missing image and stylesheet, an unreachable third-party script and a refused frame leave the fresh read able to catch the blocked write', { timeout: 90000 }, async t => {
+  const f = await setup(t, { reopen: true, brokenAssets: true });
+  assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
+});
+
+test('a failed data request rejects the fresh read and names that request for the person and regeneration', { timeout: 90000 }, async t => {
+  const f = await setup(t, { reopen: true, failingRead: true });
+  const verification = await f.verify();
+  assert.equal(verification.passes, 3); assert.equal(verification.control, 'missed');
+  assert.match(verification.error ?? '', /The failed request was a fetch request \(HTTP 500\)\.$/);
+  const { config, runs } = await f.manager.view(f.context), control = runs.find(run => run.verification?.control); assert.ok(control);
+  const result = (await f.manager.runProgress(f.context, control.id)).results[0];
+  assert.equal(result.controlReadReason, 'read-failed');
+  assert.deepEqual(result.controlFailedRead, { resourceType: 'fetch', method: 'GET', url: new URL('/broken', config.targetUrl).href, status: 500 });
+  await assert.rejects(f.manager.approveSpec(f.context, { caseId: f.item.id, hash: f.hash }), { statusCode: 409 });
 });
 
 test('a delayed submission settles before fresh readback and the blocked-write response still reaches independent checks', { timeout: 90000 }, async t => {

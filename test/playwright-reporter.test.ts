@@ -92,3 +92,23 @@ test('reporter hides encoded account paths before clipping and refuses malformed
     }
   }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
 });
+
+test('reporter keeps a failed read only for a read rejected because a request failed, with the account hidden',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const file=join(directory,'case.json');await writeFile(file,JSON.stringify({id:'case',name:'Save workspace',goal:'Save and reopen my workspace',steps:[],assertions:[]}));
+  const keys=['PERPETUAL_CASE','PERPETUAL_EVENT_CHANNEL','PERPETUAL_ACCOUNT_USERNAME','PERPETUAL_ACCOUNT_PASSWORD'],previous=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  const username='viewer@example.test';
+  try{
+    Object.assign(process.env,{PERPETUAL_CASE:file,PERPETUAL_EVENT_CHANNEL:'channel:',PERPETUAL_ACCOUNT_USERNAME:username,PERPETUAL_ACCOUNT_PASSWORD:'private-pass-91'});
+    const controlFailedRead={resourceType:'fetch',method:'GET',url:`https://app.test/users/${encodeURIComponent(username)}?token=private`,status:500};
+    const reporter=new JourneyReporter();reporter.write=()=>{};
+    reporter.onStdOut('channel:'+JSON.stringify({type:'control-read',caseId:'case',eligible:false,reason:'read-failed',controlFailedRead})+'\n');
+    assert.deepEqual(reporter.facts().controlFailedRead,{resourceType:'fetch',method:'GET',url:'https://app.test/users/[REDACTED]',status:500});
+    assert.equal(reporter.facts().controlReadReason,'read-failed');
+    for(const changes of [{eligible:true},{reason:'url-changed'},{reason:undefined},{controlFailedRead:{...controlFailedRead,body:'private'}}]){
+      const invalid=new JourneyReporter();invalid.write=()=>{};
+      invalid.onStdOut('channel:'+JSON.stringify({type:'control-read',caseId:'case',eligible:false,reason:'read-failed',controlFailedRead,...changes})+'\n');
+      assert.notEqual(invalid.facts().controlRead,true);assert.equal(invalid.facts().controlFailedRead,undefined);
+    }
+  }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
+});
