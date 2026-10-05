@@ -217,8 +217,11 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
           if (index === images.length - 1 || !MISSING_IMAGE.test(created.stderr)) throw new Error(`Could not create the repair box from ${candidate}: ${firstLine(created.stderr) || 'docker create failed'}.`);
         }
         // The copy keeps host owners on some engines; the workspace is root's, as a runner's is its user's, so git and
-        // package managers running as root treat it as their own.
-        for (const args of [['start', name], ['cp', `${source}/.`, `${name}:${ROOT}`], ['exec', name, 'chown', '-R', '0:0', ROOT]]) await step(args, 'Could not start the repair box');
+        // package managers running as root treat it as their own. A case-insensitive host such as macOS holds one file
+        // for paths that differ only in case, so the box, case-sensitive as the runner is, checks the commit out again
+        // from the copy's index: its workspace is the commit, and its diff names no file the agent did not change.
+        for (const args of [['start', name], ['cp', `${source}/.`, `${name}:${ROOT}`], ['exec', name, 'chown', '-R', '0:0', ROOT],
+          ['exec', '-w', ROOT, name, 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.ignorecase=false', '-c', 'core.precomposeunicode=false', 'reset', '--hard', '--quiet']]) await step(args, 'Could not start the repair box');
       } catch (error) {
         try { await remove(); } catch (cleanup) { throw cleanupError(`${firstLine(error instanceof Error ? error.message : String(error))}; ${String(cleanup)}`); }
         throw error;

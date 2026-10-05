@@ -91,6 +91,22 @@ test('a real box that writes more than its disk limit is removed while its comma
   assert.deepEqual(containers(`perpetual.repair=${id}`), [], 'The box and its proxy are gone.');
 });
 
+// Two tracked paths that differ only in case, of which a case-insensitive host such as macOS holds one file.
+test('a box holds the commit whatever the host filesystem holds, even paths that differ only in case', { skip, timeout: 10 * 60_000 }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-docker-')), source = await mkdtemp(join(tmpdir(), 'perpetual-repair-docker-source-'));
+  const id = randomUUID(), boxes = createRepairBoxes({ dataDir, owner: 'repair-test' });
+  t.after(async () => { cleanup(id); await rm(dataDir, { recursive: true, force: true }); await rm(source, { recursive: true, force: true }); });
+  const git = (args: string[], input?: string) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: source, encoding: 'utf8', ...(input === undefined ? {} : { input }) }).trim();
+  git(['init', '--quiet']);
+  for (const [path, text] of [['Readme.md', 'upper\n'], ['readme.md', 'lower\n']]) git(['update-index', '--add', '--cacheinfo', `100644,${git(['hash-object', '-w', '--stdin'], text)},${path}`]);
+  git(['commit', '--quiet', '-m', 'Two readmes']);
+  git(['reset', '--hard', '--quiet']);
+  const sha = git(['rev-parse', 'HEAD']);
+  const box = await boxes.create({ id, image: 'node:22-bookworm', source });
+  assert.equal((await box.diff(sha)).length, 0, 'The box\'s workspace is the commit: its diff deletes no file.');
+  assert.equal((await box.exec(['cat', 'Readme.md', 'readme.md'])).stdout, 'upper\nlower\n');
+});
+
 const exec = promisify(execFile) as CommandRunner;
 const A = 'a'.repeat(40);
 const TYPE_ERROR = "src/add.ts(1,55): error TS2322: Type 'string' is not assignable to type 'number'.";

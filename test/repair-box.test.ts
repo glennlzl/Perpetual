@@ -71,6 +71,9 @@ test('a box sits alone on an internal network, reaching out only through its egr
   assert.equal(created[created.indexOf('--network') + 1], name, 'The box joins only its internal network.');
   assert.ok(!created.includes('bridge') && !created.includes('host') && !created.some(arg => /^(?:-v|--volume|--mount|--privileged)$/.test(arg) || arg.includes('docker.sock')));
   assert.ok(created.includes('HTTPS_PROXY=http://proxy:3128') && created.includes('NO_PROXY=localhost,127.0.0.1,::1'));
+  // A case-insensitive host holds one file for paths that differ only in case; the box checks the commit out itself.
+  const filled = calls.slice(calls.indexOf(created) + 1).filter(call => call[0] !== 'container' && !call.includes('df')).map(call => call.join(' '));
+  assert.deepEqual(filled, [`start ${name}`, `cp ${f.dir}/. ${name}:/workspace`, `exec ${name} chown -R 0:0 /workspace`, `exec -w /workspace ${name} git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.ignorecase=false -c core.precomposeunicode=false reset --hard --quiet`]);
   await box.remove();
   assert.deepEqual((await f.read()).resources, [], 'Box, proxy and network are confirmed absent.');
 });
