@@ -50,8 +50,6 @@ const LOCK_TIMEOUT = 15_000;
 const GUEST_PORTS = { api: 8000, desktop: 6080 };
 const tcp = (port: number) => `${port}/tcp`;
 const PUBLISHED_PORTS = Object.values(GUEST_PORTS).map(tcp);
-// Failures that leave the local engine unconsulted, so they say nothing about a sandbox's container.
-const UNCONSULTED = new Set(['DOCKER_UNAVAILABLE', 'DOCKER_REMOTE_UNSUPPORTED', 'DOCKER_CONTEXT_INVALID', 'DOCKER_CONTEXT_MISMATCH', 'DOCKER_LINUX_REQUIRED']);
 
 class SandboxError extends Error {
   declare code: string;
@@ -398,9 +396,10 @@ async function waitUntilReady(docker: LocalDocker, record: SandboxRecord) {
   throw new SandboxError('The Cua computer-server did not become ready.', 'SANDBOX_NOT_READY');
 }
 
-async function removeOwnedContainer(docker: LocalDocker, record: SandboxRecord) {
+async function removeOwnedContainer(docker: LocalDocker, record: SandboxRecord, found = () => {}) {
   const container = await lookupContainer(docker, record);
   if (!container) return;
+  found();
   try { await docker.command(['container', 'rm', '--force', '--volumes', container.Id], 'Deleting sandbox', 90_000); }
   catch (error) {
     // A racing external deletion can make rm fail; only a fresh inspection proves absence.
@@ -506,16 +505,18 @@ export async function destroySandbox({ dataDir, id }: { dataDir?: unknown; id?: 
   sandboxId(id);
   const store = await storeFor(dataDir);
   return withLock(store, id, async () => {
-    let record = await readRecord(store, id);
+    let record = await readRecord(store, id), found = false;
     try {
       const docker = await localDocker(record.dockerHost);
-      await removeOwnedContainer(docker, record);
+      await removeOwnedContainer(docker, record, () => { found = true; });
       const { error, errorCode, cleanupError, ...retained } = record;
       return await saveRecord(store, { ...retained, status: 'destroyed', apiUrl: null, desktopUrl: null, destroyedAt: new Date().toISOString() });
     } catch (error) {
       const failure = error instanceof SandboxError ? error : new SandboxError('Sandbox deletion failed.', 'SANDBOX_CLEANUP_FAILED');
-      // A cleanup already confirmed through Docker stays confirmed when the local engine cannot be consulted again.
-      if (!(['destroyed', 'failed'].includes(record.status) && UNCONSULTED.has(failure.code))) {
+      // A cleanup already confirmed through Docker stays confirmed unless this attempt found the owned container again;
+      // failing to consult the engine, however it fails, says nothing about the container.
+      const confirmed = record.status === 'destroyed' || (record.status === 'failed' && !!record.cleanedAt);
+      if (found || !confirmed) {
         record = await saveRecord(store, { ...record, status: 'cleanup_failed', apiUrl: null, desktopUrl: null, cleanupError: failure.message });
       }
       failure.sandboxId = record.id;

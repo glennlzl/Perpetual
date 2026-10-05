@@ -19,6 +19,7 @@ const fail = (message, code = 1) => { process.stderr.write(message + '\\n'); pro
 const args = process.argv.slice(2);
 if (args[0] !== '--host' || args[1] !== state.socket) fail('Unexpected Docker endpoint', 81);
 if (state.down) fail('Cannot connect to the Docker daemon at ' + state.socket + '. Is the docker daemon running?');
+if (state.error) fail(state.error);
 const [command, ...rest] = args.slice(2);
 const option = name => rest[rest.indexOf(name) + 1];
 const container = state.container;
@@ -39,7 +40,7 @@ else if (command === 'container' && rest[0] === 'create') {
     HostConfig: { NetworkMode: 'bridge', NanoCpus: container.cpus * 1e9, Memory: container.memoryMiB * 1024 * 1024, PidsLimit: container.pids,
       PortBindings: { '8000/tcp': [requested], '6080/tcp': [requested] } }, Mounts: [] }]));
 } else if (command === 'container' && rest[0] === 'start') { container.running = true; save(); }
-else if (command === 'container' && rest[0] === 'rm') { delete state.container; save(); }
+else if (command === 'container' && rest[0] === 'rm') { if (state.rmError) fail(state.rmError); delete state.container; save(); }
 else if (command === 'exec') {
   process.stdout.write(state.exec.stdout || '');
   process.stderr.write(state.exec.stderr || '');
@@ -65,6 +66,7 @@ async function localEngine(t: TestContext) {
   t.after(() => { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   return {
     dataDir: join(directory, 'data'),
+    async read() { return JSON.parse(await readFile(state, 'utf8')); },
     async set(change: object) { await writeFile(state, JSON.stringify({ ...JSON.parse(await readFile(state, 'utf8')), ...change })); },
   };
 }
@@ -86,6 +88,20 @@ test('destroying a sandbox again while Docker is unreachable keeps its confirmed
   assert.deepEqual([records.get(failed.id)?.status, records.get(failed.id)?.cleanupError], ['failed', undefined]);
   await engine.set({ down: false });
   assert.equal((await inspectSandbox({ dataDir, id: created.id })).status, 'destroyed');
+});
+
+test('a confirmed cleanup is given up only when its owned container is found again', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const created = await createSandbox({ dataDir });
+  const { container } = await engine.read();
+  await destroySandbox({ dataDir, id: created.id });
+  // An engine that answers with an error of another kind says nothing about the container either.
+  await engine.set({ error: 'Error response from daemon: an internal error occurred' });
+  await assert.rejects(destroySandbox({ dataDir, id: created.id }), { code: 'DOCKER_ERROR' });
+  assert.deepEqual((await listSandboxes({ dataDir })).map(record => [record.status, record.cleanupError]), [['destroyed', undefined]]);
+  await engine.set({ error: null, container, rmError: 'Error response from daemon: removal of the container is already in progress' });
+  await assert.rejects(destroySandbox({ dataDir, id: created.id }), { code: 'DOCKER_ERROR' });
+  assert.equal((await listSandboxes({ dataDir }))[0].status, 'cleanup_failed');
 });
 
 test('the guest Driver check says what failed', async t => {
