@@ -48,7 +48,11 @@ export function validateBrowserTarget(value:string,{controllerOrigin}:{controlle
   if(value.length>2048||url.username||url.password||!['http:','https:'].includes(url.protocol))throw new Error('Use an application URL without embedded credentials.');
   if(url.protocol==='http:'&&!localBrowserHost(host))throw new Error('Use HTTPS for previews or localhost for a local application.');
   if(!localBrowserHost(host)&&(host.includes(':')||/^(?:0\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)||host.endsWith('.internal')||host==='metadata'))throw new Error('This address is not an application test target.');
-  if(controllerOrigin){const controller=new URL(controllerOrigin);if(url.port===controller.port)throw new Error('Choose the application URL, not the Perpetual controller.');}
+  if(controllerOrigin){
+    // Every loopback alias reaches a local controller on its port; another host is the controller only by its own name.
+    const controller=new URL(controllerOrigin),controllerHost=controller.hostname.toLowerCase().replace(/\.$/,'');
+    if(url.port===controller.port&&(localBrowserHost(host)?localBrowserHost(controllerHost):host===controllerHost))throw new Error('Choose the application URL, not the Perpetual controller.');
+  }
   url.hash='';return url.href;
 }
 

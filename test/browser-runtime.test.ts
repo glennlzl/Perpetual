@@ -14,6 +14,10 @@ test('browser target allows explicit local apps and previews but excludes contro
   // The runner's Chromium resolves a twin's host name to loopback, so twin URLs are local apps.
   assert.equal(validateBrowserTarget('http://host.docker.internal:43100/billing',{controllerOrigin:'http://127.0.0.1:4317'}),'http://host.docker.internal:43100/billing');
   for(const url of ['http://localhost:4317','http://127.1:4317','http://[::1]:4317','http://host.docker.internal:4317','https://user:secret@example.com','https://169.254.169.254/latest','https://[::ffff:169.254.169.254]/latest','http://10.0.0.1','file:///etc/passwd','https://metadata.google.internal','http://gateway.docker.internal:43100','https://metadata','http://127.example.com:43100'])assert.throws(()=>validateBrowserTarget(url,{controllerOrigin:'http://127.0.0.1:4317'}),Error,url);
+  // Only the controller's own host shares its port: a remote preview on the same port number is another application.
+  assert.equal(validateBrowserTarget('https://preview.example.com:4317/app',{controllerOrigin:'http://127.0.0.1:4317'}),'https://preview.example.com:4317/app');
+  assert.equal(validateBrowserTarget('https://preview.example.com/app',{controllerOrigin:'https://perpetual.example.com'}),'https://preview.example.com/app');
+  for(const url of ['https://perpetual.example.com/','https://perpetual.example.com./'])assert.throws(()=>validateBrowserTarget(url,{controllerOrigin:'https://perpetual.example.com'}),/not the Perpetual controller/,url);
 });
 
 test('runtime consumes bounded events and keeps model credentials out of errors',async t=>{
