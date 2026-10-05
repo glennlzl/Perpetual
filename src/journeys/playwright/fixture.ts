@@ -80,8 +80,8 @@ async function readNumber(page: Page, label: string) {
 }
 
 // A field's value is what the application kept only while nothing else set it. Before the application's scripts run,
-// each document marks every form field an input or change event reaches, whoever sent it: what a journey typed, chose or
-// cleared there.
+// each document marks every form field or editing host (contenteditable) an input or change event reaches, whoever
+// sent it: what a journey typed, chose or cleared there.
 const EDITED = 'perpetual.edited';
 function markEdits(key: string) {
   const edited = new WeakSet<EventTarget>();
@@ -91,23 +91,24 @@ function markEdits(key: string) {
 // Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
 // matches: ignoring case and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
 // field is never read, nor a field edited in the current document, nor any field of a document the browser returned to
-// through history, into which it restores what was typed before. Without the marks, no field is read.
+// through history, into which it restores what was typed before. Without the marks, no field is read. Visible text the
+// journey typed into an editing host of the current document is no more what the application kept, so it is not read.
 // From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
 function holds(nodes: Element[], [text, key, version, fields]: [string, string, number, boolean]) {
+  const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
+  // Playwright pierces open shadow roots, so an exclusion must follow their hosts too.
+  const up = (node: Element) => { const root = node.getRootNode(); return node.assignedSlot || node.parentElement || (root instanceof ShadowRoot ? root.host : null); };
   const query = (node: Element) => {
     let control = false;
-    // Playwright pierces open shadow roots, so the exclusion must follow their hosts too.
-    for (let parent: Element | null = node; parent;) {
+    for (let parent: Element | null = node; parent; parent = up(parent)) {
       control ||= parent.matches('input, textarea, select');
       if (parent.matches('input[type="search" i], [role~="searchbox" i]') || control && parent.matches('search, [role~="search" i]')) return true;
-      const root = parent.getRootNode();
-      parent = parent.assignedSlot || parent.parentElement || (root instanceof ShadowRoot ? root.host : null);
     }
     return false;
   };
-  nodes = nodes.filter(node => version < 4 || !query(node));
+  const typed = (node: Element) => { for (let parent: Element | null = node; parent; parent = up(parent)) if (parent instanceof HTMLElement && parent.isContentEditable && edited?.has(parent)) return true; return false; };
+  nodes = nodes.filter(node => (version < 4 || !query(node)) && !typed(node));
   if (!fields) return nodes.length > 0;
-  const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
   const normal = (value: string) => value.replace(/\u200b/g, '').replace(/\s+/g, ' ').trim().toLowerCase(), wanted = normal(text);

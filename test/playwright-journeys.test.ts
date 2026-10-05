@@ -29,7 +29,7 @@ const page=(title:string,body:string)=>`<!doctype html><title>${title}</title><b
 // does, and a message sent over it after that.
 const SOCKET="const SOCKET_URL=location.origin.replace('http','ws')+'/socket',socket=new WebSocket(SOCKET_URL),open=new Promise(resolve=>socket.addEventListener('open',()=>{socket.send(JSON.stringify({type:'hello'}));resolve();})),say=message=>open.then(()=>socket.send(JSON.stringify(message)));";
 function application({persist=true}:{persist?:boolean}={}){
-  const state={name:'Original Name',credits:10,notes:0,failRename:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
+  const state={name:'Original Name',body:'Original body',credits:10,notes:0,failRename:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
   const server=http.createServer((req,res)=>{
     const url=new URL(req.url!,'http://app'),signedIn=/session=1/.test(req.headers.cookie||'');hosts.add(req.headers.host);
     if(req.method!=='GET')posts.push(`${req.method} ${url.pathname}`);
@@ -59,6 +59,10 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/rename'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.name=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/rename')return send(page('Rename',`<h1>Rename</h1><label>Display name <input id=rename value="${state.name}"></label><button id=save>Rename</button>
         <script>save.onclick=()=>fetch(${url.searchParams.has('query')?"'/rename?name='+encodeURIComponent(rename.value)":"'/rename'"},{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+      // The same save from a rich-text editor (contenteditable), which shows the body only in the editor.
+      if(url.pathname==='/compose'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.body=body;res.writeHead(200);return res.end();}
+      if(url.pathname==='/compose')return send(page('Compose',`<h1>Compose</h1><div id=editor contenteditable role=textbox aria-label=Body>${state.body}</div><button id=save>Save</button>
+        <script>save.onclick=()=>fetch('/compose',{method:'POST',body:editor.textContent}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -549,6 +553,40 @@ test('a text check never reads what the journey typed into a field, nor a field 
   f.app.state.failRename=false;
   const events=await runSpec(target,renameSpec(reload),{item:renamed}),seen=events.find(event=>event.type==='journey-step'&&event.stepId==='see'&&event.status!=='running');
   assert.deepEqual([seen?.status,f.app.state.name],['completed',seen?.evidence?.match(/“(Renamed [a-z0-9]{8})”/)?.[1]]);
+});
+
+// The same journey writing its body in a rich-text editor, where what it types is visible page text.
+const composed={...renamed,id:'composed',name:'Compose and see the body',
+  steps:[{id:'compose',title:'Write the body',checks:[]},{id:'see',title:'See the new body',checks:[{type:'text-visible',value:'Body {run}'}]}]} satisfies Omit<BrowserCase,'evidence'>;
+const composeSpec=(see:string)=>`import { test } from 'perpetual';
+test('Compose and see the body', async ({ page, journey }) => {
+  await journey.milestone('compose', async () => {
+    await page.goto('/compose');
+    await page.getByRole('textbox', { name: 'Body' }).fill(\`Body \${journey.run}\`);
+    await page.getByRole('button', { name: 'Save' }).click();
+  });
+  await journey.milestone('see', async () => {
+    ${see}
+  });
+});
+`;
+
+test('a text check never reads what the journey typed into an editable region',{timeout:180000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const later='await page.getByRole(\'heading\', { name: \'Compose\' }).click();',reload='await page.reload();';
+  f.app.state.failRename=true;
+  // The body is not saved: the editor still shows the typed text on the same page, and in a control run; a reload shows the stored body.
+  for(const see of [later,reload]){
+    const code=composeSpec(see);validateJourneySpec(code,composed);
+    assert.deepEqual(ended(await runSpec(target,code,{item:composed})),['compose:completed','see:failed'],see);
+  }
+  assert.deepEqual(ended(await runSpec(target,composeSpec(later),{item:composed,blockWrites:true})),['compose:completed','see:failed']);
+  assert.equal(f.app.state.body,'Original body');
+  // Saved, the body is what the application shows in the editor once the page is opened again.
+  f.app.state.failRename=false;
+  const events=await runSpec(target,composeSpec(reload),{item:composed}),seen=events.find(event=>event.type==='journey-step'&&event.stepId==='see'&&event.status!=='running');
+  assert.deepEqual([seen?.status,f.app.state.body],['completed',seen?.evidence?.match(/“(Body [a-z0-9]{8})”/)?.[1]]);
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{
