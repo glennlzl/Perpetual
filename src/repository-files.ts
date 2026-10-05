@@ -40,7 +40,8 @@ export const hasRepositoryFile = async (root: string, relative: string, { limit 
  * The text of `root/relative`, or null when the path is absolute, climbs out of the root, is or
  * passes through a symbolic link, is not a regular file, or exceeds `limit` bytes. The file is
  * opened without following links and its size is checked again on the open handle, so neither a
- * link nor a growth between the checks is read.
+ * link nor a growth between the checks is read. A leading byte order mark, which editors on Windows
+ * often write and JSON.parse refuses, is not part of the text.
  */
 export async function readRepositoryFile(root: string, relative: string, { limit = DEFAULT_LIMIT } = {}): Promise<string | null> {
   const location = await locate(root, relative, limit);
@@ -57,7 +58,7 @@ export async function readRepositoryFile(root: string, relative: string, { limit
       if (!bytesRead) break;
       size += bytesRead;
     }
-    return size > limit ? null : buffer.subarray(0, size).toString('utf8');
+    return size > limit ? null : buffer.subarray(0, size).toString('utf8').replace(/^\uFEFF/, '');
   } catch { return null; }
   finally { await handle?.close(); }
 }
