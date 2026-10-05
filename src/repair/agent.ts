@@ -282,7 +282,13 @@ export function createRepairAgent(options: RepairAgentOptions) {
       let diff: Buffer;
       try { diff = await box.diff(repair.sha); }
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
-      if (!diff.toString('utf8').trim()) { await fail('The attempt changed no file.'); continue; }
+      if (!diff.toString('utf8').trim()) {
+        await fail('The attempt changed no file.');
+        // Done without a change is how the instructions have the model say the code cannot fix the failure, such as one
+        // whose cause is in CI configuration: a person reads why, rather than the next attempts paying to agree.
+        if (result.summary && !result.verified) return await finish({ status: 'needs-person', reason: `The model changed no file: ${result.summary}` });
+        continue;
+      }
       const first = checkChanges(diff.toString('utf8'), { deployFiles });
       if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
       // What git staged is checked again, whatever the box's diff said: its own paths, its text diff with the content
