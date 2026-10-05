@@ -14,6 +14,7 @@ The design is recorded in [Twins and the journey gate](architecture/twins-and-ga
 ## Requirements
 
 - A managed GitHub source: a repository and branch chosen in **Source → Settings** (see [Provider connections](providers.md#choose-a-source)), and a connected GitHub account that may write commit statuses.
+- For a managed source, a GitHub Actions workflow that runs on `push` to the target branch, or is dispatched on it. A commit without such a run, such as one built only by a pull request or skipped by CI, waits for Build until a newer push or a dispatched run at that commit.
 - A Sandbox stage with a twin config and at least one reviewed, selected journey.
 - An application URL that points at the stage's twin. When a new twin becomes Ready with one web-frontend app, or only one app, and a person has not chosen another URL, the URL points at it automatically.
 - Playwright's Chromium (`npx playwright install chromium`) and [approved code](journeys.md#journey-code) for each journey. The journeys' runs need no model; Perpetual uses the model to draft journeys and write their code, and an application that calls a model does so through its twin's `llm` service.
