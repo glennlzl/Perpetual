@@ -148,7 +148,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     Object.assign(gate, { status, updatedAt: time, completedAt: time } satisfies Partial<Gate>);
     if (reason) gate.reason = reason; else delete gate.reason;
     if (status === 'passed') promote(gate);
-    await persist();
+    // A verdict stands when its save fails: the next save writes it, and a repair waiting for it still learns it.
+    await persist().catch(error => { process.stderr.write(`Journey gate: ${text(error)}\n`); });
     void sync();
     for (const waiter of waiters.get(gate.id) ?? []) waiter.resolve();
     waiters.delete(gate.id);

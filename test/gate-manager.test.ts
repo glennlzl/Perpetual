@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGateManager, type GateConnection, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
@@ -105,6 +105,21 @@ test('a run that stopped on a runtime error without a failed journey needs relea
   assert.deepEqual([view.status, view.reason], ['needs-release', 'Browser runtime did not return results.']);
   assert.deepEqual([h.posts.at(-1)?.state, h.posts.at(-1)?.description], ['pending', 'Needs release']);
   assert.equal((await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' })).stages.beta.status, 'released');
+});
+
+test('a verdict whose save fails stays the verdict, so a failed journey never becomes releasable', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const h = await harness(t, { runs: { beta: { status: 'failed', results: [{ caseId: 'journey', status: 'failed' }] } }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates');
+  // The gate state cannot be written from the moment the journeys finish.
+  h.holds.run = () => chmod(root, 0o500);
+  try {
+    await h.manager.run({ stageId: 'beta' });
+    await h.manager.idle();
+  } finally { await chmod(root, 0o700); }
+  const view = h.manager.view().stages.beta;
+  assert.deepEqual([view.status, view.reason], ['failed', 'A journey failed.']);
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'developer' }), /failed gate cannot be released/);
+  assert.deepEqual(h.posts.map(item => `${item.state} ${item.description}`), ['pending Running', 'failure Failed']);
 });
 
 test('a stage without reviewed, selected journeys needs release without rebuilding or running', async t => {

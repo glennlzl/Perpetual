@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGateManager, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
@@ -210,6 +210,14 @@ test('a controller restart ends a repair gate at work or still queued without a 
   // Statuses are reported most recently updated first; both gates end together, so only the set is fixed.
   assert.deepEqual([...h.posted(P)].sort(), [['perpetual/Beta', 'pending', 'Needs release'], ['perpetual/Gamma', 'pending', 'Needs release']]);
   assert.deepEqual(h.manager.view(), { stages: {}, production: null });
+});
+
+test('a repair learns its gate\'s verdict even when the verdict cannot be saved', { skip: process.platform === 'win32' || process.getuid?.() === 0, timeout: 10_000 }, async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates');
+  h.holds.run = () => chmod(root, 0o500);
+  try { assert.deepEqual((await h.manager.runRepair(request())).gates.map(gate => gate.status), ['passed']); }
+  finally { await chmod(root, 0o700); }
 });
 
 test('shutdown ends a repair\'s wait for its gate', async t => {
