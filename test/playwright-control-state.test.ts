@@ -7,11 +7,12 @@ import type { EvaluatedCheck } from '../src/journeys/playwright/checks.ts';
 
 // Network ordering around a judged document, independent of browser timing. Real browser/controller
 // persistence and POST interference cases live in playwright-control-read.test.ts.
-function setup() {
-  const page = () => { const events = new EventEmitter(), frame = { parentFrame: () => null, url: () => 'http://app.test/' }; return Object.assign(events, { mainFrame: () => frame, url: frame.url, isClosed: () => false }) as unknown as Page & EventEmitter; };
+function setup(url = 'http://app.test/') {
+  const page = () => { const events = new EventEmitter(), frame = { parentFrame: () => null, url: () => url }; return Object.assign(events, { mainFrame: () => frame, url: frame.url, isClosed: () => false }) as unknown as Page & EventEmitter; };
   const first = page(), second = page(), context = Object.assign(new EventEmitter(), { pages: () => [first, second] });
   const reads = controlReads(context as unknown as BrowserContext);
-  function request(target = first, method = 'GET') { return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => target.url() } as unknown as Request; }
+  // Chromium reports a document's request without the fragment its page URL keeps.
+  function request(target = first, method = 'GET') { return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => target.url().split('#')[0] } as unknown as Request; }
   function fresh(target = first, status = 200) {
     const req = request(target); context.emit('request', req);
     context.emit('response', { request: () => req, ok: () => status === 200, status: () => status });
@@ -29,6 +30,13 @@ test('only the failing page fresh after its blocked change can certify a control
   assert.equal(f.reads.eligible(f.first, { ...f.failed, passed: true }), false);
   for (const check of [{type:'text-visible',value:'Saved',passed:false},{type:'url-contains',value:'/{run}',passed:false}] as EvaluatedCheck[]) assert.equal(f.reads.eligible(f.first, check), false);
   f.reads.blocked(f.first); assert.equal(f.reads.eligible(f.first, f.failed), false);
+});
+
+test('a fresh document of a hash-routed page certifies its control failure', () => {
+  for (const url of ['http://app.test/#/notes', 'http://app.test/notes#saved']) {
+    const f = setup(url); f.reads.blocked(f.first); f.fresh();
+    assert.equal(f.reads.eligible(f.first, f.failed), true, url);
+  }
 });
 
 test('failed reads, uncommitted documents and later blocked reads cannot certify persistence', () => {

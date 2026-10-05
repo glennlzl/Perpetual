@@ -1,6 +1,9 @@
 import type { BrowserContext, Page, Request } from '@playwright/test';
 import { RUN, checkTemplate, type EvaluatedCheck } from './checks.ts';
 
+// Chromium reports a document's request without its fragment, while frame and page URLs keep it, as a hash route does.
+const unhashed = (url: string) => url.split('#')[0];
+
 /** A control failure needs a fresh document of the judged page, after its blocked change. */
 export function controlReads(context: BrowserContext) {
   type Document = { request: Request; epoch: number; ok: boolean; finished: boolean; committed: boolean };
@@ -30,13 +33,13 @@ export function controlReads(context: BrowserContext) {
   const watch = (page: Page) => page.on('framenavigated', frame => {
     if (frame !== page.mainFrame()) return;
     const document = state(page).document;
-    if (document && frame.url() === document.request.url()) document.committed = true;
+    if (document && unhashed(frame.url()) === unhashed(document.request.url())) document.committed = true;
   });
   context.pages().forEach(watch); context.on('page', watch);
   const readable = (page: Page | undefined, document: Document | undefined) => {
     if (!page || page.isClosed() || !document) return false;
     const item = state(page);
-    return item.document === document && !item.invalid && document.ok && document.finished && document.committed && document.epoch === item.epoch && page.url() === document.request.url();
+    return item.document === document && !item.invalid && document.ok && document.finished && document.committed && document.epoch === item.epoch && unhashed(page.url()) === unhashed(document.request.url());
   };
   function eligible(page: Page | undefined, check: EvaluatedCheck) {
     if (!page || check.passed || check.error) return false;
