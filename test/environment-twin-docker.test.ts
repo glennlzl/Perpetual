@@ -10,9 +10,10 @@ import YAML from 'yaml';
 import { detectEnvironmentConfig } from '../src/environments/plans.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
 import { scanRepository } from '../src/scanner.ts';
+import { repositoryCache } from '../src/twin/compose.ts';
 import type { DetectedConfig } from '../src/twin/detect.ts';
 
-type Environment = { id: string; sandboxId?: string; plan?: DetectedConfig };
+type Environment = { id: string; sandboxId?: string; plan?: DetectedConfig; pipelineKey?: string };
 
 const exec = promisify(execFile);
 // Opt-in: starts one disposable Compose project, perpetual-smoke-*, on the local Docker engine.
@@ -34,6 +35,7 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
   const runtime = createEnvironmentRuntime();
   const environment: Environment = { id, plan: { services: { mailpit: {} }, apps: { web: { directory: '.', start: 'node server.mjs', port: 3000 } } } };
   const project = () => exec('docker', ['ps', '--all', '--quiet', '--filter', `label=perpetual.environment=${id}`]).then(({ stdout }) => stdout.trim());
+  const volumes = () => exec('docker', ['volume', 'ls', '--quiet', '--filter', `label=com.docker.compose.project=perpetual-${id}`]).then(({ stdout }) => stdout.trim().split('\n').filter(Boolean));
   t.after(async () => {
     try { if (environment.sandboxId) await runtime.destroySandbox({ dataDir, environment }); }
     finally { await rm(dataDir, { recursive: true, force: true }); }
@@ -54,11 +56,14 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
   assert.equal(reply.mail, 200, 'The app reached Mailpit through its twin address.');
   assert.deepEqual(await runtime.environmentHealth({ dataDir, environment }), { status: 'ready' });
   assert.match(await runtime.environmentLogs({ dataDir, environment }), /request \/journey/);
+  // Built for no repository, the twin's package cache is its own, a volume of its project beside its workspace.
+  assert.ok((await volumes()).includes(`perpetual-${id}_package-cache`));
 
   assert.notEqual(await project(), '');
   await runtime.destroySandbox({ dataDir, environment });
   delete environment.sandboxId;
   assert.equal(await project(), '', 'Deletion removes every container of the twin.');
+  assert.deepEqual(await volumes(), [], 'Deletion removes the twin\'s own package cache with its workspace.');
 });
 
 // Two npm workspace apps share the root package-lock.json; each reports whether the shared install ran.
@@ -86,10 +91,11 @@ test('apps sharing a workspace lockfile start after one shared install in a Comp
   const id = `smoke-${randomBytes(4).toString('hex')}`, repoPath = join(dataDir, 'repo'), directory = join(dataDir, 'environments', id);
   const runtime = createEnvironmentRuntime();
   const containers = () => exec('docker', ['ps', '--all', '--quiet', '--filter', `label=perpetual.environment=${id}`]).then(({ stdout }) => stdout.trim());
-  const environment: Environment = { id };
+  // A repository no other twin builds, so the package cache its twins share is this test's to remove.
+  const pipelineKey = `local:${dataDir}`, environment: Environment = { id, pipelineKey }, cache = repositoryCache(pipelineKey);
   t.after(async () => {
     try { if (environment.sandboxId) await runtime.destroySandbox({ dataDir, environment }); }
-    finally { await rm(dataDir, { recursive: true, force: true }); }
+    finally { await exec('docker', ['volume', 'rm', '--force', cache]).catch(() => {}); await rm(dataDir, { recursive: true, force: true }); }
   });
   for (const [name, content] of Object.entries(WORKSPACE)) {
     await mkdir(dirname(join(repoPath, name)), { recursive: true });
@@ -116,4 +122,5 @@ test('apps sharing a workspace lockfile start after one shared install in a Comp
   await runtime.destroySandbox({ dataDir, environment });
   delete environment.sandboxId;
   assert.equal(await containers(), '', 'Deletion removes every container of the twin.');
+  assert.equal((await exec('docker', ['volume', 'inspect', '--format', '{{.Name}}', cache])).stdout.trim(), cache, 'Deletion keeps the repository\'s package cache for its next twin.');
 });

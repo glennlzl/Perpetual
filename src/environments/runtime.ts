@@ -77,8 +77,8 @@ export interface PreparedEnvironment {
 }
 /** A health check: `final` says the twin will not recover by itself. */
 export interface EnvironmentHealth { status: 'ready' | 'starting' | 'failed'; error?: string; final?: boolean }
-/** An environment as its runtime reads it: the twin validates the plan. */
-type Environment = Pick<EnvironmentRecord, 'id' | 'sandboxId'> & { plan?: { services?: Record<string, JsonObject> } };
+/** An environment as its runtime reads it: the twin validates the plan. A repair gate's names its repair. */
+type Environment = Pick<EnvironmentRecord, 'id' | 'sandboxId'> & Partial<Pick<EnvironmentRecord, 'pipelineKey' | 'repair'>> & { plan?: { services?: Record<string, JsonObject> } };
 type TwinCall = { dataDir: string; id: string };
 /** What environments call on their twin runtime (../twin/runtime.ts). */
 export interface EnvironmentTwin {
@@ -220,10 +220,13 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       for (const value of secretInputs(next)) if (!knownSecrets.has(value)) { knownSecrets.add(value); facts = undefined; }
       return next;
     };
+    // The twins of a pipeline's repository share its package cache. A repair gate's twin builds a pull request head no
+    // person has reviewed, so its cache is its own, removed with it: nothing it writes reaches a later twin.
+    const repository = environment.repair === undefined ? environment.pipelineKey : undefined;
     const prepareTwin = async (config: Environment['plan']) => {
       values = await readInputs(config);
       check();
-      return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, signal, onStep: async step => { check(); await onUpdate(next(step)); } });
+      return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, repository, signal, onStep: async step => { check(); await onUpdate(next(step)); } });
     };
     const ready = (result: Awaited<ReturnType<EnvironmentTwin['prepare']>>): PreparedEnvironment => ({ status: 'ready', ...next('Ready'), readyAt: new Date().toISOString(), apps: result.apps,
       services: result.services.map(({ id, fidelity, status, missing = [] }) => ({ id, title: services[id]?.title ?? id, fidelity, status, missing })),

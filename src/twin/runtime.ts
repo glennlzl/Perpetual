@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { dirname, join, posix, resolve } from 'node:path';
 import YAML from 'yaml';
 import { APPS, ID, INSTALL, SOURCE, SQL_URL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
-import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
+import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, OWN_CACHE_VOLUME, PACKAGE_CACHE_ENV, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, cacheMount, composeTwin, formatEnv, hostUrl, portKey, repositoryCache, variables } from './compose.ts';
 import { missingInputs } from './inputs.ts';
 import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
@@ -315,16 +315,20 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
   }
 
   const sqlEnv = (fixture: TwinFixture, env: Record<string, string>) => ({ [SQL_URL]: env[SQL_URL] ?? fail(`${fixture.service} does not provide ${SQL_URL}, which SQL fixtures use.`) });
-  const loadFixture = (twin: Twin, fixture: TwinFixture, env: Record<string, string>, source: string, redact: Redact, workspace: boolean, image: string) => fixture.sql
+  const loadFixture = (twin: Twin, fixture: TwinFixture, env: Record<string, string>, source: string, redact: Redact, workspace: boolean, image: string, cache: string | undefined) => fixture.sql
     ? dockerRun(twin, SQL_CLIENT, ['sh', '-c', `exec psql "$${SQL_URL}" -v ON_ERROR_STOP=1 -f "$1"`, 'fixture', posix.join(WORKSPACE, fixture.sql)],
       { env: sqlEnv(fixture, env), volumes: [`${source}:${WORKSPACE}:ro`], redact })
     : fixture.query ? dockerRun(twin, SQL_CLIENT, ['sh', '-c', `exec psql "$${SQL_URL}" -v ON_ERROR_STOP=1 -c "$1"`, 'fixture', fixture.query], { env: sqlEnv(fixture, env), redact })
     // A command fixture runs where the install put the dependencies: the twin's workspace volume when it has one.
-    : dockerRun(twin, image, ['sh', '-c', appCommand(fixture.command)], { env: { ...PACKAGE_CACHE_ENV, ...env }, volumes: [workspace ? `${twin.project}_${WORKSPACE_VOLUME}:${WORKSPACE}` : `${source}:${WORKSPACE}`, PACKAGE_CACHE_MOUNT], workdir: WORKSPACE, redact });
+    : dockerRun(twin, image, ['sh', '-c', appCommand(fixture.command)], { env: { ...PACKAGE_CACHE_ENV, ...env }, volumes: [workspace ? `${twin.project}_${WORKSPACE_VOLUME}:${WORKSPACE}` : `${source}:${WORKSPACE}`, ...(cache ? [cacheMount(cache)] : [])], workdir: WORKSPACE, redact });
 
-  /** inputs: { <service id>: { <input name>: value } }, e.g. from createTwinInputs().values(). */
-  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, onStep = () => {} }: {
-    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; onStep?: (step: string) => unknown; signal?: AbortSignal;
+  /**
+   * inputs: { <service id>: { <input name>: value } }, e.g. from createTwinInputs().values(). repository: the identity of
+   * the repository the twin builds, whose twins share one package cache; without one, as for a pull request head no
+   * person has reviewed, the twin's cache is its own, empty and removed with it, so nothing it writes reaches a later twin.
+   */
+  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, repository, onStep = () => {} }: {
+    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; repository?: string; onStep?: (step: string) => unknown; signal?: AbortSignal;
   }) {
     const config = validateTwinConfig(input, { services });
     const invalid = serviceOptionErrors(config, { services });
@@ -404,13 +408,14 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
     }
 
-    const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage,
+    const cache = repository ? repositoryCache(repository) : undefined;
+    const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage, cache,
       services: Object.keys(config.services).map(serviceId => resolved[serviceId]), ports: state.ports });
     await writeStateFile(twin.env, formatEnv(result.env), { removeTemporary: true });
     await writeStateFile(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
     await save();
-    // The shared package cache outlives every twin; creating it again is a no-op.
-    if (result.compose.volumes?.[PACKAGE_CACHE] || config.fixtures.some(fixture => fixture.command)) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', PACKAGE_CACHE], { redact });
+    // A repository's package cache outlives every twin; creating it again is a no-op. A twin's own is Compose's to create.
+    if (cache && (result.compose.volumes?.[cache] || config.fixtures.some(fixture => fixture.command))) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', cache], { redact });
     // Repository code runs from the twin's workspace volume, filled once from the snapshot before anything uses it.
     const workspace = Boolean(result.compose.services[SOURCE]);
     if (workspace) {
@@ -458,9 +463,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
       }
     }
+    // Command fixtures share the twin's package cache: the repository's, or the twin's own, which Compose made with the
+    // source copy. A twin without a workspace has no cache of its own, so a fixture's container keeps one, removed with it.
+    const fixtureCache = cache ?? (workspace ? `${twin.project}_${OWN_CACHE_VOLUME}` : undefined);
     for (const [index, fixture] of fixtures.entries()) {
       await onStep(`Loading fixture ${index + 1} of ${fixtures.length}`);
-      await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage));
+      await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage), fixtureCache);
     }
     if (names.length) {
       await onStep('Starting twin');

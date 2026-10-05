@@ -82,11 +82,13 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
   // The steps the fake twin reports before it fails, and the containers its health reads.
   const twinState = { logs: '', fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'],
     containers: [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'exited', health: null, exitCode: 1 }] as { name: string; state: string; health: string | null; exitCode?: number }[] };
-  const calls = { prepare: [] as TwinConfig[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
+  // repositories: the repository each twin was prepared for, whose package cache it shares; none for a cache of its own.
+  const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
   const twin: EnvironmentTwin = {
-    async prepare({ config, onStep = () => {} }) {
+    async prepare({ config, repository, onStep = () => {} }) {
       const plan = validateTwinConfig(config, { services: { ...registry, ...services } });
       calls.prepare.push(plan);
+      calls.repositories.push(repository);
       for (const step of twinState.steps) await onStep(step);
       const failure = twinState.fail(calls.prepare.length);
       if (failure) throw new Error(failure);
@@ -836,6 +838,18 @@ test('a repair gate of a detected stage builds the plan detected from the pull r
   assert.equal((await f.create()).status, 'ready');
   const calls = await lines(f.log);
   assert.deepEqual([calls.length, calls[4].draft, calls[4].feedback], [5, before.drafts[scope].text, before.drafts[scope].feedback]);
+});
+
+test('a repair gate’s twin builds with a package cache of its own, while the stage’s other twins share the repository’s', async t => {
+  const f = await fixture(t, { model: false });
+  // A person's twin and a target-branch gate's rebuild build the repository's own code.
+  assert.equal((await f.create()).status, 'ready');
+  const gate = await f.manager.create(f.context);
+  assert.equal((await f.manager.awaitIdle(gate.environment.id)).status, 'ready');
+  // A repair gate's builds a pull request head no person has reviewed.
+  const { environment } = await f.manager.create(await repairGate(f));
+  assert.equal((await f.manager.awaitIdle(environment.id)).status, 'ready');
+  assert.deepEqual(f.calls.repositories, [f.context.key, f.context.key, undefined]);
 });
 
 test('a repair gate of a stage without a plan yet detects one from the pull request checkout and saves none', async t => {

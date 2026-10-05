@@ -40,7 +40,7 @@ test('Service context runs host CLIs in its directory with the variables they se
     { file: 'tool-cli', args: ['start'], cwd: seen.dir }, { file: 'tool-cli', args: ['status'], cwd: source, env: { HOST_ONLY: '' } }]);
   const worker = YAML.parse(await readFile(join(twin, 'compose.yaml'), 'utf8')).services['tool-worker'];
   assert.equal(worker.working_dir, '/workspace/jobs');
-  assert.deepEqual(worker.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }]);
+  assert.deepEqual(worker.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }]);
 
   tool.setup = ctx => ctx.exec('tool-cli', ['fail']);
   await assert.rejects(runtime.prepare({ dataDir, id: 'beta', config: { services: { tool: {} } }, source, inputs: { tool: { KEY: SECRET } } }),

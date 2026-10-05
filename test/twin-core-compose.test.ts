@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
 import { validateTwinConfig } from '../src/twin/config.ts';
-import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv } from '../src/twin/compose.ts';
+import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv, repositoryCache } from '../src/twin/compose.ts';
 import { services as fixtures } from './fixtures/twin/services.ts';
 import type { ResolvedService } from '../src/twin/compose.ts';
 import type { AddressInfo } from 'node:net';
@@ -58,11 +58,13 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   const web = file.services.web;
   assert.equal(web.image, APP_IMAGE);
   assert.equal(web.working_dir, '/workspace/web');
-  // Apps run from the twin's workspace volume, which a one-shot service fills from the snapshot, and share one
-  // machine-wide package cache, external so tearing a twin down keeps it.
-  assert.deepEqual(web.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }]);
-  assert.deepEqual(file.volumes, { workspace: {}, 'perpetual-package-cache': { external: true } });
-  assert.deepEqual([file.services.source.volumes?.[0], file.services.source.command, file.services.source.profiles], [{ type: 'bind', source: '/data/source', target: '/snapshot', read_only: true }, ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
+  // Apps run from the twin's workspace volume, which a one-shot service fills from the snapshot. Without a repository,
+  // the twin keeps downloads in a package cache of its own, a volume of its project like the workspace, which the copy
+  // mounts too, so Compose creates it before anything else needs it.
+  assert.deepEqual(web.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }]);
+  assert.deepEqual(file.volumes, { workspace: {}, 'package-cache': {} });
+  assert.deepEqual([file.services.source.volumes, file.services.source.command, file.services.source.profiles], [[{ type: 'bind', source: '/data/source', target: '/snapshot', read_only: true },
+    { type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }], ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
   assert.equal(web.environment?.npm_config_cache, '/perpetual-cache/npm');
   assert.equal(file.services.database.volumes, undefined);
   assert.deepEqual(web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
@@ -71,6 +73,20 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.match(web.healthcheck!.test.at(-1)!, /127\.0\.0\.1:3000\//);
   assert.deepEqual(web.depends_on, { database: { condition: 'service_healthy' }, mail: { condition: 'service_healthy' }, 'payments-listener': { condition: 'service_started' } });
   assert.deepEqual(apps, [{ id: 'web', url: 'http://127.0.0.1:43100', directory: 'web' }, { id: 'api', url: 'http://127.0.0.1:43101', directory: 'api' }]);
+});
+
+test('The twins of one repository share its package cache, named from a digest of the repository, which another repository never names', () => {
+  const cache = repositoryCache('github:acme/app:/');
+  assert.match(cache, /^perpetual-package-cache-[0-9a-f]{16}$/);
+  assert.equal(repositoryCache('github:acme/app:/'), cache, 'The same repository keeps reusing it.');
+  assert.notEqual(repositoryCache('github:acme/billing:/'), cache);
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config, services: [database, mail, payments], ports, cache });
+  for (const app of ['web', 'api']) assert.deepEqual(file.services[app].volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: cache, target: '/perpetual-cache' }], app);
+  // External, so tearing the twin down keeps it for the repository's next twin. The runtime creates it, not the copy.
+  assert.deepEqual(file.volumes, { workspace: {}, [cache]: { external: true } });
+  assert.deepEqual(file.services.source.volumes?.map(volume => volume.source), ['/data/source', 'workspace']);
+  // A twin without a repository, as a repair gate's, never mounts a repository's cache.
+  assert.equal(YAML.stringify(compose([database, mail, payments]).compose).includes('perpetual-package-cache'), false);
 });
 
 test('An app\'s health check counts a redirect as an answer without following it, as the controller\'s check does', async t => {
@@ -92,7 +108,7 @@ test('A shared install is a one-shot service that a plain up never starts', () =
   const { compose: file, apps } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: shared, services: [database, mail, payments], ports });
   assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'install', 'web', 'api', 'source']);
   assert.deepEqual(file.services.install, {
-    image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }],
+    image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }],
     command: ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
     extra_hosts: ['host.docker.internal:host-gateway'], labels: { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' },
     logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },

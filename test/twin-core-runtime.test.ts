@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
-import { APP_IMAGE } from '../src/twin/compose.ts';
+import { APP_IMAGE, repositoryCache } from '../src/twin/compose.ts';
 import { PORT_BASE, PORT_BLOCK, allocatePorts, createTwinRuntime, execCommand, portFree } from '../src/twin/runtime.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
 import { services } from './fixtures/twin/services.ts';
@@ -106,13 +106,12 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
     apps: [{ id: 'web', url: `http://127.0.0.1:${PORT_BASE}`, directory: 'web' }, { id: 'api', url: `http://127.0.0.1:${PORT_BASE + 2}`, directory: 'api' }],
   });
 
-  // The machine-wide package cache exists before any container needs it.
-  // Repository code then runs from the twin's workspace volume, filled once from the snapshot.
-  const [listen, volume, copy, up, sql, seed, all] = calls;
-  assert.equal(calls.length, 7);
+  // Repository code runs from the twin's workspace volume, filled once from the snapshot. Without a repository, the
+  // twin's package cache is its own, which Compose creates with that copy, so nothing is created before it.
+  const [listen, copy, up, sql, seed, all] = calls;
+  assert.equal(calls.length, 6);
   assert.deepEqual(compose(copy), SOURCE_RUN);
   assert.ok(seed.args.some(arg => /^perpetual-.+_workspace:\/workspace$/.test(arg)), 'A command fixture runs in the workspace volume.');
-  assert.deepEqual(volume.args, ['volume', 'create', '--label', 'perpetual.shared=package-cache', 'perpetual-package-cache']);
   assert.deepEqual(listen.args.slice(0, 4), ['run', '--rm', '--add-host', 'host.docker.internal:host-gateway']);
   assert.deepEqual(listen.args.slice(-7), ['--workdir', join(dir, 'services', 'payments'), '--env', 'PAYMENTS_KEY', 'payments/cli:1.0', 'listen', '--print-secret']);
   assert.ok(listen.args.includes('perpetual.owner=owner-1') && listen.args.includes('perpetual.environment=beta'));
@@ -124,7 +123,7 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
   assert.ok(sql.args.includes(`${source}:/workspace:ro`));
   assert.deepEqual(seed.args.slice(-4), [APP_IMAGE, 'sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed']);
   assert.deepEqual(Object.keys(seed.env!), ['COREPACK_HOME', 'npm_config_cache', 'npm_config_store_dir', 'XDG_CACHE_HOME', 'YARN_CACHE_FOLDER', 'BUN_INSTALL_CACHE_DIR', 'JOBS_API_URL', 'JOBS_PROJECT']);
-  assert.ok(seed.args.includes('perpetual-package-cache:/perpetual-cache'));
+  assert.ok(seed.args.includes('perpetual-beta_package-cache:/perpetual-cache'), 'A command fixture shares the twin\'s cache with its install and apps.');
   assert.deepEqual(compose(all), ['up', '--wait']);
   for (const call of calls) assert.deepEqual(secretsIn(call.args.join(' ')), [], call.args.join(' '));
 
@@ -145,7 +144,7 @@ test('A shared install runs once after services are ready, before fixtures and a
   await prepare({ config: { ...config(), install: { directory: '.', command: 'npm ci' } } });
   assert.deepEqual(steps.slice(-5), ['Starting services', 'Installing dependencies', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Starting twin']);
   assert.deepEqual(calls.slice(1).map(call => compose(call) ?? call.args.at(-1)), [
-    'perpetual-package-cache', SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', ['up', '--wait']]);
+    SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', ['up', '--wait']]);
   const install = calls.find(call => compose(call)?.includes('install'));
   assert.equal(install?.env, undefined, 'The install gets no twin variables.');
   assert.deepEqual(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services.install.profiles, ['install']);
@@ -153,10 +152,10 @@ test('A shared install runs once after services are ready, before fixtures and a
   // Services still start first without fixtures; a twin with no services installs, then starts its apps.
   calls.length = 0;
   await runtime.prepare({ dataDir, id: 'mail', config: { services: { mail: {} }, install: { command: 'npm ci' }, apps: { web: { start: 'node x', port: 3000 } } }, source });
-  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), ['perpetual-package-cache', SOURCE_RUN, ['up', '--wait', 'mail'], INSTALL_RUN, ['up', '--wait']]);
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, ['up', '--wait', 'mail'], INSTALL_RUN, ['up', '--wait']]);
   calls.length = 0;
   await runtime.prepare({ dataDir, id: 'bare', config: { install: { command: 'npm ci' }, apps: { web: { start: 'node x', port: 3000 } } }, source });
-  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), ['perpetual-package-cache', SOURCE_RUN, INSTALL_RUN, ['up', '--wait']]);
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, INSTALL_RUN, ['up', '--wait']]);
 });
 
 test('Service containers that run repository code start with the apps, after the install that gives them dependencies', async t => {
@@ -168,7 +167,7 @@ test('Service containers that run repository code start with the apps, after the
   const runtime = createTwinRuntime({ exec, services: { ...services, worker }, isFree: async () => true });
   const apps = { web: { start: 'node x', port: 3000 } };
   await runtime.prepare({ dataDir, id: 'repo', config: { services: { mail: {}, worker: {} }, install: { command: 'npm ci' }, apps }, source });
-  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), ['perpetual-package-cache', SOURCE_RUN, ['up', '--wait', 'mail'], INSTALL_RUN, ['up', '--wait']]);
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, ['up', '--wait', 'mail'], INSTALL_RUN, ['up', '--wait']]);
   const file = YAML.parse(await readFile(join(dataDir, 'environments', 'repo', 'twin', 'compose.yaml'), 'utf8'));
   assert.equal(file.services['worker-dev'].working_dir, '/workspace/api');
   assert.deepEqual(file.services.web.depends_on, { mail: { condition: 'service_healthy' }, 'worker-dev': { condition: 'service_started' } });
@@ -176,7 +175,54 @@ test('Service containers that run repository code start with the apps, after the
   // With only repository-code services, nothing starts before the install.
   calls.length = 0;
   await runtime.prepare({ dataDir, id: 'repo-only', config: { services: { worker: {} }, install: { command: 'npm ci' }, apps }, source });
-  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), ['perpetual-package-cache', SOURCE_RUN, INSTALL_RUN, ['up', '--wait']]);
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, INSTALL_RUN, ['up', '--wait']]);
+});
+
+test('The twins of one repository share its package cache, which deleting a twin keeps, and another repository\'s twins never mount it', async t => {
+  const { calls, prepare, runtime, dataDir } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const acme = repositoryCache('github:acme/app:/'), billing = repositoryCache('github:acme/billing:/');
+  const file = async (id: string) => YAML.parse(await readFile(join(dataDir, 'environments', id, 'twin', 'compose.yaml'), 'utf8'));
+  await prepare({ repository: 'github:acme/app:/' });
+  // The runtime creates the repository's cache before any container needs it, and a command fixture mounts it.
+  const created = calls.findIndex(call => call.args[0] === 'volume');
+  assert.deepEqual(calls[created].args, ['volume', 'create', '--label', 'perpetual.shared=package-cache', acme]);
+  assert.ok(created < calls.findIndex(call => compose(call)?.includes('source')));
+  assert.ok(calls.find(call => call.args.at(-1)!.endsWith('pnpm seed'))!.args.includes(`${acme}:/perpetual-cache`));
+  assert.deepEqual((await file('beta')).volumes, { workspace: {}, [acme]: { external: true } });
+  await prepare({ id: 'gamma', repository: 'github:acme/app:/' });
+  assert.deepEqual((await file('gamma')).volumes, { workspace: {}, [acme]: { external: true } }, 'The same repository keeps reusing it.');
+  await prepare({ id: 'other', repository: 'github:acme/billing:/' });
+  const other = await file('other');
+  assert.deepEqual(other.volumes, { workspace: {}, [billing]: { external: true } });
+  assert.equal(YAML.stringify(other).includes(acme), false);
+  calls.length = 0;
+  await runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } });
+  assert.equal(calls.some(call => call.args.some(arg => arg.includes(acme))), false, 'Deleting a twin keeps its repository\'s cache.');
+});
+
+test('A twin without a repository, as a repair gate\'s, has a package cache of its own, which deleting the twin removes', async t => {
+  const { calls, prepare, runtime, dataDir, dir, source } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await prepare();
+  // A volume of the twin's project, which nothing outside Compose creates and the source copy, its first container, mounts.
+  assert.equal(calls.some(call => call.args[0] === 'volume'), false);
+  const file = YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8'));
+  assert.deepEqual(file.volumes, { workspace: {}, 'package-cache': {} });
+  assert.deepEqual(file.services.source.volumes.map((volume: { source: string }) => volume.source), [source, 'workspace', 'package-cache']);
+  for (const app of ['web', 'api']) assert.equal(file.services[app].volumes[1].source, 'package-cache', app);
+  assert.ok(calls.find(call => call.args.at(-1)!.endsWith('pnpm seed'))!.args.includes('perpetual-beta_package-cache:/perpetual-cache'));
+  // Not external, so taking the twin down with its volumes removes it, and teardown confirms none of them remain.
+  calls.length = 0;
+  await runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } });
+  assert.deepEqual(compose(calls[0]), ['down', '--volumes', '--remove-orphans']);
+  assert.deepEqual(calls.at(-1)!.args, ['volume', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project=perpetual-beta']);
+  // A twin without a workspace has no such volume: a command fixture's container keeps its own cache, removed with it.
+  calls.length = 0;
+  await runtime.prepare({ dataDir, id: 'seeded', source, config: { services: { database: {}, jobs: { database: '{{database.DATABASE_URL}}' } }, fixtures: [{ service: 'jobs', command: 'pnpm seed' }] } });
+  const seed = calls.find(call => call.args.at(-1)!.endsWith('pnpm seed'))!;
+  assert.deepEqual(seed.args.flatMap((arg, index) => arg === '--volume' ? [seed.args[index + 1]] : []), [`${source}:/workspace`]);
+  assert.equal(calls.some(call => call.args[0] === 'volume'), false);
 });
 
 test('A failed install stops prepare with its command, exit code and the end of its output, redacted', async t => {
