@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
-import { scanRepository, createPreviewPlan } from '../src/scanner.ts';
+import { scanRepository, createPreviewPlan, repositoryPath } from '../src/scanner.ts';
 
 // The generated starter as the tests read it back.
 type StarterStep = { uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, string>; 'working-directory'?: string };
@@ -89,6 +89,19 @@ test('a scanned subdirectory keeps the workflows GitHub reads at the repository 
   assert.equal(scan.plan.workflow, undefined, 'must reuse existing CI rather than generate a competing workflow');
   assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => [node.provider, node.evidence.map(item => item.file)]), [['Vercel', ['.github/workflows/deploy.yml']]]);
   assert.deepEqual(scan.delivery.build.map(entry => entry.label), ['GitHub Actions']);
+});
+
+test('a scanned subdirectory\'s evidence is named from the repository top level: workflows as they are, the rest below it', async t => {
+  const root = await fixture(t, {
+    'apps/web/package.json': { name: 'web' },
+    'apps/web/vercel.json': {},
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{ run: npx vercel deploy --prod }]\n',
+  });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  const files = (await scanRepository(path.join(root, 'apps/web'))).nodes.filter(node => node.kind === 'deployment').flatMap(node => node.evidence.map(item => item.file));
+  // As a root directory and as git's own prefix spell the directory.
+  for (const directory of ['/apps/web', 'apps/web/']) assert.deepEqual(files.map(file => repositoryPath(file, directory)), ['apps/web/vercel.json', '.github/workflows/deploy.yml'], directory);
+  assert.deepEqual(files.map(file => repositoryPath(file, '/')), files);
 });
 
 test('proposes a bounded starter using detected pnpm workspace rather than fabricated commands', async t => {

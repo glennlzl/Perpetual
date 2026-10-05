@@ -89,6 +89,15 @@ export async function repositoryTop(root: string) {
   return top && path.isAbsolute(top) ? path.resolve(top) : root;
 }
 
+/**
+ * A scan's evidence file named from the repository's top level, given the scanned directory within it, such as /apps/web
+ * or apps/web/: workflow files already are, as GitHub names them, and every other file is named from the directory.
+ */
+export function repositoryPath(file: string, directory: string) {
+  const prefix = directory.split('/').filter(Boolean).join('/');
+  return prefix && !file.startsWith('.github/workflows/') ? `${prefix}/${file}` : file;
+}
+
 // GitHub's SSH, git and plain HTTP addresses name the repository its HTTPS address does.
 const GITHUB_HOSTS = new Set(['github.com', 'ssh.github.com']);
 function safeRemote(remote: string | null) {

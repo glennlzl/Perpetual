@@ -5,7 +5,7 @@ import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanRepository, createPreviewPlan, DISCOVERY_VERSION } from './scanner.ts';
+import { scanRepository, createPreviewPlan, DISCOVERY_VERSION, repositoryPath } from './scanner.ts';
 import { getProviderStatus, parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
@@ -126,8 +126,7 @@ async function configurationLinks(scan: Scan,files: ConfigFile[]): Promise<Confi
     if(!remote)return files.map(file=>({...file,local:true}));
     const prefix=stdout.trim();
     if(prefix && (prefix.startsWith('/') || prefix.includes('\\') || prefix.split('/').some(part=>part==='..')))return files;
-    // Workflow files are named from the repository's top level, where GitHub reads them; the rest from the scanned directory.
-    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${((file.path.startsWith('.github/workflows/')?'':prefix)+file.path).split('/').map(encodeURIComponent).join('/')}`}));
+    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${repositoryPath(file.path,prefix).split('/').map(encodeURIComponent).join('/')}`}));
   }catch {return files;}
 }
 
@@ -407,9 +406,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // rejected before any push (ADR 0002).
   const deployFiles=({key,rootDirectory}: Pick<Repair,'key'|'rootDirectory'>)=>{
     if(!state.scan||pipelineKey(state)!==key)return [];
-    const prefix=rootDirectory.split('/').filter(Boolean).join('/');
     const files=state.scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
-    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)))].map(file=>prefix?`${prefix}/${file}`:file);
+    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)).map(file=>repositoryPath(file,rootDirectory)))];
   };
   const repairBoxes=repair.boxes??createRepairBoxes({dataDir}),repairHost=repair.host??createRepairHost({dataDir});
   // A pull request that passed CI goes through each Sandbox stage's journey gate at its head, over its own checkout, then
