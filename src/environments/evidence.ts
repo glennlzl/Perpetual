@@ -19,7 +19,7 @@ import { parse as parseToml } from 'smol-toml';
 import { envNames, services as registry } from '../twin/index.ts';
 import { PORT_VARIABLE } from '../twin/compose.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
-import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, TEST, TOOLING, WALK, dependencyNames, keptFolders, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
+import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, TOOLING, WALK, dependencyNames, isTest, keptFolders, packagePaths, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
 import { SETUP_LIMITS, code as inlineCode, deployManifest, devcontainer, dockerfile, lineNumbers, oneLine, supabaseConfig, turbo, word as inlineWord, workflow, yamlValue } from './setup-configs.ts';
 import type { SetupEvidence } from './setup-configs.ts';
 import type { JsonObject } from '../twin/config.ts';
@@ -46,21 +46,19 @@ export interface VariableUse { name: string; file: string; line: number; role: R
 const SOURCE = /\.(?:[cm]?[jt]sx?|pyi?|vue|svelte|astro)$/i;
 // Unclassified text matches: locations to read, never a claim about a browser or callback's behavior.
 const URL_CONSTRUCTION = /\bnew\s+URL\s*\(/, REDIRECT = /\bredirect\s*\(/;
-// Tests, docs and tooling folders are TEST, DOCS and TOOLING (./plans.ts), which detection shares. Script folders are,
-// like tooling folders, the first folder inside a package or the repository. Seed files and folders are scripts anywhere.
+// Tests, docs and tooling folders are isTest, DOCS and TOOLING (./plans.ts), which detection shares. Script folders are,
+// like test and tooling folders, the first folder inside a package or the repository. Seed files and folders are scripts
+// anywhere.
 const SCRIPT = /^(?:scripts?|migrations?|seeds?)\//i, SEED = /(?:^|\/)(?:seeds\/|seed\.[^/]+$)/i;
-/** A file's role, by its path inside each of `packages` that holds it and inside the repository. */
-function roleOf(file: string, packages: Set<string>): Role {
-  if (TEST.test(file)) return 'test';
-  let script = SEED.test(file);
-  for (let directory = posix.dirname(file); ; directory = posix.dirname(directory)) {
-    if (directory === '.' || packages.has(directory)) {
-      const inner = directory === '.' ? file : file.slice(directory.length + 1);
-      if (TOOLING.test(inner)) return 'tooling';
-      script ||= SCRIPT.test(inner);
-    }
-    if (directory === '.') return script ? 'script' : 'runtime';
-  }
+/**
+ * A file's role, by its path inside each of `packages` that holds it and inside the repository. A test's test folder may
+ * be that of any folder in `tests`: the packages, and the folder of every manifest outside a test folder.
+ */
+function roleOf(file: string, packages: Set<string>, tests: Set<string>): Role {
+  if (isTest(file, tests)) return 'test';
+  const inner = packagePaths(file, packages);
+  if (inner.some(path => TOOLING.test(path))) return 'tooling';
+  return SEED.test(file) || inner.some(path => SCRIPT.test(path)) ? 'script' : 'runtime';
 }
 const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
 const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
@@ -296,7 +294,19 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     }
   };
   const read = reader(root);
-  const relevant = files.filter(file => !TEST.test(file));
+  // Packages: the scan's, the draft's apps and, once functions are known, every folder with a manifest outside
+  // functions, tests and docs.
+  const directories = new Map<string, string | undefined>();
+  const add = (path: unknown, framework?: string) => {
+    try { const directory = repositoryPath(path, 'A package'); if (!directories.has(directory) || framework) directories.set(directory, framework); } catch { /* Not a repository folder. */ }
+  };
+  for (const item of packages) add(item.path, item.framework);
+  try { for (const app of Object.values(fields(fields(JSON.parse(draft))?.apps) ?? {})) add(fields(app)?.directory ?? '.'); } catch { /* A draft that is not JSON names no folders. */ }
+  // A test folder is the first folder inside the repository or a package, and the packages around a manifest are
+  // shallower than it, so manifests are taken shallowest first: one in a test folder is a test's, and makes no package.
+  const tests = new Set(directories.keys()), depth = (file: string) => file.split('/').length;
+  for (const file of files.filter(path => MANIFEST(posix.basename(path)) && !DOCS.test(path)).sort((one, other) => depth(one) - depth(other))) if (!isTest(file, tests)) tests.add(posix.dirname(file));
+  const relevant = files.filter(file => !isTest(file, tests));
   const notes = [tracked ? `Files: the ${files.length.toLocaleString('en-US')} files git tracks that ${code(shown)} holds.` : `Files: a walk of ${code(shown)}, ${reason}.`];
   if (!complete) notes.push(tracked ? `Only the first ${TRACKED.files.toLocaleString('en-US')} of the ${tracked.length.toLocaleString('en-US')} files git tracks were listed.` : `The walk stopped at its limits (${WALK_LIMITS}); files beyond them are left out.`);
   const top = sorted(files.map(file => file.includes('/') ? `${file.slice(0, file.indexOf('/'))}/` : file));
@@ -331,20 +341,12 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     }
   }
   const functionOf = (file: string) => functions.get(file) ?? null;
-
-  // Packages: the scan's, the draft's apps and every folder with a manifest, outside functions, tests and docs.
-  const directories = new Map<string, string | undefined>();
-  const add = (path: unknown, framework?: string) => {
-    try { const directory = repositoryPath(path, 'A package'); if (!directories.has(directory) || framework) directories.set(directory, framework); } catch { /* Not a repository folder. */ }
-  };
-  for (const item of packages) add(item.path, item.framework);
-  try { for (const app of Object.values(fields(fields(JSON.parse(draft))?.apps) ?? {})) add(fields(app)?.directory ?? '.'); } catch { /* A draft that is not JSON names no folders. */ }
   for (const file of relevant) if (MANIFEST(posix.basename(file)) && !DOCS.test(file) && !functionOf(file)) add(posix.dirname(file));
   // Each module belongs to the innermost package around it, or to none; a function's modules are its project's.
   const packageSet = new Set(directories.keys()), ownerOf = (file: string) => innermost(packageSet, file);
 
   // The variables each source module reads, docs left out; runtime code is read first when there are too many.
-  const modules = files.filter(file => SOURCE.test(file) && !DOCS.test(file)).map(file => ({ file, role: roleOf(file, packageSet) }))
+  const modules = files.filter(file => SOURCE.test(file) && !DOCS.test(file)).map(file => ({ file, role: roleOf(file, packageSet, tests) }))
     .sort((one, other) => ROLES.indexOf(one.role) - ROLES.indexOf(other.role));
   if (modules.length > MODULES.files) notes.push(`Only the first ${MODULES.files.toLocaleString('en-US')} of ${modules.length.toLocaleString('en-US')} source files were read, runtime code first.`);
   const reads: Read[] = [], specifiers = new Map<string, string[]>(), runtime: VariableUse[] = [], functionReads = new Map<string, Set<string>>();

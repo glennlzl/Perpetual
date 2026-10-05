@@ -97,6 +97,17 @@ test('test, docs and tooling folders are not service evidence, so an example pro
   assert.deepEqual((await detect(repoPath)).services, { supabase: { directory: 'supabase' } });
 });
 
+test('a test folder is the first folder of a scanned package or the repository, so an app route of that name is the product’s evidence', async t => {
+  const { repoPath } = await fixture(t, {
+    'package.json': manifest('web', { next: '1.0.0' }, { dev: 'next dev' }),
+    'app/tests/results/page.tsx': 'import Stripe from "https://esm.sh/stripe@17";\n',
+    'tests/fixtures/package.json': manifest('fixture', { mongoose: '8.0.0' }),
+    'e2e/package.json': manifest('e2e', { ioredis: '5.0.0' }),
+    'src/lib/__mocks__/mail.ts': 'import nodemailer from "npm:nodemailer@6";\n',
+  });
+  assert.deepEqual(Object.keys((await detect(repoPath)).services), ['stripe']);
+});
+
 test('Deno modules and import maps name their packages in specifiers, which detection reads like dependencies', async t => {
   const { repoPath } = await fixture(t, {
     'supabase/config.toml': 'project_id = "fixture"\n',

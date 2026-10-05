@@ -29,12 +29,22 @@ export function snapshotKeeps(path: string) {
   return keptFolders(path) && !SKIP.has(name) && !PRIVATE.test(name) && !(PRIVATE_NAME.test(name) && !SOURCE_MODULE.test(name));
 }
 
-// Tests read variables of their own; docs' code is never run.
-export const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
+// Tests read variables of their own; docs' code is never run. A test file is one by its name, and Jest's __tests__ and
+// __mocks__ folders hold tests, wherever they are.
+export const TEST = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
 export const DOCS = /(?:^|\/)docs\//i;
-// Tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/ holds
-// runtime code whatever its folders are called.
+// Test and tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/
+// holds runtime code whatever its folders are called, a route named tests or e2e included.
+export const TEST_FOLDER = /^(?:tests?|e2e)\//i;
 export const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
+/** A repository file's path inside each of `packages` that holds it, innermost first, then inside the repository. */
+export function packagePaths(file: string, packages: ReadonlySet<string>) {
+  const paths: string[] = [];
+  for (let directory = posix.dirname(file); directory !== '.'; directory = posix.dirname(directory)) if (packages.has(directory)) paths.push(file.slice(directory.length + 1));
+  return [...paths, file];
+}
+/** Whether a repository file is a test's: by its name or a Jest folder, or in a test folder of a package or the repository. */
+export const isTest = (file: string, packages: ReadonlySet<string>) => TEST.test(file) || packagePaths(file, packages).some(path => TEST_FOLDER.test(path));
 
 // Detection evidence: dependency manifests, and only the variable names of example env files.
 export const ENV_EXAMPLE = /^\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/i;
@@ -193,13 +203,7 @@ async function repositoryApps(root: string, scan: DetectionScan): Promise<{ apps
  */
 export async function repositoryDetection(scan: DetectionScan): Promise<{ evidence: DetectionEvidence; config: DetectedConfig }> {
   const root = await realpath(scan.repo.path), scanned = new Set((scan.services ?? []).map(service => service.path));
-  const aside = (file: string) => {
-    if (TEST.test(file) || DOCS.test(file)) return true;
-    for (let directory = posix.dirname(file); ; directory = posix.dirname(directory)) {
-      if ((directory === '.' || scanned.has(directory)) && TOOLING.test(directory === '.' ? file : file.slice(directory.length + 1))) return true;
-      if (directory === '.') return false;
-    }
-  };
+  const aside = (file: string) => isTest(file, scanned) || DOCS.test(file) || packagePaths(file, scanned).some(path => TOOLING.test(path));
   const files = (await repositoryWalk(root)).files.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
   let modules = 0;
   for (const file of files) {
