@@ -152,7 +152,7 @@ Every request is scoped to an explicit `repoPath` and Sandbox `stageId`: in the 
 | --- | --- |
 | `GET /api/environments` | Returns the stage's environments and twin config (`plan`), with its `provenance` when an agent wrote it. |
 | `POST /api/environments/plan` | `plan`: a twin config. |
-| `POST /api/environments/create` | Uses the stage's config; a detected one may be generated first. A config that is not generated needs at least one app. |
+| `POST /api/environments/create` | Uses the stage's config; a detected one may be generated first. A config that is not generated needs at least one app. The stage's earlier twins that still hold resources are deleted first. |
 | `POST /api/environments/cancel` | `id`; returns 202 after requesting Stop. The environment stays busy until process and resource cleanup finishes. |
 | `POST /api/environments/destroy` | `id` |
 | `POST /api/environments/logs` | `id`; recent twin logs, after a failed generation preceded by the end of the twin config author's output, with secrets redacted. |
