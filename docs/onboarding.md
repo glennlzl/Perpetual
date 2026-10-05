@@ -36,7 +36,7 @@ Read `GET /api/github/connection`. With `connected: true`, go to step 4.
 **Ask:** Connect your GitHub account to Perpetual? It reads the repository through the account and reports a commit status on each push to the branch it gates.
 
 - Use `<account>`, signed in with the GitHub CLI on this machine (offered when `authenticated: true`): `POST /api/github/connect` with `{}`.
-- Sign in in the browser: `POST /api/github/auth/start` with `{}`, then read `POST /api/github/auth/status` with its `{ "id": … }`. Once `status` is `pending`, give them its `userCode` and `verificationUrl`, and read on until it is `complete`, then `POST /api/github/connect`; on `error`, `expired` or `cancelled`, give them its `error` and ask again.
+- Sign in in the browser: `POST /api/github/auth/start` with `{}`, then read `POST /api/github/auth/status` with its `{ "id": … }`. Once `status` is `pending`, give them its `userCode` and `verificationUrl`, and read on until it is `complete`, then `POST /api/github/connect`. On `error` or `expired`, give them its `error`; on `cancelled`, which carries none, tell them the sign-in was cancelled; then ask again.
 - Not now: stop here, since every later step needs the connection, and tell them the interface's **Connect GitHub** does the same.
 
 Done when `GET /api/github/connection` says `connected: true` and names the `account`.

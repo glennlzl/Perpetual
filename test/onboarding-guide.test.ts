@@ -29,7 +29,7 @@ test('the onboarding guide names only API routes the controller serves and CLI c
 });
 
 test('the guide waits for every state the controller can settle in, and reads the sign-in code once it exists', async () => {
-  const [guide, github, environments] = await Promise.all([read('docs/onboarding.md'), read('contract/github.ts'), read('src/environments/manager.ts')]);
+  const [guide, github, auth, environments] = await Promise.all([read('docs/onboarding.md'), read('contract/github.ts'), read('src/github-auth.ts'), read('src/environments/manager.ts')]);
   const union = (source: string, name: string) => [...(new RegExp(`export type ${name} = ([^;]+);`).exec(source)?.[1] ?? '').matchAll(/'([\w-]+)'/g)].map(match => match[1]);
   const step = (number: number) => guide.slice(guide.indexOf(`## ${number}.`), guide.indexOf(`## ${number + 1}.`));
   const unnamed = (text: string, states: string[]) => states.filter(state => !text.includes(`\`${state}\``));
@@ -38,6 +38,12 @@ test('the guide waits for every state the controller can settle in, and reads th
   assert.ok(signIn.includes('pending') && signIn.includes('complete'), signIn.join(', '));
   assert.deepEqual(unnamed(step(3), signIn.filter(status => !['starting', 'pending'].includes(status))), []);
   assert.match(step(3), /`pending`[^\n]*`userCode`/);
+  // Cancelling ends a sign-in without an error, so the guide relays `error` for exactly the end states that set one.
+  const unset = new Set([...auth.matchAll(/finish\(session, '(\w+)'\)/g)].map(match => match[1]));
+  assert.ok(unset.has('complete'), [...unset].join(', '));
+  const relayed = /\bon ([^;.]+), give them its `error`/i.exec(step(3))?.[1] ?? '';
+  const failed = signIn.filter(status => !['starting', 'pending', 'complete'].includes(status));
+  assert.deepEqual(failed.filter(status => relayed.includes(`\`${status}\``)), failed.filter(status => !unset.has(status)));
   // A creation settles in every status that is neither in progress nor a deletion's.
   const settled = union(environments, 'EnvironmentStatus').filter(status => !IN_PROGRESS.includes(status) && status !== 'destroyed');
   assert.deepEqual(settled, ['ready', 'failed', 'cleanup_failed']);
