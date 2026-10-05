@@ -201,16 +201,17 @@ test('An install that exits with an error or reaches its time limit says so befo
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await mkdir(source);
-  // The install is a real process here, so its exit code and time limit come from the command runner itself.
-  let install = 'console.log("resolving packages");process.exit(7)', timeoutMs: number | undefined;
+  // The install is a real process here, so its exit code and time limit come from the command runner itself. A shell
+  // prints its progress at once, well within a time limit that leaves room for test files running beside this one.
+  let install = 'echo resolving packages; exit 7', timeoutMs: number | undefined;
   const exec: Exec = async (_file, args, options) => args.includes('install') && args.includes('run')
-    ? execCommand(process.execPath, ['-e', install], { ...options, ...(timeoutMs ? { timeoutMs } : {}) }) : { stdout: '' };
+    ? execCommand('sh', ['-c', install], { ...options, ...(timeoutMs ? { timeoutMs } : {}) }) : { stdout: '' };
   const runtime = createTwinRuntime({ exec, services, owner: 'owner-1', isFree: async () => true });
   const twin = { dataDir, id: 'beta', source, config: { install: { command: 'npm ci' }, apps: { web: { start: 'node app.js', port: 3000 } } } };
   await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed with exit code 7: resolving packages' });
-  install = 'console.log("resolving packages");setInterval(()=>{},1000)';
-  timeoutMs = 300;
-  await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed: Twin command exceeded its 0.3-second limit.\nresolving packages' });
+  install = 'echo resolving packages; exec sleep 60';
+  timeoutMs = 2000;
+  await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed: Twin command exceeded its 2-second limit.\nresolving packages' });
 });
 
 test('Services with missing inputs are blocked, with the services that depend on them', async t => {
