@@ -341,6 +341,41 @@ test('the work list names each edge function, whether the twin serves it, and wh
   assert.match(section(evidenceText(facts, own), 'Unwired variables'), /- `edge\/supabase\/functions\/ping`: served; nothing unwired\n/);
 });
 
+test('a method called on process.env is no variable, and an example file is looked up by its own name only', async t => {
+  assert.deepEqual(readVariables("if (process.env.hasOwnProperty('CI')) log(process.env.toString?.(), import.meta.env.valueOf ());\nprocess.env.API_URL;"), ['API_URL']);
+  const { repo } = await fixture(t, {
+    'package.json': manifest('web', { express: '5.0.0' }, { start: 'node server.js' }),
+    'server.js': "if (process.env.hasOwnProperty('CI')) start();\nexport const api = process.env.API_URL, made = process.env.constructor;\n",
+    '.env.example': 'API_URL=\n',
+  });
+  const draft = JSON.stringify({ services: {}, apps: { web: { directory: '.', start: 'npm start', port: 3000 } } });
+  const list = section(evidenceText(await repositoryFacts({ source: repo, checkout: repo, draft }), draft), 'Unwired variables');
+  assert.match(list, /\n- API_URL: `server\.js:2`; in `\.env\.example`\n- constructor: `server\.js:2`\n/);
+  assert.doesNotMatch(list, /hasOwnProperty|native code/);
+});
+
+test('a config.toml beside functions is a Supabase-style project only when it reads as Supabase’s', async t => {
+  const draft = JSON.stringify({ services: {}, apps: { site: { directory: '.', start: 'npm start', port: 3000 } } });
+  // A site's own config.toml beside its serverless handlers: their reads are the app's.
+  const site = await fixture(t, {
+    'package.json': manifest('site', { express: '5.0.0' }, { start: 'node server.js' }),
+    'server.js': 'export const origin = process.env.SITE_URL;\n',
+    'config.toml': 'baseURL = "https://example.test/"\ntitle = "Acme"\n[params]\nfunctions = true\n',
+    'functions/api/hello.js': 'export const mailer = process.env.MAILER_URL;\n',
+  });
+  const facts = await repositoryFacts({ source: site.repo, checkout: site.repo, draft });
+  assert.deepEqual(unwiredSummary(facts, draft), ['- `site`: MAILER_URL, SITE_URL']);
+  assert.equal(section(evidenceText(facts, draft), 'Supabase-style projects'), 'None found.\n');
+  // A Supabase project kept in a folder of another name.
+  const project = await fixture(t, {
+    'package.json': manifest('site', { express: '5.0.0' }, { start: 'node server.js' }),
+    'backend/config.toml': 'project_id = "acme"\n[api]\nport = 54321\n',
+    'backend/functions/notify/index.ts': "const key = Deno.env.get('NOTIFY_KEY');\n",
+  });
+  assert.deepEqual(unwiredSummary(await repositoryFacts({ source: project.repo, checkout: project.repo, draft }), draft),
+    ['- `site`: none', '- Functions not served that read variables: `backend/functions/notify`']);
+});
+
 test('the evidence stays within its size limits and says what it left out', async t => {
   const files: Record<string, string> = { 'package.json': manifest('workspace', {}, { start: 'node index.js' }) };
   // Hundreds of folders, each reading many long variable names: far beyond a section's limit.
@@ -422,15 +457,17 @@ test('the evidence says which files were too large to read and when it read only
     'package.json': manifest('workspace', {}, { start: 'node index.js' }),
     'big.js': `process.env.BIG_FILE_VAR;\n//${'x'.repeat(300 * 1024)}\n`,
     'packages/huge/package.json': JSON.stringify({ name: 'huge', scripts: { start: 'node huge.js' }, description: 'x'.repeat(1_100_000) }),
-    // A setup file is read up to 256 KB.
+    // A setup file is read up to 256 KB, and so is a compose file, which the same YAML parser reads.
     '.github/workflows/big.yml': `jobs:\n  build:\n    runs-on: ubuntu-latest\n# ${'x'.repeat(300 * 1024)}\n`,
+    'compose.yml': `services:\n  db:\n    image: postgres\n# ${'x'.repeat(300 * 1024)}\n`,
   };
   for (let module = 0; module < 5001; module += 1) files[`src/module-${String(module).padStart(4, '0')}.ts`] = 'export {};\n';
   const { repo } = await fixture(t, files);
   const text = await repositoryEvidence({ source: repo });
   assert.match(text, /\n- Only the first 5,000 of 5,002 source files were read, runtime code first\.\n/);
-  assert.match(text, /\n- Left out as too large to read: `\.github\/workflows\/big\.yml` \(over 256 KB\), `big\.js` \(over 256 KB\), `packages\/huge\/package\.json` \(over 1 MB\)\.\n/);
+  assert.match(text, /\n- Left out as too large to read: `\.github\/workflows\/big\.yml` \(over 256 KB\), `big\.js` \(over 256 KB\), `compose\.yml` \(over 256 KB\), `packages\/huge\/package\.json` \(over 1 MB\)\.\n/);
   assert.equal(section(text, 'CI workflows'), 'None found.\n');
+  assert.equal(section(text, 'Compose files'), '- `compose.yml`: could not be read\n');
   assert.ok(!text.includes('BIG_FILE_VAR'));
   // The manifest is still listed, its scripts are not.
   assert.match(section(text, 'Apps and packages'), /### `packages\/huge`\n\n- Manifests: `packages\/huge\/package\.json`\n\n/);

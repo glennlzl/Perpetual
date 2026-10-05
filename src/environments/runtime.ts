@@ -128,18 +128,20 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     .flatMap(([id, entries]) => (services[id]?.inputs ?? []).filter(input => input.secret).map(input => entries[input.name])).filter((value): value is string => Boolean(value));
 
   const twinContainers = (dataDir: string, id: string) => twin.health({ dataDir, id }).then(health => health.containers, (): Container[] => []);
-  // The named containers' last lines, or every container's when none is named; empty before the twin has any.
+  // The named containers' last lines, an equal share of them each, or every container's when none is named; empty before
+  // the twin has any.
   async function containerLogs(dataDir: string, id: string, names: string[]) {
     try {
       // Vendor-owned container names are outside Compose's service-ID grammar. Their verified logs
       // join the whole twin read; never feed those names to `docker compose logs`.
       const failed = names.some(name => !ID.test(name)) ? [] : names.slice(0, 3);
       const parts = failed.length ? await Promise.all(failed.map(service => twin.logs({ dataDir, id, service, tail: LOG_LINES }))) : [await twin.logs({ dataDir, id, tail: LOG_LINES })];
-      return parts.join('\n').trim().split('\n').slice(-LOG_LINES).join('\n');
+      const share = Math.floor(LOG_LINES / parts.length);
+      return parts.map(part => part.trim().split('\n').slice(-share).join('\n')).join('\n').trim();
     } catch (error) { return `Environment logs unavailable: ${failureText(error, 600)}`; }
   }
-  // The failed containers' last lines, or every container's when none has stopped.
-  const failureLogs = async (dataDir: string, id: string) => containerLogs(dataDir, id, (await twinContainers(dataDir, id)).filter(stopped).map(item => item.name));
+  // The last lines of the app that did not answer, else of the failed containers, or every container's when none has stopped.
+  const failureLogs = async (dataDir: string, id: string, app?: string) => containerLogs(dataDir, id, app ? [app] : (await twinContainers(dataDir, id)).filter(stopped).map(item => item.name));
 
   /**
    * Where a failed preparation stopped: a service's setup or the test accounts, when the twin names that service as the
@@ -176,11 +178,11 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
 
   // A twin that is up counts as ready once every app answers below 500 on its address and, when a
   // ready service of the config can create test accounts, one exists.
-  async function verify(config: TwinConfig, result: Awaited<ReturnType<EnvironmentTwin['prepare']>>, signal?: AbortSignal): Promise<Pick<StagedFailure, 'stage' | 'subject' | 'error'> | null> {
+  async function verify(config: TwinConfig, result: Awaited<ReturnType<EnvironmentTwin['prepare']>>, signal?: AbortSignal): Promise<(Pick<StagedFailure, 'stage' | 'subject' | 'error'> & { app?: string }) | null> {
     for (const app of result.apps) {
       let status: number;
-      try { status = await answers(app.url, signal); } catch (error) { return { stage: 'answers', subject: appSubject(config, app.id), error: `apps.${app.id} did not answer at ${app.url}: ${(error as Error).message}` }; }
-      if (status >= 500) return { stage: 'answers', subject: appSubject(config, app.id), error: `apps.${app.id} answered ${status} at ${app.url}.` };
+      try { status = await answers(app.url, signal); } catch (error) { return { stage: 'answers', subject: appSubject(config, app.id), app: app.id, error: `apps.${app.id} did not answer at ${app.url}: ${(error as Error).message}` }; }
+      if (status >= 500) return { stage: 'answers', subject: appSubject(config, app.id), app: app.id, error: `apps.${app.id} answered ${status} at ${app.url}.` };
     }
     const offering = Object.keys(config.services).filter(id => services[id]?.accounts && result.services.some(item => item.id === id && item.status === 'ready'));
     if (offering.length && !result.accounts?.length) return { stage: 'account', subject: `Service ${offering.map(code).join(', ')}`, error: `${offering.map(id => services[id].title).join(' and ')} can create test accounts, but none was created: add one in its options.` };
@@ -268,7 +270,8 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       if (problem === null) return ready(result);
       const error = new Error(problem.error);
       if (!generated || cancelled()) throw error;
-      const draft = await failedDraft(error, generated, { ...problem, heading: 'the twin started, but does not count as ready', logs: await failureLogs(dataDir, environment.id) });
+      const { app, ...found } = problem;
+      const draft = await failedDraft(error, generated, { ...found, heading: 'the twin started, but does not count as ready', logs: await failureLogs(dataDir, environment.id, app) });
       throw draft ? Object.assign(error, { draft }) : error;
     }
 
@@ -301,7 +304,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
         prepare: async config => { check(); await onUpdate({ plan: config, ...next('Preparing twin') }); return prepareTwin(config); },
         verify: async (config, result) => { check(); await onUpdate(next('Checking apps')); return verify(config, result, signal); },
         diagnose: (config, error) => diagnose({ dataDir, id: environment.id, config, step: current.step, error }),
-        logs: () => failureLogs(dataDir, environment.id),
+        logs: app => failureLogs(dataDir, environment.id, app),
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
         checkpoint: onDraft,

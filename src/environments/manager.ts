@@ -7,7 +7,7 @@ import { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox 
 import { AUTHORING, isGenerationFailure, type AttemptOutcome } from './generation.ts';
 import { redact } from '../redaction.ts';
 import { diagnosticText, retainDiagnostics } from './diagnostics.ts';
-import { IN_PROGRESS, applicationOrigin, createEnvironmentUsage, holdsResources, scopeId } from './usage.ts';
+import { IN_PROGRESS, applicationOrigin, createEnvironmentUsage, holdsResources, isEnvironmentBusy, scopeId } from './usage.ts';
 import { serviceOptionErrors, validateTwinConfig } from '../twin/index.ts';
 import { HOST } from '../twin/compose.ts';
 import { createBrowserModelSettings } from '../browser/model.ts';
@@ -170,6 +170,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   const admitted = new Map<string, number>();
   const creations = new Map<string, AbortController>();
   const jobs = new Map<string, Promise<void>>(), pending = new Set<Promise<unknown>>(), scopesBusy = new Set<string>(), healthChecks = new Map<string, number>(), healthFailures = new Map<string, number>(), healthResults = new Map<string, { at: number; ok: boolean }>(), healthSkips = new Map<string, number>();
+  // checking: each health check under way, which settles once the check has released its environment.
+  const checking = new Map<string, Promise<void>>();
   // The monitor heartbeat is in-memory observation only; it is never persisted.
   const iso = (time: number) => new Date(time).toISOString();
   function withHealth(item: EnvironmentRecord): EnvironmentSummary {
@@ -177,7 +179,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     if (!checked && !skipped) return value;
     return { ...value, health: { ...(checked ? { checkedAt: iso(checked.at), ok: checked.ok, consecutiveFailures: healthFailures.get(item.id) || 0 } : {}), ...(skipped ? { skippedInUseAt: iso(skipped) } : {}) } };
   }
-  function skipHealth(id: string) { if (!((healthSkips.get(id) || 0) >= (healthChecks.get(id) || 0))) healthSkips.set(id, Date.now()); }
+  // A skip is recorded when none is, the environment's first due check included, or the last one is older than the last check.
+  function skipHealth(id: string) { const last = healthSkips.get(id); if (last === undefined || last < (healthChecks.get(id) || 0)) healthSkips.set(id, Date.now()); }
   const serialized = () => JSON.stringify(state);
   function budget() { if (Buffer.byteLength(serialized()) > 30 * 1024 * 1024) throw new Error('Local metadata storage is full. Export your history and choose a new data directory.'); }
   function persist() { return saves.run(async () => { retainDiagnostics(state.environments); budget(); await writeStateFile(file, serialized()); }); }
@@ -187,7 +190,11 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   }
   const interrupted = new Set(interruptedEnvironmentIds);
   for (const item of state.environments) {
-    if (IN_PROGRESS.includes(item.status)) Object.assign(item, { status: item.sandboxId ? 'cleanup_failed' : 'failed', step: 'Interrupted', updatedAt: now(), error: 'The controller stopped during this operation. Delete the remaining sandbox before retrying.' });
+    if (!IN_PROGRESS.includes(item.status)) continue;
+    Object.assign(item, { status: item.sandboxId ? 'cleanup_failed' : 'failed', step: 'Interrupted', updatedAt: now(), error: 'The controller stopped during this operation. Delete the remaining sandbox before retrying.' });
+    // Before it records a sandbox, an operation owns only its folder, such as the source it was copying: remove it, or keep
+    // the environment holding it until a deletion can.
+    if (!item.sandboxId) await removeSnapshot(item).catch(error => Object.assign(item, { status: 'cleanup_failed', cleanupError: failure(error) }));
   }
   // Controller death does not stop application work that an interrupted browser
   // run started. Keep ownership, and require cleanup before accepting reuse.
@@ -229,9 +236,13 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   async function planFor(context: Context) {
     const scope = scopeId(context), key = scanKey(context.scan);
     if (!state.plans[scope] || Object.hasOwn(state.detected, scope) && state.detected[scope] !== key) {
-      setPlan(scope, await detectEnvironmentConfig(context.scan));
-      state.detected[scope] = key;
-      await persist();
+      const detected = await detectEnvironmentConfig(context.scan);
+      // A plan a person saved, or an agent wrote, while detection ran is kept.
+      if (!state.plans[scope] || Object.hasOwn(state.detected, scope)) {
+        setPlan(scope, detected);
+        state.detected[scope] = key;
+        await persist();
+      }
     }
     return state.plans[scope];
   }
@@ -278,7 +289,9 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     resolveTarget(url: unknown) {
       const origin = applicationOrigin(url);
       if (!origin) return null;
-      const environment = state.environments.find(item => (item.origins || []).includes(origin));
+      // A deleted twin keeps its origins, but a twin that still holds resources owns them, as when it reuses freed ports.
+      const at = (item: EnvironmentRecord) => (item.origins || []).includes(origin);
+      const environment = state.environments.find(item => holdsResources(item) && at(item)) ?? state.environments.find(at);
       return environment ? structuredClone(publicEnvironment(environment)) : null;
     },
     markUsageUncertain(id: string, error: unknown) {
@@ -315,14 +328,18 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
      * generated config failed to build since, starting from that config and its failure. A gate never generates: it
      * builds the saved config, and when a generated one fails, its failure becomes the stage's draft. A repair gate's
      * creation (context.repair) builds repairPlan and writes no plan, draft or provenance to the stage, whatever its twin
-     * does, so a person's pending draft stays.
+     * does, so a person's pending draft stays. A stage has one twin: its earlier twins that still hold resources are deleted
+     * first, as a gate's rebuild does, and one that cannot be deleted, or is in use for more than a health check, stops
+     * the creation with its error.
      */
     async create(context: Context, { generate = false }: { generate?: boolean } = {}) {
       context = structuredClone(context);
       // Only a creation for the stage's own source owns its plan and draft.
       const scope = scopeId(context), owns = context.repair === undefined;
       if (scopesBusy.has(scope) || state.environments.some(item => item.scope === scope && IN_PROGRESS.includes(item.status))) throw conflict('This stage already has an environment operation in progress.');
-      if (state.environments.filter(holdsResources).length >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
+      // Creates admitted but not yet recorded count too, or creates admitted together would all pass the same count.
+      const previous = state.environments.filter(item => item.scope === scope && holdsResources(item)), admissions = [...admitted.values()].reduce((sum, count) => sum + count, 0);
+      if (state.environments.filter(item => holdsResources(item) && !previous.includes(item)).length + admissions >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
       const id = randomUUID(), release = usage.acquire(context, { environmentId: id, operation: 'create' });
       // Set before any closure uses it; admission failures before that only compare against it.
       let queued = false, environment!: EnvironmentRecord, directoryCreated = false, recorded = false;
@@ -342,7 +359,20 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         const plan = generation ? undefined : validateTwinConfig(stored);
         // A generated config built as it is, whose failure would become the stage's draft.
         const builtGenerated: GeneratedPlan | undefined = owns && !generation && generated ? { packages } : undefined;
-        if (plan && !Object.keys(plan.apps).length) throw new Error('Add an app before creating this environment.');
+        // A person's saved config is theirs to fix. When detection found no app, an agent writes the config on a person's
+        // Create with an OpenRouter model, which is what the person can do.
+        if (plan && !Object.keys(plan.apps).length) throw new Error(selectionReviewed ? 'Add an app before creating this environment.'
+          : `No app was detected. ${generate || !await authoringModel().catch(() => null) ? 'Add an OpenRouter API key in Settings' : 'Create the environment'} so Perpetual can write the twin config.`);
+        // The stage's earlier twins go only once this creation goes ahead, so a refused one leaves them as they are. The
+        // monitor holds one only while it checks its health, so that check finishes first; any other use refuses.
+        for (const item of previous) {
+          await checking.get(item.id);
+          await manager.destroy(context, item.id).catch((error: unknown) => {
+            throw isEnvironmentBusy(error) ? Object.assign(error as Error, { message: 'The stage’s previous twin is in use. Create the environment again once it is free.' }) : error;
+          });
+          const result = await manager.awaitIdle(item.id);
+          if (result.status !== 'destroyed') throw new Error(result.error || 'The previous twin could not be deleted.');
+        }
         // Generating a twin config, or building a generated one, reads the checkout while it prepares, for its evidence
         // and its failure's draft, so a gate does not move the source meanwhile. A repair gate reads its own checkout.
         environment = { id, scope, pipelineKey: context.key, stageId: context.stageId, repoPath: context.scan.repo.path, sourceBranch: context.scan.repo.branch || null, sourceRevision: context.scan.repo.sha || null, ...(context.repair ? { repair: context.repair } : {}), ...(plan ? { plan } : {}), status: 'queued', step: 'Queued', services: [], apps: [], createdAt: now(), ...(generation || builtGenerated ? { readsCheckout: true } : {}) };
@@ -455,7 +485,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           Object.assign(environment, { status: 'destroyed', step: 'Deleted', services: [], apps: [], destroyedAt: now(), updatedAt: now(), error: null });
           delete environment.accounts;
           await removeSnapshot(environment);
-          delete environment.logs; delete environment.logsAt;
+          // A successful deletion removes the evidence, a generated twin's log of how its config was written included.
+          delete environment.logs; delete environment.logsAt; delete environment.authoringLogs;
           delete environment.plan;
         } catch (error) { Object.assign(environment, { status: 'cleanup_failed', step: 'Deletion failed', updatedAt: now(), error: failure(error) }); }
         await persist();
@@ -468,7 +499,10 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     async logs(context: StageRef, id: string): Promise<EnvironmentLogs> {
       const environment = findEnvironment(context, id);
       if (retainDiagnostics(state.environments)) await persist();
-      if (environment.status !== 'ready') {
+      // A twin that still runs adds its live output to stored evidence, such as an earlier generation attempt's: a ready one,
+      // one its health monitor failed, and one being prepared. A failed or uncertain one has only its evidence.
+      const running = environment.status === 'ready' || canRecoverHealth(environment) || ['creating', 'preparing'].includes(environment.status) && environment.sandboxId;
+      if (!running) {
         if (environment.logs) return { logs: environment.logs };
         if (environment.logsAt) return { logs: 'Failure evidence expired.' };
       }
@@ -488,6 +522,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         try { release = usage.acquire({ key: environment.pipelineKey, stageId: environment.stageId }, { environmentId: environment.id, operation: 'health' }); }
         catch (error) { if ((error as { statusCode?: number }).statusCode === 409) { skipHealth(environment.id); continue; } throw error; }
         healthChecks.set(environment.id, Date.now());
+        let checked!: () => void;
+        checking.set(environment.id, new Promise<void>(resolve => { checked = resolve; }));
         try {
           let healthError: string | null = null;
           try {
@@ -516,7 +552,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
             catch (error) { if (environment.status === 'ready') Object.assign(environment, previous); throw error; }
           }
         }
-        finally { release(); }
+        finally { release(); checking.delete(environment.id); checked(); }
       }
       } finally { ticking = false; }
     },

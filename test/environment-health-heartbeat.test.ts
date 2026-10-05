@@ -76,6 +76,21 @@ test('a due check skipped while the environment is in use records when it was sk
   assert.equal(healthLabel(f.current().health, Date.parse('2026-09-23T10:00:48.000Z')), 'Checked 12s ago');
 });
 
+test('a twin in use from the moment it is ready records its first skipped check', async t => {
+  const f = await fixture(t);
+  // Discovery or a gate's run takes the twin before the monitor's first check.
+  const release = f.usage.acquire({ ...context, stageId: 'gamma' }, { environmentId: f.environment.id, operation: 'browser-run' });
+  await f.manager.tick();
+  assert.deepEqual(f.current().health, { skippedInUseAt: '2026-09-23T10:00:00.000Z' });
+  assert.equal(healthLabel(f.current().health, Date.parse('2026-09-23T10:00:05.000Z')), 'In use');
+  f.advance(5000); await f.manager.tick();
+  assert.equal(f.current().health?.skippedInUseAt, '2026-09-23T10:00:00.000Z', 'Repeated skips keep the first skipped time.');
+  release();
+  f.advance(1000); await f.manager.tick();
+  assert.deepEqual(f.current().health, { checkedAt: '2026-09-23T10:00:06.000Z', ok: true, consecutiveFailures: 0, skippedInUseAt: '2026-09-23T10:00:00.000Z' });
+  assert.equal(healthLabel(f.current().health, Date.parse('2026-09-23T10:00:10.000Z')), 'Checked 4s ago');
+});
+
 test('heartbeat labels use relative time and never describe a test result', () => {
   const now = Date.parse('2026-09-23T10:05:00.000Z');
   assert.equal(healthLabel({ checkedAt: '2026-09-23T10:04:48.000Z', ok: true, consecutiveFailures: 0 }, now), 'Checked 12s ago');
