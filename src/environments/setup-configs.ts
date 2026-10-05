@@ -105,16 +105,17 @@ const keys = (value: unknown) => Object.keys(fields(value) ?? {}).filter(name =>
 /** A parsed file, and where each of its keys and string values first appears. */
 type Parsed = { value: unknown; positions: Positions };
 /**
- * A YAML document, refused when it does not parse; aliases expand at most 20 times. A repeated key is not refused, since
- * checking every key against the others takes time that grows with the square of their number: the last one counts.
- * Errors are not formatted against the source, which takes as long for each of them; only the first is thrown.
+ * A YAML document, refused when it does not parse; aliases expand at most 100 times, the library's own bound, which counts
+ * nested expansions too, so a compose file can still share one defaults block across many services. A repeated key is not
+ * refused, since checking every key against the others takes time that grows with the square of their number: the last
+ * one counts. Errors are not formatted against the source, which takes as long for each of them; only the first is thrown.
  */
 function yaml(text: string): Parsed {
   const document = parseDocument(text, { uniqueKeys: false, prettyErrors: false });
   if (document.errors.length) throw document.errors[0];
   const positions: Positions = new Map();
   visitYaml(document, { Scalar(_key, node) { if (typeof node.value === 'string' && node.range) earliest(positions, node.value, node.range[0]); } });
-  return { value: document.toJS({ maxAliasCount: 20 }), positions };
+  return { value: document.toJS({ maxAliasCount: 100 }), positions };
 }
 /** A YAML file's value, as the readers parse it. */
 export const yamlValue = (text: string) => yaml(text).value;

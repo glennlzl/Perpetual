@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { code, deployManifest, devcontainer, dockerfile, supabaseConfig, turbo, workflow } from '../src/environments/setup-configs.ts';
+import { code, deployManifest, devcontainer, dockerfile, supabaseConfig, turbo, workflow, yamlValue } from '../src/environments/setup-configs.ts';
 import { hide, redact } from '../src/redaction.ts';
 
 // A repository's setup files as EVIDENCE.md quotes them: commands, images, ports, versions and paths, and variable names
@@ -146,6 +146,16 @@ test('a Supabase config.toml gives its env() names, functions, seed and enabled 
   assert.deepEqual(lines, ['- Variables from env(): `auth.external.github.secret` AUTH_GITHUB_SECRET', '- Functions in config: `billing` (verify_jwt `false`)',
     '- Seed: enabled, `./seed.sql`', '- Sign-in enabled: email, external github']);
   assert.deepEqual(names, [{ name: 'AUTH_GITHUB_SECRET', line: 8 }]);
+});
+
+test('a YAML file may share one anchor across many entries, and an alias that expands at every level is still refused', () => {
+  const services = Array.from({ length: 25 }, (_, index) => `  service-${index}:\n    <<: *defaults\n    image: app:${index}`).join('\n');
+  assert.equal(Object.keys((yamlValue(`x-defaults: &defaults\n  restart: always\nservices:\n${services}\n`) as { services: object }).services).length, 25);
+  const jobs = Array.from({ length: 25 }, (_, index) => `  job-${index}:\n    runs-on: ubuntu-latest\n    steps: *steps`).join('\n');
+  assert.equal(workflow(`x-steps: &steps\n  - run: npm test\njobs:\n${jobs}\n`).lines.filter(line => line === '    - run `npm test`').length, 25);
+  // Each level holds ten of the one before: refused long before it is expanded.
+  const levels = 'abcdefghi', bomb = [`a: &a [${Array(10).fill('x').join(', ')}]`, ...[...levels.slice(1)].map((name, index) => `${name}: &${name} [${Array(10).fill(`*${levels[index]}`).join(', ')}]`)];
+  assert.throws(() => yamlValue(bomb.join('\n')), /alias/i);
 });
 
 test('setup files that do not parse are refused by their reader', () => {
