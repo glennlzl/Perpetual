@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { parse } from 'yaml';
 import { createReleaseGitHub } from '../src/releases/github.ts';
 import type { ReleaseRequest } from '../src/releases/manager.ts';
 import type { GitHubRun } from '../src/github-cli.ts';
@@ -40,6 +42,17 @@ test('a handler missing from the default branch cannot become configured from an
   const run:GitHubRun=async(_file,args)=>{const endpoint=args.at(-1)!;
     return reply(endpoint==='repos/acme/app'?{default_branch:'main'}:endpoint.includes('/branches/')?{commit:{sha:DEFAULT}}:content(endpoint.endsWith(DEFAULT)?yaml.replace('on: deployment','on: push'):yaml));};
   await assert.rejects(createReleaseGitHub({run}).verifyTarget(input.source,input.target),/deployment event/);
+});
+
+test('the example handler passes target verification, and its job environment creates no deployment of its own',async()=>{
+  const example=await readFile(new URL('../docs/examples/github-deployment.yml.example',import.meta.url),'utf8');
+  const run:GitHubRun=async(_file,args)=>{const endpoint=args.at(-1)!;
+    return reply(endpoint==='repos/acme/app'?{default_branch:'main'}:endpoint.includes('/branches/')?{commit:{sha:DEFAULT}}:content(example));};
+  await createReleaseGitHub({run}).verifyTarget(input.source,{environment:'preview',productionEnvironment:false,workflowPath:'.github/workflows/deploy.yml'});
+  // A job deployment's success would mark the requested non-production deployment inactive.
+  const jobs=Object.values((parse(example) as {jobs:Record<string,{environment?:unknown}>}).jobs);
+  assert.ok(jobs.length>0);
+  for(const job of jobs)assert.ok(job.environment===undefined||(job.environment as {deployment?:unknown}).deployment===false,JSON.stringify(job.environment));
 });
 
 test('deployment transport pins SHA, disables merging, requires gate contexts and embeds request identity',async()=>{

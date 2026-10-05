@@ -21,6 +21,7 @@ The configured handler must:
 - Listen for `deployment` and accept only its intended environment and `payload.perpetual.workflowPath`.
 - Check that `payload.perpetual.sha` equals the deployment's SHA, then check out and deploy `github.event.deployment.sha` or an immutable artifact built from that exact SHA. Never deploy the current branch tip.
 - Use repository or environment credentials on the runner; no deployment credential enters a twin or browser.
+- Reference a job environment with `deployment: false`, as the example does. Otherwise GitHub Actions creates a deployment of its own for the job, and its success marks a non-production release Inactive. An environment with custom deployment protection rules cannot be used this way.
 - Report `in_progress`, then `success` or `failure` to the original deployment ID. Report success only after the provider confirms the real deployment; include its URL and logs.
 - Handle a duplicate delivery idempotently, using the deployment ID. Serialize incompatible releases to the same environment.
 
