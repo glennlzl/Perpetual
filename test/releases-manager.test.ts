@@ -3,6 +3,7 @@ import test from 'node:test';
 import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createReleaseGitHub } from '../src/releases/github.ts';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub, type ReleaseRequest } from '../src/releases/manager.ts';
 
 const SHA='a'.repeat(40),OTHER='b'.repeat(40);
@@ -145,6 +146,20 @@ test('restart recovers an interrupted request as unknown and only reads the remo
   const reopened=await createReleaseManager(f.options);t.after(()=>reopened.close());
   assert.equal((await reopened.view()).current?.status,'unknown');assert.equal(f.requests.length,1);
   await reopened.refresh();assert.equal((await reopened.view()).current?.status,'deployed');assert.equal(f.requests.length,1);
+});
+
+test('a reported address that encodes beyond the stored limit is dropped, so the state still loads at the next start',async t=>{
+  let release='';
+  // GitHub, through the real adapter: the deployment of this release, and a success whose address percent-encodes to over 4,000 characters.
+  const adapter=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    const data=endpoint.includes('/statuses')?[{id:51,state:'success',environment_url:`https://app.example.test/${'é'.repeat(700)}`,log_url:'https://ci.example.test/runs/1'}]
+      :{id:12,sha:SHA,environment:target.environment,production_environment:target.productionEnvironment,task:'deploy',payload:{perpetual:{releaseId:release,workflowPath:target.workflowPath,sha:SHA}}};
+    return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify(data)}`};}});
+  const f=await fixture(t,{read:adapter.read});await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});release=f.requests[0].id;
+  const deployed=(await f.manager.refresh()).current;
+  assert.deepEqual([deployed?.status,deployed?.url,deployed?.logUrl],['deployed',undefined,'https://ci.example.test/runs/1']);
+  await f.manager.close();const reopened=await createReleaseManager(f.options);t.after(()=>reopened.close());
+  assert.equal((await reopened.view()).current?.status,'deployed');
 });
 
 test('changing the target at the same commit does not present a previous destination as deployed',async t=>{
