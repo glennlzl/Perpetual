@@ -57,7 +57,7 @@ const NAVIGATION = 'Navigation is outside approved origins.', PAYMENT = 'Payment
 const UNGUARDED = 'The control run could not block everything the pages sent.', REPORT = '__perpetualUnguarded';
 // Why journey.signIn() found no sign-in form to fill.
 const NO_FORM = 'The application URL shows no sign-in form. Set the sign-in page.', NO_SIGN_IN_FORM = 'The sign-in page shows no sign-in form. Check the sign-in page.';
-const OFF_ORIGIN = 'The sign-in form is not on the application origin.';
+const OFF_ORIGIN = 'The sign-in form is not on the application origin.', UNENTERED = 'The test account could not be entered.';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // Only lines carrying the run's channel token are events; anything else a worker prints is ignored. Without a
 // channel, as while code is generated, nothing is reported.
@@ -441,7 +441,8 @@ export const test = base.extend<{ journey: JourneyFixture }>({
           if (!onApplication()) throw new Error(OFF_ORIGIN);
           const [username, password, submit] = await Promise.all(['username', 'password', 'submit'].map(name => form.getProperty(name).then(handle => handle.asElement())));
           if (!username || !password) throw new Error('The page has no sign-in form with one password field.');
-          await username.fill(account.username); await password.fill(account.password);
+          // A failed fill's call log names the value it typed, and Playwright writes a failed test's errors to a file.
+          await username.fill(account.username).then(() => password.fill(account.password)).catch(() => { throw new Error(UNENTERED); });
           // Click waits until a control disabled before both fields held values is enabled.
           if (!submit || !await submit.click({ timeout: 3000 }).then(() => true, () => false)) await password.press('Enter', { timeout: 3000 }).catch(() => {});
         } finally { await form.dispose().catch(() => {}); }

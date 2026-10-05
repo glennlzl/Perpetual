@@ -186,18 +186,26 @@ test('the journey runtime refuses a sign-in page off its application URL’s ori
     assert.throws(()=>runtime.start({...input,signInUrl:signInUrl as string},()=>{}),{message:'A Playwright journey’s sign-in page must be on its application URL’s origin.'},String(signInUrl));
 });
 
-test('a journey that fails while a filled sign-in form is open leaves no file holding the account',{timeout:120000},async t=>{
-  // A sign-in form that keeps what was typed and never signs in, until the journey's time limit.
-  const app=await served(t,{landing:'<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>'});
-  // The workspace, config and environment a journey process gets, kept after Playwright exits so its files can be read.
-  const workspace=await mkdtemp(join(tmpdir(),'perpetual-failed-journey-'));t.after(()=>rm(workspace,{recursive:true,force:true}));
-  const config=await writeJourneyWorkspace(workspace,{item:journey,targetUrl:app.url,timeoutSeconds:8,video:false});
-  await writeFile(join(workspace,'journey.spec.mjs'),spec);
-  const env=journeyEnvironment(process.env,workspace,{hash:specHash(spec),targetUrl:app.url,allowedOrigins:[new URL(app.url).origin],credentials:account,events:false});
-  const stdout=await new Promise<string>(resolve=>execFile(process.execPath,[PLAYWRIGHT_CLI,'test','--config',config],{cwd:workspace,env},(_error,out)=>resolve(String(out))));
-  const facts=stdout.split('\n').filter(line=>line.startsWith('{"type":"result"')).map(line=>JSON.parse(line).result);
-  assert.deepEqual(facts.map(result=>result.stopCause),['deadline'],'The journey ran out of time signing in.');
-  const files=(await readdir(workspace,{recursive:true,withFileTypes:true})).filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath,entry.name));
-  assert.ok(files.some(file=>file.includes(join(workspace,'output'))),'Playwright wrote its output for the failed test.');
-  for(const file of files)assert.ok(!(await readFile(file,'utf8')).includes(account.password),file);
+test('a journey that fails while signing in leaves no file holding the account',{timeout:120000},async t=>{
+  // A sign-in form that keeps what was typed and never signs in, until the journey's time limit, and one whose password
+  // field is disabled once the email is typed, so the password cannot be entered.
+  const fields='<label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>';
+  const forms=[
+    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email></label>${fields}`,8,{stopCause:'deadline'}],
+    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email oninput="this.form.password.disabled=true"></label>${fields}`,40,{stopCause:'action',error:'The test account could not be entered.'}],
+  ] as const;
+  await Promise.all(forms.map(async([landing,timeoutSeconds,expected])=>{
+    const app=await served(t,{landing});
+    // The workspace, config and environment a journey process gets, kept after Playwright exits so its files can be read.
+    const workspace=await mkdtemp(join(tmpdir(),'perpetual-failed-journey-'));t.after(()=>rm(workspace,{recursive:true,force:true}));
+    const config=await writeJourneyWorkspace(workspace,{item:journey,targetUrl:app.url,timeoutSeconds,video:false});
+    await writeFile(join(workspace,'journey.spec.mjs'),spec);
+    const env=journeyEnvironment(process.env,workspace,{hash:specHash(spec),targetUrl:app.url,allowedOrigins:[new URL(app.url).origin],credentials:account,events:false});
+    const stdout=await new Promise<string>(resolve=>execFile(process.execPath,[PLAYWRIGHT_CLI,'test','--config',config],{cwd:workspace,env},(_error,out)=>resolve(String(out))));
+    const facts=stdout.split('\n').filter(line=>line.startsWith('{"type":"result"')).map(line=>JSON.parse(line).result);
+    assert.deepEqual(facts.map(({stopCause,error})=>({stopCause,...(error?{error}:{})})),[expected],landing);
+    const files=(await readdir(workspace,{recursive:true,withFileTypes:true})).filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath,entry.name));
+    assert.ok(files.some(file=>file.includes(join(workspace,'output'))),'Playwright wrote its output for the failed test.');
+    for(const file of files){const text=await readFile(file,'utf8');assert.ok(!text.includes(account.username)&&!text.includes(account.password),file);}
+  }));
 });
