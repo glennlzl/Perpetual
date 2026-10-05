@@ -1,6 +1,6 @@
-import React, { lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
+import React, { lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { ReactFlow, ReactFlowProvider, Handle, Position, BaseEdge, MarkerType, getStraightPath, useNodesInitialized, useReactFlow, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps, type Viewport } from '@xyflow/react';
-import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
+import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, KeyRound, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { BaseNode, BaseNodeHeader, BaseNodeHeaderTitle } from '@/components/base-node';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -21,7 +21,7 @@ import type { BrowserCase, BrowserRun } from '@/lib/browser-test-ui';
 import { StepItem, StepList } from './StepList';
 import { StageBeam } from './StageBeam.tsx';
 import { AutopilotBadge, ChangeMark, ChangeRow } from './StageChanges';
-import { api } from '@/lib/api';
+import { api, session } from '@/lib/api';
 import { INITIAL_PIPELINE_VIEWPORT, STAGE_MIN_WIDTH, alignTop, createSheetViewport, entryViewport, revealViewport, stageBoxes, stageGap, uncoverViewport } from '@/lib/pipeline-viewport.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import { createTestWorkspace } from '@/lib/test-workspace';
@@ -896,8 +896,18 @@ function PipelineApp() {
   </>;
 }
 
-export default function App() {
+// Without the cookie the launch link sets, the controller answers nothing: the page says only how to sign in.
+function SignedOut() {
+  return <main className="delivery-app"><div className="pipeline-canvas canvas-empty"><KeyRound size={28} /><h1>Open the link <code>perpetual serve</code> printed</h1></div></main>;
+}
+
+function Workspace() {
   const [workspace] = useState(() => createTestWorkspace({ controller: api }));
   useEffect(() => () => workspace.dispose(), [workspace]);
   return <TestWorkspaceContext.Provider value={workspace}><PageBoundary><TooltipProvider delayDuration={200}><SidebarProvider defaultOpen={false} className="delivery-app"><PipelineApp /></SidebarProvider></TooltipProvider></PageBoundary></TestWorkspaceContext.Provider>;
+}
+
+// A refused session ends the workspace, its polls included.
+export default function App() {
+  return useSyncExternalStore(session.subscribe, session.signedOut) ? <SignedOut /> : <Workspace />;
 }
