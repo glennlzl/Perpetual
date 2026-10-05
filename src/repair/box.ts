@@ -50,6 +50,8 @@ const LIMITS = ['--memory', '4g', '--memory-swap', '4g', '--cpus', '2', '--pids-
 const PROXY_LIMITS = ['--memory', '256m', '--memory-swap', '256m', '--cpus', '1', '--pids-limit', '128'];
 /** Bytes the box may write, the free space it must leave Docker, and how often both are read while it works. */
 export const DISK = { limit: 20 * 1024 ** 3, floor: 2 * 1024 ** 3, checkMs: 15_000 };
+/** Checks between reads of a box no command runs in: once a minute at the default interval. */
+const IDLE_CHECKS = 4;
 const measure = (bytes: number) => bytes >= 1024 ** 3 ? `${Math.round(bytes / 1024 ** 3 * 10) / 10} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 const IMAGE = /^(?:node|python|golang|buildpack-deps):[\w.-]{1,64}$/;
 const ID = /^[\w-]{1,64}$/;
@@ -222,12 +224,14 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
         throw error;
       }
       // While the box works, what it wrote and Docker's free space are read; past either bound the box is removed, and
-      // its commands reject with why once it is gone.
-      let busy = 0, used = false, checking = false;
+      // its commands reject with why once it is gone. An idle box is read every IDLE_CHECKS checks, since a process a
+      // command left running in the background may still write while the model thinks or CI runs.
+      let busy = 0, used = false, checking = false, idle = 0;
       const halted = async () => { if (stopped.signal.aborted) { await removing; throw stopped.signal.reason; } };
       async function check() {
-        if (checking || stopped.signal.aborted || !busy && !used) return;
-        checking = true; used = false;
+        if (checking || stopped.signal.aborted) return;
+        if (!busy && !used && ++idle < IDLE_CHECKS) return;
+        checking = true; used = false; idle = 0;
         try {
           const [size, free] = await Promise.all([
             docker(['container', 'inspect', '--size', '--format', '{{.SizeRw}}', name], { timeoutMs: 60_000 }),

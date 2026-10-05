@@ -104,16 +104,28 @@ test('a box is removed when Docker runs low on disk space, whoever filled it', a
   await assert.rejects(box.exec(['sleep', '5']), /Docker has less than 2 GB of disk space left, so the repair box was removed\./);
 });
 
-test('an idle box is not read, and one within its bounds keeps working', async t => {
+test('a box within its bounds keeps working, and an idle one is still read', async t => {
   const f = await fake(t);
   const box = await f.boxes.create({ id: 'r4', image: 'node:22-bookworm', source: f.dir });
-  await new Promise(done => setTimeout(done, 100));
-  assert.ok(!(await f.calls()).some(call => call[0] === 'container'), 'Nothing is read while the box is idle.');
   assert.equal((await box.exec(['true'])).exitCode, 0);
-  await new Promise(done => setTimeout(done, 100));
+  for (const started = Date.now(); !(await f.calls()).some(call => call[0] === 'container') && Date.now() - started < 10_000;) await new Promise(done => setTimeout(done, 20));
   assert.ok((await f.calls()).some(call => call[0] === 'container'), 'Its writes are read after it worked.');
   assert.equal(box.signal?.aborted, false);
   await box.remove();
+});
+
+// A command the agent left running in the background, such as one started with nohup, writes while no tool runs.
+test('an idle box that writes past its disk limit is removed', async t => {
+  const f = await fake(t, {}, { limit: 1024 ** 3 });
+  const box = await f.boxes.create({ id: 'r5', image: 'node:22-bookworm', source: f.dir });
+  await f.write({ size: 2 * 1024 ** 3 });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The watchdog did not read the idle box.')), 10_000);
+    box.signal!.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+  assert.match(String(box.signal?.reason), /wrote more than 1 GB/);
+  await assert.rejects(box.exec(['true']), /wrote more than 1 GB and was removed/);
+  assert.deepEqual((await f.read()).resources, []);
 });
 
 
