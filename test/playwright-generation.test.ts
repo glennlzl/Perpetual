@@ -19,7 +19,7 @@ import type {JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
 type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Events=(input:JourneyRunInput)=>WorkerEvent[];
 /** One run of the fake harness, as it logs what it saw (test/fixtures/fake-opencode.ts). */
-type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
+type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;instructions:string;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
   generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown};hostFile?:{setups:boolean[];readLog:boolean;read:boolean}};
 type StoredState={specs:Record<string,Record<string,{approved:unknown;draft:{code:string;hash:string}}>>};
 
@@ -174,6 +174,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   const workspace=dirname(call.cwd),run=join(workspace,'run');
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
+  assert.match(call.instructions,/The log's closing best practices are for ordinary Playwright tests and do not apply here: write no assertions and no variables\./,'The upstream log ends with advice the action-only grammar refuses.');
   assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
   // The test MCP server runs behind the filter that sets up only the workspace's seed.

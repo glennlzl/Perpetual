@@ -27,7 +27,7 @@ const target = prompt.match(/generator_write_test to `([^`]+)`/)![1];
 const modes = Object.fromEntries([['config', configPath], ['seed', seedPath], ['case', env.PERPETUAL_CASE], ['opencode', 'opencode.json'], ['plan', 'specs/plan.md']].map(([name, file]) => [name, statSync(file!).mode & 0o777]));
 const record = (extra: object) => appendFileSync(log, `${JSON.stringify({ mode, prompt, cwd: process.cwd(), workspaceMode: statSync('..').mode & 0o777, plan, seed: readFileSync(seedPath, 'utf8'), config, modes,
   agent: { name: requestedAgent, mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash, tools: agent.tools }, permission: opencode.permission, provider: opencode.provider, smallModel: opencode.small_model, mcp: server.command, mcpEnvironment: server.environment,
-  prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), git: statSync('.git').isDirectory(),
+  prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), instructions: readFileSync(`.opencode/prompts/${requestedAgent}.md`, 'utf8'), git: statSync('.git').isDirectory(),
   env: { key: Boolean(env.OPENROUTER_API_KEY), account: env.PERPETUAL_ACCOUNT_USERNAME || null, password: Boolean(env.PERPETUAL_ACCOUNT_PASSWORD), channel: env.PERPETUAL_EVENT_CHANNEL ?? null, caseFile: env.PERPETUAL_CASE, target: env.PERPETUAL_TARGET_URL,
     home: env.HOME, xdg: env.XDG_CONFIG_HOME ?? null, cache: env.XDG_CACHE_HOME, npm: env.npm_config_cache, claude: env.OPENCODE_DISABLE_CLAUDE_CODE },
   ...extra })}\n`);
