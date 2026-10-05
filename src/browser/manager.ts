@@ -244,8 +244,14 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
   let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};
-  {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
-  for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
+  // The file is data: every record the restart and the views read is checked first. A run from an older controller may
+  // lack its progress, results or newer fields.
+  const records=(value:unknown)=>isRecord(value)&&Object.values(value).every(isRecord);
+  const optionalRecords=(value:unknown)=>value==null||Array.isArray(value)&&value.every(isRecord);
+  const storedRun=(run:unknown)=>isRecord(run)&&['id','scope','status'].every(key=>typeof run[key]==='string')&&Array.isArray(run.caseIds)&&optionalRecords(run.approvedCases)&&optionalRecords(run.results)
+    &&(run.progress==null||isRecord(run.progress)&&Array.isArray(run.progress.cases)&&run.progress.cases.every(item=>isRecord(item)&&optionalRecords(item.steps)));
+  {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.runs.every(storedRun)||!records(saved.configs)||!isRecord(saved.cases)||!isRecord(saved.analyses))throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
+  for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key])||(key==='preparations'||key==='configTargets')&&!records(state[key]))throw new Error('Unsupported browser preparation state.');}
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
   for(const config of Object.values(state.configs))if(config.readOnlyRequests!==undefined){
@@ -376,7 +382,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(run.mode!=='run'||(run.results||[]).some(result=>result.caseId===item.id))continue;
       // An interrupted journey ended on the controller's exception; cancelled and skipped journeys have no verdict.
       // A run's journeys are its approved cases.
-      const result=status==='failed'?journeyResult(run.approvedCases.find(value=>value.id===item.id)!,{caseId:item.id,stopCause:'exception',error:'The controller stopped during this journey.'},item.steps):{caseId:item.id,status,assertions:[],...(unstarted?{error:'Controller stopped before this journey started'}:{})};
+      const result=status==='failed'?journeyResult((run.approvedCases||[]).find(value=>value.id===item.id)??{id:item.id},{caseId:item.id,stopCause:'exception',error:'The controller stopped during this journey.'},item.steps):{caseId:item.id,status,assertions:[],...(unstarted?{error:'Controller stopped before this journey started'}:{})};
       run.results=[...(run.results||[]),result].sort((a,b)=>run.caseIds.indexOf(a.caseId)-run.caseIds.indexOf(b.caseId));
     }
     if(run.progress)touch(run);

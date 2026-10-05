@@ -216,3 +216,29 @@ test('public history preserves missing progress, old revision and immutable lega
   assert.equal((await manager.view(f.context)).cases[0].goal,scenario.goal,'Editable cases normalize independently of historical approvals.');
   assert.equal(manager.summary(f.context).runs[0].progress,undefined);
 });
+
+test('a stored state whose records have another shape is refused as unsupported, never with a type error',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const {run}=await f.manager.run(f.context,{},manual);await completed(f,run.id);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),[stored]=state.runs,scope=Object.keys(state.configs)[0];
+  const unsupported={message:'Unsupported browser state.'},preparation={message:'Unsupported browser preparation state.'};
+  const changed:[string,Record<string,unknown>,{message:string}][]=[
+    ['a null run',{runs:[null]},unsupported],
+    ['a run without its case IDs',{runs:[{...stored,caseIds:undefined}]},unsupported],
+    ['a run whose progress is not a list of journeys',{runs:[{...stored,progress:{cases:'running'}}]},unsupported],
+    ['a null journey',{runs:[{...stored,progress:{...stored.progress,cases:[null]}}]},unsupported],
+    ['a null approved case',{runs:[{...stored,approvedCases:[null]}]},unsupported],
+    ['a null result',{runs:[{...stored,results:[null]}]},unsupported],
+    ['a null stage config',{configs:{[scope]:null}},unsupported],
+    ['a null preparation',{preparations:{[scope]:null}},preparation],
+    ['a null target',{configTargets:{[scope]:null}},preparation],
+  ];
+  for(const [name,change,message] of changed){
+    await writeFile(file,JSON.stringify({...state,...change}));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),message,name);
+  }
+  // An interrupted run from an older controller without its approved cases still settles.
+  await writeFile(file,JSON.stringify({...state,externalOperations:{},runs:[{...stored,status:'running',approvedCases:undefined,results:[],progress:{...stored.progress,cases:[{...stored.progress.cases[0],status:'running'}]}}]}));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  assert.deepEqual((await manager.runProgress(f.context,run.id)).results.map(item=>item.status),['failed']);
+});
