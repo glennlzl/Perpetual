@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HELD, REJECTED } from '../../../src/repair/changes.ts';
-import { changeRules, guardResults, jsonValue, readWhole, scriptsChanged, verdict } from '../judge.ts';
+import { changeRules, guardResults, jsonValue, readAtCommit, readWhole, scriptsChanged, verdict } from '../judge.ts';
 
 const diff = (path: string, added: string, removed = 'old') => `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${removed}\n+${added}\n`;
 
@@ -51,5 +51,20 @@ test('what the judge needs is read whole, or the attempt is a runner error', asy
   assert.equal(await readWhole(box({ exitCode: 0 }), ['git'], 'what git staged'), 'package.json\0');
   for (const result of [{ exitCode: 128 }, { exitCode: 124, timedOut: true }, { exitCode: 0, truncated: true }]) {
     await assert.rejects(readWhole(box(result), ['git'], 'what git staged'), /The judge could not read what git staged\./, JSON.stringify(result));
+  }
+});
+
+// A package.json the commit holds whose read failed would otherwise pass for an added one, whose scripts are not compared.
+test('a file at the commit is absent only when git lists nothing for it; a listing or read that fails is a runner error', async () => {
+  type Answers = Record<string, { exitCode: number; stdout?: string; timedOut?: boolean }>;
+  const sha = 'a'.repeat(40), manifest = JSON.stringify({ scripts: { test: 'node --test' } });
+  const box = (answers: Answers) => ({
+    async exec(argv: readonly string[]) { const answer = answers[argv[1]] ?? { exitCode: 128 }; return { stdout: '', stderr: '', truncated: false, timedOut: false, ...answer }; },
+  });
+  assert.equal(await readAtCommit(box({ 'ls-tree': { exitCode: 0, stdout: 'web/package.json\n' }, show: { exitCode: 0, stdout: manifest } }), sha, 'web/package.json'), manifest);
+  assert.equal(await readAtCommit(box({ 'ls-tree': { exitCode: 0, stdout: '' } }), sha, 'web/package.json'), null, 'Listed nothing: the change added it.');
+  const unreadable: Answers[] = [{ 'ls-tree': { exitCode: 128 } }, { 'ls-tree': { exitCode: 124, timedOut: true } }, { 'ls-tree': { exitCode: 0, stdout: 'web/package.json\n' }, show: { exitCode: 128 } }];
+  for (const answers of unreadable) {
+    await assert.rejects(readAtCommit(box(answers), sha, 'web/package.json'), /The judge could not read web\/package\.json\./, JSON.stringify(answers));
   }
 });
