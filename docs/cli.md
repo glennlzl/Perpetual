@@ -51,7 +51,7 @@ node src/cli.ts init-ci --repo /path/to/project --output /tmp/proposed-ci.yml
 
 It does not install or start the application or run its full test suite. The report is printed and written to `artifacts/<expectations name>-validation.json`.
 
-`node scripts/browser-agent-contract.ts` runs discovery through the controller, the browser agent and Chromium against a disposable local page with a deterministic model fixture; see [Business journeys](journeys.md#tests).
+`node scripts/browser-agent-contract.ts` runs discovery through the controller, the browser agent and Chromium against a disposable local page with a deterministic model fixture; see [Business journeys](journeys.md#tests). CI runs it with the browser runtime tests.
 
 ## Tests
 
