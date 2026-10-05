@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { REDACTED, failureText, hasCredential, hasSecretLiteral, hide, redact } from '../src/redaction.ts';
+import { REDACTED, failureText, hasCredential, hasSecretLiteral, hide, redact, withoutRegistryCredentials } from '../src/redaction.ts';
 
 test('redact knows every secret shape once: named values, tokens, key blocks, user info', () => {
   const cases: [string, string[]][] = [
@@ -246,4 +246,26 @@ test('literal admission inspects every quoted value before duplicate JSON keys c
   assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value","value":"ordinary"}'), true);
   assert.equal(hasSecretLiteral('{"value":"ghp_\\u0066ixture_value'), true, 'A missing closing quote does not hide otherwise decodable text.');
   assert.equal(hasSecretLiteral('{"value":"ordinary incomplete'), false);
+});
+
+test('a package manager\'s config keeps every setting but its registry credentials, whatever the file\'s syntax', () => {
+  // npm and pnpm: scoped to a registry or not, commented out, or a literal password in a registry address.
+  const npmrc = ['registry=https://registry.npmjs.org/', '@acme:registry=https://npm.pkg.github.com/', '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}',
+    '//registry.example.test:8443/npm/:_password=Zml4dHVyZQ==', '//registry.example.test:8443/npm/:username=fixture', '_auth = Zml4dHVyZTpmaXh0dXJl', 'email=owner@example.test',
+    '; //registry.npmjs.org/:_authToken=fixture-old-token', '//registry.example.test/:tokenHelper=/home/fixture/token.sh', 'key="-----BEGIN PRIVATE KEY-----\\nMIIfixture\\n-----END PRIVATE KEY-----"',
+    'certfile=/home/fixture/client.crt', '@private:registry=https://fixture:fixture-password@registry.example.test/', 'node-linker=hoisted', 'auto-install-peers=true', 'init-author-email=owner@example.test', ''].join('\n');
+  assert.equal(withoutRegistryCredentials(npmrc), ['registry=https://registry.npmjs.org/', '@acme:registry=https://npm.pkg.github.com/', 'node-linker=hoisted', 'auto-install-peers=true', 'init-author-email=owner@example.test', ''].join('\n'));
+  // Yarn 1: quoted keys set with a space.
+  assert.equal(withoutRegistryCredentials('registry "https://registry.yarnpkg.com"\n"//registry.yarnpkg.com/:_authToken" "fixture-yarn-token"\nemail owner@example.test\n--install.frozen-lockfile true\n'),
+    'registry "https://registry.yarnpkg.com"\n--install.frozen-lockfile true\n');
+  // Yarn: nested, folded over lines, in a flow mapping, and a key block a value holds.
+  const yarnrc = ['nodeLinker: node-modules', 'npmScopes:', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', '    npmAuthToken: "${GITHUB_TOKEN}"', '    npmAlwaysAuth: true',
+    'npmAuthIdent: >-', '  fixture:', '', '  fixture-password', '', 'npmRegistries: { "//registry.example.test": { npmAuthToken: fixture-flow-token } }', 'clientKey: |', '  -----BEGIN PRIVATE KEY-----', '  MIIfixture',
+    '  -----END PRIVATE KEY-----', 'yarnPath: .yarn/releases/yarn-4.5.0.cjs', ''].join('\n');
+  assert.equal(withoutRegistryCredentials(yarnrc), ['nodeLinker: node-modules', 'npmScopes:', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', '    npmAlwaysAuth: true', '',
+    'clientKey: |', 'yarnPath: .yarn/releases/yarn-4.5.0.cjs', ''].join('\n'));
+  // Windows line endings stay, and a config without a credential comes back as it was.
+  assert.equal(withoutRegistryCredentials('legacy-peer-deps=true\r\n//registry.npmjs.org/:_authToken=fixture\r\nshamefully-hoist=true\r\n'), 'legacy-peer-deps=true\r\nshamefully-hoist=true\r\n');
+  const plain = '# Hoist for the bundler.\npublic-hoist-pattern[]=*eslint*\nenableTelemetry: false\n';
+  assert.equal(withoutRegistryCredentials(plain), plain);
 });

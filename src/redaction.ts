@@ -1,7 +1,9 @@
 // Secrets leave the controller's text in two ways, and both live here. `redact` knows what a secret
 // looks like: one catalogue of shapes, applied to every error, log, view and model input. `hide` knows
 // what a secret is: the values a process was given, replaced wherever they appear. Fixed-message
-// failures (a gh or docker error mapped to one sentence) need neither: they discard the raw output.
+// failures (a gh or docker error mapped to one sentence) need neither: they discard the raw output. A package
+// manager's config that a twin's source copies loses its credential lines instead (`withoutRegistryCredentials`), so
+// the package manager reads no marker as a token.
 
 export const REDACTED = '[REDACTED]';
 // Credential names, found inside a longer name such as STRIPE_SECRET_KEY. A short one, PASS or PWD, counts only where a
@@ -68,6 +70,12 @@ const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*(?::[ \
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
+// A package manager's setting that holds or points to a registry credential: a token, password, user name or email, a
+// client certificate or its key, or a token helper. In npm's and pnpm's .npmrc it may be scoped to a registry
+// (`//registry.example/:_authToken=…`), in Yarn 1's .yarnrc quoted and set with a space, and in Yarn's .yarnrc.yml nested
+// or in a flow mapping (`npmAuthToken: …`); a commented-out one counts too.
+const REGISTRY_CREDENTIAL = new RegExp(`(?:^\\s*(?:[#;]\\s*)?|[{,]\\s*)["']?(?:[^\\s"'=,{}]*:)?(?:_authToken|_auth|_password|username|email|certfile|keyfile|cert|key|tokenHelper|npmAuthToken|npmAuthIdent|httpsCertFilePath|httpsKeyFilePath)["']?(?:\\s*[=:]|\\s|$)`, 'im');
+const indentation = (line: string) => /^[ \t]*/.exec(line)![0].length;
 
 /**
  * Text with every secret-shaped value replaced by the marker: ANSI colour removed; private key and
@@ -118,6 +126,29 @@ export function hasCredential(input: string, { code = false, url = false }: { co
   if (url) { const value = decodedUri(input); return redact(value) !== value; }
   return new RegExp(TOKEN_SHAPE.source).test(input) || PRIVATE_KEY_BLOCK.test(input) || literalUrlPassword(input)
     || QUOTED_LITERAL.test(input) || !code && UNQUOTED_LITERAL.test(input);
+}
+
+/**
+ * A package manager's config (.npmrc, .yarnrc or .yarnrc.yml) without its credentials: each line that sets a registry
+ * credential, or holds a credential as a literal (a known token shape, a private key block, a URL with a password), is
+ * removed, with the rest of a key block it opens and the lines indented beneath it, which continue its value. Every
+ * other line, such as a registry, Yarn's nodeLinker or pnpm's hoisting, is kept as written, so an install resolves as
+ * the repository's does.
+ */
+export function withoutRegistryCredentials(text: string): string {
+  const lines = text.split('\n'), kept: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!REGISTRY_CREDENTIAL.test(line) && !hasCredential(line)) { kept.push(line); continue; }
+    if (line.includes('-----BEGIN ')) while (!lines[index].includes('-----END ') && index + 1 < lines.length) index += 1;
+    // Blank lines inside a continued value go with it; those after it stay.
+    for (let next = index + 1; next < lines.length; next += 1) {
+      if (!lines[next].trim()) continue;
+      if (indentation(lines[next]) <= indentation(line)) break;
+      index = next;
+    }
+  }
+  return kept.join('\n');
 }
 
 /**

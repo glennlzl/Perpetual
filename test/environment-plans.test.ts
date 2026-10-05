@@ -266,10 +266,12 @@ test('source snapshot excludes credentials, caches, databases and links while pr
   await symlink(path.join(repoPath, 'src'), path.join(repoPath, 'linked-directory'));
   const destination = path.join(root, 'snapshot');
   const result = await snapshotSource(repoPath, destination);
-  assert.deepEqual((await readdir(destination)).sort(), ['package.json', 'src']);
+  // The package manager's config is kept without its token.
+  assert.deepEqual((await readdir(destination)).sort(), ['.npmrc', 'package.json', 'src']);
+  assert.equal(await readFile(path.join(destination, '.npmrc'), 'utf8'), '');
   assert.deepEqual(await readdir(path.join(destination, 'src')), ['app.mjs']);
   assert.equal(await readFile(path.join(destination, 'src/app.mjs'), 'utf8'), original);
-  assert.equal(result.files, 2);
+  assert.equal(result.files, 3);
   assert.equal(result.bytes, Buffer.byteLength(original) + 2);
   assert.match(result.hash, /^[a-f0-9]{64}$/);
   assert.equal((await stat(path.join(destination, 'src/app.mjs'))).mode & 0o777, 0o600);
@@ -280,6 +282,38 @@ test('source snapshot excludes credentials, caches, databases and links while pr
   assert.equal(await readFile(path.join(repoPath, '.env'), 'utf8'), 'SECRET=do-not-copy');
   await writeFile(path.join(repoPath, 'src/app.mjs'), original + '// new revision\n');
   assert.notEqual((await snapshotSource(repoPath, path.join(root, 'snapshot-3'))).hash, result.hash);
+});
+
+test('package manager configs are copied at every depth with their settings and without their credentials', async t => {
+  const credentials = ['fixture-npm-token', 'Zml4dHVyZTpmaXh0dXJl', 'fixture-yarn-token', 'fixture-berry-token', 'fixture-password', 'owner@example.test'];
+  const files = {
+    'package.json': '{}',
+    '.npmrc': 'registry=https://registry.npmjs.org/\n@acme:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=fixture-npm-token\nnode-linker=hoisted\nshamefully-hoist=true\n',
+    'packages/web/.npmrc': '//registry.npmjs.org/:_auth=Zml4dHVyZTpmaXh0dXJl\nemail=owner@example.test\nlegacy-peer-deps=true\n',
+    'legacy/.yarnrc': '"//registry.yarnpkg.com/:_authToken" "fixture-yarn-token"\nyarn-offline-mirror "./offline-cache"\n',
+    '.yarnrc.yml': 'nodeLinker: node-modules\nnpmScopes:\n  acme:\n    npmRegistryServer: "https://npm.pkg.github.com"\n    npmAuthToken: fixture-berry-token\nnpmRegistryServer: "https://fixture:fixture-password@registry.example.test"\nyarnPath: .yarn/releases/yarn-4.5.0.cjs\n',
+  };
+  const { root, repoPath } = await fixture(t, files);
+  const destination = path.join(root, 'snapshot');
+  await snapshotSource(repoPath, destination);
+  assert.deepEqual(await filesIn(destination), ['.npmrc', '.yarnrc.yml', 'legacy/.yarnrc', 'package.json', 'packages/web/.npmrc']);
+  assert.equal(await readFile(path.join(destination, '.npmrc'), 'utf8'), 'registry=https://registry.npmjs.org/\n@acme:registry=https://npm.pkg.github.com/\nnode-linker=hoisted\nshamefully-hoist=true\n');
+  assert.equal(await readFile(path.join(destination, 'packages/web/.npmrc'), 'utf8'), 'legacy-peer-deps=true\n');
+  assert.equal(await readFile(path.join(destination, 'legacy/.yarnrc'), 'utf8'), 'yarn-offline-mirror "./offline-cache"\n');
+  assert.equal(await readFile(path.join(destination, '.yarnrc.yml'), 'utf8'), 'nodeLinker: node-modules\nnpmScopes:\n  acme:\n    npmRegistryServer: "https://npm.pkg.github.com"\nyarnPath: .yarn/releases/yarn-4.5.0.cjs\n');
+  for (const name of await filesIn(destination)) {
+    const copied = await readFile(path.join(destination, name), 'utf8');
+    for (const credential of credentials) assert.ok(!copied.includes(credential), `${name} keeps ${credential}`);
+  }
+  // The checkout keeps its files, and the gate's checkout check counts the configs, which the snapshot copies.
+  for (const [name, content] of Object.entries(files)) assert.equal(await readFile(path.join(repoPath, name), 'utf8'), content);
+  assert.deepEqual(Object.keys(files).filter(snapshotKeeps), Object.keys(files));
+  // A config without a credential is copied byte for byte, and a credential alone does not change the snapshot.
+  const plain = await fixture(t, { '.npmrc': 'legacy-peer-deps=true\n', 'app.mjs': 'export {};\n' });
+  const token = await fixture(t, { '.npmrc': 'legacy-peer-deps=true\n//registry.npmjs.org/:_authToken=fixture-npm-token\n', 'app.mjs': 'export {};\n' });
+  const [one, other] = [await snapshotSource(plain.repoPath, path.join(plain.root, 'snapshot')), await snapshotSource(token.repoPath, path.join(token.root, 'snapshot'))];
+  assert.equal(await readFile(path.join(plain.root, 'snapshot', '.npmrc'), 'utf8'), 'legacy-peer-deps=true\n');
+  assert.deepEqual([other.hash, other.bytes], [one.hash, one.bytes]);
 });
 
 test('a git checkout’s snapshot leaves out the local files git ignores, whatever their names', async t => {
