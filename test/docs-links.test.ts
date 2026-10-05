@@ -43,3 +43,15 @@ test('no current document says Perpetual renews a provisioned sandbox: only a pe
     assert.doesNotMatch(await readFile(join(root, file), 'utf8'), /(?<!never )\brenews\b/, file);
   }
 });
+
+test('the contributor guide, the CLI guide and the CI workflow name every variable that lets a test start Docker', async () => {
+  const names = new Set<string>();
+  for (const file of (await readdir(join(root, 'test'))).filter(name => name.endsWith('.test.ts'))) {
+    for (const [name] of (await readFile(join(root, 'test', file), 'utf8')).matchAll(/\bPERPETUAL_\w*DOCKER_TESTS\b/g)) names.add(name);
+  }
+  assert.ok(names.size >= 2, [...names].join(', '));
+  for (const file of ['CONTRIBUTING.md', 'docs/cli.md', '.github/workflows/ci.yml']) {
+    const text = await readFile(join(root, file), 'utf8');
+    assert.deepEqual([...names].filter(name => !text.includes(name)), [], file);
+  }
+});
