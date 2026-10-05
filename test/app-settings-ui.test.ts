@@ -66,3 +66,41 @@ test('Settings save completion survives leaving and reopening the page', { timeo
     assert.deepEqual(submitted, [{ model: 'example/a', escalationModel: 'example/c' }]);
   });
 });
+
+test('Settings names a preselected model the controller does not use beside its Select, until it is saved', { timeout: 60000 }, async t => {
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+  await server.listen();
+  const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage(), pageErrors: string[] = [], submitted: Record<string, unknown>[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  // The saved model left the catalog, and no escalation model was ever saved.
+  let saved: ModelSettingsView = { ...capabilities('example/retired'), escalationModel: '' };
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    let result: unknown, status = 200;
+    if (path === '/api/state') result = { scan: null, defaultRepo: '', pipeline: null };
+    else if (path === '/api/session') result = { token: 'fixture-token' };
+    else if (path === '/api/settings/models') result = catalog;
+    else if (path === '/api/settings/model') {
+      if (route.request().method() === 'POST') {
+        const input: Record<string, unknown> = route.request().postDataJSON(); submitted.push(input);
+        saved = { ...saved, model: String(input.model), escalationModel: String(input.escalationModel) };
+      }
+      result = { capabilities: saved };
+    } else { status = 404; result = { error: 'Unexpected fixture route.' }; }
+    await route.fulfill({ status, json: result });
+  });
+  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/#settings`);
+  const model = page.getByRole('combobox', { name: 'Model', exact: true }), escalation = page.getByRole('combobox', { name: 'Escalation model', exact: true });
+  await expect(model).toContainText('Model B');
+  await expect(model).toHaveAccessibleDescription('Saved model unavailable');
+  await expect(escalation).toContainText('Model C');
+  await expect(escalation).toHaveAccessibleDescription('Not saved');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => submitted).toEqual([{ model: 'example/b', escalationModel: 'example/c' }]);
+  await expect(page.getByText('Saved model unavailable', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Not saved', { exact: true })).toHaveCount(0);
+  for (const select of [model, escalation]) await expect(select).not.toHaveAttribute('aria-describedby');
+  await expect(model).toContainText('Model B');
+  assert.deepEqual(pageErrors, []);
+});

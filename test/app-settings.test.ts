@@ -92,3 +92,29 @@ test('catalog recovery never replaces an unsaved model or turns it into the save
   assert.equal(settings.getSnapshot().savedModel, 'example/b');
   assert.equal(settings.getSnapshot().modelsError, '');
 });
+
+test('a model Select names a preselected model the controller does not use: a saved one the catalog lost, or none saved', async () => {
+  let saved = { model: 'example/retired', escalationModel: '' };
+  const settings = createAppSettings({ controller: async (path, input) => {
+    if (path.endsWith('/models')) return catalog;
+    if (input) saved = { model: String(input.model), escalationModel: String(input.escalationModel) };
+    return { capabilities: { ...reply(saved.model).capabilities, escalationModel: saved.escalationModel } };
+  } });
+  const states = () => { const { savedModel, modelState, savedEscalation, escalationState } = settings.getSnapshot(); return { savedModel, modelState, savedEscalation, escalationState }; };
+  assert.deepEqual(states(), { savedModel: '', modelState: null, savedEscalation: '', escalationState: null }, 'Nothing is named before the settings are read.');
+  await settings.load();
+  assert.deepEqual(states(), { savedModel: 'example/b', modelState: 'unavailable', savedEscalation: 'example/c', escalationState: 'unsaved' });
+  settings.edit({ model: 'example/a' });
+  assert.equal(settings.getSnapshot().modelState, 'unavailable', 'A choice not yet saved leaves the saved model unavailable.');
+  assert.equal(await settings.save(), true);
+  assert.deepEqual(states(), { savedModel: 'example/a', modelState: null, savedEscalation: 'example/c', escalationState: null });
+});
+
+test('without the catalog a saved model is not judged unavailable, and one never saved is still named', async () => {
+  const settings = createAppSettings({ controller: async path => {
+    if (path.endsWith('/models')) throw new Error('Catalog unavailable.');
+    return { capabilities: { ...reply('example/retired').capabilities, escalationModel: '' } };
+  } });
+  await settings.load();
+  assert.deepEqual([settings.getSnapshot().modelState, settings.getSnapshot().escalationState], [null, 'unsaved']);
+});

@@ -79,7 +79,7 @@ A repair is a change of the Build stage, shown as [Autopilot](pipeline-ui.md#aut
 - **Repair** is a Button on a failed workflow row of the GitHub Actions card, for the watched head's own failed run of that workflow, with the head's short commit when it is newer than the scanned one. It is offered while the head has no repair under way and no fix waiting with its pull request; a repair that ended without one, such as one that needed a person, may start again.
 - **Stop** is a Button on the change under way; its pull request stays open.
 - The Badge menu's **Merge changes** and **Ask before merging** are the Build stage's Autopilot mode (12).
-- **Escalation model**, a second model Select in App Settings, chooses the model attempts 3 and 4 use; a strong coding model the catalog lists is preselected, else the Settings model.
+- **Escalation model**, a second model Select in App Settings, chooses the model attempts 3 and 4 use; a strong coding model the catalog lists is preselected, else the Settings model. Until one is saved, the Select is marked **Not saved** and attempts 3 and 4 use the Settings model; a saved one the catalog no longer lists is marked **Saved model unavailable**.
 
 How a repair reads as a change (`src/repair/view.ts`):
 
