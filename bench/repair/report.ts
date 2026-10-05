@@ -36,7 +36,8 @@ export function renderReport(input: readonly AttemptRecord[], { title = 'Repair-
   const names = [...groups.keys()].sort();
   const lines = [`# ${title}`, ''];
   const skipped = records.filter(record => record.status === 'skipped'), errors = records.filter(record => record.status === 'error');
-  const spent = attempted.reduce((total, record) => total + costOf(record), 0);
+  // Every paid request counts toward what was spent: a runner error's, and an attempt a resumed run replaced.
+  const spent = input.reduce((total, record) => total + costOf(record), 0);
   lines.push(`${attempted.length} attempts over ${new Set(attempted.map(record => record.case)).size} cases, ${money(spent)} spent${skipped.length ? `; ${skipped.length} skipped (${counts(skipped.map(record => record.skipped ?? 'unknown'))})` : ''}${errors.length ? `; ${errors.length} runner errors, not counted (a resumed run retries them)` : ''}.`, '');
   lines.push('## By framework and model', '');
   lines.push(table(['Framework · model', 'Success', '95% CI', '$/success', '$/attempt', 'Median time', 'p90 time', 'Median requests', 'Median tool calls', 'Ended', 'Rule violations', 'Judge failures', 'Cost unknown', 'Passed without done'], names.map(name => {

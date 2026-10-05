@@ -26,7 +26,7 @@ import { imageFor, prepareCase, type CaseContext } from './context.ts';
 import { loadCases, type Case } from './corpus.ts';
 import { createFakeOpenAI } from './fake-openai.ts';
 import { FAKE_MODELS, corpusSolutions, createFakeUpstream, solver } from './fake-upstream.ts';
-import { PROVIDERS, REASONING, UPSTREAMS, WIRES, forkGateway, keyFileModels, type AttemptUsage, type GatewayControl, type Provider, type ReasoningPolicy } from './gateway.ts';
+import { PROVIDERS, REASONING, UPSTREAMS, WIRES, forkGateway, keyFileModels, type GatewayControl, type Provider, type ReasoningPolicy } from './gateway.ts';
 import { ADAPTERS, ADAPTER_KEYS, DEFAULT_PROVIDERS, LIMITS, modelInfo, wireOf, type Adapter, type AdapterKey, type AttemptEvent, type AttemptLimits, type AttemptOutcome, type ModelInfo } from './harness.ts';
 import { judge } from './judge.ts';
 import { loadPrices, priceFor, type PriceTable } from './prices.ts';
@@ -173,10 +173,13 @@ export async function runBench(options: RunOptions) {
         exhausted = true;
         return appendRecord(paths.results, skip(cell, adapter, 'budget'), gateway.scrub);
       }
-      // A failure of the runner itself (a box, Docker) is recorded and the run goes on; a resumed run retries it.
-      const record = await attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope }).catch((error: unknown): AttemptRecord => {
+      // A failure of the runner itself (a box, Docker) is recorded and the run goes on; a resumed run retries it. What
+      // the attempt already spent, and its change, are kept once the model ran.
+      const partial: { record?: AttemptRecord } = {};
+      const record = await attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope, partial }).catch((error: unknown): AttemptRecord => {
         if (signal.aborted) throw error;
-        return { ...skip(cell, adapter, 'budget'), status: 'error', skipped: undefined, reason: 'error', error: String((error as Error)?.message ?? error).slice(0, 1000) };
+        const ran = partial.record?.gateway ? partial.record : skip(cell, adapter, 'budget');
+        return { ...ran, status: 'error', skipped: undefined, reason: 'error', error: String((error as Error)?.message ?? error).slice(0, 1000), judge: null, success: false, passedWithoutDone: false };
       });
       if (record.status === 'skipped') exhausted = true;
       await appendRecord(paths.results, record, gateway.scrub);
@@ -195,9 +198,11 @@ export async function runBench(options: RunOptions) {
   }
 }
 
-async function attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope }: {
+async function attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope, partial = {} }: {
   cell: Cell; adapter: Adapter; c: Case; context: CaseContext; model: ModelInfo; gateway: GatewayControl; options: RunOptions; paths: ReturnType<typeof resultPaths>; run: string;
   signal: AbortSignal; onScope(scope: string): Promise<void>;
+  /** The record as far as it got, for the runner to keep when the attempt fails after the model ran. */
+  partial?: { record?: AttemptRecord };
 }): Promise<AttemptRecord> {
   const folder = join(paths.attempts, cellFolder(cell)), events: AttemptEvent[] = [], scrub = gateway.scrub, provider = options.provider ?? 'openrouter';
   const record: AttemptRecord = {
@@ -205,9 +210,10 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     reason: null, adapterReason: null, summary: '', error: '', adapterSteps: 0, reproduced: null, frameworkCost: null, gateway: null, wallMs: 0, setupMs: 0, harnessPaths: [...adapter.harnessPaths ?? []], diff: null,
     rules: { rejected: [], holds: [] }, guards: [], scriptsChanged: [], judge: null, success: false, passedWithoutDone: false,
   };
+  partial.record = record;
   const setup = Date.now(), scratch = await mkdtemp(join(tmpdir(), 'bench-attempt-'));
   const box = await createBenchBox({ image: context.image, source: context.snapshot, root: paths.boxRoot, signal, onScope });
-  let diff: Buffer | null = null, tooLarge = false, usage: AttemptUsage | null = null, outcome: AttemptOutcome = { reason: 'error', steps: 0 }, timedOut = false;
+  let diff: Buffer | null = null, tooLarge = false, outcome: AttemptOutcome = { reason: 'error', steps: 0 }, timedOut = false;
   try {
     await adapter.prepare?.(box, signal);
     const boxUrl = adapter.inBox ? `${await box.attachGateway(gateway.port)}/api/v1` : undefined;
@@ -227,18 +233,22 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     }
     record.wallMs = Date.now() - started;
     timedOut = timeout.aborted || record.wallMs >= options.limits.timeMs;
-    usage = await gateway.close(opened.token);
+    // From here the attempt has spent what the gateway counted: kept on the record and written out before anything
+    // else can fail, as its change is once read.
+    const { log: requests, attempt: _attempt, model: _model, cap: _cap, ...stats } = await gateway.close(opened.token);
+    Object.assign(record, {
+      gateway: stats, reason: finalReason(stats.firstRefusal, timedOut, outcome.reason), adapterReason: outcome.reason, summary: (outcome.summary ?? '').slice(0, 4000), error: (outcome.error ?? '').slice(0, 1000),
+      adapterSteps: outcome.steps, reproduced: outcome.reproduced ?? null, frameworkCost: outcome.frameworkCost ?? null,
+    });
+    await writeArtifact(folder, 'gateway.json', { json: requests }, scrub);
+    await writeArtifact(folder, 'events.json', { json: events }, scrub);
     if (record.harnessPaths.length) await box.exec(['rm', '-rf', '--', ...record.harnessPaths.map(path => `${box.root}/${path}`)], { timeoutMs: 60_000 });
     diff = await box.diff(context.sha).catch(error => { if ((error as { rejected?: unknown }).rejected) { tooLarge = true; return null; } throw error; });
+    if (diff) { record.diff = diffStats(diff); await writeArtifact(folder, 'change.diff', diff, scrub); }
   } finally {
     await box.remove();
     await rm(scratch, { recursive: true, force: true });
   }
-  const { log: requests, attempt: _attempt, model: _model, cap: _cap, ...stats } = usage!;
-  Object.assign(record, {
-    gateway: stats, reason: finalReason(stats.firstRefusal, timedOut, outcome.reason), adapterReason: outcome.reason, summary: (outcome.summary ?? '').slice(0, 4000), error: (outcome.error ?? '').slice(0, 1000),
-    adapterSteps: outcome.steps, reproduced: outcome.reproduced ?? null, frameworkCost: outcome.frameworkCost ?? null, diff: diff ? diffStats(diff) : null,
-  });
   const judged = tooLarge ? null : await judge({ c, snapshot: context.snapshot, sha: context.sha, diff: diff ?? Buffer.alloc(0), image: context.image, steps: context.job.steps, root: paths.boxRoot, signal, onScope });
   if (judged) {
     Object.assign(record, { rules: judged.rules, guards: judged.guards, scriptsChanged: judged.scriptsChanged,
@@ -247,9 +257,6 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
   if (tooLarge) record.rules = { rejected: [TOO_LARGE], holds: [] };
   record.success = Boolean(judged?.passed) && record.reason === 'done';
   record.passedWithoutDone = Boolean(judged?.passed) && record.reason !== 'done';
-  if (diff) await writeArtifact(folder, 'change.diff', diff, scrub);
-  await writeArtifact(folder, 'gateway.json', { json: requests }, scrub);
-  await writeArtifact(folder, 'events.json', { json: events }, scrub);
   if (judged) await writeArtifact(folder, 'judge.json', { json: judged }, scrub);
   return record;
 }

@@ -30,12 +30,14 @@ test('the report summarizes each framework and model, each case, and unique solv
     record('pi', 'c', 1, { success: false, passedWithoutDone: true, reason: 'cost', gateway: { ...record('pi', 'c', 1).gateway!, cost: 0.5, costSources: { usage: 1, generation: 0, unknown: 1 } } }),
     record('pi', 'd', 1, { status: 'skipped', skipped: 'budget', gateway: null, judge: null, success: false }),
     record('pi', 'e', 1, { status: 'error', reason: 'error', error: 'Could not create the repair box', gateway: null, judge: null, success: false }),
+    // A runner error after the model ran keeps what it spent.
+    record('pi', 'f', 1, { status: 'error', reason: 'error', error: 'Could not read the change from the repair box: git failed.', judge: null, success: false, gateway: { ...record('pi', 'f', 1).gateway!, cost: 0.3 } }),
   ];
   const report = renderReport(records);
   // The later aisdk|b record replaces the earlier one: five attempts.
   assert.match(report, /\| aisdk · m\/x \| 1\/2 \(50%\) \| 9%–91% \| \$0\.20 \| \$0\.10 \| 90s \| 114s \| 6 \| 5 \| done 1, steps 1 \| – \| Run npm test 1 \| 0 \| 0 \|/);
   assert.match(report, /\| pi · m\/x \| 0\/3 \(0%\) \| 0%–56% \| – \| \$0\.23 \|.*\| cost 1, done 1, steps 1 \| rejected: The change touches CI or deployment configuration 1 \| Run npm test 1 \| 1 \| 1 \|/);
-  assert.match(report, /5 attempts over 3 cases, \$0\.90 spent; 1 skipped \(budget 1\); 1 runner errors, not counted \(a resumed run retries them\)\./);
+  assert.match(report, /5 attempts over 3 cases, \$1\.30 spent; 1 skipped \(budget 1\); 2 runner errors, not counted \(a resumed run retries them\)\./, 'What every attempt spent counts, the replaced aisdk|b and pi|f\'s runner error included.');
   assert.match(report, /\| a \| 1\/1 · \$0\.10 \| 0\/1 · \$0\.10 \|/);
   assert.match(report, /\| c \| – \| 0\/1 · \$0\.50 \|/);
   assert.match(report, /## Unique solves\n\n\| Case \| Only solved by \|\n\| --- \| --- \|\n\| a \| aisdk · m\/x \|/);
