@@ -60,7 +60,7 @@ function roleOf(file: string, packages: Set<string>): Role {
     if (directory === '.') return script ? 'script' : 'runtime';
   }
 }
-const MANIFEST =(name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
+const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
 const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
 const SETUP_DOC = /setup|develop|local|getting[-_ ]?started|contributing|install|quick[-_ ]?start|self[-_ ]?host/i;
 const COMPOSE = /^(?:docker-)?compose(?:[.-][\w.-]*)?\.ya?ml$/i;
