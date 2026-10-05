@@ -234,6 +234,8 @@ test('a rebuilding gate put back to queued behind a newer commit is superseded, 
   assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta c twin-beta']);
   assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status, item.reason ?? null]), [['c', 'passed', null], ['b', 'superseded', `Superseded by ${C.slice(0, 7)}.`]]);
   assert.equal(h.current.sha, C);
+  // B reported Running while it rebuilt, so its commit is not left pending.
+  assert.deepEqual(h.posts.filter(item => item.sha === B).map(item => `${item.state} ${item.description}`), ['pending Running', `error Superseded by ${C.slice(0, 7)}`]);
 });
 
 test('only a gate that needs release can be released, by a GitHub login, and never a failed one', async t => {

@@ -71,8 +71,9 @@ Statuses are posted through the connected account's GitHub CLI session, with the
 | Failed | `failure` | Failed |
 | Needs release | `pending` | Needs release |
 | Released | `success` | Released by `<login>` |
+| Superseded after reporting `pending` | `error` | Superseded by `<sha7>` |
 
-Queued and superseded gates report nothing. Every gate whose status changed since it was last reported is reported, however long ago it ran. A source switch during an account lookup cannot redirect a report to another repository; it remains pending for its own source. A report that fails is kept on the gate, and the 50 most recently updated gates are retried with each poll; a failed report never holds back the gate or its promotion. Without a connected account the gate records `Connect GitHub to report commit status.`
+Queued gates report nothing, and neither does a superseded gate that never reported. A superseded gate whose commit was left `pending`, such as one waiting for Build when a newer commit arrived, reports `error` with `Superseded by <sha7>` under the context it reported (`Superseded` for a stopped repair's gate), so no commit stays pending. Every gate whose status changed since it was last reported is reported, however long ago it ran. A source switch during an account lookup cannot redirect a report to another repository; it remains pending for its own source. A report that fails is kept on the gate, and the 50 most recently updated gates are retried with each poll; a failed report never holds back the gate or its promotion. Without a connected account the gate records `Connect GitHub to report commit status.`
 
 ## Release and promotion
 

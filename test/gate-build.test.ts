@@ -99,6 +99,22 @@ test('a newer push supersedes a build wait even when the older build read return
   assert.equal(saved.gates.find((gate: { sha: string }) => gate.sha === A).status, 'superseded');
 });
 
+test('a commit superseded while it waits for Build is not left pending: its status ends in an error naming the newer commit', async t => {
+  const h = await harness(t);
+  await h.manager.watch(); // baseline A
+  h.state.head = B;
+  await h.manager.watch(); // push B while its Build runs
+  await until(() => h.posts.some(post => post.sha === B));
+  h.state.head = C;
+  await h.manager.watch(); // push C before B's Build ends
+  await until(() => h.posts.some(post => post.sha === B && post.state !== 'pending'));
+  await h.manager.idle();
+  assert.deepEqual(h.posts.filter(post => post.sha === B).map(post => [post.state, post.context, post.description]),
+    [['pending', 'perpetual/Beta', 'Waiting for Build'], ['error', 'perpetual/Beta', `Superseded by ${C.slice(0, 7)}`]]);
+  assert.deepEqual([h.manager.view().stages.beta.sha, h.manager.view().stages.beta.status], [C, 'waiting-build']);
+  assert.equal(h.posts.some(post => post.sha === A), false, 'The baseline was never gated, so nothing is reported on it.');
+});
+
 const saved = async (dataDir: string) => (JSON.parse(await readFile(join(dataDir, 'gates/state.json'), 'utf8')).gates as { sha: string; status: string }[]).map(gate => [gate.sha, gate.status]);
 
 test('a baseline head takes the place of an older gate still waiting at the first stage, so it never moves the source back', async t => {

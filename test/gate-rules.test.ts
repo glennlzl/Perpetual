@@ -34,6 +34,19 @@ test('commit statuses: pending while running, success for passed or released, fa
   assert.equal(sameStatus(status('running'), undefined), false);
 });
 
+test('a superseded gate reports nothing unless its commit was left pending, which ends in an error naming the newer commit', () => {
+  const superseded = (extra: Partial<Gate>) => commitStatus(gate('Beta', A, 'superseded', undefined, extra));
+  const pending = (description: string) => ({ state: 'pending' as const, context: 'perpetual/Beta', description });
+  assert.equal(superseded({ supersededBy: B }), null, 'A gate superseded before it reported leaves nothing to end.');
+  assert.equal(superseded({ supersededBy: B, posted: { state: 'success', context: 'perpetual/Beta', description: 'Passed' } }), null);
+  assert.deepEqual(superseded({ supersededBy: B, posted: pending('Waiting for Build') }), { state: 'error', context: 'perpetual/Beta', description: 'Superseded by bbbbbbb' });
+  // The status ends under the context it was left pending with, whatever the stage is called now.
+  assert.deepEqual(superseded({ context: 'perpetual/Staging', supersededBy: C, posted: pending('Needs release') }), { state: 'error', context: 'perpetual/Beta', description: 'Superseded by ccccccc' });
+  const ended = { state: 'error' as const, context: 'perpetual/Beta', description: 'Superseded by bbbbbbb' };
+  assert.equal(sameStatus(superseded({ supersededBy: B, posted: ended }), ended), true, 'Once reported, the error stands.');
+  assert.deepEqual(superseded({ posted: pending('Running') }), { state: 'error', context: 'perpetual/Beta', description: 'Superseded' }, 'A stopped repair gate names no commit.');
+});
+
 test('a stage shows its gate at work, else its newest commit, never a superseded one', () => {
   const failed = gate('beta', A, 'failed', '2026-09-23T10:00:00.000Z');
   const queued = gate('beta', B, 'queued', '2026-09-23T10:01:00.000Z');

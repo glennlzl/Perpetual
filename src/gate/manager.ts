@@ -62,7 +62,7 @@ const isPosted = (value: unknown): value is CommitStatus => isRecord(value) && i
 const validGate = (value: unknown): value is Gate => isRecord(value)
   && (['id', 'key', 'stageId', 'sha', 'context', 'createdAt', 'detectedAt', 'updatedAt'] as const).every(field => isText(value[field]))
   && (value.branch === null || isText(value.branch)) && isText(value.status) && Object.hasOwn(GATE_STATUSES, value.status)
-  && (['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'statusError', 'repair', 'snapshot'] as const).every(field => optionalText(value[field]))
+  && (['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'supersededBy', 'statusError', 'repair', 'snapshot'] as const).every(field => optionalText(value[field]))
   && (value.posted === undefined || isPosted(value.posted));
 const validHead = (value: unknown): value is Head => isRecord(value) && (value.branch === null || isText(value.branch))
   && isText(value.login) && isText(value.sha) && (value.etag === null || isText(value.etag)) && optionalText(value.checkedAt) && optionalText(value.repository);
@@ -123,18 +123,20 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     state.gates = state.gates.filter(item => recent.has(item) || [...PENDING, ...ACTIVE].includes(item.status));
   }
 
+  // A gate superseded by a newer commit names it, so a pending status it already reported ends naming that commit.
+  const supersede = (gate: Gate, sha: string, time = now()) => Object.assign(gate, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, supersededBy: sha, updatedAt: time } satisfies Partial<Gate>);
   function enqueue(current: GateSource, stage: GateStage, sha: string, detectedAt: string) {
     const time = now();
     let gate = state.gates.find(item => item.key === current.key && item.branch === current.branch && !item.repair && item.stageId === stage.id && item.sha === sha);
     if (gate && [...PENDING, ...ACTIVE].includes(gate.status)) return gate;
     // Only the newest pending commit of a stage runs; an older one arriving later is recorded as superseded.
-    const newer = scoped(current).some(item => item.stageId === stage.id && item.sha !== sha && item.status !== 'superseded' && item.detectedAt > detectedAt);
+    const newer = scoped(current).find(item => item.stageId === stage.id && item.sha !== sha && item.status !== 'superseded' && item.detectedAt > detectedAt);
     if (!gate) { gate = { id: randomUUID(), key: current.key, branch: current.branch, stageId: stage.id, sha, context: `perpetual/${stage.name}`, createdAt: time, status: 'queued', detectedAt, updatedAt: time }; state.gates.unshift(gate); }
     // A commit run again reports under the stage's current name, as branch protection names it now.
     gate.context = `perpetual/${stage.name}`;
-    for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt'] as const) delete gate[field];
-    Object.assign(gate, { status: newer ? 'superseded' : 'queued', detectedAt, updatedAt: time } satisfies Partial<Gate>, newer ? { reason: 'A newer commit reached this stage.' } : {});
-    if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && PENDING.includes(other.status)) Object.assign(other, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, updatedAt: time } satisfies Partial<Gate>);
+    for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'supersededBy'] as const) delete gate[field];
+    Object.assign(gate, { status: newer ? 'superseded' : 'queued', detectedAt, updatedAt: time } satisfies Partial<Gate>, newer ? { reason: 'A newer commit reached this stage.', supersededBy: newer.sha } : {});
+    if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && PENDING.includes(other.status)) supersede(other, sha, time);
     prune();
     return gate;
   }
@@ -242,7 +244,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         // A newer commit queued at the stage while this one rebuilt supersedes it, as it would a queued gate, so the
         // older commit never runs after it and moves the source back.
         const newer = !gate.repair && state.gates.find(item => !item.repair && item.key === gate.key && item.branch === gate.branch && item.stageId === gate.stageId && item.status !== 'superseded' && item.detectedAt > gate.detectedAt);
-        if (newer) { await transition(gate, 'superseded', { reason: `Superseded by ${short(newer.sha)}.` }); return true; }
+        if (newer) { await transition(gate, 'superseded', { reason: `Superseded by ${short(newer.sha)}.`, supersededBy: newer.sha }); return true; }
         await transition(gate, 'queued');
         return false;
       }
@@ -365,11 +367,13 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         // source back: it gives way to the head, which is queued in its place as after a push.
         else if (first && !known) {
           const older = scoped(current).filter(gate => gate.stageId === first.id && gate.sha !== head.sha && PENDING.includes(gate.status));
-          for (const gate of older) Object.assign(gate, { status: 'superseded', reason: `Superseded by ${short(head.sha)}.`, updatedAt: now() } satisfies Partial<Gate>);
+          for (const gate of older) supersede(gate, head.sha);
           if (older.length) enqueue(current, first, head.sha, now());
         }
         await persist();
         kick();
+        // A superseded gate whose commit was left pending reports so at once.
+        void sync();
       } else if (known && !previous.repository) {
         // A conditional response verifies the repository for a legacy persisted baseline.
         previous.repository = current.repository;
@@ -455,6 +459,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       enqueue(current, stage, sha.toLowerCase(), now());
       await persist();
       kick();
+      void sync();
       return view();
     },
     /**

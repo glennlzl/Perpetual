@@ -19,6 +19,8 @@ export interface Gate extends GateRef {
   id: string; context: string; status: GateStatus; reason?: string;
   createdAt: string; detectedAt: string; updatedAt: string; startedAt?: string; completedAt?: string;
   runId?: string; environmentId?: string; releasedBy?: string; releasedAt?: string;
+  /** The newer commit that superseded this gate, when a commit did. */
+  supersededBy?: string;
   posted?: CommitStatus; statusError?: string;
 }
 /** What a gate's verdict reads from a finished run's roll-up (src/browser/results.ts). */
@@ -61,9 +63,15 @@ const STATUSES: Partial<Record<GateStatus, [CommitState, string]>> = {
   'needs-release': ['pending', 'Needs release'],
 };
 
-/** The GitHub commit status a gate reports; queued and superseded gates report nothing. */
-export function commitStatus(gate: Pick<Gate, 'status' | 'context' | 'releasedBy'> | null | undefined): CommitStatus | null {
+/**
+ * The GitHub commit status a gate reports. A queued gate reports nothing, and so does a superseded one unless its commit
+ * was left pending: that status ends in an error naming the newer commit, under the context it was reported with.
+ */
+export function commitStatus(gate: Pick<Gate, 'status' | 'context' | 'releasedBy' | 'posted' | 'supersededBy'> | null | undefined): CommitStatus | null {
   if (gate?.status === 'released') return { state: 'success', context: gate.context, description: `Released by ${gate.releasedBy}` };
+  // A pending report, or the error that already ended one.
+  if (gate?.status === 'superseded') return gate.posted && ['pending', 'error'].includes(gate.posted.state)
+    ? { state: 'error', context: gate.posted.context, description: gate.supersededBy ? `Superseded by ${short(gate.supersededBy)}` : 'Superseded' } : null;
   const status = gate && STATUSES[gate.status];
   return status ? { state: status[0], context: gate.context, description: status[1] } : null;
 }
