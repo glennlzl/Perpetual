@@ -18,6 +18,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { TOO_LARGE } from '../../src/repair/box.ts';
+import { writeStateFile } from '../../src/store.ts';
 import { checkChanges } from '../../src/repair/changes.ts';
 import { EGRESS } from '../../src/repair/egress.ts';
 import { BENCH, createBenchBox, docker, dockerAvailable, removeBenchResources, useBenchDocker } from './box.ts';
@@ -82,6 +83,12 @@ const refusalReason: Partial<Record<string, FinalReason>> = { cost: 'cost', budg
 export const finalReason = (refusal: string | null, timedOut: boolean, adapter: AttemptOutcome['reason']): FinalReason => (refusal && refusalReason[refusal]) || (timedOut ? 'time' : adapter);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+/** The data hashes of a run's boxes, which cleanup removes by; a file a killed run tore keeps those it still names. */
+export async function readScopes(file: string): Promise<string[]> {
+  const text = await readFile(file, 'utf8').catch(() => '[]');
+  try { const value: unknown = JSON.parse(text); return Array.isArray(value) ? value.filter((scope): scope is string => typeof scope === 'string') : []; }
+  catch { return [...text.matchAll(/"([\da-f]{16})"/g)].map(match => match[1]); }
+}
 const pause = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) return reject(signal.reason);
   const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms);
@@ -115,6 +122,8 @@ export async function runBench(options: RunOptions) {
   const unavailable = await dockerAvailable();
   if (unavailable) throw new Error(unavailable);
   const adapters = await chooseAdapters(options.frameworks, provider, log);
+  // Read before the gateway starts, which only the run's finally stops; each write replaces the file whole.
+  const scopes = new Set(await readScopes(paths.boxes));
   const cases = await loadCases(options.cases);
   const prices = provider === 'openai' ? options.prices ?? await loadPrices() : undefined;
   const script = options.dryRun ? solver(await corpusSolutions(cases)) : null;
@@ -122,9 +131,8 @@ export async function runBench(options: RunOptions) {
   const upstream = fake?.url ?? options.upstream ?? UPSTREAMS[provider];
   const gateway: GatewayControl = await forkGateway({ ...(fake ? { key: fake.key } : options.key?.file ? { keyFile: options.key.file } : { key: options.key?.value }), provider, ...(prices ? { prices } : {}),
     budget: options.budget, upstream, reasoning: options.reasoning, ...(options.providerOnly ? { providerOnly: options.providerOnly } : {}), ...(options.gatewayHost ? { host: options.gatewayHost } : {}) });
-  const scopes = new Set<string>(JSON.parse(await readFile(paths.boxes, 'utf8').catch(() => '[]')) as string[]);
   let saving = Promise.resolve();
-  const onScope = (scope: string) => { scopes.add(scope); saving = saving.then(() => writeFile(paths.boxes, JSON.stringify([...scopes], null, 2))); return saving; };
+  const onScope = (scope: string) => { scopes.add(scope); saving = saving.then(() => writeStateFile(paths.boxes, JSON.stringify([...scopes], null, 2), { prefix: '.boxes-', removeTemporary: true })); return saving; };
   const stop = new AbortController(), signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
   try {
     const models: Map<string, ModelInfo> = await modelInfo(options.models, prices ?? upstream);
@@ -329,7 +337,7 @@ async function main(argv: string[]) {
   if (command === 'cleanup') {
     await useBenchDocker();
     if (!values.all && !values.out) throw new Error('Name the run with --out, or pass --all for every repair-bench container and network.');
-    const scopes = values.all ? 'all' as const : JSON.parse(await readFile(resultPaths(resolve(values.out!)).boxes, 'utf8').catch(() => '[]')) as string[];
+    const scopes = values.all ? 'all' as const : await readScopes(resultPaths(resolve(values.out!)).boxes);
     const removed = await removeBenchResources(scopes);
     console.log(`removed ${removed.containers} containers and ${removed.networks} networks`);
     return 0;
