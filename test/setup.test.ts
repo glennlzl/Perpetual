@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isEntryPoint, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
+import { INSTALL, isEntryPoint, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
 
 const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -24,6 +24,14 @@ test('setup admits the Node.js versions package.json engines names, and refuses 
   assert.equal(engines.node, '>=24.12');
   for (const version of ['v24.12.0', 'v24.13.1', 'v26.7.0']) assert.ok(nodeSatisfies(version, engines.node), version);
   for (const version of ['v24.11.9', 'v22.18.0', 'v23.6.0']) assert.ok(!nodeSatisfies(version, engines.node), version);
+});
+
+test('setup installs the devDependencies the interface build runs, even where NODE_ENV is production', async () => {
+  const { scripts, devDependencies } = JSON.parse(await read('package.json')) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
+  assert.equal(scripts.build, 'vite build');
+  assert.ok(Object.hasOwn(devDependencies, 'vite'), 'The interface build runs a devDependency.');
+  // A bare npm ci omits devDependencies under NODE_ENV=production, and the build then cannot find vite.
+  assert.deepEqual(INSTALL, { title: 'Install dependencies', command: 'npm', args: ['ci', '--include=dev'] });
 });
 
 test('the setup report names what was installed, each missing tool with its fix, and the command that starts Perpetual', () => {

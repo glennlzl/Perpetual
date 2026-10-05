@@ -42,6 +42,8 @@ async function tools(): Promise<Tool[]> {
 }
 
 type Step = { title: string; command: string; args: string[] };
+/** npm ci leaves out devDependencies where NODE_ENV is production, and the interface build needs them. */
+export const INSTALL: Step = { title: 'Install dependencies', command: 'npm', args: ['ci', '--include=dev'] };
 
 /** Runs one install step in the repository root with its output shown, and fails with the step's title. */
 function run({ title, command, args }: Step): Promise<void> {
@@ -70,7 +72,7 @@ async function main() {
   if (!nodeSatisfies(process.version, engines.node)) throw new Error(`Perpetual needs Node.js ${engines.node.replace(/^\D+/, '')} or later; this is ${process.version}. https://nodejs.org/en/download`);
   const found = await tools();
   const installed: string[] = [], notes: string[] = [];
-  await run({ title: 'Install dependencies', command: 'npm', args: ['ci'] });
+  await run(INSTALL);
   installed.push('dependencies');
   await run({ title: 'Build the interface', command: 'npm', args: ['run', 'build'] });
   installed.push('the interface');
