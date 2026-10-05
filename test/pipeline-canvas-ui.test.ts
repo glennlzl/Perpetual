@@ -192,3 +192,40 @@ test('a source reload a gate asks for runs after a pipeline change saves, and a 
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
   await expect(source.getByText('ccccccc', { exact: true })).toBeVisible();
 });
+
+test('a failed first connection keeps Connect GitHub, while a failed pipeline read offers Try again', { timeout: 60000 }, async t => {
+  const account = { login: 'acme', name: null };
+  let connected = false, stateFails = false;
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return stateFails ? { status: 503, json: { error: 'The local server is unavailable. Try reconnecting.' } } : { json: { defaultRepo: '/work/app', scan: null, pipeline: null, environments: [], browserTests: {}, stageRemovals: [] } };
+    if (path === '/api/github/connection' || path === '/api/github/connect') { connected ||= path === '/api/github/connect'; return { json: { available: true, authenticated: true, account, connected, source: null, localCheckout: null } }; }
+    if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
+    if (path === '/api/github/branches') return { json: { branches: [{ name: 'main' }], nextPage: null, defaultBranch: 'main' } };
+    if (path === '/api/source/github') return { status: 500, json: { error: 'Could not create the private source checkout.' } };
+  });
+  await open();
+  const empty = page.getByRole('main');
+  await expect(empty.getByRole('heading', { name: 'Connect your GitHub', exact: true })).toBeVisible();
+  await expect(empty.getByRole('button')).toHaveCount(1);
+  await empty.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Connect GitHub', exact: true }).getByRole('button', { name: 'Continue as acme', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Source', exact: true });
+  await sheet.getByRole('combobox', { name: 'Repository', exact: true }).click();
+  await page.getByRole('option', { name: 'acme/app', exact: true }).click();
+  await expect(sheet.getByRole('combobox', { name: 'Branch', exact: true })).toHaveText('main');
+  await sheet.getByRole('button', { name: 'Save source', exact: true }).click();
+  await expect(sheet.getByRole('alert')).toHaveText('Could not create the private source checkout.');
+  // The sheet reports the failed save; the page behind it still offers the connection rather than a reload.
+  await expect(empty.getByRole('heading', { name: 'Connect your GitHub', exact: true })).toBeVisible();
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(empty.getByRole('button', { name: 'Connect GitHub', exact: true })).toBeVisible();
+  await expect(page.getByText('Could not load pipeline')).toHaveCount(0);
+  // A pipeline that cannot be read is the one failure the page reads again.
+  stateFails = true;
+  await page.reload();
+  await expect(empty.getByRole('heading', { name: 'Could not load pipeline', exact: true })).toBeVisible();
+  stateFails = false;
+  await empty.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(empty.getByRole('heading', { name: 'Connect your GitHub', exact: true })).toBeVisible();
+  assert.deepEqual(pageErrors, []);
+});
