@@ -57,6 +57,14 @@ node src/cli.ts sandbox mcp --id ID \
 
 In an agent's MCP configuration, use `node` as the command and this invocation as its arguments. Keep the process open: it forwards stdio to the guest Driver. Closing MCP ends the control session without destroying the desktop. The process uses Driver's standard permission mode, never its bypass mode, and there is no fallback to the host's desktop. No API keys, production environment variables or host browser profiles are copied into the guest. Recordings and browser actions are started by the MCP client, not by this CLI.
 
+### Bridge validation
+
+```sh
+node scripts/validate-cua-bridge.ts --id ID --output /tmp/cua-bridge-checks [--data /absolute/path/to/.perpetual]
+```
+
+This checks one existing desktop after a change to the adapter, bridge or guest image: SDK shell output and exit codes, an exact single-file roundtrip through a guest fixture it then removes, a screenshot, and Driver MCP initialization, tool discovery and read-only observations. It writes `report.json` and its evidence to a new directory under `--output`, neither creates nor destroys a desktop, and exits 1 when a check fails.
+
 ## Upstream behaviour the adapter handles
 
 | Module | Role | Perpetual use |

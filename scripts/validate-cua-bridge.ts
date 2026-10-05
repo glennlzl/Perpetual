@@ -1,10 +1,12 @@
-// Opt-in acceptance for one existing owned guest. Importing never starts work.
+// Opt-in acceptance for one existing owned guest. Importing never starts work; running it validates one guest:
+//   node scripts/validate-cua-bridge.ts --id ID --output DIR [--data DIR]
 import { spawn } from 'node:child_process';
 import { localDockerEnvironment } from '../src/process.ts';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { fileURLToPath } from 'node:url';
 import {
   executeSandbox, screenshotSandbox, uploadSandboxFile,
   downloadSandboxFile, sandboxMcpCommand,
@@ -289,4 +291,19 @@ export async function validateCuaBridge({ dataDir, id, output }: { dataDir?: unk
     throw error;
   }
   return report;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const option = (name: string) => { const index = process.argv.indexOf(`--${name}`); return index < 0 ? undefined : process.argv[index + 1]; };
+  const id = option('id'), output = option('output');
+  if (!id || !output) {
+    console.error('Usage: node scripts/validate-cua-bridge.ts --id ID --output DIR [--data DIR]');
+    process.exitCode = 1;
+  } else {
+    validateCuaBridge({ dataDir: resolve(option('data') ?? '.perpetual'), id, output }).then(report => console.log(JSON.stringify(report, null, 2)), (error: BridgeError) => {
+      console.error(error.message);
+      if (error.report) console.error(`Report: ${error.report.reportPath}`);
+      process.exitCode = 1;
+    });
+  }
 }
