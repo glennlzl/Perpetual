@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createReleaseGitHub } from '../src/releases/github.ts';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub, type ReleaseRequest } from '../src/releases/manager.ts';
 
 const SHA='a'.repeat(40),OTHER='b'.repeat(40);
@@ -113,6 +114,33 @@ test('an unresolved deployment prevents changing destinations or deploying a new
   await assert.rejects(f.manager.deploy({sha:OTHER,target}),/unresolved/);assert.equal(f.requests.length,1);
 });
 
+test('the connected account resolves an unresolved deployment another login requested, after the source moved on',async t=>{
+  let reads=0,status:'queued'|'failed'='queued';const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status};}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  // The requesting login was renamed, and the source advanced to a newer tested commit.
+  const renamed=evidence();Object.assign(renamed.source!,{login:'owner-renamed',sha:OTHER});renamed.gates[0].sha=OTHER;f.setEvidence(renamed);
+  const waiting=await f.manager.refresh();
+  assert.deepEqual([reads,waiting.recent[0].status,waiting.recent[0].error,waiting.canDeploy],[1,'queued',undefined,false]);
+  status='failed'; // the handler reports, or a person posts a failure to the deployment on GitHub
+  const ended=await f.manager.refresh();
+  assert.deepEqual([reads,ended.recent[0].status,ended.canDeploy],[2,'failed',true]);
+});
+
+test('a status read that fails keeps the deployment unresolved, with the failure shown',async t=>{
+  const f=await fixture(t,{read:async()=>{throw new Error('Could not read the GitHub deployment configuration or status.');}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const view=await f.manager.refresh();
+  assert.deepEqual([view.current?.status,view.current?.error,view.canDeploy],['queued','Could not read the GitHub deployment configuration or status.',false]);
+});
+
+test('an unresolved deployment of another branch is neither read nor blocking for the selected one',async t=>{
+  let reads=0;const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status:'queued'};}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const release=evidence();release.source!.branch='release';f.setEvidence(release);
+  await f.manager.configure(target);const view=await f.manager.refresh();
+  assert.equal(reads,0);assert.deepEqual([view.current,view.canDeploy],[null,true]);
+});
+
 test('a stale confirmation cannot deploy to a destination changed by another tab',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.configure({...target,environment:'other'});
   const confirmed={sha:SHA,target};await assert.rejects(f.manager.deploy(confirmed),/target changed/);assert.equal(f.requests.length,0);
@@ -124,6 +152,38 @@ test('fresh remote Build or branch refusal prevents deployment despite cached ga
   await assert.rejects(f.manager.deploy({sha:SHA,target}),/branch head changed/);assert.equal(f.requests.length,0);
 });
 
+test('a stop during the read-only preflight leaves no request to recover as uncertain',async t=>{
+  const checking=deferred<void>(),hold=deferred<void>();
+  const f=await fixture(t,{verifyCommit:async()=>{checking.resolve();await hold.promise;}});
+  await f.manager.configure(target);const deploying=f.manager.deploy({sha:SHA,target});await checking.promise;
+  try{
+    // What a hard stop at this moment leaves on disk.
+    const copy=await mkdtemp(join(tmpdir(),'perpetual-release-'));t.after(()=>rm(copy,{recursive:true,force:true}));
+    await cp(join(f.dataDir,'releases'),join(copy,'releases'),{recursive:true});
+    const restarted=await createReleaseManager({...f.options,dataDir:copy});t.after(()=>restarted.close());
+    const view=await restarted.view();assert.deepEqual([view.current,view.canDeploy],[null,true]);
+  }finally{hold.resolve();await deploying;}
+  assert.equal(f.requests.length,1);
+});
+
+test('a restarted controller observes an unresolved deployment in the background, less often while nothing changes',async t=>{
+  const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});await f.manager.close();
+  t.mock.timers.enable({apis:['setInterval']});
+  let reads=0,status:'queued'|'deployed'='queued';
+  const reopened=await createReleaseManager({...f.options,github:{...f.options.github,read:async()=>{reads++;return {deploymentId:'12',status};}},pollInterval:1000});
+  t.after(()=>reopened.close());
+  // One second of the controller's time, and the real time any write it starts needs.
+  const tick=async(count:number)=>{for(let index=0;index<count;index++){t.mock.timers.tick(1000);await new Promise(resolve=>setTimeout(resolve,20));}};
+  const file=join(f.dataDir,'releases','state.json');
+  await tick(1);assert.equal(reads,1,'Observation resumes without Check status.');
+  const stored=await readFile(file,'utf8');
+  await tick(10);assert.equal(reads,3,'Reads that find nothing new come less and less often.');
+  assert.equal(await readFile(file,'utf8'),stored,'A read that finds nothing new writes nothing.');
+  status='deployed';
+  for(const deadline=Date.now()+10_000;(await reopened.view()).current?.status!=='deployed';){assert.ok(Date.now()<deadline,'The reported status must arrive.');await tick(1);}
+  const settled=reads;await tick(5);assert.equal(reads,settled,'A resolved deployment is not read again in the background.');
+});
+
 test('restart recovers an interrupted request as unknown and only reads the remote receipt',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});await f.manager.close();
   const path=join(f.dataDir,'releases','state.json'),stored=JSON.parse(await readFile(path,'utf8'));
@@ -131,6 +191,20 @@ test('restart recovers an interrupted request as unknown and only reads the remo
   const reopened=await createReleaseManager(f.options);t.after(()=>reopened.close());
   assert.equal((await reopened.view()).current?.status,'unknown');assert.equal(f.requests.length,1);
   await reopened.refresh();assert.equal((await reopened.view()).current?.status,'deployed');assert.equal(f.requests.length,1);
+});
+
+test('a reported address that encodes beyond the stored limit is dropped, so the state still loads at the next start',async t=>{
+  let release='';
+  // GitHub, through the real adapter: the deployment of this release, and a success whose address percent-encodes to over 4,000 characters.
+  const adapter=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    const data=endpoint.includes('/statuses')?[{id:51,state:'success',environment_url:`https://app.example.test/${'é'.repeat(700)}`,log_url:'https://ci.example.test/runs/1'}]
+      :{id:12,sha:SHA,environment:target.environment,production_environment:target.productionEnvironment,task:'deploy',payload:{perpetual:{releaseId:release,workflowPath:target.workflowPath,sha:SHA}}};
+    return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify(data)}`};}});
+  const f=await fixture(t,{read:adapter.read});await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});release=f.requests[0].id;
+  const deployed=(await f.manager.refresh()).current;
+  assert.deepEqual([deployed?.status,deployed?.url,deployed?.logUrl],['deployed',undefined,'https://ci.example.test/runs/1']);
+  await f.manager.close();const reopened=await createReleaseManager(f.options);t.after(()=>reopened.close());
+  assert.equal((await reopened.view()).current?.status,'deployed');
 });
 
 test('changing the target at the same commit does not present a previous destination as deployed',async t=>{
@@ -143,6 +217,18 @@ test('changing the target at the same commit does not present a previous destina
     assert.equal(view.recent[0].status,'deployed');assert.equal(view.recent[0].environment,'production');assert.equal(view.recent[0].url,'https://app.example.test/');
   }
   const restored=await f.manager.configure(target);assert.equal(restored.current?.id,deployed.current?.id);assert.equal(restored.canDeploy,false);
+});
+
+test('a commit whose earlier attempt later reports success shows deployed, and Deploy is not offered',async t=>{
+  const states:Record<string,'failed'|'deployed'>={};let created=0;
+  const f=await fixture(t,{create:async()=>({deploymentId:String(++created),status:'queued'}),read:async request=>({deploymentId:request.deploymentId!,status:states[request.deploymentId!]})});
+  await f.manager.configure(target);
+  await f.manager.deploy({sha:SHA,target});states['1']='failed';await f.manager.refresh();
+  await f.manager.deploy({sha:SHA,target});states['2']='failed';await f.manager.refresh();
+  states['1']='deployed'; // the first attempt's workflow is run again on GitHub
+  const view=await f.manager.refresh();
+  assert.deepEqual([view.current?.deploymentId,view.current?.status,view.canDeploy,view.blockedReason],['1','deployed',false,'This commit is already deployed to this target.']);
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);
 });
 
 test('current deployment can be older than the recent history display limit',async t=>{

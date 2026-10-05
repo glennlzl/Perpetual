@@ -8,7 +8,8 @@ import type { ReleaseTarget } from '../../contract/releases.ts';
 
 const object=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 const id=(value:unknown)=>typeof value==='number'&&Number.isSafeInteger(value)&&value>0?String(value):null;
-function link(value:unknown):string|undefined{if(typeof value!=='string'||value.length>2048)return;try{const url=new URL(value);if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password)return url.href;}catch{}}
+// The encoded address is what a record stores, so its length is bounded too: percent-encoding can multiply it.
+function link(value:unknown):string|undefined{if(typeof value!=='string'||value.length>2048)return;try{const url=new URL(value);if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password&&url.href.length<=2048)return url.href;}catch{}}
 const safeSource=(source:ReleaseSource)=>{if(!isRepository(source.repository)||!SHA.test(source.sha))throw new Error('Invalid deployment source.');};
 const payloadOf=(value:unknown):Record<string,unknown>|null=>{if(typeof value==='string'){try{value=JSON.parse(value) as unknown;}catch{return null;}}return object(value)?value:null;};
 function matches(value:unknown,request:ReleaseRequest):value is Record<string,unknown>{

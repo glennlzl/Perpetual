@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGateManager, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
@@ -20,6 +20,15 @@ const deferred = () => { let resolve!: () => void; const promise = new Promise<v
 const request = (extra: Record<string, unknown> = {}) => ({ key: KEY, repair: 'r1', branch: BRANCH, sha: P, snapshot: SNAPSHOT, ...extra });
 type Context = { key: string; stageId: string; sha: string; repair?: string };
 type HttpError = Error & { statusCode?: number };
+
+// Waits for a gate state with a deadline, so a regression fails at its assertion instead of hanging the file.
+async function until(condition: () => boolean | Promise<boolean>, message = 'The expected gate state must arrive.') {
+  const deadline = Date.now() + 10_000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(message);
+    await new Promise(done => setTimeout(done, 1));
+  }
+}
 
 async function harness(t: TestContext, { dataDir, stages = STAGES, runs = {}, heads = [] }: { dataDir?: string; stages?: GateStage[]; runs?: Record<string, RunRollup>; heads?: BranchHead[] } = {}) {
   dataDir ??= await mkdtemp(join(tmpdir(), 'perpetual-gate-repair-'));
@@ -93,9 +102,9 @@ test('a repair gate neither supersedes nor is superseded by target-branch gates,
   const release = deferred();
   h.holds.run = async context => { if (!context.repair && context.sha === A) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta?.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   const repaired = h.manager.runRepair(request());
-  while (!(await h.gates()).some(gate => gate.repair)) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.repair));
   await h.manager.watch(); // push B while Beta tests A and the repair gate waits
   const during = await h.gates();
   assert.deepEqual(during.map(gate => [gate.sha[0], gate.status, gate.repair ?? null]), [['b', 'queued', null], ['f', 'queued', 'r1'], ['a', 'running', null]]);
@@ -125,10 +134,10 @@ test('a repair that stops ends its queued gate as superseded with nothing report
   const release = deferred();
   h.holds.run = async context => { if (!context.repair) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta?.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   const queued = new AbortController();
   const stopped = h.manager.runRepair(request(), queued.signal);
-  while (!(await h.gates()).some(gate => gate.repair)) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.repair));
   queued.abort();
   assert.deepEqual((await stopped).gates.map(gate => [gate.status, gate.reason]), [['superseded', 'The repair stopped.']]);
   release.resolve();
@@ -137,7 +146,7 @@ test('a repair that stops ends its queued gate as superseded with nothing report
   const working = deferred(), running = new AbortController();
   h.holds.run = async context => { if (context.repair) await working.promise; };
   const judged = h.manager.runRepair(request(), running.signal);
-  while (!(await h.gates()).some(gate => gate.repair && gate.status === 'running')) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.repair && gate.status === 'running'));
   running.abort();
   working.resolve();
   assert.deepEqual((await judged).gates.map(gate => gate.status), ['passed'], 'A gate at work cannot be cancelled, so its verdict is recorded.');
@@ -148,7 +157,7 @@ test('a repair that stops while a gate is at work records its next stage as supe
   const working = deferred(), stop = new AbortController();
   h.holds.run = async () => { await working.promise; };
   const judged = h.manager.runRepair(request(), stop.signal);
-  while (!(await h.gates()).some(gate => gate.status === 'running')) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.status === 'running'));
   stop.abort();
   working.resolve();
   assert.deepEqual((await judged).gates.map(gate => [gate.stageId, gate.status, gate.reason ?? null]), [['beta', 'passed', null], ['gamma', 'superseded', 'The repair stopped.']]);
@@ -162,9 +171,9 @@ test('a queued target-branch gate that cannot start yet still runs before a repa
   const release = deferred();
   h.holds.run = async context => { if (!context.repair && context.sha === A) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta?.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   const repaired = h.manager.runRepair(request());
-  while (!(await h.gates()).some(gate => gate.repair)) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.repair));
   await h.manager.watch(); // push B while Beta tests A and the repair gate waits
   let busy = true;
   h.holds.prepare = async gate => { if (!gate.repair && gate.sha === B && busy) { busy = false; throw Object.assign(new Error('Finish adding this test before changing the source.'), { statusCode: 409 }); } };
@@ -180,9 +189,9 @@ test('a queued repair gate whose source is no longer active ends without a verdi
   const release = deferred();
   h.holds.run = async context => { if (!context.repair) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta?.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   const repaired = h.manager.runRepair(request());
-  while (!(await h.gates()).some(gate => gate.repair)) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.repair));
   h.current.key = 'github:owner/other:/';
   release.resolve();
   assert.deepEqual((await repaired).gates.map(gate => [gate.status, gate.reason]), [['needs-release', 'The active source changed.']]);
@@ -212,12 +221,20 @@ test('a controller restart ends a repair gate at work or still queued without a 
   assert.deepEqual(h.manager.view(), { stages: {}, production: null });
 });
 
+test('a repair learns its gate\'s verdict even when the verdict cannot be saved', { skip: process.platform === 'win32' || process.getuid?.() === 0, timeout: 10_000 }, async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates');
+  h.holds.run = () => chmod(root, 0o500);
+  try { assert.deepEqual((await h.manager.runRepair(request())).gates.map(gate => gate.status), ['passed']); }
+  finally { await chmod(root, 0o700); }
+});
+
 test('shutdown ends a repair\'s wait for its gate', async t => {
   const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') });
   const release = deferred();
   h.holds.run = async () => { await release.promise; };
   const waiting = h.manager.runRepair(request());
-  while (!(await h.gates()).some(gate => gate.status === 'running')) await new Promise(done => setTimeout(done, 1));
+  await until(async () => (await h.gates()).some(gate => gate.status === 'running'));
   const closing = h.manager.close();
   await assert.rejects(waiting, (error: HttpError) => error.statusCode === 409 && /shutting down/.test(error.message));
   release.resolve();

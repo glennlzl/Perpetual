@@ -76,7 +76,10 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   async function view(): Promise<ReleaseView> {
     const evidence=await getEvidence(),source=sourceValid(evidence.source)?evidence.source:null;
     const target=source?state.targets[scope(source)]??null:null,history=source?own(source):[],recent=history.slice(-20).reverse().map(entry=>publicRecord(entry.record));
-    const selected=target?history.findLast(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):undefined,current=selected?publicRecord(selected.record):null;
+    // A deployment of this commit to this target stays current over a later failed attempt, as deploy() refuses another
+    // while it stands.
+    const attempts=target?history.filter(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):[];
+    const selected=attempts.findLast(entry=>entry.record.status==='deployed'||active(entry.record))??attempts.at(-1),current=selected?publicRecord(selected.record):null;
     let blockedReason=evidenceReason(evidence);
     if(!blockedReason&&!target)blockedReason='Configure a deployment target.';
     if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason='A deployment is unresolved. Check its status before deploying again.';
@@ -91,6 +94,22 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
     if(closed||!same(before,current)||target&&!same(target,state.targets[scope(before.source!)]))throw conflict('The source, gates or deployment target changed. Reload the pipeline.');
   }
   const update=(id:string,changes:Partial<ReleaseRecord>)=>save(next=>{const entry=next.releases.find(item=>item.id===id);if(!entry)throw new Error('Release record is unavailable.');Object.assign(entry.record,changes,{updatedAt:new Date().toISOString()});});
+  // A read that finds nothing new writes nothing, so observation can tell that GitHub has nothing new to report.
+  const differs=(record:ReleaseRecord,changes:Partial<ReleaseRecord>)=>Object.entries(changes).some(([key,value])=>record[key as keyof ReleaseRecord]!==value);
+  // Reads the scope's unresolved releases from GitHub and, with all, its other releases at the current commit too. The
+  // connected account reads each one, whichever account requested it: a read changes nothing on GitHub, and the
+  // deployment it finds must match the release's identifier, commit, environment and deployment ID.
+  const reconcile=(all:boolean)=>exclusive(async()=>{
+    const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before checking deployments.');
+    const pending=own(before.source).filter(entry=>active(entry.record)||all&&entry.source.sha===before.source!.sha).slice(-20);
+    for(const entry of pending){
+      try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
+        if(remote&&differs(entry.record,{...remote,error:undefined}))await update(entry.id,{...remote,error:undefined});
+      }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');
+        const message=failureText(error,500)||'Could not confirm the deployment status. Check the connection and try again.';
+        if(entry.record.error!==message)await update(entry.id,{error:message});}
+    }
+  });
   const manager={
     view,
     async configure(input:unknown){
@@ -110,10 +129,12 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         if(own(source).some(entry=>entry.source.sha===source.sha&&same(entry.target,target)&&entry.record.status==='deployed'))throw conflict('This commit is already deployed to this target.');
         const workflow=await github.verifyTarget(source,target);if(!workflowValid(workflow))throw new Error('Deployment workflow evidence is invalid.');
         await unchanged(before,target);
+        // The read-only preflight runs before the request is saved, so a stop during it never leaves a request whose
+        // outcome is uncertain: only one saved right before its POST can be.
+        await github.verifyCommit(source);await unchanged(before,target);
         const id=randomUUID(),time=new Date().toISOString(),entry:StoredRelease={id,source:structuredClone(source),target:structuredClone(target),gates:structuredClone(before.gates),workflow,
           record:{id,sha:source.sha,...target,status:'requesting',createdAt:time,updatedAt:time}};
         await save(next=>{if(next.releases.length>=1000)throw new Error('Release history is full. Preserve its records before continuing.');next.releases.push(entry);});
-        try{await github.verifyCommit(source);await unchanged(before,target);}catch(error){await update(id,{status:'failed',error:failureText(error,500)});throw error;}
         let remote:ReleaseRemote;
         try{remote=await github.create(entry);}catch(error){const refused=object(error)&&(error as {definitive?:unknown}).definitive===true;
           await update(id,{status:refused?'failed':'unknown',error:refused?'GitHub refused the deployment request. Check the workflow, permissions and required commit statuses.':'The deployment request outcome is unknown. Check its status before deploying again.'});return;
@@ -121,22 +142,19 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         await update(id,{...remote,error:undefined});
       });return view();
     },
-    async refresh(){
-      await exclusive(async()=>{
-        const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before checking deployments.');
-        const pending=own(before.source).filter(entry=>active(entry.record)||entry.source.sha===before.source!.sha).slice(-20);
-        for(const entry of pending){
-          // The current account must match the one which requested this deployment.
-          if(entry.source.login!==before.source.login)continue;
-          try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
-            if(remote)await update(entry.id,{...remote,error:undefined});
-          }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');
-            await update(entry.id,{error:failureText(error,500)||'Could not confirm the deployment status. Check the connection and try again.'});}
-        }
-      });return view();
-    },
+    async refresh(){await reconcile(true);return view();},
     async close(){closed=true;clearInterval(timer);await inFlight?.catch(()=>{});await saves.idle();},
   };
-  if(pollInterval>0){timer=setInterval(()=>{if(!closed&&!busy&&state.releases.some(entry=>active(entry.record)))void manager.refresh().catch(()=>{});},Math.max(1000,pollInterval));timer.unref();}
+  // Background observation reads only unresolved releases, and backs off from the poll interval to a minute while GitHub
+  // reports nothing new; any change to the releases, such as a new request, starts it again at the poll interval.
+  if(pollInterval>0){
+    const every=Math.max(1000,pollInterval);let seen:State|undefined,quiet=0,skip=0;
+    timer=setInterval(()=>{
+      if(closed||busy||!state.releases.some(entry=>active(entry.record)))return;
+      const current=state;
+      if(current!==seen){quiet=0;skip=0;}else if(skip>0){skip--;return;}
+      void reconcile(false).catch(()=>{}).finally(()=>{quiet=state===current?Math.min(quiet+1,10):0;seen=state;skip=Math.min(2**quiet,Math.ceil(60_000/every))-1;});
+    },every);timer.unref();
+  }
   return manager;
 }

@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createEnvironmentUsage } from '../src/environments/usage.ts';
+import { createBrowserManager } from '../src/browser/manager.ts';
+import { createEnvironmentUsage, isStageHeld, stageHeld } from '../src/environments/usage.ts';
 import { createGateSteps, createReadiness, reviewedJourneys, type GateEnvironment, type GateBrowser, type GateEnvironments, type GateStepsOptions, type IdleEnvironment, type JourneySelection } from '../src/gate/steps.ts';
 
 const context = { key: 'github:owner/app:/', stageId: 'beta', scan: { repo: { path: '/sources/app', sha: 'a'.repeat(40) } } };
@@ -25,8 +29,9 @@ function fakes({ environments: list = [], created = { id: 'new', status: 'ready'
     isActive: () => false,
     summary: () => ({ cases }),
     async view() { return { config: { targetUrl: target } }; },
-    async run(ctx, input) { calls.push(`run ${JSON.stringify(input)}`); return { run: { id: 'run-1', status: 'queued' } }; },
+    async run(ctx, input) { calls.push(`run ${JSON.stringify(input)}`); return { run: { id: 'run-1', status: 'queued', environmentId: resolves } }; },
     async runProgress(ctx, id) { calls.push(`progress ${id}`); return { run: { id, status: runs[Math.min(polls++, runs.length - 1)] } }; },
+    async stop(ctx, id) { calls.push(`stop ${id}`); return {}; },
   };
   return { calls, readiness, environments, browser };
 }
@@ -128,7 +133,7 @@ test('a health lease on the rebuilt twin delays browser admission and starts the
   f.browser.run = async () => {
     const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
     started++; release();
-    return { run: { id: 'run-1' } };
+    return { run: { id: 'run-1', environmentId: 'new' } };
   };
   const running = steps(f).run(context, { id: 'new', status: 'ready' });
   const state = running.then(() => 'completed', () => 'failed');
@@ -141,13 +146,37 @@ test('a health lease on the rebuilt twin delays browser admission and starts the
   } finally { releaseHealth(); }
 });
 
+test('a person\'s operation or a model settings save holding the stage delays browser admission and starts the journeys once', async () => {
+  const f = fakes(), holds = ['A browser operation is already in progress for this stage.', 'Model settings are being saved. Please wait.'];
+  let started = 0;
+  f.browser.run = async () => {
+    const hold = holds.shift();
+    if (hold) throw stageHeld(hold);
+    started++;
+    return { run: { id: 'run-1', environmentId: 'new' } };
+  };
+  assert.equal((await steps(f).run(context, { id: 'new', status: 'ready' })).status, 'passed');
+  assert.deepEqual([holds, started], [[], 1]);
+});
+
+test('the browser refuses a run while a person\'s save holds the stage, with a hold the gate waits for', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-steps-'));
+  const runtime = { async capabilities() { return { runtimeInstalled: true, browserInstalled: true, modelConfigured: true }; }, start() { throw new Error('No journey starts while the stage is held.'); } };
+  const manager = await createBrowserManager({ dataDir, runtime, playwright: runtime });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const stage = { key: context.key, stageId: 'beta', scan: { repo: { path: dataDir, sha: 'a'.repeat(40) } } };
+  const saving = manager.saveCases(stage, []);
+  await assert.rejects(manager.run(stage, {}), (error: unknown) => isStageHeld(error));
+  await saving;
+});
+
 test('a gate waiting for a health lease refuses a target changed before browser admission', async () => {
   const f = fakes(), usage = createEnvironmentUsage();
   const releaseHealth = usage.acquire(context, { environmentId: 'new', operation: 'health' });
   let started = 0;
   f.browser.run = async () => {
     const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
-    started++; release(); return { run: { id: 'run-1' } };
+    started++; release(); return { run: { id: 'run-1', environmentId: 'new' } };
   };
   const running = steps(f).run(context, { id: 'new', status: 'ready' });
   const rejected = assert.rejects(running, /application URL to the rebuilt twin/);
@@ -156,6 +185,21 @@ test('a gate waiting for a health lease refuses a target changed before browser 
   releaseHealth();
   await rejected;
   assert.equal(started, 0);
+});
+
+test('a run the browser admitted for another application is stopped and never becomes the gate\'s verdict', async () => {
+  for (const environmentId of ['other', undefined]) {
+    const f = fakes();
+    // A person saved another application URL between the gate's check and the browser's admission.
+    f.browser.run = async () => ({ run: { id: 'run-1', ...(environmentId ? { environmentId } : {}) } });
+    await assert.rejects(steps(f).run(context, { id: 'new', status: 'ready' }), /application URL to the rebuilt twin/);
+    assert.deepEqual(f.calls, ['stop run-1'], 'The gate stops the run it started and never follows it for a verdict.');
+  }
+  // A stop that fails still leaves the gate's own reason.
+  const f = fakes();
+  f.browser.run = async () => ({ run: { id: 'run-1', environmentId: 'other' } });
+  f.browser.stop = async () => { throw new Error('Run not found.'); };
+  await assert.rejects(steps(f).run(context, { id: 'new', status: 'ready' }), /application URL to the rebuilt twin/);
 });
 
 test('a run is refused when the application URL does not point at the rebuilt twin', async () => {

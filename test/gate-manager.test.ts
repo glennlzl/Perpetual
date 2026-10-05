@@ -1,8 +1,9 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { environmentBusy } from '../src/environments/usage.ts';
 import { createGateManager, type GateConnection, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from '../src/gate/github.ts';
 import type { Gate, GateRef, RunRollup } from '../src/gate/rules.ts';
@@ -20,11 +21,21 @@ type SavedState = { version: number; gates: Gate[]; heads: Record<string, { bran
 type Options = {
   dataDir?: string; stages?: GateStage[]; sha?: string; repository?: string | null; connection?: GateConnection | null | (() => GateConnection | null);
   journeys?: number | ((context: Context) => number); runs?: Record<string, RunRollup>; heads?: (BranchHead | Error)[]; post?: (status: CommitStatusPost) => Promise<void>;
+  pollInterval?: number; retryInterval?: number;
 };
-type Holds = { prepare?: (gate: GateRef) => Error | null; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
+type Holds = { prepare?: (gate: GateRef) => Error | null | Promise<Error | null>; journeys?: (context: Context) => Promise<unknown>; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
 
 // Injected source, GitHub and steps record what the gate asked for; nothing reaches the network or Docker.
-async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post }: Options = {}) {
+// Waits for a gate state with a deadline, so a regression fails at its assertion instead of hanging the file.
+async function until(condition: () => boolean | Promise<boolean>, message = 'The expected gate state must arrive.') {
+  const deadline = Date.now() + 10_000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(message);
+    await new Promise(done => setTimeout(done, 1));
+  }
+}
+
+async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post, pollInterval, retryInterval = 5 }: Options = {}) {
   dataDir ??= await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   let tick = 0;
   const now = () => new Date(Date.UTC(2026, 8, 23, 10, 0, 0, tick++)).toISOString();
@@ -38,12 +49,12 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
   };
   const steps: GateSteps<Context, { id: string }> = {
     async prepare(gate) {
-      if (holds.prepare) { const error = holds.prepare(gate); if (error) throw error; }
+      if (holds.prepare) { const error = await holds.prepare(gate); if (error) throw error; }
       log.push(`prepare ${gate.stageId} ${gate.sha[0]}`);
       current.sha = gate.sha;
       return { key: gate.key, stageId: gate.stageId, sha: gate.sha };
     },
-    journeys: async context => (typeof journeys === 'function' ? journeys(context) : journeys),
+    async journeys(context) { if (holds.journeys) await holds.journeys(context); return typeof journeys === 'function' ? journeys(context) : journeys; },
     async rebuild(context) {
       seen.rebuilding = manager.view().stages[context.stageId]?.status;
       log.push(`rebuild ${context.stageId} ${context.sha[0]}`);
@@ -58,7 +69,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
       return { id: `run-${context.stageId}-${context.sha[0]}`, ...result };
     },
   };
-  const manager = await createGateManager({ dataDir, source: () => current, github, steps, now, retryInterval: 5 });
+  const manager = await createGateManager({ dataDir, source: () => current, github, steps, now, pollInterval, retryInterval });
   t.after(async () => { await manager.close(); });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const saved = async (): Promise<SavedState> => JSON.parse(await readFile(join(dataDir, 'gates', 'state.json'), 'utf8'));
@@ -107,6 +118,36 @@ test('a run that stopped on a runtime error without a failed journey needs relea
   assert.equal((await h.manager.release({ stageId: 'beta', sha: A, login: 'developer' })).stages.beta.status, 'released');
 });
 
+test('a verdict whose save fails stays the verdict, so a failed journey never becomes releasable', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const h = await harness(t, { runs: { beta: { status: 'failed', results: [{ caseId: 'journey', status: 'failed' }] } }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates');
+  // The gate state cannot be written from the moment the journeys finish.
+  h.holds.run = () => chmod(root, 0o500);
+  try {
+    await h.manager.run({ stageId: 'beta' });
+    await h.manager.idle();
+  } finally { await chmod(root, 0o700); }
+  const view = h.manager.view().stages.beta;
+  assert.deepEqual([view.status, view.reason], ['failed', 'A journey failed.']);
+  await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'developer' }), /failed gate cannot be released/);
+  assert.deepEqual(h.posts.map(item => `${item.state} ${item.description}`), ['pending Running', 'failure Failed']);
+});
+
+test('a verdict whose save failed is saved at the next poll, so a restart never finds the gate still running', { skip: process.platform === 'win32' }, async t => {
+  // A local checkout: its polls read no head and nothing is left to report, so only the failed save is written again.
+  const h = await harness(t, { repository: null, pollInterval: 20, runs: { beta: { status: 'failed', results: [{ caseId: 'journey', status: 'failed' }] } }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates'), file = join(root, 'state.json');
+  // A directory in place of the state file refuses every save from the moment the journeys finish; a status report's
+  // save that lands while it is put there is replaced again.
+  h.holds.run = async () => { for (;;) { await rm(file, { recursive: true, force: true }); if (await mkdir(join(file, 'taken'), { recursive: true }).then(() => true, () => false)) return; } };
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.deepEqual(await readdir(root), ['state.json'], 'A failed save leaves no temporary file behind.');
+  await rm(file, { recursive: true });
+  h.manager.start();
+  await until(async () => (await h.gates('beta').catch(() => []))[0]?.status === 'failed', 'The verdict must be saved at the next poll.');
+});
+
 test('a stage without reviewed, selected journeys needs release without rebuilding or running', async t => {
   const h = await harness(t, { journeys: 0 });
   await h.manager.run({ stageId: 'beta' });
@@ -134,7 +175,7 @@ test('a newer commit supersedes queued ones; the running gate finishes and only 
   h.holds.run = async context => { if (context.sha === A) await release.promise; };
   h.current.sha = A;
   await h.manager.run({ stageId: 'beta' }); // Run now reads the unchanged head A
-  while (h.manager.view().stages.beta.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   await h.manager.watch(); // push B
   await h.manager.watch(); // push C
   const during = await h.gates('beta');
@@ -146,6 +187,53 @@ test('a newer commit supersedes queued ones; the running gate finishes and only 
   const after = await h.gates('beta');
   assert.deepEqual(after.map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded'], ['a', 'passed']]);
   assert.equal(h.posts.some(item => item.sha === B), false, 'A superseded commit reports no status.');
+});
+
+test('a push while a gate is prepared supersedes it before any twin or journey work', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const preparing = deferred(), moved = deferred();
+  h.holds.prepare = async gate => { if (gate.sha === B) { preparing.resolve(); await moved.promise; } return null; };
+  await h.manager.watch(); // push B
+  await preparing.promise;
+  await h.manager.watch(); // push C while the source moves to B
+  moved.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log, ['prepare beta b', 'prepare beta c', 'rebuild beta c', 'run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded']]);
+  assert.equal(h.current.sha, C);
+});
+
+test('a push while a gate counts its journeys supersedes it before any twin or journey work', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const counting = deferred(), counted = deferred();
+  h.holds.journeys = async context => { if (context.sha === B) { counting.resolve(); await counted.promise; } };
+  await h.manager.watch(); // push B
+  await counting.promise;
+  await h.manager.watch(); // push C while B's journeys are counted
+  counted.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log, ['prepare beta b', 'prepare beta c', 'rebuild beta c', 'run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded']]);
+  assert.equal(h.current.sha, C);
+});
+
+test('a rebuilding gate put back to queued behind a newer commit is superseded, never run after it', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const rebuilding = deferred(), taken = deferred();
+  let held = false;
+  // A health check takes the old twin once while B rebuilds, after C was pushed.
+  h.holds.rebuild = async context => { if (context.sha === B && !held) { held = true; rebuilding.resolve(); await taken.promise; throw environmentBusy(); } };
+  await h.manager.watch(); // push B
+  await rebuilding.promise;
+  await h.manager.watch(); // push C while B rebuilds
+  taken.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status, item.reason ?? null]), [['c', 'passed', null], ['b', 'superseded', `Superseded by ${C.slice(0, 7)}.`]]);
+  assert.equal(h.current.sha, C);
 });
 
 test('only a gate that needs release can be released, by a GitHub login, and never a failed one', async t => {
@@ -186,7 +274,7 @@ test('a promoted commit runs before a newer push enters the first stage', async 
   const release = deferred();
   h.holds.run = async context => { if (context.stageId === 'beta' && context.sha === A) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   await h.manager.watch(); // push B while Beta tests A
   release.resolve();
   await h.manager.idle();
@@ -216,8 +304,25 @@ test('a busy stage keeps its gate queued and retries it', async t => {
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   assert.equal(h.manager.view().stages.beta.status, 'queued');
-  while (h.manager.view().stages.beta.status !== 'passed') await new Promise(done => setTimeout(done, 2));
+  await until(() => h.manager.view().stages.beta?.status === 'passed');
   assert.equal(busy, -1);
+});
+
+test('a queued gate is tried again at the next poll after the active source changes away and back', async t => {
+  // Retries are far apart, so only a poll can try the gate again within the test.
+  const h = await harness(t, { repository: null, stages: STAGES.filter(stage => stage.id !== 'gamma'), pollInterval: 20, retryInterval: 60_000 });
+  let busy = true;
+  h.holds.prepare = () => (busy ? Object.assign(new Error('This stage is busy.'), { statusCode: 409 }) : null);
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'queued');
+  h.current.key = 'github:owner/other:/';
+  h.manager.start(); // a pass while another source is active finds nothing to retry
+  await h.manager.idle();
+  h.current.key = KEY;
+  busy = false;
+  await until(() => h.manager.view().stages.beta?.status === 'passed');
+  assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta a twin-beta']);
 });
 
 test('a busy stage never holds back another stage; its newest commit runs once it is free', async t => {
@@ -232,7 +337,7 @@ test('a busy stage never holds back another stage; its newest commit runs once i
   await h.manager.idle();
   assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta a twin-beta', 'run beta b twin-beta']);
   gammaBusy = false;
-  while (h.manager.view().stages.gamma.status !== 'passed') await new Promise(done => setTimeout(done, 2));
+  await until(() => h.manager.view().stages.gamma?.status === 'passed');
   await h.manager.idle();
   assert.deepEqual(h.log.filter(line => line.startsWith('run gamma')), ['run gamma b twin-gamma']);
   assert.deepEqual((await h.gates('gamma')).map(item => [item.sha[0], item.status]).sort(), [['a', 'superseded'], ['b', 'passed']]);
@@ -356,6 +461,21 @@ test('a gate queued again or released after fifty newer gates still reports its 
   await h.manager.release({ stageId: 'beta', sha: B, login: 'developer' });
   await h.manager.idle();
   assert.deepEqual(postsOf(B, from), ['success/Released by developer']);
+});
+
+test('a gate that waited behind three hundred newer records keeps its verdict when it passes and promotes', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
+  await mkdir(join(dataDir, 'gates'));
+  const at = '2026-09-23T09:00:00.000Z', queuedAt = '2026-09-23T08:00:00.000Z', posted = { state: 'success', context: 'perpetual/Beta', description: 'Passed' };
+  const others = Array.from({ length: 300 }, (_, index) => ({ id: `other-${index}`, key: 'github:owner/other:/', branch: 'main', stageId: 'beta', sha: index.toString(16).padStart(40, '0'), context: 'perpetual/Beta', status: 'passed', createdAt: at, detectedAt: at, updatedAt: at, posted }));
+  const waiting = { id: 'waiting', key: KEY, branch: 'main', stageId: 'beta', sha: A, context: 'perpetual/Beta', status: 'queued', createdAt: queuedAt, detectedAt: queuedAt, updatedAt: queuedAt };
+  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, heads: {}, gates: [...others, waiting] }));
+  const h = await harness(t, { dataDir });
+  h.manager.start();
+  await h.manager.idle();
+  const view = h.manager.view();
+  assert.deepEqual([view.stages.beta?.status, view.stages.gamma?.status, view.production], ['passed', 'passed', { sha: A, status: 'ready' }]);
+  assert.deepEqual(h.posts.filter(item => item.context === 'perpetual/Beta').map(item => item.description), ['Running', 'Passed']);
 });
 
 test('the first head another account reads is a baseline, never a push', async t => {

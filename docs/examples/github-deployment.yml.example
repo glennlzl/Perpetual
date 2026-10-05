@@ -15,7 +15,11 @@ jobs:
       github.event.deployment.payload.perpetual.workflowPath == '.github/workflows/deploy.yml' &&
       github.event.deployment.payload.perpetual.sha == github.event.deployment.sha
     runs-on: ubuntu-latest
-    environment: preview
+    # The job uses the environment's secrets and reviewers without a deployment of its own, whose success would mark
+    # the requested non-production deployment inactive.
+    environment:
+      name: preview
+      deployment: false
     steps:
       - uses: actions/checkout@v7
         with:

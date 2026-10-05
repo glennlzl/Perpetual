@@ -1,6 +1,6 @@
 // A gate's work on the controller: rebuild the stage's twin through the environments manager,
 // then run its reviewed, selected journeys through the browser manager.
-import { IN_PROGRESS, holdsResources, isEnvironmentBusy } from '../environments/usage.ts';
+import { IN_PROGRESS, holdsResources, isEnvironmentBusy, isStageHeld } from '../environments/usage.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { EnvironmentSummary } from '../environments/manager.ts';
 import type { GateSteps } from './manager.ts';
@@ -30,8 +30,10 @@ export interface GateBrowser<C> {
   isActive(stage: StageContext): boolean;
   summary(context: C): { cases?: readonly JourneySelection[] | null };
   view(context: C): Promise<{ config: { targetUrl?: string | null } }>;
-  run(context: C, input: Record<string, never>): Promise<{ run: { id: string } }>;
+  /** The run names the environment its application URL resolved to when it was admitted. */
+  run(context: C, input: Record<string, never>): Promise<{ run: { id: string; environmentId?: string } }>;
   runProgress(context: C, id: string): Promise<{ run: GateRun }>;
+  stop(context: C, id: string): Promise<unknown>;
 }
 export interface Readiness { done(id: string): void; wait(id: string): Promise<void>; forget(id: string): void }
 export interface GateStepsOptions<C extends StageContext> {
@@ -47,6 +49,7 @@ const conflict = (message: string) => Object.assign(new Error(message), { status
 const COPYING = ['queued', 'creating'];
 const readsSource = (item: GateEnvironment) => COPYING.includes(item.status) || item.status === 'preparing' && item.readsCheckout === true;
 const RUNNING = ['queued', 'running'];
+const REBUILT = 'Set the application URL to the rebuilt twin.';
 export const reviewedJourneys = <T extends JourneySelection>(cases: readonly T[] | null | undefined) => (cases || []).filter(item => item.selected && !item.needsReview);
 
 // Settles with the promise, or rejects once the controller shuts down.
@@ -106,15 +109,19 @@ export function createGateSteps<C extends StageContext>({ environments, browser,
       } finally { readiness.forget(environment.id); }
     },
     async run(context, twin) {
-      // A health probe can take the newly ready twin before the browser admits its run. Wait for that
-      // reservation only; once a run exists, its execution and verdict are never retried.
-      let run: { id: string };
+      // A health probe can take the newly ready twin before the browser admits its run, and a person's operation or a
+      // model settings save can hold the stage then. Wait for either only; once a run exists, its execution and verdict
+      // are never retried.
+      let run: { id: string; environmentId?: string };
       for (;;) {
         const { config } = await browser.view(context);
-        if (!config.targetUrl || environments.resolveTarget(config.targetUrl)?.id !== twin.id) throw new Error('Set the application URL to the rebuilt twin.');
+        if (!config.targetUrl || environments.resolveTarget(config.targetUrl)?.id !== twin.id) throw new Error(REBUILT);
         try { ({ run } = await browser.run(context, {})); break; }
-        catch (error) { if (!isEnvironmentBusy(error)) throw error; await pause(interval, signal); }
+        catch (error) { if (!isEnvironmentBusy(error) && !isStageHeld(error)) throw error; await pause(interval, signal); }
       }
+      // The browser reads the application URL again as it admits the run, so a URL saved since the check above never
+      // lends another application's journeys to this gate's verdict, and the gate stops the run it started there.
+      if (run.environmentId !== twin.id) { await browser.stop(context, run.id).catch(() => {}); throw new Error(REBUILT); }
       for (;;) {
         const { run: current } = await browser.runProgress(context, run.id);
         if (!RUNNING.includes(current.status)) return current;
