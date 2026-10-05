@@ -60,6 +60,8 @@ test('an Authorization value of any scheme and every part of a named value or UR
     ['DATABASE_URL=postgres://app:fixture#literal@db.example.test:5432/app', `DATABASE_URL=postgres://${REDACTED}@db.example.test:5432/app`],
     ['mysql://root:fixture?literal-1@db:3306/app', `mysql://${REDACTED}@db:3306/app`],
     ['request headers: Authorization: token 0123456789abcdef, Accept: application/json', `request headers: Authorization: ${REDACTED}, Accept: application/json`],
+    ['headers.set("Authorization", "Basic Zml4dHVyZTpsaXRlcmFs");', `headers.set("Authorization", ${REDACTED});`],
+    ["headers['Authorization'] = 'token fixture-literal'", `headers['Authorization'] = ${REDACTED}`],
     ['fetch(url, { headers: { Authorization: `token fixture-literal` } });', `fetch(url, { headers: { Authorization: ${REDACTED} } });`],
   ];
   for (const [input, output] of cases) assert.equal(redact(input), output, input);
@@ -85,7 +87,7 @@ test('ordinary code and commands around a credential name stay readable', () => 
   for (const [input, output] of cases) assert.equal(redact(input), output, input);
   // A key that is no secret: an ORM column, a markup attribute, a cache or storage key, a public client key.
   for (const line of ['id = Column(Integer, primary_key=True)', 'foreign_key: true', '<li data-key="row-1">', 'const cache_key = `user:${id}`;', 'CACHE_KEY=user-profile-v2',
-    'STRIPE_PUBLISHABLE_KEY=pk_test_fixture', 'NEXT_PUBLIC_SUPABASE_ANON_KEY=fixture-anon']) {
+    'STRIPE_PUBLISHABLE_KEY=pk_test_fixture', 'NEXT_PUBLIC_SUPABASE_ANON_KEY=fixture-anon', "cors({ allowedHeaders: ['Authorization', 'Content-Type'] })", 'cat: /etc/passwd: Permission denied']) {
     assert.equal(redact(line), line, line);
   }
 });
@@ -95,6 +97,9 @@ test('common credential names, token shapes, escaped JSON and PGP key blocks are
   assert.equal(redact('PRIVATE_KEY=fixture-a ENCRYPTION_KEY=fixture-b SIGNING_KEY: fixture-c'), `PRIVATE_KEY=${REDACTED} ENCRYPTION_KEY=${REDACTED} SIGNING_KEY: ${REDACTED}`);
   assert.equal(redact('SUPABASE_SERVICE_ROLE_KEY=fixture-a RAILS_MASTER_KEY=fixture-b jwt_key: fixture-c'), `SUPABASE_SERVICE_ROLE_KEY=${REDACTED} RAILS_MASTER_KEY=${REDACTED} jwt_key: ${REDACTED}`);
   assert.equal(redact('DB_PASS=fixture-a MYSQL_PWD=fixture-b passphrase: fixture-c'), `DB_PASS=${REDACTED} MYSQL_PWD=${REDACTED} passphrase: ${REDACTED}`);
+  assert.equal(redact('DB_PASSWD=fixture-a passwd: fixture-b'), `DB_PASSWD=${REDACTED} passwd: ${REDACTED}`);
+  assert.equal(hasCredential('DB_PASSWD=fixture-literal'), true);
+  assert.equal(hasCredential('passwd: "fixture-literal-1"', { code: true }), true);
   const ordinary = 'tests_passed=12 bypass=true passenger=3 pass_count=4 npm_lifecycle_event=test';
   assert.equal(redact(ordinary), ordinary, 'A name holding PASS, or npm\'s own variables, is not a credential.');
   // Built at run time, so the file itself holds no token-shaped text.

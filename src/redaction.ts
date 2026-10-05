@@ -4,11 +4,12 @@
 // failures (a gh or docker error mapped to one sentence) need neither: they discard the raw output.
 
 export const REDACTED = '[REDACTED]';
-// Credential names, found inside a longer name such as STRIPE_SECRET_KEY; a short one, PASS or PWD, only where a name
-// ends, so BYPASS and PASS_COUNT are not one. Redaction also hides the keys that read as secrets, such as ENCRYPTION_KEY
-// or SUPABASE_SERVICE_ROLE_KEY, which the change and request rules leave to ordinary values; a key that is no secret,
-// such as a primary, foreign, cache or publishable key, is ordinary text.
-const NAMES = 'token|secret|password|passphrase|(?<![a-z])(?:pass|pwd)(?![\\w-])|api[-_]?key|access[-_]?(?:key|token)|private[-_]?key|authorization';
+// Credential names, found inside a longer name such as STRIPE_SECRET_KEY. A short one, PASS or PWD, counts only where a
+// name ends, so BYPASS and PASS_COUNT are not one, and PASSWD never as the file in a path such as /etc/passwd.
+// Redaction also hides the keys that read as secrets, such as ENCRYPTION_KEY or SUPABASE_SERVICE_ROLE_KEY, which the
+// change and request rules leave to ordinary values; a key that is no secret, such as a primary, foreign, cache or
+// publishable key, is ordinary text.
+const NAMES = 'token|secret|password|(?<!/)passwd|passphrase|(?<![a-z])(?:pass|pwd)(?![\\w-])|api[-_]?key|access[-_]?(?:key|token)|private[-_]?key|authorization';
 const SECRET_NAMES = `${NAMES}|(?:encryption|signing|master|license|service[-_]?role|hmac|jwt)[-_]?key`;
 const PRIVATE_KEY = '[A-Z ]*PRIVATE KEY(?: BLOCK)?';
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
@@ -26,10 +27,11 @@ const LINE_VALUE = new RegExp(`^([ \\t]*(?:-[ \\t]+)?[\\w-]*(?:${SECRET_NAMES})[
 const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
 const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
 // An Authorization value of any scheme. On a header line, at the start of a line or a quoted string, it runs through the
-// end of the line or the closing quote. Elsewhere, as in code, it is a quoted value, or a scheme and its credential up to
-// the space, ; , ) or } that ends the expression.
+// end of the line or the closing quote. Elsewhere, as in code or passed with its quoted name (`headers.set("Authorization",
+// …)`, `headers["Authorization"] = …`), it is a quoted value, or a scheme and its credential up to the space, ; , ) or }
+// that ends the expression.
 const AUTHORIZATION_HEADER = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[^\s"'][^\r\n"']*/gim;
-const AUTHORIZATION = /(Authorization\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
+const AUTHORIZATION = /((?:Authorization\s*[:=]|\(\s*["']Authorization["']\s*,|\[\s*["']Authorization["']\s*\]\s*=)\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
 const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
