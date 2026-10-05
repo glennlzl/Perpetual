@@ -55,5 +55,7 @@ test('the Quickstart, the contributor guide and package.json name the one setup 
   for (const part of ['npm run setup', 'docs/onboarding.md', 'Leave this repository unchanged']) assert.ok(prompt.includes(part), part);
   assert.match(readme, /```sh\ngit clone https:\/\/github\.com\/willlzl\/Perpetual\.git && cd Perpetual\nnpm run setup\nnode src\/cli\.ts serve --repo \/path\/to\/your\/app\n```/);
   assert.doesNotMatch(readme, /uv sync|playwright install/, 'The README leaves the install steps to setup.');
+  // serve does not rebuild the interface, so an update reruns setup.
+  assert.match(readme, /`git pull` and then `npm run setup` again/);
   assert.match(await read('CONTRIBUTING.md'), /npm run setup/);
 });
