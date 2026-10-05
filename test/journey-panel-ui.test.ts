@@ -185,3 +185,19 @@ test('Discard draft asks first and discards exactly the draft it was chosen for'
   assert.deepEqual(fixture.controller.requests, [{ path: '/api/browser/specs/discard', input: { caseId: 'save', hash, repoPath: '/acme/app', stageId: 'beta' } }]);
   assert.deepEqual(fixture.pageErrors, []);
 });
+
+test('a journey cannot be edited while its code is generated, and can once generation stops', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  fixture.controller.view = browserView({ specs: { save: { generation: { status: 'running' } } } });
+  const page = await fixture.open(t);
+  await expect(page.getByRole('button', { name: 'Save a workspace: Edit', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Actions for Save a workspace', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Edit', exact: true })).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: 'Stop generating', exact: true })).toBeEnabled();
+  await page.keyboard.press('Escape');
+  fixture.controller.view = browserView({ specs: {} });
+  const ready = await fixture.open(t);
+  await ready.getByRole('button', { name: 'Save a workspace: Edit', exact: true }).click();
+  await expect(ready.getByRole('dialog', { name: 'Edit test', exact: true })).toBeVisible();
+  assert.deepEqual(fixture.pageErrors, []);
+});

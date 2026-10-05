@@ -669,7 +669,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
           return <JourneyCard key={item.id} item={item} run={run} status={status.status} label={status.label} repoPath={repoPath} stageId={stageId} focused={focusedCase?.id === item.id}
             selection={<Checkbox className="mt-0.5" checked={Boolean(item.selected)} disabled={disabled || (!item.selected && (!reviewed(item) || selected.length >= 30))} aria-label={`Select ${item.name}`} onCheckedChange={checked => updateCases(cases.map(current => current.id === item.id ? { ...current, selected: checked === true } : current))} />}
             spec={data.specs?.[item.id]}
-            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled} onSelect={() => setEditingCase(item)}>{journeyNeedsChecks(item) ? 'Add checks' : item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
+            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled || code.generating} onSelect={() => setEditingCase(item)}>{journeyNeedsChecks(item) ? 'Add checks' : item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
               {!item.needsReview && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
               {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => setCodeDialog({ action: 'generate', caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
                 onVerify={() => setCodeDialog({ action: 'verify', caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
@@ -678,7 +678,8 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
             skipping={pending === 'skip'}
             onViewRun={run ? () => setWatching({ ...watchedRun(run), focusCaseId: item.id }) : undefined}
-            onInspect={() => openCase(item)} />;
+            // Editing the journey while its code is generated would leave that paid generation a stale draft.
+            onInspect={code.generating ? undefined : () => openCase(item)} />;
         })}
       </div>
       {!!cases.length && !visibleCases.length && <p role="status" className="py-8 text-center text-sm text-muted-foreground">No matching tests</p>}
