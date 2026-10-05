@@ -31,6 +31,20 @@ async function scanned(t: TestContext, { github = {}, managed, state = {} }: { g
   return { dir, dataDir, app, token };
 }
 
+/** A POST whose headers and first half of its body are sent now, and the rest when `finish` is called. */
+function halfSent(url: string, token: string, path: string, input: unknown) {
+  const body = Buffer.from(JSON.stringify(input)), half = body.length >> 1;
+  const reply = Promise.withResolvers<{ status: number; body: unknown }>();
+  const req = request(url + path, { method: 'POST', agent: false, headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Perpetual-Token': token } }, res => {
+    const chunks: Buffer[] = [];
+    res.on('data', chunk => chunks.push(chunk));
+    res.on('end', () => reply.resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+  });
+  req.on('error', reply.reject);
+  req.write(body.subarray(0, half));
+  return { finish() { req.end(body.subarray(half)); return reply.promise; }, destroy() { req.destroy(); } };
+}
+
 test('controller state refuses a linked snapshot and releases ownership after refusing it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-linked-state-')), dataDir = join(dir, 'data');
   let app: Controller | undefined;
@@ -336,4 +350,24 @@ test('a body over its limit is refused without stalling the next request on its 
   const after = await send('GET', '/api/state');
   assert.equal(after.status, 200);
   assert.ok(after.ms < 3000, `The request after it waited ${after.ms} ms.`);
+});
+
+test('a change whose body finishes arriving after a source change began is refused, and saves nothing', async t => {
+  const f = await scanned(t);
+  const names = async () => (await (await fetch(`${f.app.url}/api/pipeline`)).json()).pipeline.stages.map((stage: { name: string }) => stage.name);
+  const before = await names();
+  const edit = halfSent(f.app.url, f.token, '/api/pipeline/action', { repoPath: f.dir, action: 'add-stage', name: 'Gamma' });
+  await fetch(`${f.app.url}/api/state`);
+  // A rescan holds the source while its own body arrives.
+  const rescan = halfSent(f.app.url, f.token, '/api/scan', { path: f.dir });
+  try {
+    const held = () => fetch(`${f.app.url}/api/github-actions?${new URLSearchParams({ repoPath: f.dir })}`).then(response => response.status === 409);
+    for (const deadline = Date.now() + 10_000; !await held();) {
+      assert.ok(Date.now() < deadline, 'The rescan never held the source.');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(await edit.finish(), { status: 409, body: { error: 'A source change is still being saved. Please wait.' } });
+    assert.equal((await rescan.finish()).status, 200);
+    assert.deepEqual(await names(), before);
+  } finally { edit.destroy(); rescan.destroy(); }
 });

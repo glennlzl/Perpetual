@@ -535,8 +535,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo,capabilities:{modelConfigured:!!((process.env.PERPETUAL_MODEL_API_KEY&&process.env.PERPETUAL_MODEL)||process.env.OPENROUTER_API_KEY),browserAgent:true,localBrowser:true,cloudProvisioning:false,businessDiscovery:true}} satisfies PipelineStateReply);
       if(path==='/api/stages/remove'||path==='/api/stages/removal'){
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
+        // Admitted once the body has arrived, so a source change that began meanwhile is seen.
+        requireSourceIdle();
         activeScan(input.repoPath);
         const context={key:pipelineKey(state),stageId:text(input.stageId)};
         const stage=currentPipeline(state).stages.find(item=>item.id===input.stageId),previous=removals.view(context);
@@ -593,8 +594,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         }));
       }
       if(path==='/api/browser'||path.startsWith('/api/browser/')) {
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req,path==='/api/browser/transcribe'?12*1024*1024:1024*1024);
+        requireSourceIdle();
         const scan=activeScan(input.repoPath),stage=sandboxStage(input.stageId),context=stageContext(scan,stage.id,actualPort);
         const browserRun=path.match(/^\/api\/browser\/runs\/([a-f0-9-]{36})(\/frame|\/video)?$/);
         if(req.method==='GET'&&browserRun) {
@@ -642,8 +643,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return reply(res,404,{error:'Browser operation not found.'});
       }
       if(path==='/api/environments'||path.startsWith('/api/environments/')) {
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req,1024*1024);
+        requireSourceIdle();
         const scan=activeScan(input.repoPath),stage=sandboxStage(input.stageId),context=stageContext(scan,stage.id,actualPort);
         if(req.method==='GET'&&path==='/api/environments')return reply(res,200,await environments.view(context));
         if(req.method==='POST') {
@@ -761,8 +762,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         },'The active repository changed. Reopen its settings.'));
       }
       if(req.method==='POST'&&path==='/api/pipeline/action') {
-        requireSourceIdle();
         const input=await body(req);
+        requireSourceIdle();
         const pipeline=await save(current=>{
           const repoPath=current.scan?.repo?.path;
           if(!repoPath || input?.repoPath!==repoPath) {
