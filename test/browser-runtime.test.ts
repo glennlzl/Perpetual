@@ -124,10 +124,24 @@ test('saved model settings reach Python unchanged and do not revive environment 
   assert.doesNotMatch(JSON.stringify(events),/saved-fixture-only|environment-fixture-only|wrong-fixture-only/);
 });
 
-test('an event whose JSON a secret also matches stops the run instead of throwing out of the event listener',async()=>{
-  // The account password is also the digits of a number, so redacting the event's text breaks its JSON.
-  const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"case",caseId:"c",actionCount:1234}))'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent(){},secrets:['1234']});
-  await assert.rejects(job.promise,/could not be redacted/);
+test('a short or common secret is hidden in free text without changing keys, numbers, statuses or step ids',async()=>{
+  // Each password also spells part of the protocol: a key, a number's digits, a status, a step id or a check value.
+  const sent=[
+    {type:'case',caseId:'c',status:'running',actionCount:1234,actions:[{type:'click',status:'passed'}]},
+    {type:'journey-step',caseId:'c',stepId:'create-test-workflow',status:'completed',evidence:'Created the test workflow; pass 1234 accepted',checks:[{type:'text-visible',value:'Test run complete',passed:true,error:'run test'}]},
+    {type:'result',result:{caseId:'c',stopCause:'none',assertions:[{type:'text-visible',value:'Test run complete',passed:true,resolved:'Test run complete'}],blockers:[{stepId:'create-test-workflow',kind:'account',evidence:'test account'}],error:'pass'}},
+  ];
+  for(const secret of ['pass','test','run','1234']){
+    const events:WorkerEvent[]=[];
+    const job=superviseWorker({command:process.execPath,args:['-e','for(const event of JSON.parse(process.argv[1]))console.log(JSON.stringify(event));',JSON.stringify(sent)],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent:event=>{events.push(event);},secrets:[secret]});
+    await job.promise;
+    const text=(value:string)=>value.split(secret).join('[REDACTED]');
+    assert.deepEqual(events,[
+      sent[0],
+      {...sent[1],evidence:text(sent[1].evidence as string),checks:[{type:'text-visible',value:'Test run complete',passed:true,error:text('run test')}]},
+      {type:'result',result:{caseId:'c',stopCause:'none',assertions:[{type:'text-visible',value:'Test run complete',passed:true,resolved:'Test run complete'}],blockers:[{stepId:'create-test-workflow',kind:'account',evidence:text('test account')}],error:text('pass')}},
+    ],secret);
+  }
 });
 
 test('error-only account values are masked before clipping without changing business evidence',async()=>{

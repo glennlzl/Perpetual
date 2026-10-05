@@ -31,6 +31,15 @@ export type BrowserRuntime={capabilities():Promise<BrowserCapabilities>;start(in
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 // An error's message, or anything else thrown as it is.
 const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&'message' in error?error.message:undefined;
+// Fields a consumer matches exactly against its reviewed case or a fixed vocabulary; every other string is free text.
+// A secret is hidden in free text only, so one that also spells part of a key, a number, a status or a step id, as a
+// password `test` does in `create-test-workflow`, cannot turn a valid event into an invalid one.
+const IDENTIFIERS:ReadonlySet<string>=new Set(['type','status','caseId','stepId','kind','stopCause','errorCode','method','value','resolved','files']);
+function hideText(value:unknown,conceal:(text:string)=>string,key?:string):unknown{
+  if(typeof value==='string')return key!==undefined&&IDENTIFIERS.has(key)?value:conceal(value);
+  if(Array.isArray(value))return value.map(item=>hideText(item,conceal,key));
+  return isRecord(value)?Object.fromEntries(Object.entries(value).map(([name,item])=>[name,hideText(item,conceal,name)])):value;
+}
 
 const base=fileURLToPath(new URL('../../integrations/browser-use/',import.meta.url));
 export function validateBrowserTarget(value:string,{controllerOrigin}:{controllerOrigin?:string}={}):string {
@@ -83,7 +92,7 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     }
     if(pending.length>2048){pending='';truncate();}
   });}
-  const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value));
+  const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value)),conceal=hide(hidden);
   // Error-only account values must be hidden before clipping without rewriting reviewed check evidence.
   const failure=(error:unknown)=>browserError(hide([...hidden,...errorSecrets])(String(messageOf(error)||error||'Browser operation failed.')),env);
   let buffer='',eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
@@ -110,13 +119,8 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
         let event:WorkerEvent=parsed;
         if(event.type!=='frame'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return stop('Browser event history exceeded its size limit.');}
         if(event.type==='error'){cleanupIncomplete ||= event.cleanupIncomplete===true;terminalError=new Error(failure(event.error));continue;}
-        if(event.type!=='frame'&&hidden.length){
-          // A secret can also match JSON syntax, such as a number's digits; that event cannot be redacted, and stops the run
-          // rather than throwing out of this listener.
-          let redacted:unknown;try{redacted=JSON.parse(hide(hidden.map(secret=>JSON.stringify(secret).slice(1,-1)))(JSON.stringify(event)));}catch{return stop('Browser runtime returned an event that could not be redacted.');}
-          if(!isRecord(redacted))return stop('Browser runtime returned an event that could not be redacted.');
-          event=redacted;
-        }
+        // Nesting too deep to walk stops the run rather than throwing out of this listener.
+        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal) as WorkerEvent;}catch{return stop('Browser runtime returned an invalid event.');}
         // Without onOutput, the options carry onEvent.
         try{onEvent!(event);}catch(error){return stop(failure(error),'consumer');}
       }
