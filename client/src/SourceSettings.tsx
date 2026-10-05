@@ -112,6 +112,8 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const [branch, setBranch] = useState('');
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [branchesError, setBranchesError] = useState('');
+  // A failed further page leaves the listed branches, and the choice among them, valid; Load more branches tries it again.
+  const [moreBranchesError, setMoreBranchesError] = useState('');
   const [branchPage, setBranchPage] = useState<number | null>(null);
   const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
   const [rootDirectory, setRootDirectory] = useState('/');
@@ -213,8 +215,9 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   async function loadBranches(target: string, page: number = 1, append = false) {
     const request = ++branchRequest.current;
     const preferred = savedSource.current?.repository === target ? savedSource.current.branch || '' : '';
+    const setError = append ? setMoreBranchesError : setBranchesError;
     setBranchesLoading(true);
-    setBranchesError('');
+    setError('');
     try {
       const result = await api<GitHubBranchPage>(`/api/github/branches?repository=${encodeURIComponent(target)}&page=${encodeURIComponent(page)}${Number(page) === 1 && preferred ? `&preferredBranch=${encodeURIComponent(preferred)}` : ''}`);
       if (!active.current || request !== branchRequest.current) return;
@@ -223,7 +226,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       if (!append) setDefaultBranch(result.defaultBranch || null);
       if (!append) setBranch(previous => initialBranch({ previous, preferred, defaultBranch: result.defaultBranch, names: (result.branches || []).map(item => item.name) }));
     } catch (failure) {
-      if (active.current && request === branchRequest.current) setBranchesError(messageOf(failure));
+      if (active.current && request === branchRequest.current) setError(messageOf(failure));
     } finally {
       if (active.current && request === branchRequest.current) setBranchesLoading(false);
     }
@@ -235,6 +238,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     setBranchPage(null);
     setDefaultBranch(null);
     setBranchesError('');
+    setMoreBranchesError('');
     if (connected && repository) void loadBranches(repository);
     else setBranchesLoading(false);
   }, [connected, repository, connection?.account?.login]);
@@ -319,6 +323,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           setBranches([]);
           setBranchPage(null);
           setBranchesError('');
+          setMoreBranchesError('');
           setBranchesLoading(true);
         }}>
           <SelectTrigger ref={repositoryTrigger} id="source-repository" className={`min-w-0 w-full${scanned ? ' data-[placeholder]:text-foreground' : ''}`} title={repository || scanned?.repository || undefined}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.repository || (repositoriesLoading ? 'Loading repositories…' : 'Select repository')}>{repository || undefined}</SelectValue></span></SelectTrigger>
@@ -348,6 +353,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       <SourceReadError error={branchesError} label="Retry branches" disabled={disableFields || branchesLoading} onRetry={() => loadBranches(repository)} focusTarget={() => branchTrigger.current} />
       {connected && repository && !branchesLoading && !branchesError && !branches.length && <p className="text-sm text-muted-foreground">No branches</p>}
       {branchPage && <Button type="button" variant="ghost" size="sm" className="w-fit" disabled={disableFields || branchesLoading} onClick={() => loadBranches(repository, branchPage, true)}>{branchesLoading ? 'Loading…' : 'Load more branches'}</Button>}
+      <SourceReadError error={moreBranchesError} label="Load more branches" disabled focusTarget={() => branchTrigger.current} />
     </Section>
 
     <Section>

@@ -98,3 +98,45 @@ test('a failed Autopilot read never brings back the change the page loaded with'
   await expect(build.getByRole('button', { name: 'Autopilot for Build: Merged', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
+
+test('a failed Load more branches keeps the branch chosen from a later page, and Save', { timeout: 60000 }, async t => {
+  const source = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: repoPath };
+  const connection = { available: true, authenticated: true, connected: true, account: { login: 'acme', name: null }, source, localCheckout: null };
+  const pages = [['main', 'feature/a'], ['zz-feature'], ['zz-last']], failure = 'GitHub returned an unreadable branch page. Try again.';
+  let failPage = 0;
+  const { page, pageErrors, open } = await openApp(t, (path, request) => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { source }) };
+    if (path === '/api/github/connection') return { json: connection };
+    if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
+    if (path === '/api/github/branches') {
+      const number = Number(new URL(request.url()).searchParams.get('page'));
+      if (number === failPage) return { status: 502, json: { error: failure } };
+      return { json: { branches: pages[number - 1].map(name => ({ name })), nextPage: number < pages.length ? number + 1 : null, defaultBranch: 'main' } };
+    }
+  });
+  await open();
+  await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+  const sheet = page.getByRole('dialog'), branch = sheet.getByRole('combobox', { name: 'Branch', exact: true });
+  const more = sheet.getByRole('button', { name: 'Load more branches', exact: true }), save = sheet.getByRole('button', { name: 'Save source', exact: true });
+  await expect(branch).toHaveText('main');
+  await more.click();
+  await branch.click();
+  await page.getByRole('option', { name: 'zz-feature', exact: true }).click();
+  await expect(branch).toHaveText('zz-feature');
+  failPage = 3;
+  await more.click();
+  await expect(sheet.getByRole('alert')).toHaveText(failure);
+  await expect(branch).toHaveText('zz-feature');
+  await expect(save).toBeEnabled();
+  // Load more branches repeats the failed page, keeping the pages already listed.
+  failPage = 0;
+  await more.click();
+  await expect(sheet.getByRole('alert')).toHaveCount(0);
+  await expect(branch).toHaveText('zz-feature');
+  await branch.click();
+  await expect(page.getByRole('option', { name: 'zz-last', exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'feature/a', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(save).toBeEnabled();
+  assert.deepEqual(pageErrors, []);
+});
