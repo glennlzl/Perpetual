@@ -11,7 +11,7 @@ import type { SourceSelection } from './SourceSettings';
 import type { GitHubConnection, GitHubBranchPage } from '../../contract/github.ts';
 
 type BranchList = { connection: GitHubConnection | null; branches: string[]; defaultBranch: string | null; nextPage: number | null; loading: boolean; error: string };
-type BranchCache = { key: string; branches: string[]; defaultBranch: string | null; nextPage: number | null };
+type BranchCache = { key: string; branches: string[]; defaultBranch: string | null; nextPage: number | null; readAt: number };
 
 // A colon is not valid in a Git branch name, so these cannot collide with a ref.
 const CONFIGURE = ':perpetual:configure';
@@ -21,6 +21,8 @@ const STATUS = ':perpetual:status';
 const LOCAL = ':perpetual:local';
 const CURRENT = ':perpetual:current';
 const emptyList: BranchList = { connection: null, branches: [], defaultBranch: null, nextPage: null, loading: false, error: '' };
+// A list read this recently opens at once; an older one is read again, so new and deleted branches show.
+const CACHE_MS = 30_000;
 const compare = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
 
 // Pinned names keep their order; the rest group by first path segment. A prefix
@@ -123,7 +125,7 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
       }
       const key = `${connection.account?.login || ''}\n${source.repository}\n${source.rootDirectory || '/'}\n${branch}`;
       const previous = cache.current?.key === key ? cache.current : null;
-      if (previous && !append && !force) {
+      if (previous && !append && !force && Date.now() - previous.readAt < CACHE_MS) {
         setList({ ...emptyList, connection, branches: previous.branches, defaultBranch: previous.defaultBranch, nextPage: previous.nextPage });
         return;
       }
@@ -138,7 +140,7 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
       ])];
       const nextPage = result.nextPage || null;
       const defaultBranch = page === 1 ? result.defaultBranch || null : previous?.defaultBranch || null;
-      cache.current = { key, branches, defaultBranch, nextPage };
+      cache.current = { key, branches, defaultBranch, nextPage, readAt: page === 1 ? Date.now() : previous?.readAt ?? Date.now() };
       setList({ connection, branches, defaultBranch, nextPage, loading: false, error: '' });
     } catch (failure) {
       if (valid()) setList(previous => ({ ...previous, loading: false, error: failure instanceof Error ? failure.message : 'Could not load branches.' }));
@@ -166,6 +168,8 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
       await apply();
     } catch (failure) {
       if (active.current && latestIdentity.current === startedFor) {
+        // A branch can be gone from GitHub; the next open reads the list again.
+        cache.current = null;
         setList(previous => ({ ...previous, error: failure instanceof Error ? failure.message : fallback }));
       }
     } finally {
@@ -205,7 +209,7 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
     <span className="block min-w-0 max-w-80 truncate">{local.branch || 'Local checkout'}</span>{local.branch && <Badge variant="outline">Local</Badge>}
   </SelectItem> : null;
   const status = list.loading ? <SelectItem value={STATUS} disabled>Loading branches…</SelectItem> : list.error ? <>
-    <SelectItem value={STATUS} disabled title={list.error}>Could not load branches</SelectItem>
+    <div role="alert" className="max-w-80 px-2 py-1.5 text-sm break-words text-destructive">{list.error}</div>
     <SelectItem value={RETRY}>Try again</SelectItem>
   </> : !canChoose ? <SelectItem value={CONFIGURE}>{list.connection?.connected ? 'Select repository…' : 'Connect GitHub…'}</SelectItem>
     : !list.branches.length ? <SelectItem value={STATUS} disabled>No branches found</SelectItem>
