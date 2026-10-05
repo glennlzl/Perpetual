@@ -44,6 +44,17 @@ test('a key the environment supplies is never saved, and a saved key never follo
   assert.equal(rotated.configuration().apiKey,'other-fixture-only','A path on the same host keeps its key.');
 });
 
+test('an exported key stays with its endpoint however the environment writes the address',async t=>{
+  for(const baseUrl of ['https://API.example.com/v1','https://api.example.com:443/v1/']){
+    const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-model-endpoint-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+    const env={PERPETUAL_MODEL_API_KEY:'exported-fixture-only',PERPETUAL_MODEL_BASE_URL:baseUrl};
+    await (await createBrowserModelSettings({dataDir,env})).save({model:'vendor/chat'});
+    assert.equal(JSON.parse(await readFile(join(dataDir,'browser-model.json'),'utf8')).apiKey,undefined,baseUrl);
+    const restored=await createBrowserModelSettings({dataDir,env});
+    assert.deepEqual([restored.configuration().apiKey,restored.configuration().baseUrl,restored.view().modelConfigured],['exported-fixture-only','https://api.example.com/v1',true],baseUrl);
+  }
+});
+
 test('generic provider credentials require an explicit model while an empty install shows OpenRouter defaults',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-generic-model-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const generic=await createBrowserModelSettings({dataDir,env:{PERPETUAL_MODEL_API_KEY:'generic-private-fixture'}});
