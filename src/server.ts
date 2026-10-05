@@ -402,12 +402,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     const store=await createBrowserModelSettings({dataDir}),model=store.configuration();
     return model.modelConfigured&&isOpenRouterEndpoint(model.baseUrl)?{apiKey:model.apiKey,model:model.model,escalationModel:store.escalationModel()??model.model}:null;
   };
-  // Deploy configuration the scan found for the repair's own source, relative to the repository: a change to it is
-  // rejected before any push (ADR 0002).
-  const deployFiles=({key,rootDirectory}: Pick<Repair,'key'|'rootDirectory'>)=>{
-    if(!state.scan||pipelineKey(state)!==key)return [];
-    const prefix=rootDirectory.split('/').filter(Boolean).join('/');
-    const files=state.scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
+  // Deploy configuration a scan of the repair's own checkout finds under its root directory, at the failed commit and
+  // relative to the repository: a change to it is rejected before any push (ADR 0002). An unreadable checkout ends the
+  // repair rather than allowing every change.
+  const deployFiles=async({rootDirectory}: Pick<Repair,'rootDirectory'>,clone: string)=>{
+    const parts=rootDirectory.split('/').filter(Boolean),prefix=parts.join('/');
+    const scan=await scanRepository(join(clone,...parts)).catch(()=>{throw new Error('Could not read the deploy configuration of the failed commit.');});
+    const files=scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
     return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)))].map(file=>prefix?`${prefix}/${file}`:file);
   };
   const repairBoxes=repair.boxes??createRepairBoxes({dataDir}),repairHost=repair.host??createRepairHost({dataDir});

@@ -232,17 +232,13 @@ async function webRepository(directory: string) {
   return fixtureGit(directory, 'rev-parse', 'HEAD');
 }
 
-test('attempts 1 and 2 use the App Settings model and 3 and 4 its escalation model, and the scan\'s deploy files under the root directory are refused', async t => {
+test('attempts 1 and 2 use the App Settings model and 3 and 4 its escalation model, and the failed commit\'s deploy files under the root directory are refused', async t => {
   const touch = (path: string): ScriptedStep[] => [{ calls: [{ tool: 'write', input: { path, text: '{}\n' } }] }, { calls: [{ tool: 'done', input: { summary: `Changed ${path}.` } }] }];
   const c = await controller(t, {
     build: webRepository, root: '/web', escalation: ESCALATION,
-    // Scan paths are relative to the pipeline's root directory; a deployment's evidence and its configuration file count,
-    // each on its own.
-    nodes: [
-      { id: 'vercel', kind: 'deployment', label: 'Vercel', provider: 'vercel', evidence: [{ file: 'package.json' }], configFile: 'vercel.json' },
-      { id: 'railway', kind: 'deployment', label: 'Railway', provider: 'railway', evidence: [{ file: 'railway.toml' }] },
-      { id: 'web', kind: 'application', label: 'web', evidence: [{ file: 'package.json' }] },
-    ],
+    // The active scan is of an older commit, without the deployments: the repair scans its own checkout of the failed
+    // commit, under the root directory, where a deployment's evidence and its configuration file count, each on its own.
+    nodes: [{ id: 'web', kind: 'application', label: 'web', evidence: [{ file: 'package.json' }] }],
     scripts: [[{ text: 'Unsure.' }], [{ text: 'Still unsure.' }], touch('web/vercel.json'), touch('web/railway.toml')],
   });
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
@@ -253,7 +249,7 @@ test('attempts 1 and 2 use the App Settings model and 3 and 4 its escalation mod
   assert.deepEqual(stored.attempts?.map(attempt => [attempt.number, attempt.model, attempt.failure]), [
     [1, MODEL, 'The model stopped without calling done.'], [2, MODEL, 'The model stopped without calling done.'],
     [3, ESCALATION, REJECTED.delivery], [4, ESCALATION, REJECTED.delivery],
-  ], 'The Vercel configuration file and the Railway evidence file, under web/, are the scan\'s deploy files.');
+  ], 'The Vercel configuration file and the Railway evidence file, under web/, are the failed commit\'s deploy files.');
   assert.deepEqual([c.github.pushes, c.github.calls.filter(args => args.includes('repos/owner/app/pulls'))], [[], []], 'A refused change is never pushed.');
 });
 
