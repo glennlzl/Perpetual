@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 
 const SHA = 'a'.repeat(40), time = '2026-09-29T10:00:00.000Z';

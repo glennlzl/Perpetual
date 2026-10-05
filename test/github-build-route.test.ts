@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import type { WorkflowRun } from '../contract/github.ts';
 import type { GitHubSession } from '../src/github-source.ts';

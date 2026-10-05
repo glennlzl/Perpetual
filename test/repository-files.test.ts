@@ -28,6 +28,13 @@ test('a repository file is read only when no link, no climb and no oversize is o
   assert.equal(await hasRepositoryFile(root, 'large.txt', { limit: 10 }), false);
 });
 
+test('a repository file saved with a byte order mark reads as its text', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-files-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'package.json'), '\uFEFF{"name":"web"}');
+  assert.deepEqual(JSON.parse((await readRepositoryFile(root, 'package.json'))!), { name: 'web' });
+});
+
 test('SECRET_PATH names env files, tool state, credential files and key material anywhere on a path', () => {
   for (const secret of ['.env', '.env.local', 'config/.env.production', '.git/config', '.ssh/id_rsa', '.aws/credentials', '.npmrc', 'ops/.netrc', 'credentials.json', 'secrets/config.ts', 'keys/signing.txt', 'certs/server.pem', 'store.jks', 'a/b/private.key']) assert.match(secret, SECRET_PATH, secret);
   for (const open of ['package.json', 'src/credentials-form.tsx', 'docs/secrets-policy.md', '.github/workflows/ci.yml', 'keyboard.ts', 'monkeys.ts', 'src/app.ts']) assert.doesNotMatch(open, SECRET_PATH, open);

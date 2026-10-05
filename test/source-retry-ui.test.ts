@@ -32,7 +32,7 @@ test('Source read recovery keeps keyboard focus and the user’s draft', { timeo
         : path === '/api/github/branches' ? { branches: [{ name: 'main' }, { name: 'feature/preview' }], defaultBranch: 'main' } : connection;
       await route.fulfill({ json: reply });
     });
-    await page.goto(app.url);
+    await page.goto(app.launchUrl);
     await page.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
     if (kind === 'connection') {

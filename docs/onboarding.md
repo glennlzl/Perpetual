@@ -12,17 +12,17 @@ Throughout:
 
 ## The controller API
 
-The interface's own API, at the URL `serve` prints (`http://127.0.0.1:4317` by default). Every POST carries the header `x-perpetual-token` with the `token` from `GET /api/session`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do.
+The interface's own API, at the address of the link `serve` prints (`http://127.0.0.1:4317` by default). Every request carries the header `x-perpetual-secret` with the controller's launch secret, which you read from the clone's `.perpetual/launch-secret`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do.
 
 ## 1. Start the controller
 
-In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. Done when `GET /api/session` answers and you have the URL.
+In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. It prints a link, `http://127.0.0.1:4317/#secret=…`, that signs the person's browser in and opens the interface: whenever a step sends them to the interface, give them that link. Done when `GET /api/state` answers and you have the link.
 
 ## 2. The model key
 
 A model writes the twin config, drafts journeys and writes their code; runs use none.
 
-**Ask:** Perpetual needs an OpenRouter API key (https://openrouter.ai/keys). Open Settings at `<url>` and save the key there.
+**Ask:** Perpetual needs an OpenRouter API key (https://openrouter.ai/keys). Open `<link>`, then Settings, and save the key there.
 
 - Saved: continue.
 - Continue without a model: the twin is built from the detected config, and no journey is drafted until a key is saved.
@@ -85,10 +85,11 @@ Then:
 
 ## 6. Create Beta
 
-`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is `ready` or `failed`, reporting its `step` as it changes:
+`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is no longer `queued`, `creating` or `preparing`, reporting its `step` as it changes:
 
 - `ready`: report the `apps` with their `url` and each service's `status`. A `blocked` service lists its `missing` inputs: point them to **Services → Connect** in the stage card, as they chose in step 5.
 - `failed`: give them the `error` and the `step` it failed at.
+- `cleanup_failed`: give them the `error` and the `cleanupError`. Its processes could not be confirmed stopped, so the environment stays until it is deleted.
 
 ## 7. Hand over
 

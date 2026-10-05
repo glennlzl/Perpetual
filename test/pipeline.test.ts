@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createElement, type SetStateAction } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { defaultPipeline, applyPipelineAction, normalizedPipeline } from '../src/pipeline.ts';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import { STAGE_LIMIT, createStageDataCache, outgoingTransition, sourceProvenance, stageNodeData, statusChanges } from '../client/src/lib/pipeline-nodes.ts';
 import { useRememberedOpen } from '../client/src/lib/remembered-open.ts';
 

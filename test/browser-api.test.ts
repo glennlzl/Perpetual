@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {startServer} from '../src/server.ts';
+import {fetch,startServer} from './fixtures/controller.ts';
 
 test('browser API uses controller session and source/stage scope, keeps provider key private, and persists without Docker',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-api-')),repo=join(dataDir,'repo');await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');

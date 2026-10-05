@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash, randomUUID} from 'node:crypto';
 import {request as httpRequest} from 'node:http';
-import {startServer} from '../src/server.ts';
+import {fetch, startServer} from './fixtures/controller.ts';
 import type {ManagedRuntime} from '../src/environments/manager.ts';
 import {createEnvironmentRuntime} from '../src/environments/runtime.ts';
 import {createTwinRuntime} from '../src/twin/runtime.ts';
@@ -14,7 +14,7 @@ import {createTwinRuntime} from '../src/twin/runtime.ts';
 type Plan = {services: Record<string, Record<string, unknown>>; apps: Record<string, {directory: string; start: string; port: number; env: Record<string, string>}>; fixtures: unknown[]};
 // The fields these routes answer with.
 type Body = {token: string; error?: string; logs?: string; environment: Record<string, unknown>; plan: Plan; environments: Record<string, unknown>[]; pipeline: {stages: {id: string; name: string}[]};
-  scan: {repo: {path: string}}; capabilities: object; generated?: boolean};
+  scan: {repo: {path: string}}; generated?: boolean};
 const plan = (): Plan => ({services: {mailpit: {}}, apps: {web: {directory: '.', start: 'node app.mjs', port: 3000, env: {MODE: 'test'}}}, fixtures: []});
 const legacyPlan = () => ({version: 1, services: [{id: 'web', name: 'Fixture app', directory: '.', installCommand: '', startCommand: 'node app.mjs', port: 3000, readyPath: '/health', env: {MODE: 'test'}}]});
 // Detected from each fixture repository's Express package and its dev script.
@@ -209,7 +209,7 @@ test('saved plans survive controller restart and the environment view exposes on
   assert.deepEqual((await f.view(f.beta)).body, before);
   const state = (await f.request('/api/state')).body;
   assert.equal(state.scan.repo.path, f.repos[0]);
-  assert.equal(Object.hasOwn(state.capabilities, 'localSandbox'), false, 'Environments are Compose twins, not a Cua sandbox.');
+  assert.equal(Object.hasOwn(state, 'capabilities'), false, 'Environments are Compose twins, not a Cua sandbox: the state claims no sandbox capability.');
 });
 
 test('invalid plans and environment requests are rejected before any environment work', async t => {

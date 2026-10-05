@@ -1,10 +1,51 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { request } from 'node:http';
-import { startServer, type Controller } from '../src/server.ts';
+import { Agent, request } from 'node:http';
+import type { Controller, ServerOptions } from '../src/server.ts';
+import { fetch, sessionHeaders, startServer } from './fixtures/controller.ts';
+import { DISCOVERY_VERSION } from '../src/scanner.ts';
+import type { GitHubSession } from '../src/github-source.ts';
+
+const SIGNED_IN = (login: string): GitHubSession => ({ available: true, authenticated: true, account: { login, name: null } });
+const NO_SIGN_IN = { isPending: () => false, dispose() {}, start(): never { throw new Error('unused'); }, status(): never { throw new Error('unused'); }, cancel(): never { throw new Error('unused'); } };
+
+/**
+ * A controller over a scanned acme/app checkout with a Beta stage; with `managed`, a managed source chosen by that account
+ * and no connection record. GitHub is the seams given, signed in as `developer` by default, so no gh runs.
+ */
+async function scanned(t: TestContext, { github = {}, managed, state = {} }: { github?: ServerOptions['github']; managed?: string; state?: Record<string, unknown> } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-scanned-')), dataDir = join(dir, 'data'), sha = 'a'.repeat(40);
+  await mkdir(dataDir);
+  const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha, branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
+  const stages = [['source', 'Source'], ['build', 'Build'], ['beta', 'Beta'], ['production', 'Production']].map(([id, name]) => ({ id, name, kind: id === 'beta' ? 'sandbox' : id, collapsed: false }));
+  const source = managed ? { source: { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha, connectedAccount: managed, savedAt: '2026-09-23T10:00:00.000Z' } } : {};
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [managed ? 'github:acme/app:/' : dir]: { repoPath: dir, stages } }, ...source, ...state } }));
+  const app = await startServer({ port: 0, repo: dir, dataDir, github: {
+    auth: NO_SIGN_IN, runs: { session: async () => SIGNED_IN('developer'), read: async input => ({ repository: String(input.repository), sha: String(input.sha), runs: [] }) },
+    head: async () => ({ status: 304 }), build: async () => ({ status: 'waiting', reason: 'No completed build.' }), status: async () => {}, ...github,
+  } });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${app.url}/api/session`)).json();
+  return { dir, dataDir, app, token };
+}
+
+/** A POST whose headers and first half of its body are sent now, and the rest when `finish` is called. */
+function halfSent(url: string, token: string, path: string, input: unknown) {
+  const body = Buffer.from(JSON.stringify(input)), half = body.length >> 1;
+  const reply = Promise.withResolvers<{ status: number; body: unknown }>();
+  const req = request(url + path, { method: 'POST', agent: false, headers: { ...sessionHeaders(url), 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Perpetual-Token': token } }, res => {
+    const chunks: Buffer[] = [];
+    res.on('data', chunk => chunks.push(chunk));
+    res.on('end', () => reply.resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+  });
+  // A connection cut off before `finish` is its answer, read when `finish` is.
+  req.on('error', reply.reject); reply.promise.catch(() => {});
+  req.write(body.subarray(0, half));
+  return { finish() { req.end(body.subarray(half)); return reply.promise; }, destroy() { req.destroy(); } };
+}
 
 test('controller state refuses a linked snapshot and releases ownership after refusing it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-linked-state-')), dataDir = join(dir, 'data');
@@ -21,6 +62,18 @@ test('controller state refuses a linked snapshot and releases ownership after re
   assert.equal((await fetch(app.url + '/api/state')).status, 200);
 });
 
+test('controller state that is not schema 1, such as a newer build\'s, is refused and preserved', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-other-schema-')), dataDir = join(dir, 'data');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dataDir);
+  for (const content of [{ schema: 2, state: { scan: null, providers: [], pipelines: { 'github:acme/app:/': { repoPath: dir, stages: [] } } } }, { scan: null, pipelines: {} }, [], 'state', 1]) {
+    const text = JSON.stringify(content);
+    await writeFile(join(dataDir, 'state.json'), text);
+    await assert.rejects(startServer({ port: 0, repo: dir, dataDir }), /Cannot load saved state/, text);
+    assert.equal(await readFile(join(dataDir, 'state.json'), 'utf8'), text);
+  }
+});
+
 test('controller state keeps an existing data directory private', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-private-state-')), dataDir = join(dir, 'data');
   let app: Controller | undefined;
@@ -28,6 +81,38 @@ test('controller state keeps an existing data directory private', async t => {
   await mkdir(dataDir); await chmod(dataDir, 0o755);
   app = await startServer({ port: 0, repo: dir, dataDir });
   assert.equal((await stat(dataDir)).mode & 0o777, 0o700);
+});
+
+test('a data directory inside a repository is ignored by it, and a person\'s own ignore file is kept', async t => {
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-ignored-data-')), dataDir = join(dir, '.perpetual');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  const git = (...args: string[]) => promisify(execFile)('git', ['-C', dir, ...args]);
+  await git('init', '-q');
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  await writeFile(join(dataDir, 'browser-model.json'), '{}');
+  assert.equal(await readFile(join(dataDir, '.gitignore'), 'utf8'), '*\n');
+  assert.equal((await git('status', '--porcelain', '--untracked-files=all')).stdout, '', 'Nothing in the data directory is offered to the repository.');
+  await app.close();
+  await writeFile(join(dataDir, '.gitignore'), 'state.json\n');
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal(await readFile(join(dataDir, '.gitignore'), 'utf8'), 'state.json\n');
+});
+
+test('GitHub is never read with the ambient CLI session: no provider route, and older observations are dropped', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-providers-')), dataDir = join(dir, 'data');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  await mkdir(dataDir);
+  const providers = [{ provider: 'GitHub', status: 'connected', detail: 'acme/app', runs: [] }];
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan: null, providers, pipelines: {}, githubConnection: null } }));
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal('providers' in await (await fetch(app.url + '/api/state')).json(), false);
+  assert.equal((await fetch(app.url + '/api/providers')).status, 404);
+  const { token } = await (await fetch(app.url + '/api/session')).json();
+  assert.equal((await fetch(app.url + '/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify({ path: dir }) })).status, 200);
+  assert.equal('providers' in JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf8')).state, false, 'The next save omits them.');
 });
 
 test('controller state refuses an oversized JSON snapshot without overwriting it', async t => {
@@ -185,4 +270,161 @@ test('configuration edit links need the branch on GitHub, and the original check
   await git('checkout','-q','--detach');
   assert.deepEqual((await (await fetch(`${app.url}/api/github/connection`)).json()).localCheckout,{path:repo,branch:null});
   assert.equal((await git('rev-parse','HEAD')).stdout,head,'Reading the original checkout never moves it');
+});
+
+test('closing the controller ends a polling page\'s connection with 503, so shutdown finishes', async t => {
+  const asked = Promise.withResolvers<void>(), answer = Promise.withResolvers<void>();
+  const f = await scanned(t, { github: { runs: {
+    async session() { asked.resolve(); await answer.promise; return SIGNED_IN('developer'); },
+    async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; },
+  } } });
+  // One kept-alive connection, as a polling page holds one.
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => agent.destroy());
+  const get = (path: string) => new Promise<{ status: number; connection?: string }>((resolve, reject) => {
+    const req = request(f.app.url + path, { agent, headers: sessionHeaders(f.app.url) }, res => { res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection })); });
+    req.on('error', reject); req.end();
+  });
+  const inFlight = get(`/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`);
+  await asked.promise;
+  let closed = false;
+  const closing = f.app.close().then(() => { closed = true; });
+  answer.resolve();
+  assert.equal((await inFlight).status, 200, 'A request in flight at shutdown still gets its reply.');
+  const polls: { status: number; connection?: string }[] = [];
+  for (const deadline = Date.now() + 10_000; !closed && Date.now() < deadline;) {
+    // A refused connection is the controller gone.
+    polls.push(await get('/api/state').catch(() => ({ status: 0 })));
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  assert.equal(closed, true, `Shutdown finished while the page polled: ${JSON.stringify(polls)}`);
+  await closing;
+  for (const poll of polls) assert.ok(poll.status === 0 || poll.status === 503 && poll.connection === 'close', JSON.stringify(poll));
+});
+
+test('a managed source chosen through the reused CLI session stays with the account that chose it', async t => {
+  let login = 'alice';
+  // No connection record: the session was reused, and the source was chosen as alice.
+  const f = await scanned(t, { managed: 'alice', github: { runs: { session: async () => SIGNED_IN(login), async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } } } });
+  const runs = async () => { const response = await fetch(`${f.app.url}/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`); return { status: response.status, body: await response.json() }; };
+  assert.deepEqual(await runs(), { status: 200, body: { repository: 'acme/app', sha: 'a'.repeat(40), runs: [] } });
+  login = 'bob';
+  assert.deepEqual(await runs(), { status: 400, body: { error: 'Connect your GitHub account to read workflow runs.' } }, 'Another CLI account is not the connected one.');
+});
+
+test('every change needs the session token, whatever its method', async t => {
+  const f = await scanned(t, { managed: 'developer', state: { githubConnection: { login: 'developer', connectedAt: '2026-09-23T09:00:00.000Z' } } });
+  const mode = async () => (await (await fetch(`${f.app.url}/api/autopilot?${new URLSearchParams({ repoPath: f.dir })}`)).json()).stages.build.mode;
+  const before = await mode(), saved = await readFile(join(f.dataDir, 'state.json'), 'utf8');
+  const body = JSON.stringify({ repoPath: f.dir, stageId: 'build', mode: before === 'merge' ? 'ask' : 'merge', runId: '1', id: 'x', action: 'add-stage', name: 'Gamma', path: f.dir, service: 'stripe', inputs: {} });
+  for (const path of ['/api/autopilot/mode', '/api/autopilot/repair', '/api/autopilot/stop', '/api/pipeline/action', '/api/scan', '/api/twin/inputs', '/api/gate/run', '/api/releases/deploy', '/api/environments/create', '/api/browser/config', '/api/github/disconnect']) {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      for (const token of [undefined, 'wrong-token']) {
+        const response = await fetch(f.app.url + path, { method, headers: { 'Content-Type': 'application/json', ...token ? { 'X-Perpetual-Token': token } : {} }, body });
+        assert.equal(response.status, 403, `${method} ${path}${token ? ' with a wrong token' : ''}`);
+      }
+    }
+  }
+  assert.equal(await mode(), before);
+  assert.equal(await readFile(join(f.dataDir, 'state.json'), 'utf8'), saved);
+  assert.equal((await fetch(f.app.url + '/api/autopilot/mode', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': f.token }, body })).status, 404, 'Autopilot takes its changes as POST.');
+});
+
+test('the controller answers its own page and a person\'s visit, never another site on this host', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-same-origin-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  // A twin's app on another loopback port is the same site as the controller, but not the same origin.
+  for (const [site, status] of [['same-origin', 200], ['none', 200], ['same-site', 403], ['cross-site', 403]] as const) {
+    assert.equal((await fetch(app.url + '/api/state', { headers: { 'Sec-Fetch-Site': site } })).status, status, site);
+  }
+});
+
+test('a body over its limit is refused without stalling the next request on its connection', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-large-body-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(async () => { agent.destroy(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(app.url + '/api/session')).json();
+  const send = (method: string, path: string, body?: string) => new Promise<{ status: number; connection?: string; reused: boolean; ms: number }>((resolve, reject) => {
+    const started = Date.now();
+    const req = request(app.url + path, { agent, method, headers: { ...sessionHeaders(app.url), ...body ? { 'Content-Type': 'application/json', 'X-Perpetual-Token': token } : {} } }, res => {
+      res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection, reused: req.reusedSocket, ms: Date.now() - started }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+  // A body read to its end, over its limit or not JSON, is refused on a connection the next request reuses at once.
+  for (const body of [JSON.stringify({ name: 'x'.repeat(2 * 1024 * 1024) }), '{"name":']) {
+    const refused = await send('POST', '/api/pipeline/action', body);
+    assert.deepEqual([refused.status, refused.connection], [400, 'keep-alive']);
+    const next = await send('GET', '/api/state');
+    assert.deepEqual([next.status, next.reused], [200, true]);
+    assert.ok(next.ms < 3000, `The next request waited ${next.ms} ms.`);
+  }
+  // A body far past its limit is cut off: its client may see the refusal or the closed connection, and the next request
+  // goes through at once.
+  const cut = await send('POST', '/api/pipeline/action', JSON.stringify({ name: 'x'.repeat(20 * 1024 * 1024) })).catch(() => null);
+  if (cut) assert.deepEqual([cut.status, cut.connection], [400, 'close']);
+  const after = await send('GET', '/api/state');
+  assert.equal(after.status, 200);
+  assert.ok(after.ms < 3000, `The request after it waited ${after.ms} ms.`);
+});
+
+test('a change whose body finishes arriving after a source change began is refused, and saves nothing', async t => {
+  const f = await scanned(t);
+  const names = async () => (await (await fetch(`${f.app.url}/api/pipeline`)).json()).pipeline.stages.map((stage: { name: string }) => stage.name);
+  const before = await names();
+  const edit = halfSent(f.app.url, f.token, '/api/pipeline/action', { repoPath: f.dir, action: 'add-stage', name: 'Gamma' });
+  await fetch(`${f.app.url}/api/state`);
+  // A rescan holds the source while its own body arrives.
+  const rescan = halfSent(f.app.url, f.token, '/api/scan', { path: f.dir });
+  try {
+    const held = () => fetch(`${f.app.url}/api/github-actions?${new URLSearchParams({ repoPath: f.dir })}`).then(response => response.status === 409);
+    for (const deadline = Date.now() + 10_000; !await held();) {
+      assert.ok(Date.now() < deadline, 'The rescan never held the source.');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(await edit.finish(), { status: 409, body: { error: 'A source change is still being saved. Please wait.' } });
+    assert.equal((await rescan.finish()).status, 200);
+    assert.deepEqual(await names(), before);
+  } finally { edit.destroy(); rescan.destroy(); }
+});
+
+test('closing the controller cuts off a request whose body never finishes arriving', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-unfinished-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  const { token } = await (await fetch(app.url + '/api/session')).json();
+  const stuck = halfSent(app.url, token, '/api/pipeline/action', { repoPath: dir, action: 'add-stage', name: 'Gamma' });
+  t.after(async () => { stuck.destroy(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  await fetch(app.url + '/api/state');
+  let closed = false;
+  const closing = app.close().then(() => { closed = true; });
+  for (const deadline = Date.now() + 10_000; !closed && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(closed, true, 'Shutdown finished without the rest of the body.');
+  await closing;
+  await assert.rejects(stuck.finish(), 'The request was cut off.');
+});
+
+test('the connected account is read again when the source moves during its session check', async t => {
+  let move: (() => Promise<unknown>) | undefined;
+  const f = await scanned(t, { github: {
+    runs: { async session() { const moving = move; move = undefined; await moving?.(); return SIGNED_IN('developer'); }, read: async input => ({ repository: String(input.repository), sha: String(input.sha), runs: [] }) },
+    failure: async ({ repository, runId }) => ({ runId: String(runId), jobs: [], log: '', tail: String(repository), diagnosis: { method: 'rule-based', category: 'unknown', summary: '' }, observedAt: '2026-09-23T10:00:00.000Z' }),
+  } });
+  // A rescan of the same GitHub checkout replaces the scan while the account is being checked, as a gate moving the
+  // managed copy does.
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  for (const args of [['init', '-q'], ['remote', 'add', 'origin', 'https://github.com/acme/app.git']]) await promisify(execFile)('git', ['-C', f.dir, ...args]);
+  move = () => fetch(`${f.app.url}/api/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': f.token }, body: JSON.stringify({ path: f.dir }) });
+  const response = await fetch(`${f.app.url}/api/providers/github/runs/123/failure`);
+  assert.deepEqual([response.status, (await response.json()).tail], [200, 'acme/app']);
+  assert.equal(move, undefined, 'The source moved during the first check.');
+});
+
+test('the state reply claims no model or browser readiness, which only the settings and browser views know', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-state-reply-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  // It once read the model from environment variables alone, so a key saved in Settings read as missing.
+  assert.equal('capabilities' in await (await fetch(app.url + '/api/state')).json(), false);
 });

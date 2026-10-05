@@ -15,20 +15,30 @@ export async function privateDirectory(path: string, message: string, { resolveA
   return root;
 }
 
-/** The parsed JSON of a state file, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
-export async function readStateFile(file: string, { limit, invalid }: { limit: number; invalid: string }): Promise<unknown> {
+/** The text of a file the controller keeps, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
+export async function readPrivateFile(file: string, { limit, invalid }: { limit: number; invalid: string }): Promise<string | undefined> {
   let stat;
   try { stat = await lstat(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > limit) throw new Error(invalid);
-  // The controller's own file; the caller decides whether what it holds is state it can load.
-  return JSON.parse(await readFile(file, 'utf8')) as unknown;
+  return await readFile(file, 'utf8');
 }
 
-/** Writes `content` to `file` (mode 0600) through a private temporary file beside it and one rename, so a reader sees the old file or the new one. */
-export async function writeStateFile(file: string, content: string, { prefix = '.state-', removeTemporary = false } = {}) {
+/** The parsed JSON of a state file, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
+export async function readStateFile(file: string, options: { limit: number; invalid: string }): Promise<unknown> {
+  const text = await readPrivateFile(file, options);
+  // The controller's own file; the caller decides whether what it holds is state it can load.
+  return text === undefined ? undefined : JSON.parse(text) as unknown;
+}
+
+/**
+ * Writes `content` to `file` (mode 0600) through a private temporary file beside it and one rename, so a reader sees the
+ * old file or the new one. A failed save removes its temporary file, so failures never pile files up, unless a caller
+ * keeps it with `removeTemporary: false`; the save's own error is the one reported.
+ */
+export async function writeStateFile(file: string, content: string, { prefix = '.state-', removeTemporary = true } = {}) {
   const temporary = join(dirname(file), `${prefix}${randomUUID()}.tmp`);
   try { await writeFile(temporary, content, { mode: 0o600 }); await rename(temporary, file); }
-  finally { if (removeTemporary) await rm(temporary, { force: true }); }
+  catch (error) { if (removeTemporary) await rm(temporary, { force: true }).catch(() => {}); throw error; }
 }
 
 /** One save at a time, in order; a rejected save never blocks the next, and `idle()` settles once every queued save has. */

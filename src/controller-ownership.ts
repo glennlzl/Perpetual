@@ -20,13 +20,15 @@ export async function acquireControllerOwnership(dataDir: string): Promise<() =>
     // Each filename is immutable and unique: stale cleanup never unlinks a
     // replacement owner's record, unlike reclaiming a shared fixed lock file.
     for(const entry of await readdir(directory)){
-      if(entry===name)continue;
+      // A hidden file, such as the one a file manager leaves in a folder it shows, is no record.
+      if(entry===name||entry.startsWith('.'))continue;
       const match=/^([1-9]\d*)-[a-f0-9-]{36}\.lock$/.exec(entry);
       if(!match)throw new Error('Unrecognized controller ownership record; preserve the data directory.');
       const pid=Number(match[1]);let alive=true;
       if(!Number.isSafeInteger(pid)||pid>2147483647)throw new Error('Invalid controller ownership record; preserve the data directory.');
       try{process.kill(pid,0);}catch(error){const code=(error as NodeJS.ErrnoException).code;if(code==='ESRCH')alive=false;else if(code!=='EPERM')throw error;}
-      if(alive)throw Object.assign(new Error('Another local controller is already using this data directory. Close it or choose a different --data directory.'),{code:'CONTROLLER_ALREADY_RUNNING'});
+      // A process with the recorded id may not be a controller at all, after a crash and a reboot: say how to recover.
+      if(alive)throw Object.assign(new Error(`Another local controller (process ${pid}) is already using this data directory. Close it or choose a different --data directory; if no controller is running, remove ${join(directory,entry)}.`),{code:'CONTROLLER_ALREADY_RUNNING'});
       await rm(join(directory,entry),{force:true});
     }
     return release;
