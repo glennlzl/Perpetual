@@ -13,7 +13,7 @@ import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
-import {controlBlockerText} from '../journeys/playwright/control.ts';
+import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createJourneyCode,restoreJourneyCode,replaceJourneyCases} from './journey-code.ts';
 import type {GenerationFailure,JourneyCodeState,JourneyCodeSnapshot,Verification,VerificationIdentity,RunnableCode} from './journey-code.ts';
@@ -252,6 +252,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   for(const run of state.runs)for(const result of run.results||[]){
     const facts:unknown=result;
     if(!isRecord(facts)||facts.controlBlocker!==undefined&&(facts.controlRead!==false||!controlBlockerText(facts.controlBlocker)))throw new Error('Invalid stored control limitation.');
+    if(facts.controlReadReason!==undefined&&(facts.controlRead!==false||!controlReadReasonText(facts.controlReadReason)))throw new Error('Invalid stored control read diagnosis.');
   }
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.

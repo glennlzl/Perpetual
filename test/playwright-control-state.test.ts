@@ -8,10 +8,10 @@ import type { EvaluatedCheck } from '../src/journeys/playwright/checks.ts';
 // Network ordering around a judged document, independent of browser timing. Real browser/controller
 // persistence and POST interference cases live in playwright-control-read.test.ts.
 function setup() {
-  const page = () => { const events = new EventEmitter(), frame = { parentFrame: () => null, url: () => 'http://app.test/' }; return Object.assign(events, { mainFrame: () => frame, url: frame.url, isClosed: () => false }) as unknown as Page & EventEmitter; };
+  const page = () => { let url = 'http://app.test/'; const events = new EventEmitter(), frame = { parentFrame: () => null, url: () => url }; return Object.assign(events, { mainFrame: () => frame, url: frame.url, isClosed: () => false, setUrl(value: string) { url = value; } }) as unknown as Page & EventEmitter & { setUrl(value: string): void }; };
   const first = page(), second = page(), context = Object.assign(new EventEmitter(), { pages: () => [first, second] });
   const reads = controlReads(context as unknown as BrowserContext);
-  function request(target = first, method = 'GET') { return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => target.url() } as unknown as Request; }
+  function request(target = first, method = 'GET') { const url = target.url(); return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => url } as unknown as Request; }
   function fresh(target = first, status = 200) {
     const req = request(target); context.emit('request', req);
     context.emit('response', { request: () => req, ok: () => status === 200, status: () => status });
@@ -91,6 +91,7 @@ test('a delayed blocked response does not invalidate the fresh document after th
   f.fresh();
   f.context.emit('requestfailed', write);
   assert.equal(f.reads.eligible(f.first, f.failed), false, 'A failed transport remains inconclusive, even for a blocked request.');
+  assert.equal(f.reads.observation(f.first).reason(f.failed)(), 'blocked-request-failed', 'An aborted blocked write is distinguished from an application read failure.');
 });
 
 test('a later blocked request invalidates the fresh document even when its response is ignored', () => {
@@ -101,4 +102,27 @@ test('a later blocked request invalidates the fresh document even when its respo
   f.context.emit('request', write); f.reads.blockedRequest(write);
   f.context.emit('response', { request: () => write, ok: () => false, status: () => 503 });
   assert.equal(witness(), false);
+});
+
+test('a canonicalized address explains rejection without qualifying the changed document', () => {
+  const f = setup(); f.reads.blocked(f.first); f.fresh();
+  f.first.setUrl('http://app.test/saved-name/');
+  const observed = f.reads.observation(f.first);
+  assert.equal(observed(f.failed), undefined);
+  assert.equal(observed.reason(f.failed)(), 'url-changed');
+});
+
+test('a blocked communication after readback retains its rejection reason through finalization', () => {
+  const f = setup(); f.reads.blocked(f.first); f.fresh();
+  const observed = f.reads.observation(f.first), witness = observed(f.failed);
+  assert.ok(witness); f.reads.blocked(f.first);
+  assert.equal(witness(), false);
+  assert.equal(observed.reason(f.failed)(), 'blocked-after-read');
+});
+
+test('a read arriving after the observation cannot replace its missing-read diagnosis', () => {
+  const f = setup(); f.reads.blocked(f.first);
+  const observed = f.reads.observation(f.first);
+  f.fresh(); assert.equal(observed(f.failed), undefined);
+  assert.equal(observed.reason(f.failed)(), 'no-fresh-document');
 });

@@ -84,6 +84,10 @@ test('restart refuses malformed stored control limitations before publishing run
     const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
     await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control limitation/);
   }
+  for(const fields of [{controlRead:false,controlReadReason:{}},{controlRead:false,controlReadReason:'private page text'},{controlRead:true,controlReadReason:'url-changed'},{controlReadReason:'url-changed'}]){
+    const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control read diagnosis/);
+  }
   await writeFile(file,JSON.stringify(saved));
   const restored=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restored.close());
   assert.deepEqual((await restored.runProgress(f.context,run.id)).results,report.results,'Legacy evidence without a limitation stays unchanged.');

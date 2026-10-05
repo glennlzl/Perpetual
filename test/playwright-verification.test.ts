@@ -150,6 +150,21 @@ test('a failed control milestone preserves its shared-worker limitation through 
   assert.equal(f.workers.length,4,'Restart starts no paid work or browser retry.');
 });
 
+test('an ineligible control read keeps its fixed diagnosis and failed approval across restart',async t=>{
+  const f=await setup(t);
+  await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
+  for(let attempt=1;attempt<=3;attempt++)(await f.worker(attempt)).finish(passing);
+  (await f.worker(4)).finish([...unkept.slice(0,-1),{type:'result',result:{caseId:journey.id,stopCause:'none',controlRead:false,controlReadReason:'url-changed',assertions:[]}}]);
+  const verification=await f.settled();
+  assert.equal(verification.status,'failed');assert.equal(verification.control,'missed');
+  assert.match(verification.error||'',/address changed/);
+  const control=(await f.manager.view(f.context)).runs.find(run=>run.verification?.control)!;
+  assert.equal(control.results![0].controlReadReason,'url-changed');
+  await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409});
+  await f.restart();assert.deepEqual(await f.verification(),verification);
+  assert.equal(f.workers.length,4);
+});
+
 test('stopping a verification cancels its attempt, and a restart ends an unfinished one as cancelled',async t=>{
   const f=await setup(t);
   await assert.rejects(f.manager.cancelSpecVerification(f.context,{caseId:journey.id}),{statusCode:404});

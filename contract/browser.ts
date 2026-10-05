@@ -36,7 +36,8 @@ export interface Blocker { stepId?: string; kind: BlockerKind; evidence: string 
 export type AssertionResult = FinalAssertion & { passed: boolean; resolved?: string; reached?: false };
 export type JourneyVerdict = 'passed' | 'failed' | 'blocked' | 'needs_review';
 export type ControlBlocker = 'shared-worker' | 'unguarded-transport';
-export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
+export type ControlReadReason = 'page-unavailable' | 'no-blocked-change' | 'no-fresh-document' | 'blocked-after-read' | 'blocked-request-failed' | 'read-failed' | 'read-incomplete' | 'document-not-committed' | 'document-replaced' | 'url-changed' | 'check-unreadable' | 'baseline-not-before-change' | 'check-not-run-owned';
+export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
 export type RunStatus = JourneyVerdict | 'cancelled' | 'completed';
 export type ConcurrencyLimit = 'account' | 'shared-data' | null;
 export type MilestoneCheckResult = MilestoneCheck & { passed: boolean; observed?: number; resolved?: string; error?: string; provenance?: 'independent' };
