@@ -7,7 +7,7 @@ import { chromium, expect as playwrightExpect, type Request } from '@playwright/
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
-import type { BuildReply } from '../contract/github.ts';
+import type { BuildReply, CommitDeployments, DeploymentRecord } from '../contract/github.ts';
 import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
@@ -26,6 +26,8 @@ const pipelineState = (pipeline: Pipeline, extra: Record<string, unknown> = {}) 
   pipeline, environments: [], browserTests: {}, stageRemovals: [], ...extra,
 });
 const release: ReleaseReply = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, recent: [] };
+// The Build row of a repository with workflows, which GitHub's Build and recorded deployments are read for.
+const actions = { id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' };
 
 // The actual App on Vite, with its own polls. Only HTTP replies are fixtures; a handler answers first.
 async function openApp(t: TestContext, handle: Handler) {
@@ -79,6 +81,28 @@ test('pausing a transition names the transition and leaves the stage status in i
   await dialog.getByRole('button', { name: 'Resume transition', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Pause transition from Beta to Production', exact: true })).toBeVisible();
   assert.equal(pipeline.transitions.find(edge => edge.target === 'production')?.blocked, false);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a deployment GitHub records for the commit joins Production without connecting its Badge', { timeout: 60000 }, async t => {
+  const recorded: DeploymentRecord = { id: '11', environment: 'Production – app', provider: 'Vercel', creator: 'vercel[bot]', production: true, transient: false, ref: sha, task: 'deploy',
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', state: 'success', stateAt: '2026-01-01T00:00:00Z', url: 'https://app.example.test', logUrl: null };
+  let production: unknown[] = [];
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [actions], production } } } };
+    if (path === '/api/github/deployments') return { json: { repository: 'acme/app', sha, deployments: production.length ? [] : [recorded] } satisfies CommitDeployments };
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+  });
+  await open();
+  const card = page.getByRole('group', { name: 'Production', exact: true });
+  await expect(card.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Not connected', exact: true })).toBeVisible();
+  // A target the repository names connects Production, with no deployment recorded for the commit.
+  production = [{ id: 'deployment-provider:railway', kind: 'deployment-group', provider: 'Railway', label: 'Railway', deployments: [{ id: 'railway:api', kind: 'deployment', provider: 'Railway', label: '@acme/api deployment' }] }];
+  await page.reload();
+  await expect(card.getByRole('button', { name: 'Railway projects', exact: true })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Unverified', exact: true })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Vercel projects', exact: true })).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });
 

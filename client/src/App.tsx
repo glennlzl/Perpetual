@@ -199,7 +199,7 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
 // deployment's reported result from the journey gate's readiness for a commit.
 // null is a status not known yet, which shows no Badge. A paused transition only
 // describes the pipeline, so its arrow says so and the stage keeps its own status.
-function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
+function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, revision, discovered, gate, gated, releases }: Pick<StageData, 'environment'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'discovered' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (stage.kind === 'source') return revision ? { kind: 'ready', text: origin === 'github' ? 'GitHub' : 'Local', sha: revision } : { kind: 'unconfigured', text: 'No commit' };
   // Ready is a gate verdict; a requested deployment reports its own state at its exact commit.
   if (stage.kind === 'production') {
@@ -207,7 +207,8 @@ function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, r
     if (release) return { kind: release.tone, text: release.label, sha: release.sha, hint: release.hint };
     const ready = productionStatus(gate && !isStageGate(gate) ? gate : null);
     if (ready) return { ...ready, hint: 'Every Sandbox gate passed or released this commit.' };
-    if (!services.length) return { kind: 'unconfigured', text: 'Not connected', hint: 'No deployment target found in the repository or in its GitHub deployments.' };
+    // Only the repository's own targets connect Production: a deployment GitHub records joins its rows, never its Badge.
+    if (!discovered) return { kind: 'unconfigured', text: 'Not connected', hint: 'No deployment target found in the repository.' };
     return { kind: 'idle', text: 'Unverified', hint: gated ? 'No commit has passed every Sandbox gate yet.' : 'No Sandbox stage gates commits before Production. Add Beta with the + after Build.' };
   }
   if (stage.kind === 'sandbox' && environment?.status === 'failed' && environment.step === 'Stopped') return { kind: 'idle', text: 'Stopped' };
@@ -269,7 +270,7 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
   const { stage, services, repoPath, scannedAt, sha, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
-  const status = stageStatus(stage, { environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
+  const status = stageStatus(stage, { environment, buildStatus, origin, revision, discovered: data.discovered, gate, gated, releases: data.releases });
   const sandbox = stage.kind === 'sandbox';
   // The changes Autopilot records for the stage; one under way lights the card's beam.
   const changes = autopilot?.changes || [];

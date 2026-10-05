@@ -76,8 +76,9 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
     arrival: arrivals[stage.id] || '', beat: stage.kind === 'sandbox' ? healthBeat(environment) : '',
     gate: stage.kind === 'sandbox' ? gates?.stages?.[stage.id] || null : stage.kind === 'production' ? gates?.production || null : null,
     ...(stage.kind === 'source' ? sourceProvenance(scan, source) : {}),
-    // Whether a Sandbox stage gates commits before Production; its badge says so when none does.
-    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), releases, releaseReadError } : {}),
+    // Whether a Sandbox stage gates commits before Production, and whether the repository names a deployment target, which
+    // the recorded deployments joining its rows never do; its badge says so when either is missing.
+    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), discovered: stageServices(scan, stage).length > 0, releases, releaseReadError } : {}),
     // Source is the repository connection; the other stages carry their Autopilot.
     ...(stage.kind !== 'source' ? { autopilot: autopilot?.stages?.[stage.id] || null } : {}),
     ...(stage.kind === 'build' ? { build, buildStatus, github, buildReadError } : {}),

@@ -161,6 +161,20 @@ test('stage data carries Source provenance as primitives and no rollback entry',
   assert.equal(stageNodeData(production, { scan: localScan(), pipeline }).origin, undefined);
 });
 
+test('Production finds its deployment targets in the scan alone, never in the deployments GitHub records', () => {
+  type Row = { id: string; kind?: string; provider?: string; label?: string; deployments?: Row[] };
+  const pipeline = defaultPipeline('/work/storefront'), [, build, production] = pipeline.stages;
+  const record: Row = { id: 'deployment-provider:vercel', kind: 'deployment-group', provider: 'Vercel', label: 'Vercel', deployments: [{ id: 'github-deployment:11', kind: 'github-deployment', provider: 'Vercel', label: 'Production' }] };
+  const target: Row = { id: 'railway:api', kind: 'deployment', provider: 'Railway', label: '@acme/api deployment' };
+  const scan = (rows: Row[]) => ({ repo: { path: '/work/storefront', sha: SHA }, delivery: { source: [], build: [], production: rows } });
+  const recorded = stageNodeData<unknown, Row>(production, { scan: scan([]), pipeline, production: [record] });
+  assert.deepEqual(recorded.services, [record], 'The recorded deployment joins Production\'s rows.');
+  assert.equal(recorded.discovered, false, 'A deployment GitHub records is no deployment target of the repository.');
+  assert.equal(stageNodeData<unknown, Row>(production, { scan: scan([target]), pipeline }).discovered, true);
+  assert.equal(stageNodeData<unknown, Row>(production, { scan: scan([target]), pipeline, production: [target, record] }).discovered, true);
+  assert.equal('discovered' in stageNodeData<unknown, Row>(build, { scan: scan([target]), pipeline }), false, 'Only Production carries it.');
+});
+
 test('each stage carries its outgoing transition as primitives for controls rendered after it', () => {
   let pipeline = applyPipelineAction(defaultPipeline('/work/storefront'), { action: 'add-stage', afterStageId: 'build', name: 'Beta' });
   const beta = pipeline.stages[2].id;
