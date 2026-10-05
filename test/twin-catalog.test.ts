@@ -24,6 +24,8 @@ test('The service catalog lists every registered service with its options, varia
   const stripe = entries.find(entry => entry.startsWith('`stripe`:'))!;
   assert.match(stripe, /Inputs created on request or supplied once by the user/);
   assert.match(stripe, /Perpetual can create its inputs when the user asks\./);
+  // An author never relies on a part of Trigger.dev the shared instance does not run.
+  assert.match(entries.find(entry => entry.startsWith('`trigger-dev`:'))!, /runs no Electric or object store: Realtime run subscriptions/);
 });
 
 test('A catalog comes from whichever registry it is given, described or not', () => {

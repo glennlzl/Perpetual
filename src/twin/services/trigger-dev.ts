@@ -12,7 +12,8 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 
 // Official local Trigger.dev: one self-hosted webapp stack per machine (Compose project `perpetual-trigger`),
 // one Trigger project per twin, and a per-twin `trigger dev` worker that runs the repository's tasks.
-// Deploy-only parts of the official stack (registry, supervisor, Docker socket proxy) are left out.
+// Deploy-only parts of the official stack (registry, supervisor, Docker socket proxy) are left out, and so are Electric,
+// which serves Realtime run subscriptions, and the object store for large payloads, as the catalog says.
 export const VERSION = '4.6.4';
 export const PROJECT = 'perpetual-trigger';
 export const BOT_EMAIL = 'trigger@perpetual.localhost'; // the only address the instance accepts
@@ -233,6 +234,7 @@ export default {
       env: 'The worker\'s own variables, which its tasks read, as an app\'s env.',
     },
     provides: ['TRIGGER_API_URL', 'TRIGGER_SECRET_KEY'],
+    notes: ['The instance runs no Electric or object store: Realtime run subscriptions, such as useRealtimeRun or runs.subscribeToRun, and payloads large enough to be offloaded do not work.'],
   },
   validate: options => {
     cliVersion(options);
