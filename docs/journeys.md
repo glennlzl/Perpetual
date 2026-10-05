@@ -34,7 +34,7 @@ export PERPETUAL_MODEL_BASE_URL='https://openrouter.ai/api/v1'  # optional
 node src/cli.ts serve --repo /absolute/path/to/your/repo
 ```
 
-`PERPETUAL_MODEL_API_KEY` with `PERPETUAL_MODEL` and `PERPETUAL_MODEL_BASE_URL` selects another OpenAI-compatible endpoint for discovery. Saved settings take precedence over the environment. They are stored in the controller's data directory with mode 0600, and no response returns the key.
+`PERPETUAL_MODEL_API_KEY` with `PERPETUAL_MODEL` and `PERPETUAL_MODEL_BASE_URL` selects another OpenAI-compatible endpoint for discovery. Saved settings take precedence over the environment. They are stored in the controller's data directory with mode 0600, and no response returns the key. Settings saves a key only when one is entered: an exported key stays in the environment, so rotating it takes effect, and settings saved without a key use it only with the endpoint it is exported for.
 
 The model receives the task, bounded source excerpts, requirements and observed page content. Drafting a journey from a description, dictation and code generation need an OpenRouter key and model in Settings, and use OpenRouter credits. Writing code needs a more capable model than exploring; a small model can fail to write valid code.
 

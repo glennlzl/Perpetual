@@ -31,6 +31,18 @@ export type BrowserRuntime={capabilities():Promise<BrowserCapabilities>;start(in
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 // An error's message, or anything else thrown as it is.
 const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&'message' in error?error.message:undefined;
+// Fields of a run's events that a consumer matches exactly against its reviewed case or a fixed vocabulary: milestone
+// checks, result assertions and blockers, case actions, video files and a blocked request's method. Every other string
+// is free text, as is all of a discovery or sign-in-page event, which the model writes. A secret is hidden in free text
+// only, so one that also spells part of a key, a number, a status or a step id, as a password `test` does in
+// `create-test-workflow`, cannot turn a valid event into an invalid one.
+const IDENTIFIERS:ReadonlySet<string>=new Set(['type','status','caseId','stepId','kind','stopCause','errorCode','method','value','resolved','files']);
+const RUN_EVENTS:ReadonlySet<unknown>=new Set(['case','journey-step','result','video','blocked-request']);
+function hideText(value:unknown,conceal:(text:string)=>string,exempt?:ReadonlySet<string>,key?:string):unknown{
+  if(typeof value==='string')return key!==undefined&&exempt?.has(key)?value:conceal(value);
+  if(Array.isArray(value))return value.map(item=>hideText(item,conceal,exempt,key));
+  return isRecord(value)?Object.fromEntries(Object.entries(value).map(([name,item])=>[name,hideText(item,conceal,exempt,name)])):value;
+}
 
 const base=fileURLToPath(new URL('../../integrations/browser-use/',import.meta.url));
 export function validateBrowserTarget(value:string,{controllerOrigin}:{controllerOrigin?:string}={}):string {
@@ -39,14 +51,22 @@ export function validateBrowserTarget(value:string,{controllerOrigin}:{controlle
   if(value.length>2048||url.username||url.password||!['http:','https:'].includes(url.protocol))throw new Error('Use an application URL without embedded credentials.');
   if(url.protocol==='http:'&&!localBrowserHost(host))throw new Error('Use HTTPS for previews or localhost for a local application.');
   if(!localBrowserHost(host)&&(host.includes(':')||/^(?:0\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)||host.endsWith('.internal')||host==='metadata'))throw new Error('This address is not an application test target.');
-  if(controllerOrigin){const controller=new URL(controllerOrigin);if(url.port===controller.port)throw new Error('Choose the application URL, not the Perpetual controller.');}
+  if(controllerOrigin){
+    // Every loopback alias reaches a local controller on its port; another host is the controller only by its own name.
+    const controller=new URL(controllerOrigin),controllerHost=controller.hostname.toLowerCase().replace(/\.$/,'');
+    if(url.port===controller.port&&(localBrowserHost(host)?localBrowserHost(controllerHost):host===controllerHost))throw new Error('Choose the application URL, not the Perpetual controller.');
+  }
   url.hash='';return url.href;
 }
 
+/** The model keys to hide. One too short to be a real credential, such as a local endpoint's placeholder `x`, is left: hiding it would only rewrite ordinary text. */
+export const modelKeys=(...keys:unknown[])=>keys.filter((key):key is string=>typeof key==='string'&&key.length>=16);
+
 export function browserError(error:unknown,env:NodeJS.ProcessEnv=process.env,limit=800):string {
   let text=String(messageOf(error)||error||'Browser operation failed.');
-  text=hide([env.PERPETUAL_MODEL_API_KEY,env.OPENROUTER_API_KEY])(text);
-  return redact(text).replace(/(https?:\/\/[^\s?#]+)[?#][^\s]*/g,'$1').slice(0,limit);
+  text=hide(modelKeys(env.PERPETUAL_MODEL_API_KEY,env.OPENROUTER_API_KEY))(text);
+  // Each address is scanned once: its query and fragment are cut after it is found, never searched for from every start.
+  return redact(text).replace(/https?:\/\/\S+/g,url=>url.replace(/[?#][\s\S]*$/,'')).slice(0,limit);
 }
 
 /**
@@ -84,10 +104,10 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     }
     if(pending.length>2048){pending='';truncate();}
   });}
-  const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value));
+  const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value)),conceal=hide(hidden);
   // Error-only account values must be hidden before clipping without rewriting reviewed check evidence.
   const failure=(error:unknown)=>browserError(hide([...hidden,...errorSecrets])(String(messageOf(error)||error||'Browser operation failed.')),env);
-  let buffer='',eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
+  let buffer='',broken=false,eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
   function signal(name:NodeJS.Signals){lifecycle({name:'worker-signal',signal:name});try{if(process.platform!=='win32'&&child.pid)process.kill(-child.pid,name);else child.kill(name);}catch{}}
   function groupAlive(){if(process.platform==='win32'||!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code!=='ESRCH';}}
   function stop(message:string,reason:WorkerLifecycle['reason']='protocol'){
@@ -96,28 +116,27 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     // after up to 5 seconds finishing recordings. Give those cleanups time before killing the owned process group.
     killTimer=setTimeout(()=>{forcedAt=Date.now();if(!groupOnly){cleanupIncomplete=true;terminalError=new Error(`${terminalError?.message||'Browser operation stopped.'} Cleanup incomplete after forced termination; an owned browser or temporary profile may remain.`);}signal('SIGKILL');},cleanupGraceMs);killTimer.unref();
   }
+  // A stream that broke the protocol is drained, never buffered or parsed again: what follows may be part of what broke it.
+  function refuse(message:string){broken=true;buffer='';stop(message);}
   const promise=new Promise<void>((resolve,reject)=>{
     function done(error:unknown){if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);lifecycle({name:'worker-done',failed:Boolean(error),cleanupIncomplete,timedOut});error?reject(Object.assign(new Error(failure(error)),cleanupIncomplete?{cleanupIncomplete:true}:{},timedOut?{timedOut:true}:{})):resolve();}
     child.once('error',()=>done(new Error(unavailable)));
     child.stdout.setEncoding('utf8');
     if(onOutput){child.stderr.setEncoding('utf8');for(const stream of ['stdout','stderr'] as const)child[stream].on('data',(chunk:string)=>{try{onOutput(chunk,stream);}catch(error){stop(failure(error),'consumer');}});}
     else child.stdout.on('data',(chunk:string)=>{
-      buffer+=chunk;if(Buffer.byteLength(buffer)>3*1024*1024)return stop('Browser event exceeded its size limit.');
+      if(broken)return;
+      buffer+=chunk;if(Buffer.byteLength(buffer)>3*1024*1024)return refuse('Browser event exceeded its size limit.');
       let newline;
       while((newline=buffer.indexOf('\n'))!==-1){
         const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);if(!line.trim())continue;
-        let parsed:unknown;try{parsed=JSON.parse(line);}catch{return stop('Browser runtime returned an invalid event.');}
-        if(!isRecord(parsed))return stop('Browser runtime returned an invalid event.');
+        let parsed:unknown;try{parsed=JSON.parse(line);}catch{return refuse('Browser runtime returned an invalid event.');}
+        if(!isRecord(parsed))return refuse('Browser runtime returned an invalid event.');
         let event:WorkerEvent=parsed;
-        if(event.type!=='frame'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return stop('Browser event history exceeded its size limit.');}
+        // A frame or an action snapshot replaces the previous one, so neither spends the event history.
+        if(event.type!=='frame'&&event.type!=='case'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return refuse('Browser event history exceeded its size limit.');}
         if(event.type==='error'){cleanupIncomplete ||= event.cleanupIncomplete===true;terminalError=new Error(failure(event.error));continue;}
-        if(event.type!=='frame'&&hidden.length){
-          // A secret can also match JSON syntax, such as a number's digits; that event cannot be redacted, and stops the run
-          // rather than throwing out of this listener.
-          let redacted:unknown;try{redacted=JSON.parse(hide(hidden.map(secret=>JSON.stringify(secret).slice(1,-1)))(JSON.stringify(event)));}catch{return stop('Browser runtime returned an event that could not be redacted.');}
-          if(!isRecord(redacted))return stop('Browser runtime returned an event that could not be redacted.');
-          event=redacted;
-        }
+        // Nesting too deep to walk stops the run rather than throwing out of this listener.
+        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal,RUN_EVENTS.has(event.type)?IDENTIFIERS:undefined) as WorkerEvent;}catch{return refuse('Browser runtime returned an invalid event.');}
         // Without onOutput, the options carry onEvent.
         try{onEvent!(event);}catch(error){return stop(failure(error),'consumer');}
       }
@@ -150,7 +169,9 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
   function childEnvironment(configuration:BrowserModelSettings){
     const result:Record<string,string>={PYTHONUNBUFFERED:'1',ANONYMIZED_TELEMETRY:'false',BROWSER_USE_LOGGING_LEVEL:'error'};
     const values=typeof env==='function'?env():env;
-    for(const key of ['PATH','HOME','TMPDIR','LANG','DISPLAY']){const value=values[key];if(typeof value==='string')result[key]=value;}
+    // Chromium's install folder, as the journey worker reads it, and the proxy and certificate authorities that model
+    // requests go through, under each name Python's HTTP clients read.
+    for(const key of ['PATH','HOME','TMPDIR','LANG','DISPLAY','PLAYWRIGHT_BROWSERS_PATH','HTTPS_PROXY','HTTP_PROXY','NO_PROXY','https_proxy','http_proxy','no_proxy','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE']){const value=values[key];if(typeof value==='string')result[key]=value;}
     Object.assign(result,browserModelEnvironment(configuration));
     return result;
   }
@@ -181,7 +202,7 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
       const configuration=modelConfiguration();
       if(input.mode!=='preflight'&&!configuration.modelConfigured)throw new Error(configuration.modelError);
       const env=childEnvironment(configuration);
-      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,timeoutMs,cleanupGraceMs,secrets:[env.PERPETUAL_MODEL_API_KEY],unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
+      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,timeoutMs,cleanupGraceMs,secrets:modelKeys(env.PERPETUAL_MODEL_API_KEY),unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
     },
   };
   return runtime;

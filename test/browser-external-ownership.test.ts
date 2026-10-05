@@ -35,8 +35,9 @@ async function fixture(t: TestContext) {
   t.after(async () => { workers.forEach(worker => worker.cancel()); await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
   return { dataDir, workers, context, get manager() { return manager; },
     async restart() { await manager.close(); manager = await createBrowserManager(options); },
-    async started(count: number) { for (let i = 0; i < 300 && workers.length < count; i++) await wait(10); assert.ok(workers.length >= count); },
-    async settled(stage: string) { for (let i = 0; i < 300 && manager.isActive(context(stage)); i++) await wait(10); assert.equal(manager.isActive(context(stage)), false); },
+    // Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+    async started(count: number) { for (const deadline = Date.now() + 10000; workers.length < count && Date.now() < deadline;) await wait(10); assert.ok(workers.length >= count); },
+    async settled(stage: string) { for (const deadline = Date.now() + 10000; manager.isActive(context(stage)) && Date.now() < deadline;) await wait(10); assert.equal(manager.isActive(context(stage)), false); },
   };
 }
 const account = { credentials: { username: 'tester@example.test', password: 'temporary-password' } };
@@ -122,7 +123,10 @@ test('an interrupted external generation keeps its durable hold and workspace wh
 test('a failed final state save cannot release an external operation for another worker', async t => {
   const f = await fixture(t);
   await f.manager.run(f.context('beta'), {}, { manual: true }); await f.started(1);
-  const file = join(f.dataDir, 'browser/state.json'), saved = await readFile(file, 'utf8');
+  const file = join(f.dataDir, 'browser/state.json');
+  // The journey's start is saved as it launches; the file is replaced once that save has landed.
+  for (const deadline = Date.now() + 10000; JSON.parse(await readFile(file, 'utf8')).runs[0].progress.cases[0].status !== 'running'; await wait(10)) assert.ok(Date.now() < deadline, 'The journey start was not saved.');
+  const saved = await readFile(file, 'utf8');
   await rm(file); await mkdir(file);
   try {
     f.workers[0].fail(new Error('The browser stopped.')); await f.settled('beta');

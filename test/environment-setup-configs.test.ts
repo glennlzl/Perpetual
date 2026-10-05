@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { code, deployManifest, devcontainer, dockerfile, supabaseConfig, turbo, workflow } from '../src/environments/setup-configs.ts';
+import { code, deployManifest, devcontainer, dockerfile, supabaseConfig, turbo, workflow, yamlValue } from '../src/environments/setup-configs.ts';
 import { hide, redact } from '../src/redaction.ts';
 
 // A repository's setup files as EVIDENCE.md quotes them: commands, images, ports, versions and paths, and variable names
@@ -93,6 +93,17 @@ test('a Dockerfile gives its images, working directory, argument and variable na
   hidden(lines.join('\n'));
 });
 
+test('quoted text, arithmetic and other instructions open no heredoc, and one that never closes leaves the rest read', () => {
+  for (const opener of ['RUN echo "usage: tool <<input>> out" > /usage.txt', 'RUN echo $((1 << shift))', 'LABEL description="<<EOF"', 'RUN cat <<NEVER > /notes']) {
+    const { lines } = dockerfile(['FROM node:24', opener, 'ENV API_URL=http://api', 'EXPOSE 3000', 'CMD ["node", "server.js"]'].join('\n'));
+    assert.deepEqual(lines, ['- From: `node:24`', '- Env: API_URL', '- Expose: 3000', '- Cmd: `["node", "server.js"]`'], opener);
+  }
+  // A heredoc that closes, its delimiter quoted or not, still hides its body.
+  for (const opener of ["RUN <<'EOF' bash", 'COPY <<-"EOF" /app/settings', 'RUN cat <<EOF > /app/notes']) {
+    assert.deepEqual(dockerfile(['FROM node:24', opener, 'ENV INSIDE=1', 'EOF', 'ENV AFTER=1'].join('\n')).lines, ['- From: `node:24`', '- Env: AFTER'], opener);
+  }
+});
+
 test('a devcontainer.json with comments gives its image, features, ports, setup commands and variable names', () => {
   const { lines, names } = devcontainer([
     '{', '  // The development image', '  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",', '  "features": { "ghcr.io/devcontainers/features/node:1": {} },',
@@ -137,6 +148,16 @@ test('a Supabase config.toml gives its env() names, functions, seed and enabled 
   assert.deepEqual(names, [{ name: 'AUTH_GITHUB_SECRET', line: 8 }]);
 });
 
+test('a YAML file may share one anchor across many entries, and an alias that expands at every level is still refused', () => {
+  const services = Array.from({ length: 25 }, (_, index) => `  service-${index}:\n    <<: *defaults\n    image: app:${index}`).join('\n');
+  assert.equal(Object.keys((yamlValue(`x-defaults: &defaults\n  restart: always\nservices:\n${services}\n`) as { services: object }).services).length, 25);
+  const jobs = Array.from({ length: 25 }, (_, index) => `  job-${index}:\n    runs-on: ubuntu-latest\n    steps: *steps`).join('\n');
+  assert.equal(workflow(`x-steps: &steps\n  - run: npm test\njobs:\n${jobs}\n`).lines.filter(line => line === '    - run `npm test`').length, 25);
+  // Each level holds ten of the one before: refused long before it is expanded.
+  const levels = 'abcdefghi', bomb = [`a: &a [${Array(10).fill('x').join(', ')}]`, ...[...levels.slice(1)].map((name, index) => `${name}: &${name} [${Array(10).fill(`*${levels[index]}`).join(', ')}]`)];
+  assert.throws(() => yamlValue(bomb.join('\n')), /alias/i);
+});
+
 test('setup files that do not parse are refused by their reader', () => {
   assert.throws(() => workflow('jobs: [unclosed'));
   assert.throws(() => supabaseConfig('[auth'));
@@ -161,6 +182,18 @@ test('a devcontainer.json that builds its image or runs compose files gives them
     ['- Build: dockerfile `Dockerfile`, context `..`', '- remoteEnv: EDITOR_TOKEN']);
   assert.deepEqual(devcontainer('{ "build": {} }').lines, ['- Build: yes']);
   assert.deepEqual(devcontainer('{ "dockerComposeFile": ["../compose.yml", "compose.dev.yml"], "service": "app" }').lines, ['- Compose files: `../compose.yml`, `compose.dev.yml`, service `app`']);
+});
+
+test('long lists of manifest entries, env() references and named commands keep their first entries and say how many more', () => {
+  const vercel = deployManifest('vercel.json', JSON.stringify({ crons: Object.fromEntries(Array.from({ length: 45 }, (_, index) => [`job${index}`, { buildCommand: `npm run job${index}` }])) }));
+  assert.equal(vercel.lines.length, 41);
+  assert.deepEqual([vercel.lines[0], vercel.lines[40]], ['- `crons.job0.buildCommand`: `npm run job0`', '- … 5 more left out.']);
+  const config = supabaseConfig(`[x]\n${Array.from({ length: 42 }, (_, index) => `k${index} = "env(KEY_${index})"`).join('\n')}\n`);
+  assert.match(config.lines[0], /^- Variables from env\(\): `x\.k0` KEY_0, .*`x\.k39` KEY_39 and 2 more$/);
+  // Named commands are one level deep, as the dev container spec allows.
+  assert.deepEqual(devcontainer(JSON.stringify({ postStartCommand: { db: 'pnpm db:up', nested: { inner: 'pnpm inner' } } })).lines, ['- postStartCommand: `db` `pnpm db:up`']);
+  const named = devcontainer(JSON.stringify({ postCreateCommand: Object.fromEntries(Array.from({ length: 41 }, (_, index) => [`c${index}`, 'pnpm build'])) })).lines;
+  assert.deepEqual([named.length, named[40]], [41, '- … 1 more left out.']);
 });
 
 test('a name’s line is where the file declares or references it, not a comment or step that mentions it first', () => {
@@ -195,8 +228,11 @@ test('a key that is not one plain word is quoted on one line, so a file cannot a
 });
 
 test('each reader takes time in proportion to its file, however the file is crafted', () => {
-  const MB = 1024 * 1024;
-  const fill = (unit: string, head = '', tail = '') => head + unit.repeat(Math.ceil((MB - head.length - tail.length) / unit.length)) + tail;
+  const MB = 1024 * 1024, KB = 1024;
+  const fill = (unit: string, head = '', tail = '', size = MB) => head + unit.repeat(Math.ceil((size - head.length - tail.length) / unit.length)) + tail;
+  // Names nested `depth` deep, each beside `commands` commands.
+  const nested = (depth: number, commands: number) => { let value: unknown = 'echo a'; for (let index = 0; index < depth; index += 1) value = { [`n${index}`]: value, ...Object.fromEntries(Array.from({ length: commands }, (_, command) => [`m${command}`, 'echo b'])) }; return value; };
+  const commands = (count: number, entry: (index: number) => string, separator: string) => Array.from({ length: count }, (_, index) => entry(index)).join(separator);
   const numbered = (make: (index: number) => string, separator = '\n') => { const parts: string[] = []; for (let index = 0, size = 0; size < MB; index += 1) { parts.push(make(index)); size += parts.at(-1)!.length + 1; } return parts.join(separator); };
   // Each was quadratic or worse: a name looked up across the whole file, a growing instruction tested again for each of
   // its lines, a pattern that rescans from every unclosed quote or expression, and YAML's check of every key against
@@ -206,12 +242,22 @@ test('each reader takes time in proportion to its file, however the file is craf
     ['a Dockerfile with 100,000 continued lines', () => dockerfile(fill('RUN a \\\n'))],
     ['a Dockerfile with a string that never closes', () => dockerfile(fill('\\"', 'ARG A="'))],
     ['a Dockerfile with single quotes that never close', () => dockerfile(fill("'", 'ENV A='))],
+    ['a RUN instruction with a string that never closes', () => dockerfile(fill('\\"', 'RUN echo "'))],
+    ['a Dockerfile with 100,000 heredocs that never close', () => dockerfile(numbered(index => `RUN cat <<E${index}`))],
     ['a workflow with 100,000 variables', () => workflow(`env:\n${numbered(index => `  KEY_${index}: v`)}\njobs: {}\n`)],
     ['a workflow with expressions that never close', () => workflow(fill('${{ ', 'env:\n  A: "', '"\n'))],
     ['a workflow with a value of spaces', () => workflow(`jobs:\n  build:\n    container: "a${' '.repeat(MB)}b"\n`)],
     ['a dev container with 100,000 variables', () => devcontainer(`{ "containerEnv": { ${numbered(index => `"KEY_${index}": "v"`, ',')} } }`)],
     ['a turbo.json with 100,000 variables', () => turbo(`{ "globalEnv": [${numbered(index => `"KEY_${index}"`, ',')}] }`)],
     ['a Supabase config with 100,000 references', () => supabaseConfig(`[x]\n${numbered(index => `k${index} = "env(KEY_${index})"`)}`)],
+    // A YAML error formatted against the whole source, a long instruction tested again for each comment row inside it,
+    // and a long key or deep names formatted again for every entry beneath them, each in a file the reader takes.
+    ['a workflow of tags that do not parse', () => assert.throws(() => workflow(fill('!a ', '', '', 256 * KB)))],
+    ['a workflow of quotes that do not parse', () => assert.throws(() => workflow(fill('"', '', '', 256 * KB)))],
+    ['a Dockerfile whose continued line is followed by 65,536 comment rows', () => dockerfile(`RUN ${'\\a'.repeat(32 * KB)}\\\n${'#\n'.repeat(64 * KB)}`)],
+    ['a deploy manifest whose 100 KB key holds 9,000 commands', () => deployManifest('vercel.json', `{"${'k'.repeat(100 * KB)}":{${commands(9000, index => `"c${index}Cmd":"x"`, ',')}}}`)],
+    ['a Supabase config whose 100 KB table holds 9,000 references', () => supabaseConfig(`[${'k'.repeat(100 * KB)}]\n${commands(9000, index => `r${index} = "env(A${index})"`, '\n')}\n`)],
+    ['a 240 KB dev container whose 16,500 commands are named 1,500 deep', () => devcontainer(JSON.stringify({ postCreateCommand: nested(1500, 11) }))],
   ];
   for (const [name, read] of cases) {
     const started = performance.now();

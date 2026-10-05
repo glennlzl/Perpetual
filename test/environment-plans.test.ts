@@ -1,11 +1,13 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, open, realpath } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, open, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { APP_PORT, detectEnvironmentConfig, snapshotSource } from '../src/environments/plans.ts';
+import { promisify } from 'node:util';
+import { APP_PORT, detectEnvironmentConfig, snapshotKeeps, snapshotSource } from '../src/environments/plans.ts';
 import { validateTwinConfig } from '../src/twin/index.ts';
 import { scanRepository } from '../src/scanner.ts';
 
@@ -23,6 +25,11 @@ async function fixture(t: TestContext, files: Record<string, string> = {}) {
 
 const manifest = (name: string, dependencies: Record<string, string>, scripts: Record<string, string> = {}, extra: object = {}) => JSON.stringify({ name, dependencies, scripts, ...extra });
 const detect = async (repoPath: string) => detectEnvironmentConfig(await scanRepository(repoPath));
+// The fixture's git ignores only what its own .gitignore names.
+const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'init.defaultBranch=main', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', ...args],
+  { cwd, env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+const filesIn = async (directory: string) => (await readdir(directory, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile())
+  .map(entry => path.relative(directory, path.join(entry.parentPath, entry.name))).sort();
 
 test('detection proposes the Node.js major the repository asks for', async t => {
   const app = (extra: object = {}) => manifest('web', { express: '1.0.0' }, { start: 'node server.js' }, extra);
@@ -75,6 +82,19 @@ test('detection proposes apps from the scan and services from paths, manifests a
     'service-api': { directory: 'api', build: 'npm run build', start: 'npm run start', port: APP_PORT },
   });
   assert.deepEqual(validateTwinConfig(config).apps.service.env, {}, 'A detected config is a valid twin config.');
+});
+
+test('test, docs and tooling folders are not service evidence, so an example project never stands in for the product’s', async t => {
+  const { repoPath } = await fixture(t, {
+    'package.json': manifest('web', { next: '1.0.0', '@supabase/supabase-js': '2.0.0' }, { dev: 'next dev' }),
+    'supabase/config.toml': 'project_id = "acme"\n',
+    'examples/demo/supabase/config.toml': 'project_id = "demo"\n',
+    'examples/demo/.env.example': 'SMTP_HOST=mail.example\n',
+    'test/fixtures/sample/package.json': manifest('sample', { mongoose: '8.0.0', ioredis: '5.0.0', stripe: '17.0.0' }),
+    'docs/snippets/package.json': manifest('snippets', { nodemailer: '6.0.0' }),
+    'src/billing.test.ts': 'import Stripe from "npm:stripe@17";\n',
+  });
+  assert.deepEqual((await detect(repoPath)).services, { supabase: { directory: 'supabase' } });
 });
 
 test('Deno modules and import maps name their packages in specifiers, which detection reads like dependencies', async t => {
@@ -152,6 +172,25 @@ test('a script that reaches a cloud CLI falls back to the next script and is nev
   }, 'A build that reaches a cloud CLI is left out.');
 });
 
+test('a database migration, a release flag or a release folder in a script is no cloud launcher, but a publisher named with a hyphen is', async t => {
+  const { repoPath } = await fixture(t, {
+    'package.json': JSON.stringify({ name: 'workspace', workspaces: ['apps/*'] }),
+    'package-lock.json': '{}',
+    'apps/api/package.json': manifest('api', { express: '1.0.0' }, { start: 'prisma migrate deploy && node dist/release/server.js' }),
+    'apps/site/package.json': manifest('site', { next: '1.0.0' }, { build: 'prisma generate && prisma migrate deploy && next build', start: 'next start' }),
+    'apps/tool/package.json': manifest('tool', { hono: '1.0.0' }, { dev: 'npm run deploy', start: 'node server.js --release --skip-deploy' }),
+    // A build that publishes is left out, and a start script that deploys is no app.
+    'apps/docs/package.json': manifest('docs', { next: '1.0.0' }, { build: 'next build && semantic-release', start: 'next start' }),
+    'apps/admin/package.json': manifest('admin', { express: '1.0.0' }, { start: 'npm run build-and-deploy' }),
+  });
+  assert.deepEqual((await detect(repoPath)).apps, {
+    'service-apps-2fapi': { directory: 'apps/api', start: 'npm run start', port: APP_PORT },
+    'service-apps-2fdocs': { directory: 'apps/docs', start: `npm run start -- --hostname 0.0.0.0 --port ${APP_PORT}`, port: APP_PORT },
+    'service-apps-2fsite': { directory: 'apps/site', build: 'npm run build', start: `npm run start -- --hostname 0.0.0.0 --port ${APP_PORT}`, port: APP_PORT },
+    'service-apps-2ftool': { directory: 'apps/tool', start: 'npm run start', port: APP_PORT },
+  });
+});
+
 test('a package without a web framework runs as an app only through its start script', async t => {
   const { repoPath } = await fixture(t, {
     'package.json': JSON.stringify({ name: 'workspace', workspaces: ['packages/*'] }),
@@ -179,6 +218,28 @@ test('detection reads no linked file and no evidence outside the repository', as
   assert.deepEqual(Object.keys(config.apps), ['service']);
 });
 
+test('a root manifest that does not parse is not evidence, and the scanned apps are still proposed', async t => {
+  for (const root of ['﻿{"name":"workspace"}', '{"name":"workspace",}', '<<<<<<< HEAD\n{"name":"workspace"}\n=======\n{"name":"other"}\n>>>>>>> branch\n']) {
+    const { repoPath } = await fixture(t, { 'package.json': root, 'apps/web/package.json': manifest('web', { express: '1.0.0' }, { start: 'node server.js' }) });
+    assert.deepEqual((await detect(repoPath)).apps, { 'service-apps-2fweb': { directory: 'apps/web', build: 'npm install', start: 'npm run start', port: APP_PORT } }, JSON.stringify(root));
+  }
+});
+
+test('a folder that cannot be read is left out of detection, and the snapshot names it', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  // A database container's bind-mounted data, owned by its own user.
+  const { root, repoPath } = await fixture(t, { 'package.json': manifest('web', { express: '1.0.0' }, { start: 'node server.js' }), 'pgdata/PG_VERSION': '16\n' });
+  await chmod(path.join(repoPath, 'pgdata'), 0o000);
+  try {
+    assert.deepEqual(Object.keys((await detect(repoPath)).apps), ['service']);
+    await assert.rejects(snapshotSource(repoPath, path.join(root, 'snapshot')), /^Error: The source folder pgdata cannot be read\. Make it readable, or move it out of the checkout or have git ignore it\.$/);
+    // A checkout whose git ignores it never opens it.
+    await writeFile(path.join(repoPath, '.gitignore'), 'pgdata/\n');
+    await git(repoPath, 'init', '--quiet');
+    await snapshotSource(repoPath, path.join(root, 'ignored'));
+    assert.deepEqual(await filesIn(path.join(root, 'ignored')), ['.gitignore', 'package.json']);
+  } finally { await chmod(path.join(repoPath, 'pgdata'), 0o700); }
+});
+
 test('a production launcher runs after its build and stays unbuilt in the source snapshot', async t => {
   const { root, repoPath } = await fixture(t, {
     'package.json': manifest('production', { vite: '1.0.0' }, { build: 'vite build', start: 'vite preview' }),
@@ -196,8 +257,10 @@ test('source snapshot excludes credentials, caches, databases and links while pr
     'src/app.mjs': original, 'package.json': '{}', '.env': 'SECRET=do-not-copy', '.env.test': 'SECRET=do-not-copy',
     '.npmrc': '//registry/:_authToken=do-not-copy', '.ssh/id_rsa': 'private', '.aws/credentials': 'private',
     '.vercel/project.json': 'private', 'state.sqlite': 'private', 'cert.pem': 'private', 'secret.json': 'private',
-    'node_modules/dependency/index.js': 'cache', 'dist/app.js': 'cache', '.git/config': 'private',
+    'node_modules/dependency/index.js': 'cache', 'dist/app.js': 'cache',
   });
+  // Its git metadata is never copied either.
+  await git(repoPath, 'init', '--quiet');
   await writeFile(path.join(root, 'outside.txt'), 'outside-credential');
   await symlink(path.join(root, 'outside.txt'), path.join(repoPath, 'linked.txt'));
   await symlink(path.join(repoPath, 'src'), path.join(repoPath, 'linked-directory'));
@@ -217,6 +280,47 @@ test('source snapshot excludes credentials, caches, databases and links while pr
   assert.equal(await readFile(path.join(repoPath, '.env'), 'utf8'), 'SECRET=do-not-copy');
   await writeFile(path.join(repoPath, 'src/app.mjs'), original + '// new revision\n');
   assert.notEqual((await snapshotSource(repoPath, path.join(root, 'snapshot-3'))).hash, result.hash);
+});
+
+test('a git checkout’s snapshot leaves out the local files git ignores, whatever their names', async t => {
+  const committed = { '.gitignore': '.envrc\n.dev.vars\nterraform.tfstate\nlocal-dump/\n*.log\n', 'package.json': '{}', 'src/app.mjs': 'export const app = true;\n' };
+  const { root, repoPath } = await fixture(t, {
+    ...committed,
+    '.envrc': 'export TWILIO_AUTH=fixture-local-value\n', '.dev.vars': 'SENDGRID_KEY=fixture-local-value\n', 'terraform.tfstate': '{"resources":[]}\n',
+    'local-dump/customers.csv': 'email\njane@example.test\n', 'src/debug.log': 'local output\n',
+    // A new file git would commit is source, as the gate's checkout check counts it.
+    'src/draft.mjs': 'export const draft = true;\n',
+  });
+  await git(repoPath, 'init', '--quiet');
+  await git(repoPath, 'add', '--', ...Object.keys(committed));
+  await git(repoPath, 'commit', '--quiet', '-m', 'fixture');
+  const destination = path.join(root, 'snapshot');
+  const result = await snapshotSource(repoPath, destination);
+  assert.deepEqual(await filesIn(destination), ['.gitignore', 'package.json', 'src/app.mjs', 'src/draft.mjs']);
+  assert.equal(result.files, 4);
+  // Without git metadata nothing says what is local, so the same files are copied but for the names the snapshot never takes.
+  await rm(path.join(repoPath, '.git'), { recursive: true });
+  await snapshotSource(repoPath, path.join(root, 'walked'));
+  assert.deepEqual(await filesIn(path.join(root, 'walked')), ['.dev.vars', '.envrc', '.gitignore', 'local-dump/customers.csv', 'package.json', 'src/app.mjs', 'src/debug.log', 'src/draft.mjs', 'terraform.tfstate']);
+});
+
+test('the snapshot leaves out what each repository inside the checkout ignores, and stops when git cannot list it', async t => {
+  const { root, repoPath } = await fixture(t, {
+    'package.json': '{}',
+    'vendor/lib/.gitignore': '.envrc\nout/\n', 'vendor/lib/.envrc': 'export TWILIO_AUTH=fixture-local-value\n', 'vendor/lib/out/report.txt': 'local output\n', 'vendor/lib/index.js': 'export {};\n',
+    'vendor/linked/.gitignore': '.dev.vars\n', 'vendor/linked/.dev.vars': 'SENDGRID_KEY=fixture-local-value\n', 'vendor/linked/index.js': 'export {};\n',
+  });
+  await git(repoPath, 'init', '--quiet');
+  // A nested repository keeps its metadata in a .git folder; a submodule, like a repository whose metadata is elsewhere, in a .git file.
+  await git(path.join(repoPath, 'vendor/lib'), 'init', '--quiet');
+  await git(path.join(repoPath, 'vendor/linked'), 'init', '--quiet', '--separate-git-dir', path.join(root, 'linked.git'));
+  await snapshotSource(repoPath, path.join(root, 'snapshot'));
+  assert.deepEqual(await filesIn(path.join(root, 'snapshot')), ['package.json', 'vendor/lib/.gitignore', 'vendor/lib/index.js', 'vendor/linked/.gitignore', 'vendor/linked/index.js']);
+  // Git that cannot list them, for a repository moved away from its metadata or a broken index, would copy every file it ignores.
+  await writeFile(path.join(repoPath, 'vendor/linked/.git'), `gitdir: ${path.join(root, 'moved.git')}\n`);
+  await assert.rejects(snapshotSource(repoPath, path.join(root, 'moved')), /^Error: Git could not list the ignored files in the source folder vendor\/linked: it exited with status 128\. Check that git status works there\.$/);
+  await writeFile(path.join(repoPath, '.git', 'index'), 'not an index');
+  await assert.rejects(snapshotSource(repoPath, path.join(root, 'broken')), /^Error: Git could not list the ignored files in the source folder \.: it exited with status 128\. Check that git status works there\.$/);
 });
 
 test('source snapshot excludes local agent configuration and instructions at every depth', async t => {
@@ -263,6 +367,17 @@ test('source snapshot preserves credential-named modules and build routes inside
   for (const name of modules) assert.equal(await readFile(path.join(destination, 'src', name), 'utf8'), 'export const marker = "application";', name);
   for (const name of ['frontend/src/routes/dist/route.ts', 'frontend/src/routes/coverage/route.ts']) assert.match(await readFile(path.join(destination, name), 'utf8'), /source route/);
   for (const name of [...protectedFiles, 'build/generated.js', 'frontend/dist/generated.js', 'coverage/report.json']) await assert.rejects(readFile(path.join(destination, name)), { code: 'ENOENT' }, name);
+});
+
+test('the snapshot leaves out build output folders but keeps files named build, dist or coverage, as snapshotKeeps says', async t => {
+  const files = { 'package.json': '{}', 'script/build': '#!/bin/sh\nnpm run compile\n', 'tools/dist': 'release notes\n', 'coverage': 'thresholds\n',
+    'build/generated.js': 'output', 'packages/ui/dist/index.js': 'output' };
+  const { root, repoPath } = await fixture(t, files);
+  const destination = path.join(root, 'snapshot');
+  await snapshotSource(repoPath, destination);
+  const kept = await filesIn(destination);
+  assert.deepEqual(kept, ['coverage', 'package.json', 'script/build', 'tools/dist']);
+  assert.deepEqual(Object.keys(files).filter(snapshotKeeps).sort(), kept, 'The gate’s checkout check counts the files the snapshot copies.');
 });
 
 test('snapshot refuses ordinary in-repository destinations and oversized files', async t => {

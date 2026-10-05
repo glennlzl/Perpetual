@@ -116,7 +116,7 @@ export const authoringPrompt = (feedback: boolean) => feedback
   ? `The previous twin config failed; ${FEEDBACK} says why. The draft is already in ${CONFIG}. Start from ${FEEDBACK}, the unwired variables, CI and deploy evidence and URL-operation locations in ${EVIDENCE}; fix ${CONFIG} for the application in ${REPO}/ within your first few steps, then refine it. Audit request-derived redirects and callbacks even when no variable is unwired. PORT is the container port; configure the framework's request origin from the publicUrl-derived browser port and canonical hostname before finishing, following ${INSTRUCTIONS}.`
   : `The draft is already in ${CONFIG}. Start from the unwired variables, CI and deploy evidence and URL-operation locations in ${EVIDENCE}; edit ${CONFIG} for the application in ${REPO}/ within your first few steps, then refine it. Audit request-derived redirects and callbacks even when no variable is unwired. PORT is the container port; configure the framework's request origin from the publicUrl-derived browser port and canonical hostname before finishing, following ${INSTRUCTIONS}.`;
 
-/** TWIN.md: the twin config format and rules (docs/SANDBOX.md), and the catalog of the services a config may use. */
+/** TWIN.md: the twin config format and rules (docs/twins.md), and the catalog of the services a config may use. */
 export function twinInstructions(services: TwinServices = registry) {
   return `# Writing a twin config
 
