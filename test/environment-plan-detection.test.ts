@@ -33,3 +33,21 @@ test('a detected plan follows each new scan until the user saves one, which is n
   await assert.rejects(manager.savePlan(context('4'), { services: { stripe: { bogus: 1 } }, apps: {} }), /^Error: services\.stripe has unsupported option bogus; use /);
   assert.deepEqual((await manager.view(context('4'))).plan.services, { stripe: {} });
 });
+
+test('a plan saved while a new scan is being detected is kept', async t => {
+  const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-plan-detection-'))), repoPath = join(dataDir, 'repo');
+  await mkdir(repoPath);
+  await writeFile(join(repoPath, 'package.json'), JSON.stringify({ name: 'app', dependencies: {} }));
+  const context = (scannedAt: string) => ({ key: 'local:fixture', stageId: 'beta', scan: { repo: { path: repoPath, sha: 'a'.repeat(40), branch: 'main' }, scannedAt, services: [] } });
+  let manager = await createEnvironmentManager({ dataDir, runtime });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  assert.deepEqual((await manager.view(context('1'))).plan, { services: {}, apps: {} });
+  // A rescan's view detects again while the person saves their config.
+  const viewing = manager.view(context('2'));
+  const { plan: saved } = await manager.savePlan(context('2'), { services: { stripe: {} }, apps: {} });
+  assert.deepEqual((await viewing).plan, saved);
+  assert.deepEqual((await manager.view(context('3'))).plan, saved, 'The saved plan is never detected again.');
+  await manager.close();
+  manager = await createEnvironmentManager({ dataDir, runtime });
+  assert.deepEqual((await manager.view(context('4'))).plan, saved);
+});

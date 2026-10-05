@@ -229,9 +229,13 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   async function planFor(context: Context) {
     const scope = scopeId(context), key = scanKey(context.scan);
     if (!state.plans[scope] || Object.hasOwn(state.detected, scope) && state.detected[scope] !== key) {
-      setPlan(scope, await detectEnvironmentConfig(context.scan));
-      state.detected[scope] = key;
-      await persist();
+      const detected = await detectEnvironmentConfig(context.scan);
+      // A plan a person saved, or an agent wrote, while detection ran is kept.
+      if (!state.plans[scope] || Object.hasOwn(state.detected, scope)) {
+        setPlan(scope, detected);
+        state.detected[scope] = key;
+        await persist();
+      }
     }
     return state.plans[scope];
   }
