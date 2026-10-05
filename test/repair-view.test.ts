@@ -63,6 +63,8 @@ test('a finished repair is merged, passed, under review or not merged, and says 
   assert.deepEqual([stopped.status, stopped.reason, marks(stopped)[0], stopped.steps[0].detail], ['not-merged', 'Stopped.', 'Read the failure: waiting', [{ text: 'CI', href: RUN.url }, ' failed at ', { text: 'cb9292c' }, ' ', 'Stopped.']]);
   const superseded = repairChange(repair('superseded', { pullRequest: { ...PULL, draft: true, closed: true }, reason: 'Superseded by ddddddd.' }), 'build');
   assert.deepEqual([superseded.status, marks(superseded)[3]], ['not-merged', 'Verify: waiting'], 'A closed pull request is not under review.');
+  const rejected = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false, closed: true }, reason: 'Auto-merge is off.' }), 'build');
+  assert.equal(rejected.status, 'not-merged', 'Nor is a ready fix whose pull request a person closed.');
 });
 
 test('only a managed source\'s Build carries Autopilot: its mode is the auto-merge switch, and the head\'s failed runs are offered while nothing repairs it', () => {

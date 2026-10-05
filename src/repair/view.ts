@@ -27,7 +27,7 @@ type Names = (stageId: string) => string;
 // running while the manager works; merged; passed when the failure cleared without a change; a fix that waits for a
 // person is under review, and one that ended without a fix, or whose pull request is closed, is not merged.
 const changeStatus = (repair: PublicRepair): ChangeStatus => ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' ? 'passed'
-  : repair.status === 'ready' || repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
+  : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
 
 // A ready repair that nothing verified waits at Verify: a journey gate did not pass, or its pull request is still a
 // draft no gate judged, as when no workflow, or not the one that failed, ran for it, or its runs were cancelled.
