@@ -105,7 +105,7 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 // source-scoped state; observing never starts discovery or test execution.
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
-  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], errorClock = 0;
+  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], errorClock = 0, foreignReplies = 0;
   let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
   let pipelineChanges: { input: PipelineAction }[] = [], pipelineQueue: Promise<unknown> = Promise.resolve();
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
@@ -231,7 +231,14 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     const revisions = new Map([...entries].map(([id, entry]) => [id, { ...entry.revisions }]));
     try {
       const next = await controller('/api/state') as T;
-      if (disposed || ownGeneration !== generation || request !== summaryRevision || sourceKey(next.scan?.repo) !== identity) return;
+      if (disposed || ownGeneration !== generation || request !== summaryRevision) return;
+      // Another window can change the controller's source. One reply may race this window's own change, so a second
+      // in a row that names another source says so instead of leaving the graph silently frozen.
+      if (sourceKey(next.scan?.repo) !== identity) {
+        if (++foreignReplies > 1) { sourceError = 'The source changed. Reload the pipeline.'; publish(); }
+        return;
+      }
+      foreignReplies = 0;
       sourceError = '';
       stageRemovals = share(stageRemovals, next.stageRemovals || []);
       previews = share(previews, previewTargets(next.scan));
@@ -363,7 +370,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     activate(nextSource: { path?: string; branch?: string | null } | null | undefined, seed: SourceState = {}) {
       if (disposed) throw new Error('The test workspace is closed.');
       const nextIdentity = sourceKey(nextSource);
-      generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; listed = null;
+      generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; foreignReplies = 0; listed = null;
       pipelineChanges = []; pipelineQueue = Promise.resolve(); pipelineRevision++;
       confirmedPipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? seed.pipeline : null;
       projectPipeline();

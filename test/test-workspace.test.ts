@@ -305,3 +305,21 @@ test('a reopened inspector reads its stage again before its view counts as loade
   assert.deepEqual(stage.getSnapshot().browser.accounts?.map(account => account.id), ['admin']);
   stop();
 });
+
+test('a source another window switched to is reported once a second poll names it, instead of a silently frozen graph', async t => {
+  let branch = 'main';
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => ({ scan: { repo: { path: source.path, branch } }, browserTests: {} }) });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { browserTests: {} });
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+  branch = 'feature';
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '', 'One reply may race this window\'s own source change.');
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, 'The source changed. Reload the pipeline.');
+  workspace.activate({ ...source, branch: 'feature' }, { browserTests: {} });
+  assert.equal(workspace.getSnapshot().error, '');
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+});
