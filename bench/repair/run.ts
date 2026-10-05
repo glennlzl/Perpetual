@@ -53,6 +53,13 @@ export interface RunOptions {
 }
 /** Time an adapter gets past its limit to stop by itself before the runner aborts it. */
 const GRACE_MS = 30_000;
+/** Runner errors in a row after which a run starts no more attempts, since something such as Docker fails every one. */
+export const RUNNER_ERRORS = 5;
+/** Counts the runner errors in a row that a judged attempt ends; true once there are limit of them. */
+export function errorStreak(limit = RUNNER_ERRORS) {
+  let streak = 0;
+  return (record: Pick<AttemptRecord, 'status'>) => (streak = record.status === 'error' ? streak + 1 : record.status === 'judged' ? 0 : streak) >= limit;
+}
 
 /** Why an adapter cannot run against a provider: it declares no wire API for it, or one the gateway does not serve there. */
 export function unsupported(adapter: Pick<Adapter, 'providers'>, provider: Provider): string | null {
@@ -169,13 +176,17 @@ export async function runBench(options: RunOptions) {
       models: [...models.values()], cases: prepared, seeds: options.seeds, budget: options.budget, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null,
       cells: cells.length, resumed: cells.length - todo.length }, gateway.scrub, 2), { mode: 0o600 });
     log(`${todo.length} of ${cells.length} attempts to run (${cells.length - todo.length} already done); budget $${options.budget}, cap $${options.limits.cost} each`);
-    let exhausted = false;
+    // Once RUNNER_ERRORS attempts in a row failed in the runner, each of which may have paid for model calls first, the
+    // run starts no more; the rest is left for a resumed run.
+    const stopping = errorStreak();
+    let exhausted = false, halted: string | null = null;
     const skip = (cell: Cell, adapter: Adapter, why: 'budget'): AttemptRecord => ({
       run, key: cell.key, framework: cell.framework, frameworkVersion: adapter.version, model: cell.model, case: cell.case, seed: cell.seed, startedAt: new Date().toISOString(), status: 'skipped', skipped: why,
       reason: null, adapterReason: null, summary: '', error: '', adapterSteps: 0, reproduced: null, frameworkCost: null, gateway: null, wallMs: 0, setupMs: 0, harnessPaths: [], diff: null,
       rules: { rejected: [], holds: [] }, guards: [], scriptsChanged: [], judge: null, success: false, passedWithoutDone: false,
     });
     await pool(todo, options.concurrency, async cell => {
+      if (halted !== null) return;
       const adapter = adapters.get(cell.framework as AdapterKey)!, { c, context } = contexts.get(cell.case)!, model = models.get(cell.model)!;
       if (exhausted || !await room(gateway, options.limits.cost, signal)) {
         exhausted = true;
@@ -190,6 +201,7 @@ export async function runBench(options: RunOptions) {
         return { ...ran, status: 'error', skipped: undefined, reason: 'error', error: String((error as Error)?.message ?? error).slice(0, 1000), judge: null, success: false, passedWithoutDone: false };
       });
       if (record.status === 'skipped') exhausted = true;
+      if (stopping(record) && halted === null) halted = record.error;
       await appendRecord(paths.results, record, gateway.scrub);
       log(`${cell.key}: ${record.status === 'skipped' ? 'skipped (budget)' : record.status === 'error' ? `runner error: ${record.error}` : `${record.success ? 'solved' : 'not solved'} · ${record.reason} · ${record.judge?.reason ?? '–'} · $${(record.gateway?.cost ?? 0).toFixed(4)} · ${Math.round(record.wallMs / 1000)}s`}`);
     }, signal);
@@ -197,6 +209,7 @@ export async function runBench(options: RunOptions) {
     await writeFile(paths.report, report);
     const final = await gateway.status();
     log(`spent $${final.spent.toFixed(4)} of $${final.budget}; report: ${paths.report}`);
+    if (halted !== null) throw new Error(`The run stopped after ${RUNNER_ERRORS} runner errors in a row, the last: ${halted} Resume it with the same --out once the cause is fixed.`);
     return { records, report, out };
   } finally {
     stop.abort();

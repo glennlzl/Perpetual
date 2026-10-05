@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPrices, priceFor } from '../prices.ts';
-import { readScopes, runBench, type RunOptions } from '../run.ts';
+import { RUNNER_ERRORS, errorStreak, readScopes, runBench, type RunOptions } from '../run.ts';
 
 // A run killed while it rewrote boxes.json leaves it empty or cut off; resume and cleanup still read what it names.
 test('the boxes list is read whole, torn or missing', async t => {
@@ -19,6 +19,14 @@ test('the boxes list is read whole, torn or missing', async t => {
   assert.deepEqual(await readScopes(file), [a], 'A torn list keeps the scopes it still names whole.');
   await writeFile(file, '');
   assert.deepEqual(await readScopes(file), []);
+});
+
+// A Docker that fails every box after the model ran would otherwise pay for each remaining cell's model calls in turn.
+test('a run stops starting attempts after five runner errors in a row, which a judged attempt ends and a skipped one does not', () => {
+  const stopping = errorStreak();
+  const statuses = ['error', 'error', 'judged', 'error', 'error', 'skipped', 'error', 'error'] as const;
+  assert.deepEqual([RUNNER_ERRORS, statuses.map(status => stopping({ status }))], [5, [false, false, false, false, false, false, false, false]]);
+  assert.equal(stopping({ status: 'error' }), true, 'The fifth error in a row stops the run.');
 });
 
 // An OpenAI dry run prices the table's first real model, so its scripted solves could stand in for a paid run's.
