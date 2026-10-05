@@ -336,13 +336,18 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(!inside||inside.startsWith('..')||isAbsolute(inside))throw invalid();
     return path;
   }
-  // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs.
+  // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs. A source
+  // move during the session read, such as a gate moving the managed copy, is not a disconnect: the account is read once
+  // more for the moved source.
   async function connectedAccount(){
-    if(state.githubConnection===null||githubAuth.isPending())return null;
-    const scan=state.scan,source=state.source;
-    const connection=await githubConnection(await githubRuns.session());
-    if(state.scan!==scan||state.source!==source)return null;
-    return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
+    for(let attempt=0;attempt<2;attempt+=1){
+      if(state.githubConnection===null||githubAuth.isPending())return null;
+      const scan=state.scan,source=state.source;
+      const connection=await githubConnection(await githubRuns.session());
+      if(state.scan!==scan||state.source!==source)continue;
+      return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
+    }
+    return null;
   }
   // The watcher moves a managed source whose pipeline has no Sandbox stage to its branch head, never during a stage's
   // removal or another source change: it tries again at its next poll.

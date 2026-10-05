@@ -387,3 +387,19 @@ test('closing the controller cuts off a request whose body never finishes arrivi
   await closing;
   await assert.rejects(stuck.finish(), 'The request was cut off.');
 });
+
+test('the connected account is read again when the source moves during its session check', async t => {
+  let move: (() => Promise<unknown>) | undefined;
+  const f = await scanned(t, { github: {
+    runs: { async session() { const moving = move; move = undefined; await moving?.(); return SIGNED_IN('developer'); }, read: async input => ({ repository: String(input.repository), sha: String(input.sha), runs: [] }) },
+    failure: async ({ repository, runId }) => ({ runId: String(runId), jobs: [], log: '', tail: String(repository), diagnosis: { method: 'rule-based', category: 'unknown', summary: '' }, observedAt: '2026-09-23T10:00:00.000Z' }),
+  } });
+  // A rescan of the same GitHub checkout replaces the scan while the account is being checked, as a gate moving the
+  // managed copy does.
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  for (const args of [['init', '-q'], ['remote', 'add', 'origin', 'https://github.com/acme/app.git']]) await promisify(execFile)('git', ['-C', f.dir, ...args]);
+  move = () => fetch(`${f.app.url}/api/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': f.token }, body: JSON.stringify({ path: f.dir }) });
+  const response = await fetch(`${f.app.url}/api/providers/github/runs/123/failure`);
+  assert.deepEqual([response.status, (await response.json()).tail], [200, 'acme/app']);
+  assert.equal(move, undefined, 'The source moved during the first check.');
+});
