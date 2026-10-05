@@ -59,6 +59,9 @@ PAGES = {
     # A rejection answered 200 with the same form, and one answered 401 on a page without a form.
     "/email-again": html('<form method="POST" action="/login-again"><input type="email" name="email"><input type="password" name="password"><button>Sign in</button></form>'),
     "/email-401": html('<form method="POST" action="/login-401"><input type="email" name="email"><input type="password" name="password"><button>Sign in</button></form>'),
+    # A server-rendered sign-in that answers with a redirect to the workspace.
+    "/email-redirect": html('<form method="POST" action="/login-redirect"><input type="email" name="email"><input type="password" name="password"><button>Sign in</button></form>'),
+    "/workspace": html("<h1>Workspace ready</h1>"),
 }
 
 
@@ -80,6 +83,11 @@ class Application(BaseHTTPRequestHandler):
             time.sleep(1.5)
         if path.startswith("/api/"):
             self.respond(b"{}", "application/json", 200 if path == "/api/login" and accepted else 401)
+        elif path == "/login-redirect" and accepted:
+            self.send_response(303)
+            self.send_header("Location", "/workspace")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif path == "/login-again":
             self.respond(PAGES["/email-again"].replace(b"<form", b'<p role="alert">Wrong email or password</p><form'))
         else:
@@ -118,7 +126,7 @@ class SignInForms(unittest.IsolatedAsyncioTestCase):
             server.gets.clear()
             server.posts.clear()
 
-    def browser(self, path, endpoints=("/login", "/api/login", "/api/reject"), **extra):
+    def browser(self, path, endpoints=("/login", "/login-redirect", "/api/login", "/api/reject"), **extra):
         # Discovery lets the account's POST reach only a configured sign-in endpoint.
         payload = {"mode": "discover", "targetUrl": self.url + path, "allowedOrigins": [self.url], "credentials": ACCOUNT, "authEndpoints": [self.url + endpoint for endpoint in endpoints], **extra}
         return runner.OwnedBrowser(payload, [].append)
@@ -126,7 +134,7 @@ class SignInForms(unittest.IsolatedAsyncioTestCase):
     async def test_fills_and_submits_the_sign_in_form_of_each_page(self):
         async with self.browser("/email") as owned:
             page = await owned.active_page()
-            for path, endpoint, fields in [("/email", "/login", {"email", "password"}), ("/username", "/login", {"user", "password"}), ("/disabled", "/login", {"email", "password"}), ("/two", "/login", {"login", "password"}), ("/spa", "/api/login", {"email", "password"})]:
+            for path, endpoint, fields in [("/email", "/login", {"email", "password"}), ("/email-redirect", "/login-redirect", {"email", "password"}), ("/username", "/login", {"user", "password"}), ("/disabled", "/login", {"email", "password"}), ("/two", "/login", {"login", "password"}), ("/spa", "/api/login", {"email", "password"})]:
                 with self.subTest(path=path):
                     self.app.posts.clear()
                     await page.goto(self.url + path)
