@@ -52,7 +52,6 @@ import type { Scan, ScanRepo } from './scanner.ts';
 import type { EnvironmentContext, EnvironmentPlan, ManagedRuntime } from './environments/manager.ts';
 import type { Pipeline, Stage } from './pipeline.ts';
 import type { GitHubSession, PreparedGitHubSource } from './github-source.ts';
-import type { ProviderStatus } from './providers.ts';
 import type { GitHubAuthManager } from './github-auth.ts';
 import type { GitHubRunsReader } from './github-runs.ts';
 import type { GitHubDeploymentsReader } from './github-deployments.ts';
@@ -64,10 +63,10 @@ export interface GitHubSource extends Omit<PreparedGitHubSource, 'sha'> { sha: s
 export type GitHubConnectionRecord = NonNullable<PipelineStateReply['githubConnection']>;
 /** state.json (schema 1). Saved pipelines are normalized again on every read. */
 export interface ControllerState {
-  scan: Scan | null; providers: ProviderStatus[]; pipelines: Record<string, Pipeline>;
+  scan: Scan | null; pipelines: Record<string, Pipeline>;
   source?: GitHubSource | null; githubConnection?: GitHubConnectionRecord | null;
-  /** Retired repair reports and HTTP checks: removed on load, so the next save omits them. */
-  runs?: unknown; checks?: unknown;
+  /** Retired repair reports, HTTP checks and provider observations: removed on load, so the next save omits them. */
+  runs?: unknown; checks?: unknown; providers?: unknown;
 }
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
@@ -197,7 +196,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
   const refreshAssets=async()=>{const scan=++assetScans,assets=await assetFiles(publicDir);if(scan>appliedAssetScan){appliedAssetScan=scan;publicFiles={...staticFiles,...assets};}};
   const stateFile=join(dataDir,'state.json');
-  let state: ControllerState={scan:null,providers:[],pipelines:{}};
+  let state: ControllerState={scan:null,pipelines:{}};
   // The controller's own state file, which every build writes as schema 1 with a state object. Anything else, such as
   // a newer build's schema, cannot be read, and is preserved rather than replaced by the next save.
   try {
@@ -211,7 +210,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
   // Retired repair reports, HTTP checks and their stage drafts; the next save omits them. Provider observations, once
   // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
-  delete state.runs;delete state.checks;state.providers=[];
+  delete state.runs;delete state.checks;delete state.providers;
   for(const pipeline of Object.values(state.pipelines))if(Array.isArray(pipeline?.stages))for(const stage of pipeline.stages as SavedStage[])delete stage?.tests;
   const token=randomBytes(32).toString('hex');
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
@@ -305,8 +304,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     try {
       const scan = await scanRepository(state.scan.repo.path);
       await save(current => ({
-        state: { ...current, scan, providers: [] },
-        commit() { state.scan = scan; state.providers = []; },
+        state: { ...current, scan },
+        commit() { state.scan = scan; },
       }));
     } catch (error) {
       process.stderr.write(`Could not refresh repository discovery; retaining saved data: ${redact((error as Error).message)}\n`);
@@ -324,7 +323,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       await requireGitHub(await githubRuns.session());
       await (github.update??updateGitHubSource)({source,dataDir,sha});
       const scan=await scanRepository(source.scanPath),next={...source,sha:scan.repo.sha,savedAt:new Date().toISOString()};
-      await save(current=>({state:{...current,scan,source:next,providers:[]},commit(){state.scan=scan;state.source=next;state.providers=[];}}));
+      await save(current=>({state:{...current,scan,source:next},commit(){state.scan=scan;state.source=next;}}));
     });
   }
   // A repair gate's checkout: a directory under <dataDir>/repairs by its real path, which a repair's merge step owns.
@@ -720,8 +719,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             const saved=pipelines[key];
             const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
             pipelines[key]=pipeline;
-            return {state:{...current,scan,source,providers:[],pipelines},
-              commit(){state.scan=scan;state.source=source;state.providers=[];state.pipelines=pipelines;},
+            return {state:{...current,scan,source,pipelines},
+              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;},
               result:{scan,source,pipeline} satisfies SourceReply};
           });
           return reply(res,200,result);
@@ -730,7 +729,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/scan') {
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const input=await body(req),scan=await scanRepository(input.path||repo);
-          await save(current=>({state:{...current,providers:[],scan,source:null},commit(){state.providers=[];state.scan=scan;state.source=null;}}));
+          await save(current=>({state:{...current,scan,source:null},commit(){state.scan=scan;state.source=null;}}));
           return reply(res,200,scan);
         });
       }

@@ -836,7 +836,7 @@ function PipelineApp() {
     try {
       const result = await api<SourceResult>('/api/source/github', selection);
       workspace.activate(result.scan.repo, result);
-      setState(previous => ({ ...previous, scan: result.scan, source: result.source, providers: [], environments: result.environments || [], browserTests: {} }));
+      setState(previous => ({ ...previous, scan: result.scan, source: result.source, environments: result.environments || [], browserTests: {} }));
       setError('');
       return result;
     } catch (failure) { setError((failure as Error).message); throw failure; }
