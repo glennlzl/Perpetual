@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createEnvironmentUsage } from '../src/environments/usage.ts';
+import { createBrowserManager } from '../src/browser/manager.ts';
+import { createEnvironmentUsage, isStageHeld, stageHeld } from '../src/environments/usage.ts';
 import { createGateSteps, createReadiness, reviewedJourneys, type GateEnvironment, type GateBrowser, type GateEnvironments, type GateStepsOptions, type IdleEnvironment, type JourneySelection } from '../src/gate/steps.ts';
 
 const context = { key: 'github:owner/app:/', stageId: 'beta', scan: { repo: { path: '/sources/app', sha: 'a'.repeat(40) } } };
@@ -139,6 +143,30 @@ test('a health lease on the rebuilt twin delays browser admission and starts the
     assert.equal((await running).status, 'passed');
     assert.equal(started, 1);
   } finally { releaseHealth(); }
+});
+
+test('a person\'s operation or a model settings save holding the stage delays browser admission and starts the journeys once', async () => {
+  const f = fakes(), holds = ['A browser operation is already in progress for this stage.', 'Model settings are being saved. Please wait.'];
+  let started = 0;
+  f.browser.run = async () => {
+    const hold = holds.shift();
+    if (hold) throw stageHeld(hold);
+    started++;
+    return { run: { id: 'run-1' } };
+  };
+  assert.equal((await steps(f).run(context, { id: 'new', status: 'ready' })).status, 'passed');
+  assert.deepEqual([holds, started], [[], 1]);
+});
+
+test('the browser refuses a run while a person\'s save holds the stage, with a hold the gate waits for', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-steps-'));
+  const runtime = { async capabilities() { return { runtimeInstalled: true, browserInstalled: true, modelConfigured: true }; }, start() { throw new Error('No journey starts while the stage is held.'); } };
+  const manager = await createBrowserManager({ dataDir, runtime, playwright: runtime });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const stage = { key: context.key, stageId: 'beta', scan: { repo: { path: dataDir, sha: 'a'.repeat(40) } } };
+  const saving = manager.saveCases(stage, []);
+  await assert.rejects(manager.run(stage, {}), (error: unknown) => isStageHeld(error));
+  await saving;
 });
 
 test('a gate waiting for a health lease refuses a target changed before browser admission', async () => {

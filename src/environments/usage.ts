@@ -29,6 +29,9 @@ const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:40
 /** A temporary reservation conflict, before an environment operation has started. */
 export const environmentBusy=()=>Object.assign(conflict('This environment has an operation in progress.'),{code:'ENVIRONMENT_BUSY' as const});
 export const isEnvironmentBusy=(error:unknown)=>error instanceof Error&&'code' in error&&error.code==='ENVIRONMENT_BUSY';
+/** A stage held by another of its operations, or by a model settings save, before the requested operation has started. */
+export const stageHeld=(message:string)=>Object.assign(conflict(message),{code:'STAGE_HELD' as const});
+export const isStageHeld=(error:unknown)=>error instanceof Error&&'code' in error&&error.code==='STAGE_HELD';
 const stageKey=({key,stageId}:StageRef)=>JSON.stringify([key,stageId]);
 
 // Leases last until execution and its durable result have settled. Stage

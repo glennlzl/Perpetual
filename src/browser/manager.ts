@@ -17,7 +17,7 @@ import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts'
 import {createJourneyCode,restoreJourneyCode,replaceJourneyCases} from './journey-code.ts';
 import type {GenerationFailure,JourneyCodeState,JourneyCodeSnapshot,Verification,VerificationIdentity,RunnableCode} from './journey-code.ts';
 export type {SpecSummary} from './journey-code.ts';
-import {applicationHost as canonicalHost,applicationOrigin,createEnvironmentUsage,scopeId} from '../environments/usage.ts';
+import {applicationHost as canonicalHost,applicationOrigin,createEnvironmentUsage,scopeId,stageHeld} from '../environments/usage.ts';
 import {selectRunAccount} from './run-credentials.ts';
 import type {AccountSignIn,RunCredentials} from './run-credentials.ts';
 import {appId} from '../twin/detect.ts';
@@ -588,7 +588,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   function find(context:BrowserStageContext,id:unknown):BrowserRun{const run=state.runs.find(r=>r.id===id&&r.scope===scopeId(context));if(!run)throw Object.assign(new Error('Browser run not found in this stage.'),{statusCode:404});return run;}
   // A test run executes an immutable case snapshot, so case writes may overlap it; discovery may not.
   // A verification holds its stage between attempts too, except for its own attempts and the writes a run allows.
-  function requireIdle(context:BrowserStageContext,{duringRun=false,verification=false}={}){if(closed)throw conflict('The controller is shutting down.');usage.assertAvailable(context);if(modelSaving)throw conflict('Model settings are being saved. Please wait.');const scope=scopeId(context);if(busy.has(scope)||state.runs.some(r=>r.scope===scope&&active(r)&&!(duringRun&&r.mode==='run'))||!duringRun&&!verification&&verifying(scope))throw conflict('A browser operation is already in progress for this stage.');}
+  function requireIdle(context:BrowserStageContext,{duringRun=false,verification=false}={}){if(closed)throw conflict('The controller is shutting down.');usage.assertAvailable(context);if(modelSaving)throw stageHeld('Model settings are being saved. Please wait.');const scope=scopeId(context);if(busy.has(scope)||state.runs.some(r=>r.scope===scope&&active(r)&&!(duringRun&&r.mode==='run'))||!duringRun&&!verification&&verifying(scope))throw stageHeld('A browser operation is already in progress for this stage.');}
   async function viewModel():Promise<ModelSettingsReply>{return {capabilities:{...modelSettings.view(),...await runtime!.capabilities()}};}
   // Discovery and code generation need the browser agent's runtime and model; runs need only Playwright's Chromium.
   async function capabilities():Promise<PublicCapabilities>{
