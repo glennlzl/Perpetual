@@ -235,8 +235,8 @@ test('a change the rules reject is never pushed, and its reason goes back to the
   await until(() => h.repair()?.status === 'ready');
   await h.manager.idle();
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js']);
-  assert.equal((await h.saved()).attempts?.[0].failure, REJECTED.credential);
-  assert.ok(h.prompts[1][0].includes('looks like a credential'));
+  assert.equal((await h.saved()).attempts?.[0].failure, `${REJECTED.credential} Found at config.js:1.`);
+  assert.ok(h.prompts[1][0].includes('looks like a credential') && h.prompts[1][0].includes('config.js:1'), 'The next attempt learns where, never the text.');
 });
 
 test('a change that weakens how CI checks the code reaches the merge step held for a person', async t => {
@@ -285,7 +285,7 @@ test('a credential in a file git treats as binary is refused from what the host 
   await until(() => h.repair()?.status === 'ready');
   await h.manager.idle();
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js']);
-  assert.equal((await h.saved()).attempts?.[0].failure, REJECTED.credential);
+  assert.equal((await h.saved()).attempts?.[0].failure, `${REJECTED.credential} Found at deploy.env:1.`);
 });
 
 test('the cost cap ends the repair as failed and keeps its pull request a draft', async t => {

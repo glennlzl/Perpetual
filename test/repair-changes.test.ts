@@ -9,7 +9,7 @@ const diff = (...files: string[]) => `${files.join('\n')}\n`;
 
 test('a source fix passes the rules with its paths and changed lines', () => {
   const result = checkChanges(diff(file('src/add.js', ['module.exports = (a, b) => a + b;'], ['module.exports = (a, b) => a - b;'])));
-  assert.deepEqual(result, { paths: ['src/add.js'], added: 1, removed: 1, rejected: [], holds: [] });
+  assert.deepEqual(result, { paths: ['src/add.js'], added: 1, removed: 1, rejected: [], holds: [], credentials: [] });
 });
 
 test('added credential text rejects the change; the same text removed, or a reference to a secret, does not', () => {
@@ -31,6 +31,17 @@ test('added credential text rejects the change; the same text removed, or a refe
   ]) {
     assert.deepEqual(checkChanges(diff(file(path, [line]))).rejected, [], `${path}: ${line}`);
   }
+});
+
+// The next attempt is told where its credential text is, never the text, so it can remove the right lines.
+test('credential text is named by path and line, and a line the change only moves is not added', () => {
+  const added = checkChanges(diff(file('src/config.ts', ['const a = 1;', 'const token = "ghp_abcdefghijklmnopqrstuvwxyz0123";'], ['const a = 0;'])));
+  assert.deepEqual([added.rejected, added.credentials], [[REJECTED.credential], ['src/config.ts:2']]);
+  const context = ['diff --git a/.env b/.env', '--- a/.env', '+++ b/.env', '@@ -3,2 +3,3 @@', ' NODE_ENV=production', '+API_KEY=abcd1234efgh5678', ' PORT=3000', ''].join('\n');
+  assert.deepEqual(checkChanges(context).credentials, ['.env:4'], 'Context lines count toward the line number.');
+  const line = 'export const apiKey = "abcd1234efgh5678";';
+  const moved = checkChanges(diff(file('src/auth.js', [], [line]), file('src/auth/index.js', [line])));
+  assert.deepEqual([moved.rejected, moved.credentials], [[], []], 'A moved file adds no text the repository did not hold.');
 });
 
 test('a path through .git, outside the repository or a submodule rejects the change', () => {

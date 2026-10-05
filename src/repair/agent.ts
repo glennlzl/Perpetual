@@ -87,6 +87,8 @@ const VERIFIED = 'The model stopped without calling done; the failing step\'s ow
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 /** A change the box or the host copy refused, such as one too large; the attempt fails with its message. */
 const rejected = (error: unknown) => isRecord(error) && error.rejected === true;
+/** Why the change rules refused a change, with where it added credential text (never the text) for the next attempt. */
+const refusal = (reasons: readonly string[], credentials: readonly string[]) => [...reasons, ...(credentials.length ? [`Found at ${credentials.slice(0, 5).join(', ')}.`] : [])].join(' ');
 const dollars = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 /**
  * The dollars OpenRouter reported for a step. A bring-your-own-key request's cost is only OpenRouter's fee; the
@@ -292,7 +294,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
         continue;
       }
       const first = checkChanges(diff.toString('utf8'), { deployFiles });
-      if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
+      if (first.rejected.length) { await fail(refusal(first.rejected, first.credentials)); continue; }
       // What git staged is checked again, whatever the box's diff said: its own paths, its text diff with the content
       // of files it treats as binary, and the manifests whose checks it changed. The change's size is that text diff's
       // too, since a file git treats as binary, by its content or its attributes, counts no lines in the box's diff.
@@ -301,7 +303,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
       const { paths } = staged, rules = pathRules(paths, deployFiles), checked = checkChanges(staged.text, { deployFiles });
       const refused = [...new Set([...rules.rejected, ...checked.rejected])];
-      if (refused.length) { await fail(refused.join(' ')); continue; }
+      if (refused.length) { await fail(refusal(refused, checked.credentials)); continue; }
       await connected(repair);
       const account = await pulls.account();
       if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);

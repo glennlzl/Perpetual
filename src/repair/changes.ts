@@ -8,7 +8,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
 import { hasCredential } from '../redaction.ts';
 
-export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[] }
+/** credentials names where credential text was added, as path:line of the new file, never the text. */
+export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[]; credentials: string[] }
 
 /** Changed lines beyond which a change is held for a person. */
 export const SIZE_LIMIT = 400;
@@ -119,27 +120,29 @@ export function pathRules(paths: readonly string[], deployFiles: readonly string
 }
 
 /**
- * The rules for a `git diff` with prefixes a/ and b/: its paths, changed lines, rejections and holds. A binary patch's
- * content is not read here; the host copy checks git's --text diff of what it staged, binary files included.
+ * The rules for a `git diff` with prefixes a/ and b/: its paths, changed lines, rejections and holds, and where it adds
+ * credential text. A binary patch's content is not read here; the host copy checks git's --text diff of what it staged,
+ * binary files included.
  */
 export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?: readonly string[] } = {}): ChangeCheck {
-  const paths = new Set<string>(), rejected = new Set<string>();
-  let added = 0, removed = 0, hunk = false, binary = false, code = false;
+  const paths = new Set<string>(), rejected = new Set<string>(), gone = new Set<string>(), adds: { text: string; code: boolean; at: string }[] = [];
+  let added = 0, removed = 0, hunk = false, binary = false, code = false, file = '', number = 0;
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       const named = headerPaths(line.slice(11));
-      hunk = false; binary = false; code = CODE.test(named.at(-1) ?? '');
+      hunk = false; binary = false; file = named.at(-1) ?? ''; code = CODE.test(file);
       named.forEach(path => paths.add(path));
       continue;
     }
     if (binary) continue;
     if (hunk) {
-      if (line.startsWith('+')) { added += 1; if (hasCredential(line.slice(1), { code })) rejected.add(REJECTED.credential); continue; }
-      if (line.startsWith('-')) { removed += 1; continue; }
-      if (line.startsWith(' ') || line.startsWith('\\') || line === '') continue;
+      if (line.startsWith('+')) { added += 1; adds.push({ text: line.slice(1), code, at: `${file}:${number}` }); number += 1; continue; }
+      if (line.startsWith('-')) { removed += 1; gone.add(line.slice(1)); continue; }
+      if (line.startsWith(' ')) { number += 1; continue; }
+      if (line.startsWith('\\') || line === '') continue;
       hunk = false;
     }
-    if (line.startsWith('@@')) { hunk = true; continue; }
+    if (line.startsWith('@@')) { hunk = true; number = Number(/^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line)?.[1] ?? 0); continue; }
     if (line === 'GIT binary patch') { binary = true; continue; }
     const header = /^(?:---|\+\+\+) (.+)$/.exec(line) ?? /^(?:rename|copy) (?:from|to) (.+)$/.exec(line);
     if (header) {
@@ -149,8 +152,11 @@ export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?:
     }
     if (/^(?:new file mode|deleted file mode|old mode|new mode) 160000$|^index [\da-f]+\.\.[\da-f]+ 160000$/.test(line)) rejected.add(REJECTED.submodule);
   }
+  // Credential text is text the change adds: a line it also removes, as in a file it moves, was already there.
+  const credentials = adds.filter(item => !gone.has(item.text) && hasCredential(item.text, { code: item.code })).map(item => item.at);
+  if (credentials.length) rejected.add(REJECTED.credential);
   const listed = [...paths], rules = pathRules(listed, deployFiles);
   rules.rejected.forEach(reason => rejected.add(reason));
   const holds = [...rules.holds, ...(added + removed > SIZE_LIMIT ? [HELD.size] : [])];
-  return { paths: listed, added, removed, rejected: [...rejected], holds };
+  return { paths: listed, added, removed, rejected: [...rejected], holds, credentials: credentials.slice(0, 10) };
 }
