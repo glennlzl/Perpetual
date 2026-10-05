@@ -377,17 +377,18 @@ function useGitHubDeployments(repoPath: string | undefined, sha: string | null, 
 }
 
 // Autopilot's modes and changes, read once the controller reports them in the
-// pipeline state; before that the cards show nothing about Autopilot.
+// pipeline state; before that the cards show nothing about Autopilot. The state's
+// view stands only until the first read: a failed read shows nothing, never that older view.
 function useAutopilot(repoPath: string | undefined, initial: AutopilotView | null | undefined) {
-  const [view, setView] = useState<AutopilotView | null>(null);
+  const [read, setRead] = useState<{ repoPath: string; view: AutopilotView | null } | null>(null);
   const enabled = initial !== undefined;
   useEffect(() => {
     if (!repoPath || !enabled) return undefined;
-    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setView(previous => shareAutopilot(previous, next)) });
+    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setRead(previous => ({ repoPath, view: shareAutopilot(previous?.repoPath === repoPath ? previous.view : null, next) })) });
     const stop = autopilotChanges.subscribe(() => poller.refresh());
     return () => { stop(); poller.stop(); };
   }, [repoPath, enabled]);
-  const current = view ?? initial ?? null;
+  const current = read && read.repoPath === repoPath ? read.view : initial ?? null;
   return enabled && current?.repoPath === repoPath ? current : null;
 }
 

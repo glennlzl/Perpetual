@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
+import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
 
@@ -37,7 +38,14 @@ async function openApp(t: TestContext, handle: Handler) {
     await route.fulfill({ status: reply.status ?? 200, json: reply.json });
   });
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  return { page, posts, pageErrors, open: () => page.goto(`${origin}/build/`) };
+  // Reads a poll at once, as a saved change does, and waits for its reply to render.
+  const refresh = async (route: string, module: string, notifier: string) => {
+    const response = page.waitForResponse(value => new URL(value.url()).pathname === route);
+    await page.evaluate(async ([file, name]) => { (await import(file))[name].notify(); }, [module, notifier]);
+    await (await response).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  };
+  return { page, posts, pageErrors, refresh, open: () => page.goto(`${origin}/build/`) };
 }
 
 test('pausing a transition names the transition and leaves the stage status in its Badge', { timeout: 60000 }, async t => {
@@ -65,5 +73,28 @@ test('pausing a transition names the transition and leaves the stage status in i
   await dialog.getByRole('button', { name: 'Resume transition', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Pause transition from Beta to Production', exact: true })).toBeVisible();
   assert.equal(pipeline.transitions.find(edge => edge.target === 'production')?.blocked, false);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a failed Autopilot read never brings back the change the page loaded with', { timeout: 60000 }, async t => {
+  const running: AutopilotChange = { id: 'repair-1', stageId: 'build', kind: 'repair', title: 'Fixing build', status: 'running', sha, steps: [{ id: 'read', name: 'Read the failure', status: 'active' }] };
+  const view = (change: AutopilotChange): AutopilotView => ({ repoPath, stages: { build: { mode: 'merge', changes: [change] } } });
+  let autopilot: Reply = { json: view({ ...running, status: 'needs-review', steps: [{ id: 'read', name: 'Read the failure', status: 'done' }] }) };
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { autopilot: view(running) }) };
+    if (path === '/api/autopilot') return autopilot;
+  });
+  await open();
+  const build = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Needs review', exact: true })).toBeVisible();
+  // The controller cannot be read: the page shows nothing about Autopilot rather than the view it loaded with.
+  autopilot = { status: 503, json: { error: 'Autopilot unavailable.' } };
+  await refresh('/api/autopilot', '/build/src/lib/pipeline-autopilot.ts', 'autopilotChanges');
+  await expect(build.getByRole('button', { name: /^Autopilot for Build/ })).toHaveCount(0);
+  await expect(build.getByText('Fixing build')).toHaveCount(0);
+  await expect(build.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+  autopilot = { json: view({ ...running, status: 'merged' }) };
+  await refresh('/api/autopilot', '/build/src/lib/pipeline-autopilot.ts', 'autopilotChanges');
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Merged', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
