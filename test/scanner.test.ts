@@ -265,3 +265,13 @@ test('custom helper paths and object fields never establish a Vercel project ide
     assert.equal(scan.workflows.length, 1, 'the workflow remains with the Build runner');
   });
 });
+
+test('a workflow that mentions Vercel only in a comment, an @vercel/ package or a vercel-labs/ tool deploys nothing to Vercel', async t => {
+  const root = await fixture(t, {
+    'package.json': { name: 'action' },
+    '.github/workflows/build.yml': 'name: Build\non: push\n# Previews deploy through the Vercel Git integration, not here.\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx @vercel/ncc build index.js -o dist # bundled for Vercel\n      - uses: vercel-labs/emulate@v1\n',
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx @vercel/ncc build index.js\n      - run: npx vercel deploy --prod\n',
+  });
+  const scan = await scanRepository(root);
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => node.evidence.map(item => [item.file, item.line])), [[['.github/workflows/deploy.yml', 8]]]);
+});

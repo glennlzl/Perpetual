@@ -273,10 +273,9 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
       edge(workflowId, jobId, 'runs');
       for (const dependency of job.needs) if (jobs.some(j => j.id === dependency)) edge(`${workflowId}:${id(dependency)}`, jobId, 'needs');
     }
-    if (/vercel/i.test(raw)) {
-      const workflowEvidence = evidence(file, 'Vercel-related automation found; provider connection is not verified.', lineOf(raw.toLowerCase(), 'vercel'));
-      appendEvidence(vercelEvidence, workflowEvidence);
-    }
+    // A comment, an @vercel/ package such as @vercel/ncc or a vercel-labs/ tool mentions Vercel without deploying to it.
+    const vercelLine = raw.split('\n').findIndex(line => /vercel/i.test(line.replace(/(?:^|\s)#.*/, '').replace(/@vercel\/[\w.-]*|vercel-labs\/[\w.-]*/gi, '')));
+    if (vercelLine >= 0) appendEvidence(vercelEvidence, evidence(file, 'Vercel-related automation found; provider connection is not verified.', vercelLine + 1));
   }
 
   for (const location of new Set(['.', ...services.map(s => s.path), ...found.deployments])) {
