@@ -12,7 +12,7 @@ test('OpenRouter key is persisted privately, omitted from view, and retained dur
   assert.equal(model.view().keyConfigured,false);
   await model.save({apiKey:'openrouter-private-fixture'});
   assert.equal(model.environment().PERPETUAL_MODEL_API_KEY,'openrouter-private-fixture');
-  assert.equal(model.environment().PERPETUAL_MODEL,'openai/gpt-5.4-mini');
+  assert.equal(model.environment().PERPETUAL_MODEL,'openai/gpt-6-luna');
   assert.equal(JSON.stringify(model.view()).includes('private-fixture'),false);
   assert.equal((await stat(join(dataDir,'browser-model.json'))).mode&0o777,0o600);
   await model.save({model:'anthropic/claude-sonnet-4.6'});
@@ -64,11 +64,11 @@ test('generic provider credentials require an explicit model while an empty inst
   assert.equal(generic.environment().PERPETUAL_MODEL,'');
   assert.equal(generic.environment().PERPETUAL_MODEL_BASE_URL,'https://api.openai.com/v1');
   const empty=await createBrowserModelSettings({dataDir,env:{}});
-  assert.equal(empty.view().model,'openai/gpt-5.4-mini');
+  assert.equal(empty.view().model,'openai/gpt-6-luna');
   assert.equal(empty.view().baseUrl,'https://openrouter.ai/api/v1');
   assert.equal(empty.view().modelConfigured,false);
   const openRouter=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'openrouter-private-fixture'}});
-  assert.equal(openRouter.environment().PERPETUAL_MODEL,'openai/gpt-5.4-mini');
+  assert.equal(openRouter.environment().PERPETUAL_MODEL,'openai/gpt-6-luna');
   assert.equal(openRouter.view().modelConfigured,true);
 });
 
@@ -109,8 +109,8 @@ test('the escalation model defaults to a strong model the catalog has, else the 
   const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
   // The public catalog as OpenRouter lists it; no request leaves the test.
   const catalog=(ids:string[])=>{globalThis.fetch=(async()=>new Response(JSON.stringify({data:ids.map(id=>({id,name:`Vendor: ${id}`,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))}),{status:200})) as typeof fetch;};
-  catalog(['openai/gpt-5.4-mini','anthropic/claude-sonnet-4.6','openai/gpt-6']);
-  assert.deepEqual((({defaultModel,defaultEscalationModel})=>[defaultModel,defaultEscalationModel])(await createOpenRouterModelCatalog().view()),['openai/gpt-5.4-mini','openai/gpt-6']);
+  catalog(['openai/gpt-6-luna','openai/gpt-5.4-mini','anthropic/claude-sonnet-4.6','openai/gpt-6']);
+  assert.deepEqual((({defaultModel,defaultEscalationModel})=>[defaultModel,defaultEscalationModel])(await createOpenRouterModelCatalog().view()),['openai/gpt-6-luna','openai/gpt-6']);
   assert.equal((await createOpenRouterModelCatalog().view(undefined,'anthropic/claude-sonnet-4.6')).defaultEscalationModel,'anthropic/claude-sonnet-4.6','A saved escalation model stays selected.');
   catalog(['openai/gpt-5.4-mini','qwen/qwen3']);
   assert.equal((await createOpenRouterModelCatalog().view('qwen/qwen3')).defaultEscalationModel,'qwen/qwen3','Without a strong model, repairs escalate to the Settings model.');

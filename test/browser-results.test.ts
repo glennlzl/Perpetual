@@ -39,6 +39,30 @@ test('worker status claims are ignored, and an unknown case or stop cause is a p
   assert.throws(()=>verdict({caseId:'other'}),/unknown case/);
 });
 
+test('control limitations are validated facts that cannot change the failed business verdict',()=>{
+  const result=verdict({controlRead:false,controlBlocker:'shared-worker',stopCause:'action',error:'The control run cannot block shared-worker communication.'},progress('completed','failed'));
+  assert.deepEqual(result,{caseId:journey.id,status:'failed',engine:'playwright',assertions:[{...passing,reached:false}],controlRead:false,controlBlocker:'shared-worker',error:'Milestone check failed: Pay with a Stripe test card.'});
+  for(const controlRead of [undefined,true])assert.throws(()=>verdict({controlRead,controlBlocker:'shared-worker'}),/control limitation/);
+  for(const controlBlocker of [null,{},'page secret','constructor'])assert.throws(()=>verdict({controlRead:false,controlBlocker}),/control limitation/);
+});
+
+test('a fixed control-read diagnosis is retained while arbitrary worker text and a qualified diagnosis are refused',()=>{
+  const result=verdict({controlRead:false,controlReadReason:'url-changed'},progress('completed','failed'));
+  assert.equal(result.status,'failed');
+  assert.equal(result.controlReadReason,'url-changed');
+  for(const controlRead of [undefined,true])assert.throws(()=>verdict({controlRead,controlReadReason:'url-changed'}),/control read diagnosis/);
+  for(const controlReadReason of [null,{},'private page address','constructor'])assert.throws(()=>verdict({controlRead:false,controlReadReason}),/control read diagnosis/);
+});
+
+test('control transport evidence stays bounded and cannot qualify a failed control',()=>{
+  const controlBlocks=[{kind:'http',method:'POST',url:'https://viewer:secret@app.test/read;token=private?secret=private#private',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}];
+  const result=verdict({controlRead:false,controlReadReason:'blocked-after-read',controlBlocks},progress('completed','failed'));
+  assert.equal(result.status,'failed');assert.equal(result.controlRead,false);
+  assert.deepEqual((result as unknown as {controlBlocks:unknown}).controlBlocks,[{kind:'http',method:'POST',url:'https://app.test/read',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}]);
+  for(const controlRead of [undefined,true])assert.throws(()=>verdict({controlRead,controlBlocks}),/control transport evidence/);
+  for(const invalid of [null,{},Array(11).fill(controlBlocks[0]),[{...controlBlocks[0],body:'private'}],[{...controlBlocks[1],message:'private'}],[{...controlBlocks[0],afterRead:'true'}]])assert.throws(()=>verdict({controlRead:false,controlBlocks:invalid}),/control transport evidence/);
+});
+
 test('one precedence decides status and message: failed, blocked, needs review, then passed',()=>{
   const failedCheck=[{...journey.steps[0],status:'completed'},{...journey.steps[1],status:'failed',checks:[{type:'compare-number',label:'Credits',name:'after',op:'>',than:'before',passed:false,observed:10,provenance:'independent'}]}];
   const table:[string,Record<string,unknown>,MilestoneState[],string,string|undefined][]=[

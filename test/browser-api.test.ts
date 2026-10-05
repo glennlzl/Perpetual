@@ -27,7 +27,7 @@ test('browser API uses controller session and source/stage scope, keeps provider
   assert.equal(invalidAccount.status,400);assert.match(invalidAccount.body.error,/test account/i);
   assert.equal(JSON.stringify(invalidAccount).includes('private-login-fixture-only'),false);
   const key='private-openrouter-fixture-only';
-  const configured=await request('/api/browser/model',{...context,apiKey:key});assert.equal(configured.status,200);assert.equal(configured.body.capabilities.model,'openai/gpt-5.4-mini');assert.equal(JSON.stringify(configured).includes(key),false);
+  const configured=await request('/api/browser/model',{...context,apiKey:key});assert.equal(configured.status,200);assert.equal(configured.body.capabilities.model,'openai/gpt-6-luna');assert.equal(JSON.stringify(configured).includes(key),false);
   let view=await request(`/api/browser?${query}`);assert.equal(view.body.config.targetUrl,'http://localhost:3000/');assert.equal(view.body.capabilities.keyConfigured,true);assert.equal(JSON.stringify(view).includes(key),false);
   assert.equal((await request(`/api/browser/runs/00000000-0000-0000-0000-000000000000/frame?${query}`)).status,404);
   const recording=`/api/browser/runs/00000000-0000-0000-0000-000000000000/video?${new URLSearchParams({...context,caseId:'x',file:`page@${'0'.repeat(32)}.webm`})}`;

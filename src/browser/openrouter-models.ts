@@ -3,7 +3,7 @@ import type {OpenRouterModel,OpenRouterModelView} from '../../contract/settings.
 export const OPENROUTER_BASE_URL='https://openrouter.ai/api/v1';
 export const isOpenRouterEndpoint=(value:unknown):boolean=>typeof value==='string'&&value.replace(/\/$/,'')===OPENROUTER_BASE_URL;
 const CATALOG_URL=`${OPENROUTER_BASE_URL}/models`;
-export const DEFAULT_MODEL='openai/gpt-5.4-mini';
+export const DEFAULT_MODEL='openai/gpt-6-luna';
 /** Strong coding models a build repair escalates to, in order of preference; the first the catalog has is the default. */
 export const ESCALATION_MODELS=['anthropic/claude-sonnet-5','openai/gpt-6','anthropic/claude-sonnet-4.6','openai/gpt-5.4','google/gemini-3-pro-preview'];
 const CACHE_TTL_MS=5*60*1000,RETRY_MS=60*1000;
