@@ -264,6 +264,45 @@ test('verification attempts keep a history of their own, and each stage keeps it
   assert.deepEqual(history,expected);
 });
 
+test('deleting a stage deletes its tests, code, settings, runs and recordings, and nothing of another stage',async t=>{
+  const facts={caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]};
+  const f=await fixture(t,input=>{
+    const name=`page@${randomBytes(16).toString('hex')}.webm`;writeFileSync(join(input.videoDir!,name),'webm');
+    return [{type:'video',caseId:scenario.id,files:[name]},...milestones,{type:'result',result:facts}];
+  });
+  const gamma={...f.context,stageId:'gamma'},idle=async(context:typeof f.context)=>{for(const deadline=Date.now()+WAIT;f.manager.isActive(context);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The stage did not become idle.');};
+  await f.manager.saveConfig(gamma,{targetUrl:'http://localhost:3001'});await f.manager.saveCases(gamma,[scenario]);await draftCode(f.manager,gamma,[scenario]);
+  const kept=(await f.manager.run(gamma,{},manual)).run;await idle(gamma);
+  const running=(await f.manager.run(f.context,{},manual)).run;
+  await assert.rejects(f.manager.removeStage(f.context),{statusCode:409},'A stage running journeys keeps its data.');
+  await idle(f.context);
+  // Its analysis, preparation, automatic target and an external cleanup hold, as earlier operations leave them.
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),scope=scopeId(f.context);
+  Object.assign(state.analyses,{[scope]:{cases:[],summary:'Workspace product',authenticated:false,createdAt:'2026-10-01T00:00:00.000Z',sourceRevision:'abc'}});
+  Object.assign(state.preparations,{[scope]:{environmentId:'twin',status:'completed',createdAt:'2026-10-01T00:00:00.000Z'}});
+  Object.assign(state.preparationAttempts,{[`${scope}:twin`]:true,[`${scopeId(gamma)}:twin`]:true});
+  Object.assign(state.configTargets,{[scope]:{environmentId:'twin',url:'http://localhost:3000/'}});
+  state.externalOperations={'http://127.0.0.1:3999':{id:randomUUID(),scope,operation:'run',startedAt:'2026-10-01T00:00:00.000Z'}};
+  await writeFile(file,JSON.stringify(state));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  await manager.removeStage(f.context);
+  const view=await manager.view(f.context);
+  assert.deepEqual([view.cases,view.runs,view.specs,view.config.targetUrl,view.preparation,view.analysis],[[],[],{},'',null,null]);
+  const saved=JSON.parse(await readFile(file,'utf8'));
+  for(const key of ['configs','cases','analyses','preparations','configTargets','specs','generationFailures','authoring'])assert.equal(Object.hasOwn(saved[key],scope),false,key);
+  assert.deepEqual(Object.keys(saved.preparationAttempts),[`${scopeId(gamma)}:twin`]);
+  assert.deepEqual(saved.runs.map((run:{id:string})=>run.id),[kept.id]);
+  assert.deepEqual(Object.keys(saved.externalOperations),['http://127.0.0.1:3999'],'A cleanup hold keeps its application.');
+  const videos=join(f.dataDir,'browser','videos');
+  await assert.rejects(access(join(videos,running.id)));
+  assert.equal((await manager.view(gamma)).cases.length,1);
+  await access(join(videos,kept.id,(await manager.runProgress(gamma,kept.id)).progress.cases[0].videos![0]));
+  // Deleting it again, as a retried stage removal does, changes nothing.
+  await manager.removeStage(f.context);
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')).runs.map((run:{id:string})=>run.id),[kept.id]);
+});
+
 test('a symbolically linked recording folder is refused, and its target is left intact',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-manager-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const outside=join(dataDir,'outside');await mkdir(join(outside,'Holiday'),{recursive:true});await writeFile(join(outside,'notes.txt'),'notes');

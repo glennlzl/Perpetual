@@ -51,7 +51,7 @@ function validateState(state: unknown) {
 // Sandbox stage once; losing its browser page does not lose the cleanup work.
 export async function createStageRemovalManager({ dataDir, usage, environments, browser, removeStage }: {
   dataDir: string; usage: EnvironmentUsage; environments: Pick<EnvironmentManager, 'summaries' | 'destroy' | 'awaitIdle'>;
-  browser: { isActive(context: StageRef): boolean }; removeStage: (context: StageRef) => Promise<unknown>;
+  browser: { isActive(context: StageRef): boolean; removeStage(context: StageRef): Promise<unknown> }; removeStage: (context: StageRef) => Promise<unknown>;
 }) {
   const root = await privateDirectory(resolve(dataDir, 'stage-removals'), 'Stage removal storage must not be a symbolic link.', { resolveAliases: false });
   const file = join(root, 'state.json');
@@ -123,6 +123,9 @@ export async function createStageRemovalManager({ dataDir, usage, environments, 
         }
         if (closed) return checkpoint(record);
         if (stageEnvironments(record.context).some(holdsResources)) throw new Error('A sandbox still belongs to this stage. Retry deleting the stage.');
+        // The stage's tests, journey code, test settings, runs and recordings go before the stage does; deleting them
+        // again on a retry is harmless.
+        await browser.removeStage(record.context);
         // The injected transaction uses this saved logical scope, never the
         // currently selected source. It must tolerate a prior successful commit.
         await removeStage(record.context);

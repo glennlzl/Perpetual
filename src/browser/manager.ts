@@ -352,8 +352,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
   // Each stage keeps the recordings of its latest runs, apart from verification attempts, of its latest gate run, and of
-  // its latest verification's attempts; a run's recordings go with it.
-  async function pruneVideos(){
+  // its latest verification's attempts; a run's recordings go with it. strict reports a folder it could not remove.
+  async function pruneVideos({strict=false}={}){
     const kept=new Set<string>(),count=new Map<string,number>(),gates=new Set<string>(),verified=new Map<string,string>();
     for(const run of state.runs){
       if(active(run)){kept.add(run.id);continue;}
@@ -372,8 +372,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       else for(const item of run.progress?.cases||[])delete item.videos;
     }
     // Only run folders are removed; anything else placed here is left alone.
-    const names=(await readdir(videoRoot).catch(()=>[])).filter(name=>runFolder.test(name)&&!kept.has(name));
-    await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(()=>{});}));
+    const failed=(error:unknown)=>{if(strict&&(error as NodeJS.ErrnoException|null)?.code!=='ENOENT')throw error;};
+    const names=(await readdir(videoRoot).catch(error=>{failed(error);return [];})).filter(name=>runFolder.test(name)&&!kept.has(name));
+    await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(failed);}));
   }
   function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const projected=project(),authoring=retainAuthoring(projected.authoring??{},projected.cases);const content=JSON.stringify({...projected,authoring});if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();state.authoring=authoring;});}
   const externalLeases=new Set<string>();
@@ -994,6 +995,29 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const promise=startWork(...args);admissions.add(promise);
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
+  const stageActive=(context:{key:string;stageId:string})=>{const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&(active(r)||jobs.has(r.id)));};
+  /**
+   * Deletes a Sandbox stage's tests, journey code, test settings, preparation, runs and recordings, once the stage's
+   * removal has cleaned up its twins. A cleanup hold its operations left stays: it holds an application, not the stage.
+   * Done again, as a retried removal does, it removes recordings an earlier attempt could not.
+   */
+  function removeStage(context:{key:string;stageId:string}){return admit(async()=>{
+    if(stageActive(context))throw conflict('Stop the browser run before deleting this stage.');
+    const scope=scopeId(context),attempts=`${scope}:`,removed=new Set(state.runs.filter(run=>run.scope===scope).map(run=>run.id));
+    const keyed=['configs','cases','analyses','preparations','configTargets','specs','generationFailures','authoring'] as const;
+    const without=(records:Record<string,unknown>)=>Object.fromEntries(Object.entries(records).filter(([key])=>key!==scope));
+    await persist(()=>({...state,...Object.fromEntries(keyed.map(key=>[key,without(state[key])])),
+      preparationAttempts:Object.fromEntries(Object.entries(state.preparationAttempts).filter(([key])=>!key.startsWith(attempts))),runs:state.runs.filter(run=>run.scope!==scope)}),()=>{
+      for(const key of keyed)delete (state[key] as Record<string,unknown>)[scope];
+      for(const key of Object.keys(state.preparationAttempts))if(key.startsWith(attempts))delete state.preparationAttempts[key];
+      state.runs=state.runs.filter(run=>run.scope!==scope);
+    });
+    for(const id of removed)frames.delete(id);
+    for(const [key,entry] of generations)if(entry.scope===scope)generations.delete(key);
+    for(const [key,entry] of verifications)if(entry.scope===scope)verifications.delete(key);
+    pendingPreparations.delete(scope);
+    await pruneVideos({strict:true});
+  });}
   // The target twin's test accounts for the account choice, without passwords.
   function targetAccounts(url:string|undefined){const environment=url?resolveEnvironment(url):null;return environment?.status==='ready'?(environment.accounts||[]).map(({id,label,username})=>({id,label,username})):[];}
   function publicConfig(scope:string):BrowserConfig{
@@ -1151,7 +1175,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     async skip(context:BrowserStageContext,id:unknown,caseId:unknown){const run=find(context,id);if(run.mode!=='run'||!includes(run.caseIds,caseId))throw Object.assign(new Error('Journey not found in this run.'),{statusCode:404});const journey=caseId,entry=jobs.get(run.id);if(entry){entry.skips.add(journey);if(entry.scheduler)entry.scheduler.skip(journey);else if(!run.results?.some(result=>result.caseId===journey)){/* A journey settled before the scheduler started keeps its verdict. */const item=run.progress.cases.find(item=>item.id===journey)!;item.status='skipped';item.completedAt=now();touch(run);}}return report(run);},
     async stop(context:BrowserStageContext,id:unknown){const run=find(context,id),entry=jobs.get(run.id);if(entry){entry.cancelled=true;entry.cancel();}return {run:publicRun(run)};},
     // A terminal verdict can still be saving results and releasing its target.
-    isActive(context:{key:string;stageId:string}){const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&(active(r)||jobs.has(r.id)));},
+    isActive:stageActive,
+    removeStage,
     close(){
       if(closing)return closing;closed=true;
       const cancel=()=>{for(const entry of verifications.values())entry.cancelled=true;for(const entry of jobs.values()){entry.cancelled=true;entry.cancel();}for(const controller of inputJobs.keys())controller.abort();for(const entry of generations.values())if(entry.status==='running')entry.cancel();};cancel();

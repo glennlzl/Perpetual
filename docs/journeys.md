@@ -258,7 +258,7 @@ Beta and Gamma cards list the stage's journeys with their queued, running and re
 
 Watching a verification follows it as a whole: when the shown attempt ends, the viewer opens the next one, its control run included, so **Cancel run** stays reachable until the verification settles. An attempt a person opens after it ended stays open, so earlier attempts can be reviewed while the verification runs.
 
-Every tab of a run journey is recorded as WebM; discovery is not recorded. A finished journey plays its recordings (one tab per recording); one without a recording shows its **Last frame**, never presented as live activity. A stage keeps the recordings of its latest 5 runs other than verification attempts, of its latest gate run however many runs followed it, and, apart from those, of its latest verification's attempts. A missing recorder leaves a journey unrecorded without failing it; a killed process reports no recording.
+Every tab of a run journey is recorded as WebM; discovery is not recorded. A finished journey plays its recordings (one tab per recording); one without a recording shows its **Last frame**, never presented as live activity. A stage keeps the recordings of its latest 5 runs other than verification attempts, of its latest gate run however many runs followed it, and, apart from those, of its latest verification's attempts. A missing recorder leaves a journey unrecorded without failing it; a killed process reports no recording. Deleting a Sandbox stage deletes its runs and recordings with its tests, journey code and test settings.
 
 Frames and recordings may show test data. They stay behind the local, scoped controller.
 
