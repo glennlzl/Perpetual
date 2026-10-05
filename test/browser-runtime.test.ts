@@ -159,6 +159,20 @@ test('a short or common secret is hidden in free text without changing keys, num
   }
 });
 
+test('a discovery or sign-in-page event is free text throughout, its check values included',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-discovery-text-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  // The model reports back a page that shows its key.
+  const reported=JSON.stringify([
+    {type:'discovery',cases:[{id:'orders',name:'Place an order',steps:[{id:'pay',title:'Pay',checks:[{type:'text-visible',value:'KEY'}]}],assertions:[{type:'text-visible',value:'Key KEY'}]}],summary:'Explored'},
+    {type:'sign-in-page',caseId:'discovery',url:'https://app.example/sign-in/KEY'},
+  ]);
+  const runner=join(directory,'runner.mjs');
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>{for(const event of JSON.parse(${JSON.stringify(reported)}.replaceAll('KEY',process.env.PERPETUAL_MODEL_API_KEY)))console.log(JSON.stringify(event));});`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture-chat',PERPETUAL_MODEL_API_KEY:'fixture-model-key-0123456789'}}),events:WorkerEvent[]=[];
+  await runtime.start({mode:'discover'},event=>events.push(event)).promise;
+  assert.deepEqual(events,JSON.parse(reported.replaceAll('KEY','[REDACTED]')));
+});
+
 // A worker that runs script; its events are what the supervisor accepted.
 function supervise(script:string,{cleanupGraceMs=200}={}){
   const events:WorkerEvent[]=[];

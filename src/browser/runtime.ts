@@ -31,14 +31,17 @@ export type BrowserRuntime={capabilities():Promise<BrowserCapabilities>;start(in
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
 // An error's message, or anything else thrown as it is.
 const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&'message' in error?error.message:undefined;
-// Fields a consumer matches exactly against its reviewed case or a fixed vocabulary; every other string is free text.
-// A secret is hidden in free text only, so one that also spells part of a key, a number, a status or a step id, as a
-// password `test` does in `create-test-workflow`, cannot turn a valid event into an invalid one.
+// Fields of a run's events that a consumer matches exactly against its reviewed case or a fixed vocabulary: milestone
+// checks, result assertions and blockers, case actions, video files and a blocked request's method. Every other string
+// is free text, as is all of a discovery or sign-in-page event, which the model writes. A secret is hidden in free text
+// only, so one that also spells part of a key, a number, a status or a step id, as a password `test` does in
+// `create-test-workflow`, cannot turn a valid event into an invalid one.
 const IDENTIFIERS:ReadonlySet<string>=new Set(['type','status','caseId','stepId','kind','stopCause','errorCode','method','value','resolved','files']);
-function hideText(value:unknown,conceal:(text:string)=>string,key?:string):unknown{
-  if(typeof value==='string')return key!==undefined&&IDENTIFIERS.has(key)?value:conceal(value);
-  if(Array.isArray(value))return value.map(item=>hideText(item,conceal,key));
-  return isRecord(value)?Object.fromEntries(Object.entries(value).map(([name,item])=>[name,hideText(item,conceal,name)])):value;
+const RUN_EVENTS:ReadonlySet<unknown>=new Set(['case','journey-step','result','video','blocked-request']);
+function hideText(value:unknown,conceal:(text:string)=>string,exempt?:ReadonlySet<string>,key?:string):unknown{
+  if(typeof value==='string')return key!==undefined&&exempt?.has(key)?value:conceal(value);
+  if(Array.isArray(value))return value.map(item=>hideText(item,conceal,exempt,key));
+  return isRecord(value)?Object.fromEntries(Object.entries(value).map(([name,item])=>[name,hideText(item,conceal,exempt,name)])):value;
 }
 
 const base=fileURLToPath(new URL('../../integrations/browser-use/',import.meta.url));
@@ -129,7 +132,7 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
         if(event.type!=='frame'&&event.type!=='case'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return refuse('Browser event history exceeded its size limit.');}
         if(event.type==='error'){cleanupIncomplete ||= event.cleanupIncomplete===true;terminalError=new Error(failure(event.error));continue;}
         // Nesting too deep to walk stops the run rather than throwing out of this listener.
-        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal) as WorkerEvent;}catch{return refuse('Browser runtime returned an invalid event.');}
+        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal,RUN_EVENTS.has(event.type)?IDENTIFIERS:undefined) as WorkerEvent;}catch{return refuse('Browser runtime returned an invalid event.');}
         // Without onOutput, the options carry onEvent.
         try{onEvent!(event);}catch(error){return stop(failure(error),'consumer');}
       }
