@@ -164,6 +164,11 @@ test('the journey list, a focused journey and its recording tabs have the roles 
   const panel = page.locator(`#${await tab.getAttribute('aria-controls')}`);
   await expect(panel).toHaveAttribute('role', 'tabpanel');
   await expect(panel.getByLabel('Save a workspace recording', { exact: true })).toHaveCount(1);
+  // The tabs come before their panels, and a panel is no stop of its own, so Tab moves from the chosen tab into its recording.
+  await expect(panel).toHaveAttribute('tabindex', '-1');
+  await tab.press('Tab');
+  assert.ok(await panel.evaluate(element => element !== document.activeElement && element.contains(document.activeElement)), 'The recording, or its retry, is focused.');
+  assert.deepEqual(fixture.pageErrors, []);
 });
 
 test('Discard draft asks first and discards exactly the draft it was chosen for', { timeout: 60000 }, async t => {

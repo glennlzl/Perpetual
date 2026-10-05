@@ -24,11 +24,11 @@ export default function JourneyRecording({ urls, name = 'Journey', variant = 'fu
   const tab = urls[Number(selected)] ? selected : '0', src = urls[Number(tab)];
   return <div role="group" aria-label={`${name} browser`} className={`journey-browser relative flex min-w-0 items-center justify-center overflow-hidden bg-background ${variant === 'focus' ? 'h-full w-full' : 'aspect-video border-y'} ${className}`}>
     {urls.length > 1 ? <Tabs value={tab} onValueChange={setSelected} className="absolute inset-0 gap-0">
-      {/* Each tab's recording is the panel that tab controls. */}
-      {urls.map((url, index) => <TabsContent key={url} value={String(index)} className="relative flex min-h-0 items-center justify-center"><Recording key={url} src={url} name={name} /></TabsContent>)}
-      <div className="absolute top-2 right-2 left-2 min-w-0 overflow-x-auto overscroll-x-contain">
+      <div className="absolute top-2 right-2 left-2 z-10 min-w-0 overflow-x-auto overscroll-x-contain">
         <TabsList aria-label={`${name} recordings`}>{urls.map((url, index) => <TabsTrigger key={url} value={String(index)} className="text-xs">Tab {index + 1}</TabsTrigger>)}</TabsList>
       </div>
+      {/* Each tab's recording is the panel that tab controls; its video, not the panel, takes focus after the tabs. */}
+      {urls.map((url, index) => <TabsContent key={url} value={String(index)} tabIndex={-1} className="relative flex min-h-0 items-center justify-center"><Recording key={url} src={url} name={name} /></TabsContent>)}
     </Tabs> : <Recording key={src} src={src} name={name} />}
   </div>;
 }
