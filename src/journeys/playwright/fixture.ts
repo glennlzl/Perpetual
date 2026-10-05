@@ -92,7 +92,7 @@ function markEdits(key: string) {
   for (const type of ['input', 'change']) window.addEventListener(type, event => { const target = event.composedPath()[0]; if (target) edited.add(target); }, true);
 }
 // What holds looks for: the text, from version 5 the source of the pattern that finds it, the edit marks' key, the check
-// version, and whether it reads form fields rather than visible text getByText found.
+// version, and whether it reads form fields rather than the visible elements whose text holds it.
 type Wanted = [text: string, pattern: string | null, key: string, version: number, fields: boolean];
 // Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
 // matches: ignoring case and runs of whitespace, and from version 5 by its pattern, only where the text stands on its
@@ -101,6 +101,8 @@ type Wanted = [text: string, pattern: string | null, key: string, version: numbe
 // through history, into which it restores what was typed before. Without the marks, no field is read. Visible text the
 // journey typed into an editing host of the current document is no more what the application kept, so it is not read.
 // From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
+// From version 5, visible text is judged where the page renders it (shown), so what stands beside it is what a person
+// sees beside it, and the element that holds it must be one of the matched elements left after these exclusions.
 function holds(nodes: Element[], [text, pattern, key, version, fields]: Wanted) {
   const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
   // Playwright pierces open shadow roots, so an exclusion must follow their hosts too.
@@ -114,8 +116,48 @@ function holds(nodes: Element[], [text, pattern, key, version, fields]: Wanted) 
     return false;
   };
   const typed = (node: Element) => { for (let parent: Element | null = node; parent; parent = up(parent)) if (parent instanceof HTMLElement && parent.isContentEditable && edited?.has(parent)) return true; return false; };
+  // Whether the page renders a match of find whose owner, the deepest element holding all of it, is one of owners. The
+  // page's text is its visible text where it has a box, open shadow roots and slots included, and a button input's
+  // label. A line break stands at a <br> and around every box that does not flow inline or holds an image, a form control
+  // or other replaced content: a block such as a paragraph or a table cell, a flex or grid item, a badge's inline box, a
+  // button. Text the page does not render, as an SVG title or a closed select's other options, is not there, nor a text
+  // area's initial text, which may no longer be what it shows; fields are read below. An element holds the text of its
+  // children and of its shadow root, as getByText reads it, so the owner of a match is known among the matched elements.
+  const shown = (owners: Set<Element>, find: RegExp) => {
+    const parent = (node: Node) => node.parentElement ?? (node.parentNode instanceof ShadowRoot ? node.parentNode.host : null);
+    const boxes = new Set(['br', 'button', 'input', 'select', 'textarea', 'img', 'svg', 'video', 'audio', 'canvas', 'iframe', 'embed', 'object', 'meter', 'progress']);
+    // Where each run of the text starts, and the element that holds it.
+    const starts: [number, Element][] = [];
+    let rendered = '';
+    const walk = (node: Node, visible: boolean) => {
+      if (node instanceof Text) { if (visible && node.data) { starts.push([rendered.length, parent(node)!]); rendered += node.data; } return; }
+      if (!(node instanceof Element)) return;
+      const style = getComputedStyle(node), { display } = style, inner = style.visibility === 'visible';
+      if (display === 'none' || display !== 'contents' && !node.checkVisibility()) return;
+      const edge = display !== 'inline' && display !== 'contents' || boxes.has(node.localName) ? '\n' : '';
+      rendered += edge;
+      if (node instanceof HTMLInputElement) { if (['submit', 'button', 'reset'].includes(node.type)) { starts.push([rendered.length, node]); rendered += node.value; } }
+      else if (!(node instanceof HTMLTextAreaElement)) for (const child of node.shadowRoot?.childNodes ?? (node instanceof HTMLSlotElement && node.assignedNodes().length ? node.assignedNodes() : node.childNodes)) walk(child, inner);
+      rendered += edge;
+    };
+    walk(document.documentElement, true);
+    const at = (index: number) => starts.findLast(([start]) => start <= index)?.[1] ?? null;
+    const common = (one: Element | null, other: Element | null) => {
+      const chain = new Set<Element>();
+      for (; one; one = parent(one)) chain.add(one);
+      while (other && !chain.has(other)) other = parent(other);
+      return other;
+    };
+    for (let match = find.exec(rendered); match; match = find.exec(rendered)) {
+      const owner = common(at(match.index), at(match.index + match[0].length - 1));
+      if (owner && owners.has(owner)) return true;
+      // Matches may overlap, so the next starts one character later.
+      find.lastIndex = match.index + (rendered.codePointAt(match.index)! > 0xffff ? 2 : 1);
+    }
+    return false;
+  };
   nodes = nodes.filter(node => (version < 4 || !query(node)) && !typed(node));
-  if (!fields) return nodes.length > 0;
+  if (!fields) return pattern === null || !nodes.length ? nodes.length > 0 : shown(new Set(nodes), new RegExp(pattern, 'giu'));
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
   const normal = (value: string) => value.replace(/\u200b/g, '').replace(/\s+/g, ' ').trim().toLowerCase(), wanted = normal(text);
@@ -127,10 +169,12 @@ function holds(nodes: Element[], [text, pattern, key, version, fields]: Wanted) 
 }
 // Text a person sees on the page: visible text, or what the application put in a visible form field, as a saved value is
 // often shown. text-absent passes exactly when this is false. From version 5, both find the text only where it stands on
-// its own, and each element's text, as each field's value, is judged on its own.
+// its own: visible text where the page renders it, and each field's value on its own.
 async function shows(page: Page, text: string) {
-  const pattern = CHECKS >= 5 ? textPattern(text) : null, lookFor = (fields: boolean): Wanted => [text, pattern?.source ?? null, EDITED, CHECKS, fields];
-  const nodes = page.getByText(pattern ?? text).filter({ visible: true });
+  const pattern = CHECKS >= 5 ? textPattern(text).source : null, lookFor = (fields: boolean): Wanted => [text, pattern, EDITED, CHECKS, fields];
+  // getByText keeps only the deepest elements whose text holds the text, so a child holding it within a longer word, as
+  // Overdue holds due, would hide its parent's Due. From version 5, every visible element whose text holds it may own it.
+  const nodes = (pattern === null ? page.getByText(text) : page.locator('*', { hasText: text })).filter({ visible: true });
   // A textarea's server-rendered query is textContent too; exclude search controls from both observation paths.
   if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, lookFor(false))) return true;
   if (CHECKS < 2) return false;

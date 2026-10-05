@@ -36,7 +36,7 @@ export type FixtureEvent =
  * code must be verified again when those semantics change. 1: text checks read visible text. 2: they also read
  * what the application put in visible form fields. 3: a caught control requires a fresh persistence read.
  * 4: declared search controls never supply stored-result text evidence. 5: a text check finds its value only where
- * it stands on its own (textPattern).
+ * it stands on its own (textPattern) in the text the page renders.
  */
 export const CHECK_VERSION = 5;
 
@@ -74,24 +74,29 @@ export function numberAfter(text: string, label: string, adjacent = false): Read
 }
 
 // Scripts written without spaces between words, in which a value may stand within a longer run of letters.
-const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
+const UNSPACED = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Thai}\\p{scx=Lao}\\p{scx=Khmer}\\p{scx=Myanmar}]';
 // What a text check skips, as Playwright's text matching does: zero-width spaces and soft hyphens anywhere, and more
 // whitespace where the value has a space.
-const SKIP = '[\\u200b\\u00ad]*', SPACE = '\\s[\\s\\u200b\\u00ad]*', WORD = '[\\p{L}\\p{N}]';
+const SKIP = '[\\u200b\\u00ad]*', SPACE = '\\s[\\s\\u200b\\u00ad]*';
+// What joins the page's text to an edge of the value that is a letter: a letter or digit. To one that is a digit: a digit
+// or a letter of a script written with spaces, so INV-7 is within INV-70, while 42元 stands on its own in 共42元.
+const JOINS = { letter: '[\\p{L}\\p{N}]', digit: `(?:\\p{N}|(?!${UNSPACED})\\p{L})` };
 /**
- * How a text check finds its value from check version 5, in visible text through getByText and in form fields alike:
- * ignoring case and runs of whitespace, and only where the value stands on its own. Right beside an edge of the value
- * that is a letter, digit or combining mark, the page shows no letter or digit, so Paid is not found in Unpaid nor INV-7
- * in INV-70. An edge in a script written without spaces between words needs no boundary, so 已支付 is found in
- * 订单已支付成功, and neither does an edge that is punctuation.
+ * How a text check finds its value from check version 5, in the text a page renders and in form fields alike: ignoring
+ * case and runs of whitespace, and only where the value stands on its own. Right beside an edge of the value that is a
+ * letter or digit, the page shows nothing that joins it (JOINS), so Paid is not found in Unpaid. A combining mark counts
+ * with the character it follows: an edge of the value is its first character, or its last that is no mark. A mark right
+ * after the value continues its last character, so Cafe is not found in a Café written with a combining accent, and
+ * before the value, the page character that counts is the one any marks there follow, so Paid stands on its own after a
+ * check mark with a variation selector. An edge in a script written without spaces between words needs no boundary, so
+ * 已支付 is found in 订单已支付成功, and neither does an edge that is punctuation or a symbol.
  */
 export function textPattern(value: string): RegExp {
-  const chars = [...squash(value.replace(/[\u200b\u00ad]/g, ''))];
-  const bounded = (char = '') => /[\p{L}\p{M}\p{N}]/u.test(char) && !UNSPACED.test(char);
-  // Any other character than a letter or digit is written as its code point: Playwright passes a Unicode pattern on
-  // unescaped, and a quote or >> in it would end the selector.
-  const body = chars.map(char => char === ' ' ? SPACE : /[\p{L}\p{N}]/u.test(char) ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`).join(SKIP);
-  return new RegExp(`${bounded(chars[0]) ? `(?<!${WORD}${SKIP})` : ''}${body}${bounded(chars.at(-1)) ? `(?!${SKIP}${WORD})` : ''}`, 'iu');
+  const chars = [...squash(value.replace(/[\u200b\u00ad]/g, ''))], unspaced = new RegExp(UNSPACED, 'u');
+  const joins = (char = '') => unspaced.test(char) ? null : /\p{N}/u.test(char) ? JOINS.digit : /[\p{L}\p{M}]/u.test(char) ? JOINS.letter : null;
+  const before = joins(chars[0]), after = joins(chars.findLast(char => !/\p{M}/u.test(char)));
+  const body = chars.map(char => char === ' ' ? SPACE : escape(char)).join(SKIP);
+  return new RegExp(`${before ? `(?<!${before}[\\p{M}\\u200b\\u00ad]*)` : ''}${body}${after ? `(?!${SKIP}(?:\\p{M}|${after}))` : ''}`, 'iu');
 }
 
 const originOf = (url: string) => { try { const { protocol, origin } = new URL(url); return ['http:', 'https:'].includes(protocol) ? origin : null; } catch { return null; } };

@@ -226,19 +226,25 @@ test('the fixture reads numbers after their label and guards navigation and paym
 test('a text check finds its value where it stands on its own, ignoring case and runs of whitespace',()=>{
   const finds=(text:string,value:string)=>textPattern(value).test(text);
   // Beside an edge that is a letter or digit: the start or end of the text, whitespace or punctuation. An edge that is
-  // punctuation needs no boundary, and zero-width spaces and soft hyphens are skipped, as Playwright skips them.
+  // punctuation needs no boundary, zero-width spaces and soft hyphens are skipped, as Playwright skips them, and the
+  // value's other characters, as ( or +, stand for themselves.
   for(const [text,value] of [['Status: Paid','paid'],['Paid in full','PAID'],['(Paid)','Paid'],['INV-7.','INV-7'],['Total:42','Total:'],['Сумма: Оплачено','оплачено'],['결제 완료','결제'],
-    ['QA\n  k3m9x2qa saved','QA k3m9x2qa'],['QA \u200b k3m9x2qa','QA k3m9x2qa'],['Rechnungs\u00adbetrag offen','Rechnungsbetrag'],['Copy "Q3 report" >> \'Archive\' (1/2)','"Q3 report" >> \'Archive\' (1/2)']] as const)
+    ['QA\n  k3m9x2qa saved','QA k3m9x2qa'],['QA \u200b k3m9x2qa','QA k3m9x2qa'],['Rechnungs\u00adbetrag offen','Rechnungsbetrag'],['Copy "Q3 report" >> \'Archive\' (1/2)','"Q3 report" >> \'Archive\' (1/2)'],
+    ['Total (USD) 42','Total (USD)'],['Plan a+b','a+b']] as const)
     assert.equal(finds(text,value),true,`${value} in ${text}`);
   for(const [text,value] of [['Unpaid','Paid'],['Inactive','Active'],['INV-70','INV-7'],['Paid2','Paid'],['Subtotal:42','Total:'],['Неоплачено','Оплачено'],['결제완료','결제'],
-    ['Un\u00adpaid','paid'],['QAk3m9x2qa','QA k3m9x2qa']] as const)
+    ['Un\u00adpaid','paid'],['QAk3m9x2qa','QA k3m9x2qa'],['Plan aab','a+b']] as const)
     assert.equal(finds(text,value),false,`${value} in ${text}`);
-  // An edge in a script written without spaces between words needs no boundary; a Latin or digit edge beside one does.
-  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย']] as const)
+  // A combining mark belongs to the character it follows: a dependent vowel sign or an accent continues a word, and a
+  // variation selector a symbol, which needs no boundary.
+  for(const [text,value] of [['कमी','कम'],['किताब','ताब'],['Cafe\u0301','Cafe']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
+  for(const [text,value] of [['यह किताब है','किताब'],['Cafe\u0301 au lait','Cafe\u0301'],['\u2714\ufe0fPaid','\u2714\ufe0f'],['\u2714\ufe0fPaid','Paid']] as const)
     assert.equal(finds(text,value),true,`${value} in ${text}`);
-  for(const [text,value] of [['Pro版','Pro'],['共42元','42元'],['已支付Paid','Paid']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
-  // Playwright passes a Unicode pattern on unescaped: no quote or >> may end its selector.
-  assert.doesNotMatch(String(textPattern('"a" >> \'b\' `c`')),/["'`]|>>/);
+  // An edge in a script written without spaces between words needs no boundary, nor does a digit beside such a script; a
+  // letter of a script written with spaces beside it does, and a digit beside another digit or such a letter.
+  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย'],['共42元','42元'],['合計1,240円','1,240円'],['第3章','3']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  for(const [text,value] of [['Pro版','Pro'],['已支付Paid','Paid'],['42kg','42'],['3개','3']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
 });
 
 // A manager whose Playwright runtime records its launches and replays scripted events.
