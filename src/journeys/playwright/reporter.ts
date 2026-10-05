@@ -9,13 +9,15 @@ import type { FullResult, Reporter, TestCase, TestError, TestResult, TestStep } 
 import { SIGN_IN_ACTION, STEPS, approvedCase, type ApprovedCase } from './checks.ts';
 import { hide, failureText } from '../../redaction.ts';
 import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
+import { controlBlockerText, controlReadReasonText } from './control.ts';
+import type { ControlBlocker, ControlReadReason } from '../../../contract/browser.ts';
 
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
-export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string; actionFeedback?: string };
+export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; error?: string; actionFeedback?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
-type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown; feedback?: unknown };
+type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; reason?: unknown; lifecycle?: unknown; feedback?: unknown };
 
 // Journey actions by Playwright step title; fixture reads stay private while explicit readiness waits are visible.
 const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
@@ -25,6 +27,7 @@ const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/
 export default class JourneyReporter implements Reporter {
   channel: string | undefined; approved: ApprovedCase; videoDir: string | undefined; secrets: string[];
   controlRead: boolean | undefined;
+  controlReadReason: ControlReadReason | undefined;
   actionFeedback: string | undefined;
   diagnostics = process.env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && process.env.PERPETUAL_BLOCK_WRITES !== '1';
   diagnosticBytes = 0; diagnosticDropped = 0;
@@ -74,7 +77,11 @@ export default class JourneyReporter implements Reporter {
         this.write(event);
       } else if (event.type === 'assertions' && Array.isArray(event.assertions)) this.assertions = event.assertions;
       else if (event.type === 'action-feedback' && typeof event.feedback === 'string' && event.feedback.length <= 2000) this.actionFeedback = failureText(hide(this.secrets)(event.feedback), 2000);
-      else if (event.type === 'control-read' && typeof event.eligible === 'boolean') this.controlRead = event.eligible;
+      else if (event.type === 'control-read' && typeof event.eligible === 'boolean') {
+        const valid = event.reason === undefined || event.eligible === false && Boolean(controlReadReasonText(event.reason));
+        this.controlRead = valid && event.eligible;
+        this.controlReadReason = valid && event.eligible === false ? event.reason as ControlReadReason | undefined : undefined;
+      }
       else if (event.type === 'journey-stop' && typeof event.error === 'string') this.stop ||= event.error;
     }
   }
@@ -101,9 +108,13 @@ export default class JourneyReporter implements Reporter {
   // Facts, never a verdict: the controller decides status from these, the milestones and the approved case.
   facts(): JourneyFacts {
     const { id: caseId, steps = [] } = this.approved, result = this.result;
-    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }) };
+    const controlBlocker = this.controlRead === false ? (['shared-worker', 'unguarded-transport'] as const).find(value => controlBlockerText(value) === this.stop) : undefined;
+    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }), ...(controlBlocker ? { controlBlocker } : {}), ...(this.controlReadReason ? { controlReadReason: this.controlReadReason } : {}) };
     if (result?.status === 'passed') return { ...base, stopCause: 'none' };
     if (result?.status === 'timedOut') return { ...base, stopCause: 'deadline' };
+    // An unguarded control is inconclusive even when an independently reviewed check failed.
+    // Keep that transport refusal alongside its already reported failed milestone.
+    if (this.controlRead === false && this.stop) return { ...base, stopCause: 'action', error: this.safe(this.stop) };
     // A reviewed check that failed decides the journey; the error that stopped it adds nothing.
     if (this.checkFailed || this.assertions.some(item => item.passed === false)) return { ...base, stopCause: 'none' };
     const title = steps.find(step => step.id === this.running)?.title;

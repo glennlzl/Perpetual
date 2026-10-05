@@ -8,7 +8,8 @@ import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
-import { controlReads } from './control.ts';
+import { controlReads, controlBlockerText } from './control.ts';
+import type { ControlReadReason } from '../../../contract/browser.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
@@ -54,7 +55,8 @@ const BLOCK_WRITES = env.PERPETUAL_BLOCK_WRITES === '1', READS = new Set(['GET',
 // Fixed reasons a journey stops for review (the runner's navigation_not_allowed and payment_live_mode_rejected), and
 // why a control run in which every check passed proves nothing; a page calls REPORT when a write may have got past.
 const NAVIGATION = 'Navigation is outside approved origins.', PAYMENT = 'Payment pages accept input only in Stripe test mode.';
-const UNGUARDED = 'The control run could not block everything the pages sent.', REPORT = '__perpetualUnguarded';
+const UNGUARDED = controlBlockerText('unguarded-transport')!, REPORT = '__perpetualUnguarded';
+const SHARED_WORKER = controlBlockerText('shared-worker')!;
 // Why journey.signIn() found no sign-in form to fill.
 const NO_FORM = 'The application URL shows no sign-in form. Set the sign-in page.', NO_SIGN_IN_FORM = 'The sign-in page shows no sign-in form. Check the sign-in page.';
 const OFF_ORIGIN = 'The sign-in form is not on the application origin.';
@@ -187,9 +189,8 @@ async function streamFrames(page: Page) {
 
 // A control run's script in each document, after Playwright's WebSocket mock and before the page's own scripts. It
 // counts the journey's actions there (a click, a key press, typing or a selection), except while the fixture signs in.
-// A socket drops what the page sends once the journey has acted since it opened, so its opening message and
-// subscriptions still reach the application. What a socket that opened after an action since the fixture last signed
-// in sends may be a write, so the page reports it.
+// Opening messages and subscriptions reach the application before business actions, and while the fixture signs in.
+// After an action, sends are dropped even from a socket that opened only because of that action.
 function holdSockets(report: string) {
   type Send = Parameters<WebSocket['send']>;
   const state: Held = { actions: 0, signedAt: 0, signingIn: false }, opened = new WeakMap<WebSocket, number>(), Routed = globalThis.WebSocket;
@@ -199,7 +200,7 @@ function holdSockets(report: string) {
     constructor(...args: ConstructorParameters<typeof Routed>) { super(...args); this.addEventListener('open', () => opened.set(this, state.actions)); }
     override send(...args: Send) {
       const at = opened.get(this);
-      if (at !== undefined && !state.signingIn) { if (at !== state.actions) { (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('blocked'); return; } if (at > state.signedAt) (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('unguarded'); }
+      if (at !== undefined && !state.signingIn && (at !== state.actions || at > state.signedAt)) { (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('blocked'); return; }
       super.send(...args);
     }
   };
@@ -211,11 +212,11 @@ function signingInPage(on: boolean) {
   if (state) Object.assign(state, { signingIn: on, signedAt: state.actions });
 }
 
-// A sign-in form has one password field, not new-password, so a sign-up form is none; its username is the type=email
-// or autocomplete username/email field in the same form, else the nearest text field before the password (as
-// integrations/browser-use/sign_in.py finds it). Without one, null.
+// Combined forms follow the discovery adapter's rule. On the explicitly configured sign-in page only, one hinted
+// identifier and a submit control may precede the password step. That step still needs the same identifier; the host
+// checks its value before entering a password. A read-only identifier is evidence there, never a field to overwrite.
 type Control = HTMLInputElement | HTMLButtonElement;
-function findForm(): { username: HTMLInputElement; password: HTMLInputElement; submit: Control | null } | null {
+function findForm({ identifierFirst = false, passwordStep = false }: { identifierFirst?: boolean; passwordStep?: boolean } = {}): { username: HTMLInputElement; password: HTMLInputElement | null; submit: Control | null } | null {
   const nodes: Control[] = [];
   const walk = (root: Document | ShadowRoot) => root.querySelectorAll('*').forEach(node => { if (node.tagName === 'INPUT' || node.tagName === 'BUTTON') nodes.push(node as Control); if (node.shadowRoot) walk(node.shadowRoot); });
   walk(document);
@@ -224,9 +225,10 @@ function findForm(): { username: HTMLInputElement; password: HTMLInputElement; s
   const kind = (node: Element) => (node.getAttribute('type') || 'text').toLowerCase();
   const shown = (node: Element) => node.getClientRects().length > 0 && node.checkVisibility({ visibilityProperty: true, opacityProperty: true });
   const before = (node: Control, other: Control) => nodes.indexOf(node) < nodes.indexOf(other);
-  const inputs = nodes.filter((node): node is HTMLInputElement => node.tagName === 'INPUT' && !node.disabled && !(node as HTMLInputElement).readOnly && shown(node));
-  const passwords = inputs.filter(node => kind(node) === 'password');
-  const names = inputs.filter(node => kind(node) === 'text' || kind(node) === 'email');
+  const inputs = nodes.filter((node): node is HTMLInputElement => node.tagName === 'INPUT' && shown(node));
+  const editable = (node: HTMLInputElement) => !node.disabled && !node.readOnly;
+  const passwords = inputs.filter(node => kind(node) === 'password' && editable(node));
+  const names = inputs.filter(node => (kind(node) === 'text' || kind(node) === 'email') && (passwordStep || editable(node)));
   const hinted = (node: Element) => kind(node) === 'email' || /\b(username|email)\b/i.test(node.getAttribute('autocomplete') || '');
   for (const password of passwords) {
     let member = (node: Control) => node.form === password.form;
@@ -235,12 +237,19 @@ function findForm(): { username: HTMLInputElement; password: HTMLInputElement; s
       while (box && !names.some(node => inside(node, box))) box = up(box);
       member = node => !!box && inside(node, box);
     }
-    if (/new-password/i.test(password.getAttribute('autocomplete') || '') || passwords.filter(member).length !== 1) continue;
+    if (/new-password/i.test(password.getAttribute('autocomplete') || '') || inputs.filter(node => kind(node) === 'password' && member(node)).length !== 1) continue;
     const fields = names.filter(member), preferred = fields.filter(hinted);
     const username = preferred.filter(node => before(node, password)).pop() || preferred[0] || fields.filter(node => before(node, password)).pop();
     if (!username) continue;
     const submits = nodes.filter(node => member(node) && (node.tagName === 'BUTTON' ? node.type === 'submit' : ['submit', 'image'].includes(kind(node))) && shown(node));
     return { username, password, submit: submits.find(node => before(password, node)) || submits[0] || null };
+  }
+  if (identifierFirst && !passwordStep && !inputs.some(node => kind(node) === 'password')) {
+    const candidates = names.filter(node => hinted(node) && node.form && names.filter(field => field.form === node.form).length === 1);
+    if (candidates.length !== 1) return null;
+    const username = candidates[0];
+    const submits = nodes.filter(node => node.form === username.form && (node.tagName === 'BUTTON' ? node.type === 'submit' : ['submit', 'image'].includes(kind(node))) && shown(node));
+    if (submits.length === 1) return { username, password: null, submit: submits[0] };
   }
   return null;
 }
@@ -249,8 +258,10 @@ export const test = base.extend<{ journey: JourneyFixture }>({
   journey: async ({ page, context }, use, testInfo) => {
     if (createHash('sha256').update(readFileSync(testInfo.file)).digest('hex') !== env.PERPETUAL_SPEC_HASH) throw halt('The spec differs from its approved version.');
     const timeout = Number(env.PERPETUAL_CHECK_TIMEOUT_MS) || 10000, captures: Captures = {}, done: string[] = [];
-    let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false;
+    let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false, sharedWorker = false;
+    const controlRefusal = () => sharedWorker ? SHARED_WORKER : UNGUARDED;
     const controlFailures: (() => boolean)[] = [];
+    const controlReasons: (() => ControlReadReason | undefined)[] = [];
     let controlCheckFailed = false;
     const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context) : undefined;
     const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
@@ -261,6 +272,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       return (check: EvaluatedCheck) => {
         control.captured(check);
         controlCheckFailed ||= !check.passed;
+        if (!check.passed) controlReasons.push(observed.reason(check));
         const witness = observed(check);
         if (witness && !unguarded) controlFailures.push(witness);
       };
@@ -320,7 +332,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       });
       await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', ...(BLOCK_WRITES && readRequests.length ? {} : { resourceType: 'Document' }), requestStage: 'Request' }] });
       if (!BLOCK_WRITES) return;
-      cdp.on('Target.targetCreated', ({ targetInfo: created }) => { if (created.type === 'shared_worker') unguarded = true; });
+      cdp.on('Target.targetCreated', ({ targetInfo: created }) => { if (created.type === 'shared_worker') { sharedWorker = true; unguarded = true; } });
       await cdp.send('Target.setDiscoverTargets', { discover: true });
     };
     if (CHECKS >= 2) await context.addInitScript(markEdits, EDITED);
@@ -383,22 +395,34 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         // The form is on the current page, else on the sign-in page: a sign-up form, or any other password field, does
         // not count. With a sign-in page set, the current page gets a short wait before it opens; without one, the
         // action timeout, as a slowly rendered form needs.
-        const found = (timeout?: number) => signing.mainFrame().waitForFunction(findForm, undefined, { polling: POLL_MS, timeout }).then(handle => handle, (error: unknown) => { if (error instanceof errors.TimeoutError) return null; throw error; });
+        const found = (timeout?: number, options: Parameters<typeof findForm>[0] = {}) => signing.mainFrame().waitForFunction(findForm, options, { polling: POLL_MS, timeout }).then(handle => handle, (error: unknown) => { if (error instanceof errors.TimeoutError) return null; throw error; });
         const onSignInPage = async () => {
           if (!SIGN_IN_URL) throw new Error(NO_FORM);
           // The sign-in page is a new document, which a control run marks as signing in too.
           await signing.goto(SIGN_IN_URL); await hold(true, signing);
-          return await found() ?? Promise.reject(new Error(NO_SIGN_IN_FORM));
+          return await found(undefined, { identifierFirst: true }) ?? Promise.reject(new Error(NO_SIGN_IN_FORM));
         };
-        const form = await found(SIGN_IN_URL ? FORM_MS : undefined) ?? await onSignInPage();
+        let form = await found(SIGN_IN_URL ? FORM_MS : undefined) ?? await onSignInPage();
         try {
           // A redirect can leave the application's origin; the account is entered only on it.
           if (!onApplication()) throw new Error(OFF_ORIGIN);
-          const [username, password, submit] = await Promise.all(['username', 'password', 'submit'].map(name => form.getProperty(name).then(handle => handle.asElement())));
+          let [username, password, submit] = await Promise.all(['username', 'password', 'submit'].map(name => form.getProperty(name).then(handle => handle.asElement())));
+          if (username && !password && submit) {
+            await username.fill(account.username);
+            await submit.click({ timeout: 3000 });
+            await form.dispose().catch(() => {});
+            form = await found(SIGN_IN_MS, { passwordStep: true }) ?? await Promise.reject(new Error('The password step shows no matching sign-in form. Check the sign-in flow.'));
+            if (!onApplication()) throw new Error(OFF_ORIGIN);
+            [username, password, submit] = await Promise.all(['username', 'password', 'submit'].map(name => form.getProperty(name).then(handle => handle.asElement())));
+            if (!username || await username.inputValue() !== account.username) throw new Error('The password step is for a different test account.');
+            // A full navigation resets the document's socket guard; this verified password step is still sign-in.
+            await hold(true, signing);
+          } else if (username) await username.fill(account.username);
           if (!username || !password) throw new Error('The page has no sign-in form with one password field.');
-          await username.fill(account.username); await password.fill(account.password);
+          await password.fill(account.password);
           // Click waits until a control disabled before both fields held values is enabled.
-          if (!submit || !await submit.click({ timeout: 3000 }).then(() => true, () => false)) await password.press('Enter', { timeout: 3000 }).catch(() => {});
+          if (submit) await submit.click({ timeout: 3000 });
+          else await password.press('Enter', { timeout: 3000 });
         } finally { await form.dispose().catch(() => {}); }
         // Signed in once an approved page stays without a visible password field, so a brief transition does not count.
         const deadline = Date.now() + SIGN_IN_MS;
@@ -425,11 +449,16 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       emit({ type: 'assertions', assertions: assertions.map(({ type, value, passed, resolved }) => ({ type, value, passed, ...(resolved ? { resolved } : {}) })) });
       if (assertions.some(item => !item.passed)) throw new Error('A final assertion failed.');
       // Every check passed, but a write may have got past the block: the control run is inconclusive, not missed.
-      if (unguarded) throw halt(UNGUARDED);
+      if (unguarded) throw halt(controlRefusal());
     } finally {
       diagnostic?.cleanup();
       await stopFrames();
-      if (control && controlCheckFailed) emit({ type: 'control-read', eligible: !unguarded && controlFailures.some(valid => valid()) });
+      if (unguarded) emit({ type: 'journey-stop', error: controlRefusal() });
+      if (control && controlCheckFailed) {
+        const eligible = !unguarded && controlFailures.some(valid => valid());
+        const reason = eligible || unguarded ? undefined : controlReasons.map(reason => reason()).find(Boolean);
+        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}) });
+      }
     }
   },
 });

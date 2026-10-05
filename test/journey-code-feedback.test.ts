@@ -34,3 +34,14 @@ test('regeneration remembers bounded failures of the same reviewed contract with
   snapshot.cases=[{...item,goal:'A newly reviewed outcome'}];
   assert.equal(owner.generationFeedback('scope',item.id),undefined);
 });
+
+test('regeneration receives an ineligible control diagnosis without its raw error or historical code',()=>{
+  const [item]=validateBrowserCases([{id:'rename',name:'Rename workspace',goal:'Save and reopen my workspace name',steps:[{id:'save',title:'Save and reopen',checks:[{type:'text-visible',value:'Workspace {run}'}]}],expectedOutcomes:['The new name persists'],needsReview:false}]);
+  const code='historical private input',hash=specHash(code),contract=caseHash(item);
+  const runs:JourneyCodeSnapshot['runs']=Array.from({length:4},(_,index)=>({id:`run-${index}`,status:index===3?'failed':'passed',caseIds:[item.id],specHashes:{[item.id]:hash},verification:{id:'verify',hash,caseHash:contract,checkVersion:CHECK_VERSION,attempt:index+1,control:index===3},results:[{caseId:item.id,status:index===3?'failed':'passed',assertions:[],...(index===3?{controlRead:false,controlReadReason:'url-changed',error:'private former account'}:{})}],progress:{cases:[{id:item.id,steps:[{status:index===3?'failed':'completed'}]}]}}));
+  const snapshot:JourneyCodeSnapshot={cases:[item],generations:new Map(),verifications:[],runs,code:{generationFailures:{},specs:{[item.id]:{approved:null,draft:{code,hash,caseHash:contract,savedAt:'2026-10-01T00:00:00.000Z',verification:{id:'verify',checkVersion:CHECK_VERSION,status:'failed',passes:3,control:'missed',error:'The control did not check freshly read business data.',runIds:runs.map(run=>run.id)}}}}}};
+  const owner=createJourneyCode({read:()=>snapshot,transact:async()=>{throw new Error('Reading feedback must not write.');}});
+  const feedback=owner.generationFeedback('scope',item.id);
+  assert.match(feedback?.error||'',/address changed/);
+  assert.ok(!JSON.stringify(feedback).includes('private'));
+});
