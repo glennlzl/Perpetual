@@ -371,10 +371,11 @@ test('Destroy takes Compose down with volumes, then tears services down in rever
   calls.length = 0;
   assert.deepEqual(await runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } }), { status: 'destroyed' });
   assert.deepEqual(compose(calls[0]), ['down', '--volumes', '--remove-orphans']);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.deepEqual(calls[1].args.slice(-2), ['payments/cli:1.0', 'logout']);
   assert.deepEqual(calls[2].args.slice(-3, -1), ['jobs/cli:2.0', 'delete']);
   assert.match(calls[2].args.at(-1)!, /^perpetual-beta-\d+$/);
+  assert.deepEqual(calls[4].args, ['volume', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project=perpetual-beta']);
   await assert.rejects(access(dir));
 });
 
@@ -387,11 +388,27 @@ test('Destroy removes detached one-shot containers and confirms none remain befo
     return {};
   });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  await prepare(); await runtime.destroy({ dataDir, id: 'beta' });
+  await prepare(); calls.length = 0;
+  await runtime.destroy({ dataDir, id: 'beta' });
   assert.equal(orphan, false, 'An interrupted docker run can leave its guest after the CLI exits.');
   const scans = calls.filter(call => call.args[0] === 'ps');
   assert.equal(scans.length, 2);
   assert.ok(scans.every(call => call.args.includes('label=perpetual.environment=beta') && call.args.includes('label=perpetual.owner=owner-1')));
+  // A guest that still mounted the workspace volume kept it through the first down, so a second one removes it.
+  const steps = calls.map(call => compose(call)?.[0] ?? call.args[0]);
+  assert.deepEqual(steps.slice(steps.indexOf('rm')), ['rm', 'ps', 'down', 'volume']);
+  await assert.rejects(access(dir));
+});
+
+test('Destroy keeps the twin and its ownership while one of its volumes remains', async t => {
+  let leftover = true;
+  const { runtime, prepare, dataDir, dir } = await setup(args => args[0] === 'volume' && args[1] === 'ls' && leftover ? { stdout: 'perpetual-beta_workspace\n' } : {});
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await prepare();
+  await assert.rejects(runtime.destroy({ dataDir, id: 'beta' }), /cleanup failed; its files are kept for another attempt\. Owned volumes: The twin's volumes are still present\./);
+  await access(join(dir, 'twin.json'));
+  leftover = false;
+  assert.deepEqual(await runtime.destroy({ dataDir, id: 'beta' }), { status: 'destroyed' });
   await assert.rejects(access(dir));
 });
 

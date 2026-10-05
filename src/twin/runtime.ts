@@ -597,8 +597,14 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         if (ids.length) {
           await docker(['rm', '--force', ...ids], { redact });
           if ((await remaining()).length) fail('Owned containers are still present.');
+          // Compose only warns about a volume such a guest still mounted, so its down runs again now the guest is gone.
+          if (await exists(twin.compose)) await docker(composeArgs(twin, 'down', '--volumes', '--remove-orphans'), { redact });
         }
       } catch (error) { failures.push(`Owned containers: ${redact((error as Error).message)}`); }
+      try {
+        const { stdout } = await docker(['volume', 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${twin.project}`], { redact });
+        if (stdout.trim()) fail('The twin\'s volumes are still present.');
+      } catch (error) { failures.push(`Owned volumes: ${redact((error as Error).message)}`); }
     }
     if (failures.length) fail(`Twin cleanup failed; its files are kept for another attempt. ${failures.join(' ')}`);
     await rm(twin.dir, { recursive: true, force: true });
