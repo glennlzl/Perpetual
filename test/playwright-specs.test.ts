@@ -204,6 +204,9 @@ test('the fixture reads numbers after their label and guards navigation and paym
   assert.deepEqual(numberAfter('Unpaid invoices 7 Paid invoices 3','paid invoices',true),{value:3,gap:1,own:true});
   assert.deepEqual(numberAfter('Subtotal $10.00','Total',true),{value:10,gap:1,own:false});
   assert.deepEqual(numberAfter('税込合計 1200','合計'),{value:1200,gap:1,own:false});
+  // A number another format continues is no number to compare: its first part is never read.
+  for(const text of ['Credits 1.240,50','Credits 12,5','Credits 1\'240','Credits 1’240','Credits 1\u00a0240','Credits 1\u202f240','Credits 1.2k','Credits 3M users','Credits 2B'])assert.ok(Number.isNaN(numberAfter(text,'Credits')?.value),text);
+  for(const [text,value] of [['Credits 1,240.50.',1240.5],['Credits 12, 13 left',12],['Credits 5GB',5],['Credits 5MB',5],['Credits 12 100',12],['Credits 10:30',10],['Credits 12.5%',12.5]] as const)assert.equal(numberAfter(text,'Credits')?.value,value,text);
   const allowed=new Set(['http://127.0.0.1:3000']);
   assert.equal(navigationAllowed('http://127.0.0.1:3000/settings',allowed),true);assert.equal(navigationAllowed('about:blank',allowed),true);
   assert.equal(navigationAllowed('https://example.com/',allowed),false);assert.equal(navigationAllowed('javascript:alert(1)',allowed),false);

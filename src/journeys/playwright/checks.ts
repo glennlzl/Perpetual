@@ -53,9 +53,12 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * adjacent: only separators may sit between them, so an ancestor's sibling text is never read.
  * The label is read where it stands on its own, not within a longer word (Total, not the end of Subtotal), else where it
  * first occurs, as in scripts that write words without spaces; own says which.
+ * A number that another format continues, as 1.240,50, 12,5, 1'240, 1 240 grouped with a no-break space, or 1.2k, is
+ * read as NaN rather than as its first part.
  */
 export function numberAfter(text: string, label: string, adjacent = false): Reading | null {
-  text = squash(text); label = squash(label);
+  // Digits grouped by a no-break or thin space are one number, which squashing would split into two.
+  text = squash(text.replace(/(?<=\d)[   ](?=\d)/gu, "'")); label = squash(label);
   const found = label ? [...text.matchAll(new RegExp(escape(label), 'giu'))] : [];
   const alone = found.find(item => !/[\p{L}\p{N}]$/u.test(text.slice(0, item.index)) && !/^[\p{L}\p{N}]/u.test(text.slice(item.index + item[0].length)));
   const at = alone ?? found[0];
@@ -64,8 +67,8 @@ export function numberAfter(text: string, label: string, adjacent = false): Read
   NUMBER.lastIndex = end;
   const match = NUMBER.exec(text);
   if (!match || adjacent && /[\p{L}\p{N}]/u.test(text.slice(end, match.index))) return null;
-  const [, sign, whole, fraction] = match;
-  return { value: Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end, own: Boolean(alone) };
+  const [, sign, whole, fraction] = match, other = /^(?:[.,'’]\d|[kKMB](?![\p{L}\p{N}]))/u.test(text.slice(match.index + match[0].length));
+  return { value: other ? NaN : Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end, own: Boolean(alone) };
 }
 
 const originOf = (url: string) => { try { const { protocol, origin } = new URL(url); return ['http:', 'https:'].includes(protocol) ? origin : null; } catch { return null; } };

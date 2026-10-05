@@ -74,7 +74,7 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/unreadable')return send(page('Unreadable','<h1>Unreadable</h1><label>Kept <input value=Kept></label><script>Element.prototype.matches=()=>{throw new Error(\'Unreadable\');};</script>'));
       if(url.pathname==='/freeze')return send(page('Freeze','<h1>Freeze</h1><button onclick="setTimeout(()=>{for(;;){}},100)">Freeze</button>'));
       // Rows whose labels end with another row's label.
-      if(url.pathname==='/cart')return send(page('Cart','<h1>Cart</h1><table><tr><td>Subtotal</td><td>$10.00</td></tr><tr><td>Shipping</td><td>$2.00</td></tr><tr><td>Total</td><td>$12.00</td></tr></table><p>Unpaid invoices 7</p><p>Paid invoices 3</p>'));
+      if(url.pathname==='/cart')return send(page('Cart','<h1>Cart</h1><table><tr><td>Subtotal</td><td>$10.00</td></tr><tr><td>Shipping</td><td>$2.00</td></tr><tr><td>Total</td><td>$12.00</td></tr></table><p>Unpaid invoices 7</p><p>Paid invoices 3</p><p>Balance 1&#8239;240</p>'));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -653,6 +653,10 @@ test('a number is read after its label standing on its own, never after a longer
   validateJourneySpec(code,cart);
   const step=(await runSpec(target,code,{item:cart})).find(event=>event.type==='journey-step'&&event.status!=='running');
   assert.deepEqual([step?.status,step?.evidence],['completed','Reviewed checks passed: Total 12; Paid invoices 3.']);
+  // A number in another format fails its check rather than reading its first group.
+  const balance={...cart,steps:[{...cart.steps[0],checks:[{type:'read-number' as const,label:'Balance',name:'balance'}]}]};
+  const failed=(await runSpec(target,code,{item:balance})).find(event=>event.type==='journey-step'&&event.status!=='running') as RunEvent&{checks?:{passed:boolean;error?:string}[]};
+  assert.deepEqual([failed?.status,failed?.checks?.map(check=>[check.passed,check.error])],['failed',[[false,'The number after this label is in an unsupported format.']]]);
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{

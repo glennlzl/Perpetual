@@ -136,6 +136,7 @@ async function observe(page: Page, check: Check, captures: Captures): Promise<Ob
   if (check.type === 'compare-number' && !Object.hasOwn(captures, check.than)) return { passed: false, final: true, error: 'The earlier value was not captured.' };
   const value = await readNumber(page, check.label);
   if (value === null) return { passed: false, error: 'No number follows this label on the current page.' };
+  if (Number.isNaN(value)) return { passed: false, error: 'The number after this label is in an unsupported format.' };
   return check.type === 'read-number' ? { passed: true, observed: value } : { passed: OPERATORS[check.op](value, captures[check.than]), observed: value };
 }
 
