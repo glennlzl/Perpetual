@@ -103,8 +103,12 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   let watchErrorScope: { identity: string | null; login: string | null } | null = null;
   // A repair's wait for each of its gates, the gate being executed, and repair gates stopped while it was prepared.
   const waiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }[]>(), abandoned = new Set<string>();
-  let executing: Gate | null = null;
-  function persist() { return saves.run(() => writeStateFile(file, JSON.stringify(state))); }
+  let executing: Gate | null = null, unsaved = false;
+  // A failed save leaves the state unsaved until a later save succeeds; each poll saves it again meanwhile.
+  function persist() {
+    return saves.run(() => writeStateFile(file, JSON.stringify(state), { removeTemporary: true }))
+      .then(() => { unsaved = false; }, (error: unknown) => { unsaved = true; throw error; });
+  }
   await persist();
 
   const active = () => { const current = source(); return current?.key ? current : null; };
@@ -521,8 +525,14 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     },
     start() {
       if (closed || timer) return;
-      // Each poll also tries the queue, so a gate whose retries stopped while another source was active is checked again.
-      timer = setInterval(() => { void watch().then(() => { void sync(); kick(); }); }, pollInterval);
+      // Each poll also tries the queue, so a gate whose retries stopped while another source was active is checked again,
+      // and saves a state whose last save failed, so a verdict reaches the disk without waiting for another change.
+      timer = setInterval(() => {
+        void watch().then(() => {
+          if (unsaved) void persist().catch(error => { process.stderr.write(`Journey gate: ${text(error)}\n`); });
+          void sync(); kick();
+        });
+      }, pollInterval);
       timer.unref?.();
       void sync();
       kick();

@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { environmentBusy } from '../src/environments/usage.ts';
@@ -131,6 +131,21 @@ test('a verdict whose save fails stays the verdict, so a failed journey never be
   assert.deepEqual([view.status, view.reason], ['failed', 'A journey failed.']);
   await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'developer' }), /failed gate cannot be released/);
   assert.deepEqual(h.posts.map(item => `${item.state} ${item.description}`), ['pending Running', 'failure Failed']);
+});
+
+test('a verdict whose save failed is saved at the next poll, so a restart never finds the gate still running', { skip: process.platform === 'win32' }, async t => {
+  // A local checkout: its polls read no head and nothing is left to report, so only the failed save is written again.
+  const h = await harness(t, { repository: null, pollInterval: 20, runs: { beta: { status: 'failed', results: [{ caseId: 'journey', status: 'failed' }] } }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  const root = join(h.dataDir, 'gates'), file = join(root, 'state.json');
+  // A directory in place of the state file refuses every save from the moment the journeys finish; a status report's
+  // save that lands while it is put there is replaced again.
+  h.holds.run = async () => { for (;;) { await rm(file, { recursive: true, force: true }); if (await mkdir(join(file, 'taken'), { recursive: true }).then(() => true, () => false)) return; } };
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.deepEqual(await readdir(root), ['state.json'], 'A failed save leaves no temporary file behind.');
+  await rm(file, { recursive: true });
+  h.manager.start();
+  await until(async () => (await h.gates('beta').catch(() => []))[0]?.status === 'failed', 'The verdict must be saved at the next poll.');
 });
 
 test('a stage without reviewed, selected journeys needs release without rebuilding or running', async t => {
