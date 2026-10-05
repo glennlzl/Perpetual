@@ -93,6 +93,17 @@ test('a Dockerfile gives its images, working directory, argument and variable na
   hidden(lines.join('\n'));
 });
 
+test('quoted text, arithmetic and other instructions open no heredoc, and one that never closes leaves the rest read', () => {
+  for (const opener of ['RUN echo "usage: tool <<input>> out" > /usage.txt', 'RUN echo $((1 << shift))', 'LABEL description="<<EOF"', 'RUN cat <<NEVER > /notes']) {
+    const { lines } = dockerfile(['FROM node:24', opener, 'ENV API_URL=http://api', 'EXPOSE 3000', 'CMD ["node", "server.js"]'].join('\n'));
+    assert.deepEqual(lines, ['- From: `node:24`', '- Env: API_URL', '- Expose: 3000', '- Cmd: `["node", "server.js"]`'], opener);
+  }
+  // A heredoc that closes, its delimiter quoted or not, still hides its body.
+  for (const opener of ["RUN <<'EOF' bash", 'COPY <<-"EOF" /app/settings', 'RUN cat <<EOF > /app/notes']) {
+    assert.deepEqual(dockerfile(['FROM node:24', opener, 'ENV INSIDE=1', 'EOF', 'ENV AFTER=1'].join('\n')).lines, ['- From: `node:24`', '- Env: AFTER'], opener);
+  }
+});
+
 test('a devcontainer.json with comments gives its image, features, ports, setup commands and variable names', () => {
   const { lines, names } = devcontainer([
     '{', '  // The development image', '  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",', '  "features": { "ghcr.io/devcontainers/features/node:1": {} },',
@@ -220,6 +231,8 @@ test('each reader takes time in proportion to its file, however the file is craf
     ['a Dockerfile with 100,000 continued lines', () => dockerfile(fill('RUN a \\\n'))],
     ['a Dockerfile with a string that never closes', () => dockerfile(fill('\\"', 'ARG A="'))],
     ['a Dockerfile with single quotes that never close', () => dockerfile(fill("'", 'ENV A='))],
+    ['a RUN instruction with a string that never closes', () => dockerfile(fill('\\"', 'RUN echo "'))],
+    ['a Dockerfile with 100,000 heredocs that never close', () => dockerfile(numbered(index => `RUN cat <<E${index}`))],
     ['a workflow with 100,000 variables', () => workflow(`env:\n${numbered(index => `  KEY_${index}: v`)}\njobs: {}\n`)],
     ['a workflow with expressions that never close', () => workflow(fill('${{ ', 'env:\n  A: "', '"\n'))],
     ['a workflow with a value of spaces', () => workflow(`jobs:\n  build:\n    container: "a${' '.repeat(MB)}b"\n`)],

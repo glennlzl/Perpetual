@@ -212,11 +212,17 @@ const unquoted = (text: string) => text.replace(QUOTED, '""');
 const spaced = (text: string) => unquoted(text).trim().split(/\s+/).filter(Boolean);
 // A line that ends with a backslash continues on the next one that is not a comment.
 const CONTINUED = /\\\s*$/, COMMENT = /^\s*#/;
+// A heredoc opens in RUN, COPY or ADD with a word of its own that starts with <<, its delimiter quoted or not; quoted text
+// and arithmetic such as $((1 << n)) open none. Quoted text is left out before looking, but for a delimiter's quotes.
+const HEREDOC = /(?:^|\s)<<-?(["']?)([A-Za-z_]\w*)\1(?=\s|$)/, HEREDOC_KEYWORDS = new Set(['RUN', 'COPY', 'ADD']);
+const QUOTED_TEXT = /(<<-?(["'])[A-Za-z_]\w*\2)|"(?:[^"\\]|\\[\s\S])*(?:"|\\?$)|'[^']*(?:'|$)/g;
 
 /** A Dockerfile: its base images, working directories, build arguments, variables, ports and start commands. */
 export function dockerfile(text: string, observe: Observation = redact): SetupEvidence {
   const { code, word, command } = quoted(observe);
   const rows = text.split(/\r?\n/), found = new Map<string, number>();
+  // The last row that is each text, so a heredoc that never closes opens none and the rows after it are still read.
+  const closing = new Map(rows.map((row, index) => [row.trim(), index]));
   const parts: Record<'From' | 'Workdir' | 'Args' | 'Env' | 'Expose' | 'Cmd' | 'Entrypoint', string[]> = { From: [], Workdir: [], Args: [], Env: [], Expose: [], Cmd: [], Entrypoint: [] };
   for (let index = 0, heredoc: string | null = null; index < rows.length; index += 1) {
     if (heredoc !== null) { if (rows[index].trim() === heredoc) heredoc = null; continue; }
@@ -235,7 +241,8 @@ export function dockerfile(text: string, observe: Observation = redact): SetupEv
     const match = /^\s*([A-Za-z]+)\s+([\s\S]*)$/.exec(pieces.join(''));
     if (!match) continue;
     const keyword = match[1].toUpperCase(), args = match[2].trim();
-    heredoc = /(?<!<)<<(?!<)-?\s*["']?([A-Za-z_]\w*)["']?/.exec(args)?.[1] ?? null;
+    const opened = HEREDOC_KEYWORDS.has(keyword) ? HEREDOC.exec(args.replace(QUOTED_TEXT, (_text, delimiter?: string) => delimiter ?? '""'))?.[2] : undefined;
+    heredoc = opened !== undefined && (closing.get(opened) ?? -1) > index ? opened : null;
     if (keyword === 'FROM') {
       const [from, as, stage] = spaced(args).filter(item => !item.startsWith('--'));
       if (from) parts.From.push(`${code(from)}${as?.toUpperCase() === 'AS' && stage ? ` as ${code(stage)}` : ''}`);
