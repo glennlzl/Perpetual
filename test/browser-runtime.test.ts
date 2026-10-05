@@ -202,15 +202,19 @@ test('the worker protocol refuses malformed, incomplete and unfinished output',a
   ] as const)await assert.rejects(supervise(script).promise,{message},script);
 });
 
-test('after a protocol error the worker output is drained, never parsed or delivered again',async()=>{
+test('after a protocol error the worker output is drained, never parsed or delivered again',async t=>{
   // The worker ignores the stop signal and goes on writing a valid event.
   const worker=supervise('process.on("SIGTERM",()=>{});console.log(JSON.stringify({type:"status",order:1}));console.log("not json");setTimeout(()=>{console.log(JSON.stringify({type:"status",order:2}));setTimeout(()=>process.exit(0),50);},100);',{cleanupGraceMs:10000});
   await assert.rejects(worker.promise,{message:'Browser runtime returned an invalid event.'});
   assert.deepEqual(worker.events,[{type:'status',order:1}]);
-  // An event over its size limit is dropped as it arrives, while the worker keeps writing until it is killed.
-  const flood=supervise('process.on("SIGTERM",()=>{});const chunk="x".repeat(65536);const write=()=>process.stdout.write(chunk,write);write();',{cleanupGraceMs:300});
-  await assert.rejects(flood.promise,(error:Error)=>error.message.startsWith('Browser event exceeded its size limit. Cleanup incomplete after forced termination'));
+  // An event over its size limit is dropped as it arrives. The worker ignores the stop signal and writes 256 MiB more:
+  // the controller reads all of it before the cleanup grace ends, without keeping it.
+  const before=process.memoryUsage().heapUsed;let held=0;
+  const sample=setInterval(()=>{held=Math.max(held,process.memoryUsage().heapUsed-before);},10);t.after(()=>clearInterval(sample));
+  const flood=supervise('process.on("SIGTERM",()=>{});const chunk="x".repeat(65536);let left=4096;const write=()=>left--?process.stdout.write(chunk,write):process.exit(0);write();',{cleanupGraceMs:10000});
+  await assert.rejects(flood.promise.finally(()=>clearInterval(sample)),{message:'Browser event exceeded its size limit.'});
   assert.deepEqual(flood.events,[]);
+  assert.ok(held<192*1024*1024,`The controller held ${Math.round(held/1024/1024)} MiB of the 256 MiB it dropped.`);
 });
 
 test('the event history is bounded, while replaced action snapshots do not spend it',async()=>{
