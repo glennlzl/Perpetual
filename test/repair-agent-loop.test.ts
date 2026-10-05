@@ -251,4 +251,14 @@ test('the model\'s summary is fenced in the pull request, and neither references
   assert.match(message, /\n\nPerpetual build repair\.$/, 'The summary is never the last paragraph, where trailers are read.');
   const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
   assert.ok(body.includes(`\`\`\`\`\n${summary}\n\`\`\`\``), 'In the body it is quoted as code, where GitHub acts on none of it.');
+  const linked = commitMessage('Fix CI', 'Closes https://github.com/acme/app/issues/12 and GH-13, like https://github.com/acme/app/pull/14.');
+  assert.doesNotMatch(linked, /\/(?:issues|pull)\/\d|GH-\d/, 'An issue or pull request named by its URL or GH- number is not referenced either.');
+  assert.equal(linked.replaceAll('⁠', ''), 'Fix CI\n\nCloses https://github.com/acme/app/issues/12 and GH-13, like https://github.com/acme/app/pull/14.\n\nPerpetual build repair.');
+});
+
+// Where a change adds credential text is named by the paths the model chose, which reach the attempts table.
+test('an attempt\'s failure is code in the pull request\'s attempts table, so the paths it names neither mention nor close anything', () => {
+  const failure = 'The change adds text that looks like a credential. Remove it; a repair never adds secrets. Found at fixes #12.env:1, @acme/team.env:1.';
+  const body = pullRequestBody({ repair, workflows: [], summary: '', attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: '2026-09-25T10:00:00.000Z', completedAt: '2026-09-25T10:05:00.000Z', failure }], holds: [], check: null, spent: 0 });
+  assert.ok(body.includes(`| 1 | \`openai/gpt-6-luna\` | \`${failure}\` | 0 | $0.0000 |`), body);
 });
