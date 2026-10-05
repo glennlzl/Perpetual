@@ -11,7 +11,7 @@ Status: implemented. Behaviour is documented in [Twins](../twins.md) and [Journe
 
 ## Twin
 
-A twin is a generated Docker Compose project plus a `.env` file. It runs the product's actual app code and the services that code depends on. The runtime writes `compose.yaml` and `.env` (mode 0600) under `<dataDir>/environments/<id>/twin/`, runs each service's setup, then runs `docker compose up --wait`. Teardown runs `docker compose down --volumes` plus each service's teardown. Compose already handles ordering (`depends_on`) and health checks, so Perpetual does not reimplement either.
+A twin is a generated Docker Compose project plus a `.env` file. It runs the product's actual app code and the services that code depends on. The runtime writes `compose.yaml` and `.env` (mode 0600) under `<dataDir>/environments/<id>/twin/`, runs each service's setup, then runs `docker compose up --wait`. Teardown runs `docker compose down --volumes` plus each service's teardown, removes the containers interrupted one-shot commands left, running `down` again when it removed any, and confirms that none of the twin's volumes remain. Compose already handles ordering (`depends_on`) and health checks, so Perpetual does not reimplement either.
 
 - Apps run the repository's own code from the source snapshot on a Node image of the major the repository declares, else the current LTS. The user's checkout is never mounted.
   - A one-shot `source` service copies the snapshot into the twin's own `workspace` volume, and the install, apps, repository-code services and command fixtures run from that volume. Writing dependencies and build output through a host bind mount is several times slower on Docker Desktop.
@@ -45,7 +45,7 @@ export default {
   - `options`: this service's section of the twin config;
   - `inputs` and `outputs`;
   - addressing: `host`, `port(name)`, `url(name, path)`, `app(id).url`, and `sharedPort(name, current?)`, the port of a service's machine-wide instance, reserved once in `<dataDir>/twin-services/ports.json` outside every twin's port block;
-  - `run(image, args)` for a pinned CLI image, and `exec(file, args)` for a pinned CLI on the host that drives Docker itself. The Docker socket is never mounted into a container.
+  - `run(image, args)` for a pinned CLI image, and `exec(file, args, { cwd, env })` for a pinned CLI on the host that drives Docker itself, with `env` set over the controller's environment, which it otherwise inherits. The Docker socket is never mounted into a container.
 - Inputs are test credentials only. They are validated by pattern, stored locally (mode 0600), never sent to the client and reused across twins. A service with a missing input is **blocked**: its variables are left out, and a journey on the twin that does not pass reports `blocked (integration)`, since nothing tells whether the missing service caused it. Nothing substitutes for it.
 - A service may declare `provision: { inputs: [{ name, label, default? }], run }` to create its inputs on the user's explicit action. `run(ctx)` gets `{ inputs, docker(args, { timeoutMs }), tempDir }`, where `tempDir` is a private, empty 0700 directory removed afterwards, and returns `{ values, details: { expiresAt, claimUrl?, account? } }`. `default: 'git-email'` pre-fills an input from `git config --global user.email`.
   - `values` are the service's own inputs, checked by their patterns like a manual save. The record `{ inputs, expiresAt, claimUrl, account, provisionedAt }` is kept apart in `<dataDir>/twin-provisions.json` (0600).
