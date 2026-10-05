@@ -12,7 +12,8 @@ export interface GateStage { id: string; name: string; kind: string }
 export interface GateSource { key: string; branch: string | null; sha: string | null; repository?: string | null; stages: readonly GateStage[] }
 export interface GateConnection { login: string; repository: string }
 export interface BuildInput { repository: string; branch: string | null; sha: string; login: string }
-export type BuildVerdict = { status: 'passed' } | { status: 'waiting' | 'blocked'; reason: string };
+/** none: GitHub Actions has no push or dispatch run of the branch at the commit, as far as complete evidence shows. */
+export type BuildVerdict = { status: 'passed' } | { status: 'waiting' | 'blocked' | 'none'; reason: string };
 export interface GateGitHub {
   connection(): Promise<GateConnection | null>;
   head(input: BranchHeadInput): Promise<BranchHead>;
@@ -35,6 +36,8 @@ export interface GateManagerOptions<Context, Twin> {
   /** Moves the managed source copy to its branch's head and rescans it (409: not now). */
   follow?: (head: SourceHead) => Promise<void>;
   now?: () => string; pollInterval?: number; retryInterval?: number;
+  /** How long after it was queued a gate waits for a commit GitHub Actions has no run for, before it needs release. */
+  buildWait?: number;
 }
 /** A gate as the pipeline shows it. */
 /** A gate as GET /api/gate replies with it: the contract's StageGate, picked from the persisted record. */
@@ -73,6 +76,7 @@ const conflict = (message: string) => Object.assign(new Error(message), { status
 const text = (error: unknown) => failureText(error, 500);
 const LIMIT = 300;
 const STOPPED = 'The repair stopped.', CHANGED = 'The active source changed.', RESTARTED = 'Interrupted by a controller restart.';
+const UNBUILT = 'GitHub Actions has no push or dispatch run for this commit. Release it, or dispatch a workflow and run the gate again.';
 // Only the most recently updated gates are reported again after a failed report.
 const REPORTED = 50;
 const publicGate = ({ id, stageId, sha, status, reason, releasedBy, releasedAt, statusError, detectedAt, updatedAt }: Gate): PublicGate =>
@@ -87,7 +91,7 @@ const publicGate = ({ id, stageId, sha, status, reason, releasedBy, releasedAt, 
  *   run(context, twin) -> finished run.
  * follow({ key, branch, sha }): moves a managed source without a Sandbox stage to its watched head (409: not now).
  */
-export async function createGateManager<Context, Twin extends { id?: string | null } | null | undefined>({ dataDir, source, github, steps, follow, now = () => new Date().toISOString(), pollInterval = 60_000, retryInterval = 10_000 }: GateManagerOptions<Context, Twin>) {
+export async function createGateManager<Context, Twin extends { id?: string | null } | null | undefined>({ dataDir, source, github, steps, follow, now = () => new Date().toISOString(), pollInterval = 60_000, retryInterval = 10_000, buildWait = 15 * 60_000 }: GateManagerOptions<Context, Twin>) {
   const root = await privateDirectory(resolve(dataDir, 'gates'), 'Gate storage must not be a symbolic link.');
   const file = join(root, 'state.json');
   let state: GateState = { version: 1, gates: [], heads: {} };
@@ -200,6 +204,9 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     const head = state.heads[current.key];
     if (build.login && head && (head.branch !== current.branch || head.login !== build.login)) return false;
     if (build.status !== 'passed') {
+      // A commit GitHub Actions does not build, such as one CI skips or builds only for a pull request, waits for a push or
+      // dispatch run for a while, then needs a person: it is never admitted, promoted or left waiting without one.
+      if (build.status === 'none' && Date.parse(now()) - Date.parse(gate.detectedAt) >= buildWait) { await settle(gate, 'needs-release', UNBUILT); return false; }
       const status = build.status === 'blocked' ? 'build-failed' : 'waiting-build';
       if (gate.status !== status || gate.reason !== build.reason) await transition(gate, status, { reason: build.reason });
       return false;
@@ -208,7 +215,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     return true;
   }
   async function work(gate: Gate) {
-    if (!(await admitBuild(gate))) return false;
+    // A gate Build admission settled, or another commit superseded meanwhile, is done; one still pending waits.
+    if (!(await admitBuild(gate))) return !PENDING.includes(gate.status);
     let context: Context;
     const stopped = async () => { if (!abandoned.has(gate.id)) return false; await settle(gate, 'superseded', STOPPED); return true; };
     try { context = await steps.prepare({ key: gate.key, branch: gate.branch, stageId: gate.stageId, sha: gate.sha, ...(gate.repair ? { repair: gate.repair, snapshot: gate.snapshot } : {}) }); }
@@ -490,7 +498,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (gate.status !== 'needs-release') throw conflict(gate.status === 'failed' ? 'A failed gate cannot be released.' : 'This gate does not need release.');
       const identity = sourceIdentity(current), build = await readBuild(current, gate);
       if (closed || sourceIdentity(active()) !== identity || gate.status !== 'needs-release') throw conflict('The gate changed. Reload the pipeline.');
-      if (build.status !== 'passed') throw conflict(build.reason);
+      // A person may release a commit GitHub Actions has no run for, never one whose Build failed or is unfinished.
+      if (build.status !== 'passed' && build.status !== 'none') throw conflict(build.reason);
       Object.assign(gate, { status: 'released', releasedBy: login, releasedAt: now(), updatedAt: now() } satisfies Partial<Gate>);
       promote(gate);
       await persist();
