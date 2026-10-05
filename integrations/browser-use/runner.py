@@ -100,7 +100,7 @@ DISCOVERY_INSTRUCTIONS = """Understand this product from its current browser pag
 Each case must represent one meaningful user goal, from entry and prerequisites through its final business outcome. Keep the connected actions needed to achieve that goal in one journey, preserving the same login session, created records, identifiers and business state. Do not split a journey into isolated page opens, clicks, individual functions, internal schemas, or fragments extracted from source files. Intermediate checks support the final outcome; they are not separate business successes. Do not move the normal work of the journey into preconditions merely to make a smaller test.
 Prioritize two to four complete business journeys when supported: the primary happy path through its actual result and usage/credit effect, a separate payment or subscription lifecycle, and durable settings changes. These are categories to investigate, not features to invent. For a billing journey include payment handling and changed balance or entitlement, and refund/upgrade/downgrade only if supported; otherwise explicitly state missing coverage. A happy path must include doing the product's useful work and checking its outcome, not stop at login, creating a shell, saving a draft, or reaching a page. It observes the completed, successful result of that work before any credit or usage milestone; a credit decrease after a failed run is a failure, not a pass. Determine the actual journey from this product and the user's goal. Return fewer cases when warranted, never pad to a count. The response capacity is four complete journeys. State remaining coverage gaps in the summary.
 Each journey contains 2–12 ordered steps, each with a unique stable id and a concise title describing a business milestone. Keep login, connected work, and verification of the final effect inside the same journey and browser session. These milestones are not click scripts, selectors, or implementation checks. Do not split a happy path into login, page access, schema, and persistence cases. All generated cases use shared test data; only the user can approve independent test data for parallel execution.
-Before finalizing, inspect the relevant input and stored-result screens through read-only navigation when accessible, not just their links on an index page. An empty create form and an existing record's local detail/edit view can establish which fields exist and how saved values are displayed without creating anything. Keep these observations distinct from executing the journey. Discovery itself is read-only: do not submit forms, create or delete records, send messages, purchase, or attempt to execute the proposed journeys. HTTP mutation requests are blocked. Stay within allowed origins. Do not invent browsing activity or claim inaccessible behavior was observed.
+Before finalizing, inspect the relevant input and stored-result screens through read-only navigation when accessible, not just their links on an index page. An empty create form and an existing record's local detail/edit view can establish which fields exist and how saved values are displayed without creating anything. Keep these observations distinct from executing the journey. Discovery itself is read-only: do not submit forms, create or delete records, send messages, purchase, or attempt to execute the proposed journeys. HTTP mutation requests, and WebSocket messages a page sends after you act, are blocked. Stay within allowed origins. Do not invent browsing activity or claim inaccessible behavior was observed.
 Preconditions must identify required test accounts, permissions, fixtures and working dependency connections. Missing login credentials, authenticated access, data, payment/email/provider test integrations, or unknown business rules are explicit blockers in the summary and affected cases. You may propose a journey supported by source despite a blocker, but must distinguish that proposal from observed behavior. Never invent credentials, fabricate service responses, or substitute a simulated success for a real business outcome.
 Expected outcomes must describe the final user-visible result, including persistence and external effects when essential to that goal. API, database and provider evidence may support that outcome; internal schema or function checks do not replace exercising the user journey. Runs independently check final-page URL/text assertions and optional milestone checks, evaluated on the live page when the run reaches that milestone: url-contains, text-visible and text-absent with a value; read-number, which captures under a name the number shown right after a visible label such as Credits; and compare-number, which reads that label again and compares it using <, >, = or != with an earlier read-number capture named in than. When a visible balance, credit or usage value supports the outcome, propose a read-number check in an early milestone, and a compare-number check only in a milestone after the one whose checks confirm the successful result, such as a visible success message. Use at most six checks per milestone, only with labels observed on the page or in supplied source. Supply checks only when they genuinely support the outcome, and identify additional required evidence when they cannot prove it. An opened page or successful click alone is not proof of a larger journey's completion.
 For every milestone and final outcome, ask whether each proposed check could still pass if the intended action failed or never ran. If so, it is supporting context, not completion evidence: buttons, navigation tabs, headings and unchanged starting states cannot alone prove an action completed. Ground the terminal success state and goal-specific result contents in observed pages or supplied source, observing actual output rather than echoed input or a generic result heading. Distinguish success of the whole operation from success of an individual step. For asynchronous work, queued, running or accepted states are not completion. When the requested goal is specifically saving a draft, a persisted draft can be valid evidence; judge checks against the goal, not a list of forbidden words.
@@ -369,6 +369,8 @@ class OwnedBrowser:
         self.cdp_sessions = []
         self.blocked_navigations = 0
         self.blocked_requests = set()
+        # Agent actions so far; a page's socket sends only until the agent acts after it opened.
+        self.agent_actions = 0
         self.guard_error = False
         self.model_error = None
         self.auth_exchanges = 0
@@ -388,6 +390,8 @@ class OwnedBrowser:
             # Context interception catches a popup's very first request, before
             # its page-specific CDP connection exists. CDP below covers redirects.
             await self.context.route("**/*", self.route_initial_request)
+            # Routes never see a WebSocket's messages, so every socket is routed to its server as well.
+            await self.context.route_web_socket("**/*", self.route_socket)
             if self.payload.get("credentials"):
                 self.context.on("response", self.track_auth_response)
             await self.context.add_init_script(script=CURSOR_SCRIPT)
@@ -476,6 +480,16 @@ class OwnedBrowser:
                     await route.abort("blockedbyclient")
                 return
             await route.continue_()
+
+    def route_socket(self, socket):
+        # Discovery is read-only. A socket's opening messages and subscriptions reach the server, but what the page sends
+        # once the agent has acted since the socket opened may be a write, so it is dropped. The server's messages arrive.
+        opened, server = self.agent_actions, socket.connect_to_server()
+
+        def forward(message):
+            if self.agent_actions == opened:
+                server.send(message)
+        socket.on_message(forward)
 
     async def intercept_request(self, cdp, event):
         request = event["request"]
@@ -804,6 +818,8 @@ def create_agent(payload, owned, task, schema, case_id=None, actions=None, sourc
 
     async def planned(_state, output, _step):
         owned.require_guard()
+        # Before the action runs, so what a page sends over an open socket as its result is held.
+        owned.agent_actions += 1
         owned.diagnostics["forcedFinalization"] |= agent.AgentOutput is agent.DoneAgentOutput
         pending.clear()
         for action in output.action:

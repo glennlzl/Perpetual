@@ -5,6 +5,7 @@ import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 import threading
 import unittest
 from unittest.mock import patch
@@ -43,6 +44,18 @@ change.onclick=()=>Promise.all([fetch('/rpc',{method:'POST',headers:{'Content-Ty
             if self.path.endswith('-redirect'):
                 html = html.replace(b"'/rpc'", b"'/rpc-redirect'")
             self.wfile.write(html)
+            return
+        if self.path.startswith("/socket?port="):
+            # Subscribes over a WebSocket on load and sends a change over it when the button is pressed.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'''<!doctype html><h1>Connecting</h1><button id=remove>Remove workspace</button><script>
+const socket=new WebSocket('ws://127.0.0.1:'+new URLSearchParams(location.search).get('port')+'/live');
+socket.onopen=()=>socket.send('subscribe');
+socket.onmessage=event=>{document.querySelector('h1').textContent=event.data;};
+remove.onclick=()=>{socket.send('remove');remove.textContent='Removal sent';};
+</script>''')
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -92,6 +105,86 @@ class ProtocolModelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class SocketModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: once the page's subscription answered, press its button, then report."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        latest = next(message["content"] for message in reversed(request["messages"]) if "<browser_state>" in json.dumps(message["content"]))
+        observation = (latest if isinstance(latest, str) else "\n".join(part.get("text", "") for part in latest)).split("<browser_state>")[-1]
+        if "Removal sent" in observation:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "See the live workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        elif "Subscribed" in observation:
+            line = next(line for line in observation.splitlines() if "<button" in line)
+            found = re.search(r"(?:\[(\d+)\]|(\d+)\[:\])", line)
+            action = {"click": {"index": int(found.group(1) or found.group(2))}}
+        else:
+            action = {"wait": {"seconds": 1}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class SocketContracts(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from websockets.asyncio.server import serve
+        self.received = []
+
+        async def live(connection):
+            async for message in connection:
+                self.received.append(message)
+                if message == "subscribe":
+                    await connection.send("Subscribed")
+        self.sockets = await serve(live, "127.0.0.1", 0)
+        self.application = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.application.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.application.server_port}"
+        self.target = f"{self.url}/socket?port={self.sockets.sockets[0].getsockname()[1]}"
+
+    async def asyncTearDown(self):
+        self.sockets.close()
+        await self.sockets.wait_closed()
+        self.application.shutdown()
+        self.application.server_close()
+
+    async def test_a_page_socket_reaches_its_server_while_the_agent_has_not_acted(self):
+        payload = {"mode": "discover", "targetUrl": self.target, "allowedOrigins": [self.url]}
+        async with runner.OwnedBrowser(payload, [].append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+            await page.get_by_role("button", name="Remove workspace", exact=True).click()
+            for _ in range(200):
+                if "remove" in self.received:
+                    break
+                await asyncio.sleep(0.05)
+        self.assertEqual(self.received, ["subscribe", "remove"])
+
+    async def test_what_a_page_sends_over_a_socket_after_the_agent_acts_never_reaches_its_server(self):
+        model = ThreadingHTTPServer(("127.0.0.1", 0), SocketModelHandler)
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": self.target, "allowedOrigins": [self.url], "maxSteps": 6, "timeoutSeconds": 40})
+        events = []
+        try:
+            with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}), patch.object(runner, "emit", events.append):
+                discovered = await asyncio.wait_for(runner.discover(payload), 45)
+        finally:
+            model.shutdown()
+            model.server_close()
+        self.assertEqual(discovered["type"], "discovery")
+        actions = [event["actions"] for event in events if event["type"] == "case" and event["actions"]][-1]
+        self.assertIn({"type": "click", "status": "passed"}, actions)
+        # The subscription sent on load reached the server; the change the agent's click sent did not.
+        self.assertEqual(self.received, ["subscribe"])
 
 
 class BrowserContracts(unittest.IsolatedAsyncioTestCase):
