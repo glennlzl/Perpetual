@@ -35,6 +35,22 @@ test('the client merges class names with one engine: cn, which the utils alias r
   assert.match(await readFile(new URL('../client/src/lib/utils.ts', import.meta.url), 'utf8'), /^export \{ cn \} from 'cn';$/m);
 });
 
+test('one Chromium serves both Playwright packages: the Node and Python browser runtime pins agree', async () => {
+  const { dependencies } = await manifest();
+  const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+  const [lock, pyproject, uvLock, runner] = await Promise.all([read('package-lock.json'), read('integrations/browser-use/pyproject.toml'),
+    read('integrations/browser-use/uv.lock'), read('integrations/browser-use/runner.py')]);
+  const { packages } = JSON.parse(lock) as { packages: Record<string, { version?: string }> };
+  const pinned = (name: string) => new RegExp(`"${name}==([^"]+)"`).exec(pyproject)?.[1];
+  const locked = (name: string) => new RegExp(`\\[\\[package\\]\\]\\nname = "${name}"\\nversion = "([^"]+)"`).exec(uvLock)?.[1];
+  const checked = JSON.parse(/^VERSIONS = (\{.*\})$/m.exec(runner)?.[1] ?? '{}') as Record<string, string>;
+  const playwright = dependencies['@playwright/test'];
+  assert.match(playwright, /^\d+\.\d+\.\d+$/, 'Pinned exactly.');
+  // Setup installs Chromium with node_modules/playwright only; the Python worker finds it only at the same version.
+  assert.deepEqual([packages['node_modules/playwright']?.version, pinned('playwright'), locked('playwright'), checked.playwright], Array(4).fill(playwright));
+  assert.deepEqual([locked('browser-use'), checked['browser-use']], Array(2).fill(pinned('browser-use')));
+});
+
 test('zod, which only the model packages\' peers need, is on the newest major every one of them accepts', async () => {
   const { dependencies } = await manifest();
   const { packages } = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8')) as { packages: Record<string, Locked> };
