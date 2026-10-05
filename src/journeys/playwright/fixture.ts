@@ -188,9 +188,8 @@ async function streamFrames(page: Page) {
 
 // A control run's script in each document, after Playwright's WebSocket mock and before the page's own scripts. It
 // counts the journey's actions there (a click, a key press, typing or a selection), except while the fixture signs in.
-// A socket drops what the page sends once the journey has acted since it opened, so its opening message and
-// subscriptions still reach the application. What a socket that opened after an action since the fixture last signed
-// in sends may be a write, so the page reports it.
+// Opening messages and subscriptions reach the application before business actions, and while the fixture signs in.
+// After an action, sends are dropped even from a socket that opened only because of that action.
 function holdSockets(report: string) {
   type Send = Parameters<WebSocket['send']>;
   const state: Held = { actions: 0, signedAt: 0, signingIn: false }, opened = new WeakMap<WebSocket, number>(), Routed = globalThis.WebSocket;
@@ -200,7 +199,7 @@ function holdSockets(report: string) {
     constructor(...args: ConstructorParameters<typeof Routed>) { super(...args); this.addEventListener('open', () => opened.set(this, state.actions)); }
     override send(...args: Send) {
       const at = opened.get(this);
-      if (at !== undefined && !state.signingIn) { if (at !== state.actions) { (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('blocked'); return; } if (at > state.signedAt) (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('unguarded'); }
+      if (at !== undefined && !state.signingIn && (at !== state.actions || at > state.signedAt)) { (globalThis as unknown as Record<string, (kind: string) => void>)[report]?.('blocked'); return; }
       super.send(...args);
     }
   };
