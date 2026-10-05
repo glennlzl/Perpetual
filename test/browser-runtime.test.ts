@@ -186,11 +186,15 @@ test('after a protocol error the worker output is drained, never parsed or deliv
   assert.deepEqual(flood.events,[]);
 });
 
-test('the event history of a worker is bounded',async()=>{
+test('the event history is bounded, while replaced action snapshots do not spend it',async()=>{
   // About 9 MiB of other events stops the worker.
   const padded=supervise('const pad="x".repeat(10240);for(let i=0;i<900;i++)console.log(JSON.stringify({type:"status",i,pad}));');
   await assert.rejects(padded.promise,{message:'Browser event history exceeded its size limit.'});
   assert.ok(padded.events.length<900);
+  // A journey re-sends its last 150 actions as each action starts and ends: about 9 MiB for 900 actions reaches its end.
+  const actions=supervise('const actions=Array.from({length:150},()=>({type:"click",status:"passed"}));for(let i=0;i<1800;i++)console.log(JSON.stringify({type:"case",caseId:"c",status:"running",actions}));console.log(JSON.stringify({type:"result",result:{caseId:"c"}}));');
+  await actions.promise;
+  assert.equal(actions.events.length,1801);
 });
 
 test('cancelling a worker leaves none of its process running',async()=>{

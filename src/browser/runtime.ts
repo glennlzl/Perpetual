@@ -125,7 +125,8 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
         let parsed:unknown;try{parsed=JSON.parse(line);}catch{return refuse('Browser runtime returned an invalid event.');}
         if(!isRecord(parsed))return refuse('Browser runtime returned an invalid event.');
         let event:WorkerEvent=parsed;
-        if(event.type!=='frame'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return refuse('Browser event history exceeded its size limit.');}
+        // A frame or an action snapshot replaces the previous one, so neither spends the event history.
+        if(event.type!=='frame'&&event.type!=='case'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return refuse('Browser event history exceeded its size limit.');}
         if(event.type==='error'){cleanupIncomplete ||= event.cleanupIncomplete===true;terminalError=new Error(failure(event.error));continue;}
         // Nesting too deep to walk stops the run rather than throwing out of this listener.
         if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal) as WorkerEvent;}catch{return refuse('Browser runtime returned an invalid event.');}
