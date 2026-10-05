@@ -322,7 +322,8 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
     const { steps, error: stepError } = buildJourneySteps(draft.stepRows, item.steps || []);
     if (stepError) return setError(stepError);
     const { stepRows: _rows, ...fields } = draft;
-    const next = { ...fields, steps, name: draft.name.trim(), goal: draft.goal.trim(), preconditions, expectedOutcomes, assertions: draft.assertions.map(check => ({ type: check.type, value: check.value.trim() })), needsReview: false };
+    // A kept draft may predate a selection change, which the editor never edits; the case's own selection is saved.
+    const next = { ...fields, selected: item.selected, steps, name: draft.name.trim(), goal: draft.goal.trim(), preconditions, expectedOutcomes, assertions: draft.assertions.map(check => ({ type: check.type, value: check.value.trim() })), needsReview: false };
     // Existing step-less cases stay runnable unchanged; any reviewed edit needs real milestones.
     const legacyUnchanged = !item.needsReview && !item.steps?.length && DEFINITION.every(key => JSON.stringify(next[key] ?? []) === JSON.stringify(item[key] ?? [])) && next.isolation === (item.isolation || 'shared');
     const countError = reviewedStepError(steps, { legacyUnchanged });

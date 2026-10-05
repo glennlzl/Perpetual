@@ -95,3 +95,29 @@ test('a journey card opens to show code being generated and code that failed to 
   });
   assert.deepEqual(fixture.pageErrors, []);
 });
+
+test('a kept editor draft saves the selection the journey has now, not the one it had when editing began', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  let cases = [{ ...journey, selected: false }];
+  fixture.controller.view = browserView({ cases });
+  fixture.controller.reply = (path, input) => {
+    if (path !== '/api/browser/cases') return undefined;
+    cases = input.cases as typeof cases; fixture.controller.view = browserView({ cases });
+    return { json: { cases } };
+  };
+  const page = await fixture.open(t), dialog = page.getByRole('dialog');
+  await page.getByRole('button', { name: 'Actions for Save a workspace', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await dialog.getByLabel('Business goal').fill('Save, reopen and rename the workspace');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select Save a workspace', exact: true }).click();
+  await expect.poll(() => cases[0].selected).toBe(true);
+  await page.getByRole('button', { name: 'Actions for Save a workspace', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await expect(dialog.getByLabel('Business goal')).toHaveValue('Save, reopen and rename the workspace');
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  assert.equal(cases[0].goal, 'Save, reopen and rename the workspace');
+  assert.equal(cases[0].selected, true, 'The later selection still holds, so the gate keeps running the journey.');
+  assert.deepEqual(fixture.pageErrors, []);
+});
