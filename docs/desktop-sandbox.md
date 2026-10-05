@@ -94,7 +94,7 @@ Driver element references belong to one capture: observe again after a meaningfu
 ## Limits
 
 - A desktop provides a computer, not dependencies: it does not reproduce payment, mail or database semantics or production state. Recreating a container resets its own filesystem, not remote services. SDK snapshots are not implemented for this local transport.
-- There is no automatic expiry, database sidecar, outbound network isolation, restorable snapshot or CPU architecture emulation choice. Loopback publishing protects inbound control ports; it does **not** stop the guest from reaching the internet, host services or a production URL you supply. Run trusted workloads only.
+- There is no automatic expiry, database sidecar, outbound network isolation, restorable snapshot or CPU architecture emulation choice. Loopback publishing keeps the API and desktop ports from other machines only. Perpetual adds no credential to either port, and at the reviewed commit computer-server authenticates only Cua cloud containers and accepts requests from any browser origin, so any local process, or a web page open in a browser on this machine that finds the port, can run commands in the guest or watch its desktop. Destroy a desktop you no longer use. Loopback publishing also does **not** stop the guest from reaching the internet, host services or a production URL you supply. Run trusted workloads only.
 - The Driver MCP path has been exercised for protocol discovery and read-only calls, not for every tool.
 
 ## Licenses and upgrades
