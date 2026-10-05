@@ -66,10 +66,13 @@ def checked_transport(api_url):
             if command == "run_command":
                 if not isinstance(result, dict):
                     raise BridgeError("Cua returned an invalid command result.")
+                # computer-server answers a command it timed out or could not run with success false and a
+                # placeholder code such as -1; the command's outcome in the guest is unknown.
+                if payload.get("success") is False or result.get("success") is False:
+                    raise BridgeError("The guest command did not finish, for example at its time limit; its outcome is unknown.")
                 code = result.get("returncode", result.get("return_code"))
                 if (type(code) is not int or not isinstance(result.get("stdout", ""), str)
-                        or not isinstance(result.get("stderr", ""), str)
-                        or ((payload.get("success") is False or result.get("success") is False) and code == 0)):
+                        or not isinstance(result.get("stderr", ""), str)):
                     raise BridgeError("Cua did not return a confirmed guest exit code.")
                 # A nonzero exit is evidence for the caller, not an SDK fault.
                 return {"result": {"returncode": code, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")}}
