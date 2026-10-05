@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../src/store.ts';
@@ -43,6 +43,15 @@ test('a state file is written beside itself and renamed into place, private, wit
   assert.equal(await readFile(file, 'utf8'), '{"a":2}');
   assert.deepEqual(await readdir(base), ['state.json']);
   await assert.rejects(writeStateFile(join(base, 'missing', 'state.json'), '{}'), /ENOENT/, 'A failure is the file system\'s, unchanged.');
+});
+
+test('a failed save leaves no temporary file behind and reports its own error', async t => {
+  const base = await mkdtemp(join(tmpdir(), 'perpetual-store-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // A folder where the file belongs refuses the rename.
+  await mkdir(join(base, 'state.json'));
+  for (let attempt = 0; attempt < 3; attempt += 1) await assert.rejects(writeStateFile(join(base, 'state.json'), '{}'), { code: 'EISDIR' });
+  assert.deepEqual(await readdir(base), ['state.json']);
 });
 
 test('a save queue runs saves in order, lets a failed save through and settles idle after the last', async () => {
