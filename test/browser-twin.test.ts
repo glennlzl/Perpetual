@@ -80,6 +80,18 @@ test('a discovery whose admission cannot be saved leaves the stage\'s preparatio
   await f.manager.saveModel(beta,{apiKey:'fixture-only',model:'openai/gpt-4.1-mini'});
 });
 
+test('verifying code is refused before it starts without an application URL or a ready twin',async t=>{
+  const failed={...twin,id:'twin-failed',status:'failed',apps:[{id:'service-web',url:'http://host.docker.internal:43120'}]};
+  const f=await fixture(t,{environments:[twin,failed]}),beta=f.context('beta');
+  await f.manager.saveCases(beta,[journey]);await draftCode(f.manager,beta,[journey]);
+  const verify=async()=>f.manager.verifySpec(beta,{caseId:journey.id,hash:(await f.manager.view(beta)).specs[journey.id].draft!.hash});
+  await assert.rejects(verify(),{message:'Set the application URL first.'});
+  await f.manager.saveConfig(beta,{targetUrl:'http://host.docker.internal:43120/'});
+  await assert.rejects(verify(),{statusCode:409,message:'The selected application environment is not ready. Choose an available application URL.'});
+  assert.equal((await f.manager.view(beta)).specs[journey.id].draft!.verification,undefined,'Nothing is recorded against the draft.');
+  assert.equal(f.requests.length,0);
+});
+
 test('a twin with several apps and no web frontend asks for the application URL',async t=>{
   const f=await fixture(t,{events:discovered});
   const beta={...f.context('beta'),scan:{...f.context('beta').scan,services:[]}};

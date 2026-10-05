@@ -441,7 +441,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const account=Object.fromEntries((['credentials','accountId'] as const).filter(name=>input[name]!==undefined).map((name):[string,unknown]=>[name,input[name]]));
     // Every attempt runs with the config and on the twin the verification starts with, so another twin of the stage that
     // becomes ready meanwhile never takes over some of its attempts.
-    const config=normalizedConfig(state.configs[scope]||defaults,context),target={config,environmentId:config.targetUrl&&resolveEnvironment(config.targetUrl)?.id||null};
+    const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
+    // A twin a run would refuse is refused before anything is recorded; only a change between attempts ends a verification.
+    const environment=resolveEnvironment(config.targetUrl);
+    if(environment&&environment.status!=='ready')throw conflict('The selected application environment is not ready. Choose an available application URL.');
+    if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
+    const target={config,environmentId:environment?.id||null};
     // The verification holds that twin from its start to its end: it takes it here, and each attempt's lease passes to the
     // next, so nothing else, such as a health check, takes it while the verification records its start or an attempt, or
     // waits for the stage. A twin in use refuses the verification.
