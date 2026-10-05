@@ -1,7 +1,7 @@
 import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { failureText, redact } from './redaction.ts';
 import type { GitHubSession, GitHubRepositoryPage, GitHubBranchPage } from '../contract/github.ts';
@@ -387,4 +387,9 @@ export async function prepareGitHubSource({ repository, branch, rootDirectory = 
     if (cleanupFailed) safe.message += ' An incomplete private checkout could not be removed from the managed sources directory.';
     throw safe;
   }
+}
+
+/** Removes a prepared copy that was never saved, as a failed connection removes its own: nothing refers to it. */
+export async function discardGitHubSource(prepared: Pick<PreparedGitHubSource, 'checkoutPath'>) {
+  await rm(dirname(prepared.checkoutPath), { recursive: true, force: true });
 }

@@ -7,6 +7,8 @@ import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { ensureGitHubHistory, listGitHubBranches, listGitHubRepositories, prepareGitHubSource, updateGitHubSource } from '../src/github-source.ts';
 import { readGitHistory } from '../src/git-history.ts';
+import { startServer } from '../src/server.ts';
+import type { SourceReply } from '../contract/pipeline.ts';
 
 const exec = promisify(execFile);
 
@@ -53,6 +55,22 @@ async function github(t: TestContext, replies: Record<string, unknown> = {}) {
     return (await git('-C', work, 'rev-parse', 'HEAD')).stdout.trim();
   };
   return { dir, dataDir: join(dir, 'data'), commit, push: (...args: string[]) => git('-C', work, 'push', '--quiet', origin, ...args), git: (...args: string[]) => git('-C', work, ...args) };
+}
+
+/** The controller signed in to GitHub as developer, with `state` saved, for `work`; it closes before GitHub's fixture goes. */
+async function withController(t: TestContext, state: object, work: (controller: { dataDir: string; connect(input: object): Promise<{ status: number; body: SourceReply }> }) => Promise<void>) {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-github-controller-'))), dataDir = join(dir, 'data');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dataDir);
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan: null, providers: [], pipelines: {}, githubConnection: { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, ...state } }));
+  const app = await startServer({ port: 0, repo: dir, dataDir });
+  try {
+    const { token } = await (await fetch(`${app.url}/api/session`)).json();
+    await work({ dataDir, async connect(input) {
+      const response = await fetch(`${app.url}/api/source/github`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify(input) });
+      return { status: response.status, body: await response.json() };
+    } });
+  } finally { await app.close(); }
 }
 
 test('a row GitHub lists that cannot be chosen is left out of its page instead of failing it', async t => {
@@ -135,4 +153,16 @@ test('a root directory typed in another letter case is saved as the checkout spe
   const source = await prepareGitHubSource({ repository: 'acme/app', branch: 'main', rootDirectory: '/backend/API', dataDir: hub.dataDir });
   // A repair's host copy builds the scan path from the saved root, so the two must agree.
   assert.deepEqual([source.rootDirectory, source.scanPath], ['/Backend/api', join(source.checkoutPath, 'Backend', 'api')]);
+});
+
+test('a connection whose save fails removes the copy it made', async t => {
+  const hub = await github(t, { user: { login: 'developer' }, 'repos/acme/app/branches/main': { name: 'main' } });
+  await hub.commit({ 'README.md': 'one\n' });
+  await withController(t, {}, async ({ dataDir, connect }) => {
+    // The state file can no longer be replaced, so the save fails after the copy is cloned and scanned.
+    await rm(join(dataDir, 'state.json'));
+    await mkdir(join(dataDir, 'state.json', 'kept'), { recursive: true });
+    assert.equal((await connect({ repository: 'acme/app', branch: 'main', rootDirectory: '/' })).status, 400);
+    assert.deepEqual(await readdir(join(dataDir, 'sources')), [], 'A copy that was never saved does not stay behind.');
+  });
 });

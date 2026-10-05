@@ -11,7 +11,7 @@ import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
-import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
+import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, discardGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
 import { readGitHubActions, readServiceConfig } from './service-config.ts';
 import type { ConfigFile } from '../contract/service-config.ts';
 import { withDeliveryGraph } from './delivery.ts';
@@ -688,7 +688,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const connection=await requireGitHub(),input=await body(req);
           const prepared=await prepareGitHubSource({repository:input.repository,branch:input.branch,rootDirectory:input.rootDirectory,dataDir});
-          const scan=await scanRepository(prepared.scanPath);
+          // A copy whose scan or save fails is never saved, so nothing refers to it: it goes, as a failed clone does.
+          const discard=async(error: unknown): Promise<never>=>{await discardGitHubSource(prepared).catch(()=>{});throw error;};
+          const scan=await scanRepository(prepared.scanPath).catch(discard);
           const source: GitHubSource={...prepared,connectedAccount:connection.account.login,savedAt:new Date().toISOString()};
           const result=await save(current=>{
             const key=sourceKey(source),detected=parseGitHubRemote(current.scan?.repo?.remote);
@@ -704,7 +706,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             return {state:{...current,scan,source,providers:[],pipelines},
               commit(){state.scan=scan;state.source=source;state.providers=[];state.pipelines=pipelines;},
               result:{scan,source,pipeline} satisfies SourceReply};
-          });
+          }).catch(discard);
           return reply(res,200,result);
         });
       }
