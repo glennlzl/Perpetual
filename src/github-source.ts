@@ -220,14 +220,16 @@ function inCheckoutTurn<T>(path: string, work: () => Promise<T>): Promise<T> {
   return turn;
 }
 
-async function managedHistoryCheckout(source: ManagedSourceInput | null | undefined, dataDir: unknown) {
+const invalidCheckout = () => new GitHubSourceError('History can only be synced in a managed GitHub checkout. Reconnect the repository.');
+
+/** A saved source's managed clone, validated, with its root directory unless `checkRoot` is false. */
+async function managedHistoryCheckout(source: ManagedSourceInput | null | undefined, dataDir: unknown, { checkRoot = true } = {}) {
   if (!source || typeof source !== 'object') throw new GitHubSourceError('Connect a GitHub repository before loading its history.');
   const repository = repositoryName(source.repository), branch = branchName(source.branch), root = sourceRoot(source.rootDirectory);
   if (typeof dataDir !== 'string' || !dataDir.trim() || dataDir.includes('\0')
     || typeof source.checkoutPath !== 'string' || !isAbsolute(source.checkoutPath) || source.checkoutPath.includes('\0')) {
     throw new GitHubSourceError('The managed GitHub checkout is unavailable. Reconnect the repository.');
   }
-  const invalidCheckout = () => new GitHubSourceError('History can only be synced in a managed GitHub checkout. Reconnect the repository.');
   const requireDirectory = async (path: string) => {
     const stat = await lstat(path);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw invalidCheckout();
@@ -249,8 +251,7 @@ async function managedHistoryCheckout(source: ManagedSourceInput | null | undefi
     const config = await lstat(join(gitDirectory, 'config'));
     if (config.isSymbolicLink() || !config.isFile()) throw invalidCheckout();
     for (const name of ['objects', 'refs']) await requireDirectory(join(gitDirectory, name));
-    const scanPath = await scanDirectory(checkoutPath, root);
-    if (source.scanPath !== scanPath) throw invalidCheckout();
+    if (checkRoot && source.scanPath !== await scanDirectory(checkoutPath, root)) throw invalidCheckout();
     const [layout, origin, head, shallow] = await Promise.all([
       command('git', gitArgs(['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir']), 'Reading the managed checkout', API_TIMEOUT, checkoutPath),
       command('git', gitArgs(['remote', 'get-url', '--all', 'origin']), 'Reading the GitHub remote', API_TIMEOUT, checkoutPath),
@@ -262,7 +263,7 @@ async function managedHistoryCheckout(source: ManagedSourceInput | null | undefi
       || resolve(checkoutPath, paths[1]) !== gitDirectory || resolve(checkoutPath, paths[2]) !== gitDirectory
       || origin.stdout.trim().toLowerCase() !== `https://github.com/${repository}.git`.toLowerCase()
       || head.stdout.trim() !== branch || !['true', 'false'].includes(shallow.stdout.trim())) throw invalidCheckout();
-    return { checkoutPath, repository, shallow: shallow.stdout.trim() === 'true' };
+    return { checkoutPath, repository, root, shallow: shallow.stdout.trim() === 'true' };
   } catch (error) {
     if (error instanceof GitHubSourceError) throw error;
     throw invalidCheckout();
@@ -300,10 +301,11 @@ export async function ensureGitHubHistory({ source, dataDir, refresh = false }: 
  */
 export async function updateGitHubSource({ source, dataDir, sha }: { source?: ManagedSourceInput | null; dataDir?: unknown; sha?: unknown } = {}): Promise<{ sha: string }> {
   if (typeof sha !== 'string' || !SHA.test(sha)) throw new GitHubSourceError('Choose a commit of the selected branch.');
-  const { checkoutPath } = await managedHistoryCheckout(source, dataDir);
+  const { checkoutPath } = await managedHistoryCheckout(source, dataDir, { checkRoot: false });
   return inCheckoutTurn(checkoutPath, async () => {
-    // Validated again in turn, so the shallow boundary is read after any history sync before it.
-    const checkout = await managedHistoryCheckout(source, dataDir);
+    // Validated again in turn, so the shallow boundary is read after any history sync before it. The root directory is
+    // checked at the commit the copy moves to: one that removed it must not keep the copy from one that restores it.
+    const checkout = await managedHistoryCheckout(source, dataDir, { checkRoot: false });
     await command('git', gitArgs([
       '-c', 'fetch.writeCommitGraph=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
       'fetch', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--no-write-fetch-head',
@@ -316,6 +318,7 @@ export async function updateGitHubSource({ source, dataDir, sha }: { source?: Ma
     historySyncs.delete(checkoutPath);
     const { stdout } = await command('git', gitArgs(['rev-parse', '--verify', 'HEAD']), 'Reading the checkout commit', API_TIMEOUT, checkoutPath);
     if (stdout.trim().toLowerCase() !== sha.toLowerCase()) throw new GitHubSourceError('The managed source did not move to this commit. Try again.');
+    if (await scanDirectory(checkoutPath, checkout.root) !== source?.scanPath) throw invalidCheckout();
     return { sha: stdout.trim() };
   });
 }

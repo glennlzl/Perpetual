@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -85,4 +85,19 @@ test('after the copy moves to a pushed commit, its branch graph reaches that com
   const second = await hub.commit({ 'README.md': 'two\n' });
   assert.deepEqual(await updateGitHubSource({ source, dataDir: hub.dataDir, sha: second }), { sha: second });
   assert.deepEqual(await graph(), [second, first], 'The scanned commit heads the graph.');
+});
+
+test('a commit that removes the root directory never strands the copy before a commit that restores it', async t => {
+  const hub = await github(t, { 'repos/acme/app/branches/main': { name: 'main' } });
+  await hub.commit({ 'apps/web/package.json': '{}\n' });
+  const source = await prepareGitHubSource({ repository: 'acme/app', branch: 'main', rootDirectory: '/apps/web', dataDir: hub.dataDir });
+  const removed = await hub.commit({ 'apps/web': null, 'apps/site/package.json': '{}\n' });
+  await assert.rejects(updateGitHubSource({ source, dataDir: hub.dataDir, sha: removed }), /root directory does not exist in this branch/);
+  const restored = await hub.commit({ 'apps/web/package.json': '{"name":"web"}\n' });
+  assert.deepEqual(await updateGitHubSource({ source, dataDir: hub.dataDir, sha: restored }), { sha: restored });
+  assert.equal(await readFile(join(source.scanPath, 'package.json'), 'utf8'), '{"name":"web"}\n');
+  // A commit that turns the root into a link is refused at that commit, before anything reads through it.
+  await rm(join(hub.dir, 'work/apps/web'), { recursive: true });
+  await symlink('site', join(hub.dir, 'work/apps/web'));
+  await assert.rejects(updateGitHubSource({ source, dataDir: hub.dataDir, sha: await hub.commit({}) }), /without symbolic links/);
 });
