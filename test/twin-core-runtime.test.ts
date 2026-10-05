@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import YAML from 'yaml';
 import { APP_IMAGE } from '../src/twin/compose.ts';
 import { PORT_BASE, PORT_BLOCK, allocatePorts, createTwinRuntime, execCommand, portFree } from '../src/twin/runtime.ts';
+import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
 import { services } from './fixtures/twin/services.ts';
 import type { AddressInfo } from 'node:net';
 import type { Exec } from '../src/twin/runtime.ts';
@@ -358,7 +359,8 @@ test('Health reads either Compose ps format and reports stopped twins', async t 
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'stopped', containers: [] });
   await prepare();
-  assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: [{ name: 'web', state: 'exited', health: null, exitCode: 1 }] });
+  assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: [{ name: 'web', state: 'exited', health: null, exitCode: 1 },
+    ...['jobs-worker', 'payments-listener', 'database', 'mail', 'api'].map(name => ({ name, state: 'removed', health: null, exitCode: null }))] });
 });
 
 test('Health fails a twin whose Compose service container is gone, however healthy the others are', async t => {
@@ -369,9 +371,13 @@ test('Health fails a twin whose Compose service container is gone, however healt
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await prepare();
   assert.equal((await runtime.health({ dataDir, id: 'beta' })).status, 'ready');
-  // A crashed database that a prune removed: the apps still run, and nothing brings it back.
+  // A crashed database that a prune removed: the apps still run, and nothing brings it back. Health names it, and so
+  // does its environment.
   listed = services.filter(name => name !== 'database');
-  assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: listed.map(name => ({ name, state: 'running', health: 'healthy', exitCode: 0 })) });
+  assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: [
+    ...listed.map(name => ({ name, state: 'running', health: 'healthy', exitCode: 0 })), { name: 'database', state: 'removed', health: null, exitCode: null }] });
+  assert.deepEqual(await createEnvironmentRuntime({ twin: runtime }).environmentHealth({ dataDir, environment: { id: 'beta', sandboxId: 'beta' } }),
+    { status: 'failed', final: true, error: 'Stopped: database removed.' });
 });
 
 test('Destroy takes Compose down with volumes, then tears services down in reverse setup order', async t => {

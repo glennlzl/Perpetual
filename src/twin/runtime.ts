@@ -241,8 +241,10 @@ function inspectedHealth(stdout: string, expected: ServiceHealthContainer[]): Co
   return containers;
 }
 
+/** The state of a Compose service whose container is gone, as a prune removes a stopped one: it never comes back by itself. */
+const REMOVED = 'removed';
 const overall = (containers: ContainerStatus[]): TwinHealth['status'] => !containers.length ? 'stopped'
-  : containers.some(item => ['exited', 'dead'].includes(item.state) || item.health === 'unhealthy') ? 'failed'
+  : containers.some(item => ['exited', 'dead', REMOVED].includes(item.state) || item.health === 'unhealthy') ? 'failed'
   : containers.every(item => item.state === 'running' && [null, 'healthy'].includes(item.health)) ? 'ready' : 'starting';
 
 export function createTwinRuntime({ exec = execCommand, services = registry, isFree = portFree, portBase = PORT_BASE, appImage = APP_IMAGE, owner }: {
@@ -501,8 +503,9 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const containers = parsePs(stdout).map(item => ({ name: String(item.Service), state: String(item.State), health: typeof item.Health === 'string' && item.Health ? item.Health : null, exitCode: typeof item.ExitCode === 'number' ? item.ExitCode : null }));
     // A separate service stack cannot supply the twin's missing Compose containers.
     if (!containers.length) return { status: 'stopped', containers };
-    // Nor can the containers left supply a removed one, which never comes back by itself.
-    const listed = new Set(containers.map(item => item.name)), missing = (await upServices(twin.compose)).some(name => !listed.has(name));
+    // Nor can the containers left supply a removed one, which is named so its environment says which service is gone.
+    const listed = new Set(containers.map(item => item.name));
+    containers.push(...(await upServices(twin.compose)).filter(name => !listed.has(name)).map(name => ({ name, state: REMOVED, health: null, exitCode: null })));
     // Blocked services have no resource record. A restarted controller reads the same owned names from the adapter.
     for (const record of state?.services ?? []) {
       const definition = services[record.id];
@@ -514,7 +517,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         containers.push(...inspectedHealth(inspected.stdout, expected));
       } catch (error) { throw new Error(`${definition.title}: ${redactSecrets(redact((error as Error).message))}`); }
     }
-    return { status: missing ? 'failed' : overall(containers), containers };
+    return { status: overall(containers), containers };
   }
 
   async function logs({ dataDir, id, service, tail = 200 }: { dataDir: string; id: string; service?: string | null; tail?: number }) {
