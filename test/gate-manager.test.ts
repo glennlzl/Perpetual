@@ -21,11 +21,21 @@ type SavedState = { version: number; gates: Gate[]; heads: Record<string, { bran
 type Options = {
   dataDir?: string; stages?: GateStage[]; sha?: string; repository?: string | null; connection?: GateConnection | null | (() => GateConnection | null);
   journeys?: number | ((context: Context) => number); runs?: Record<string, RunRollup>; heads?: (BranchHead | Error)[]; post?: (status: CommitStatusPost) => Promise<void>;
+  pollInterval?: number; retryInterval?: number;
 };
 type Holds = { prepare?: (gate: GateRef) => Error | null | Promise<Error | null>; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
 
 // Injected source, GitHub and steps record what the gate asked for; nothing reaches the network or Docker.
-async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post }: Options = {}) {
+// Waits for a gate state with a deadline, so a regression fails at its assertion instead of hanging the file.
+async function until(condition: () => boolean | Promise<boolean>, message = 'The expected gate state must arrive.') {
+  const deadline = Date.now() + 10_000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(message);
+    await new Promise(done => setTimeout(done, 1));
+  }
+}
+
+async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post, pollInterval, retryInterval = 5 }: Options = {}) {
   dataDir ??= await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   let tick = 0;
   const now = () => new Date(Date.UTC(2026, 8, 23, 10, 0, 0, tick++)).toISOString();
@@ -59,7 +69,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
       return { id: `run-${context.stageId}-${context.sha[0]}`, ...result };
     },
   };
-  const manager = await createGateManager({ dataDir, source: () => current, github, steps, now, retryInterval: 5 });
+  const manager = await createGateManager({ dataDir, source: () => current, github, steps, now, pollInterval, retryInterval });
   t.after(async () => { await manager.close(); });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const saved = async (): Promise<SavedState> => JSON.parse(await readFile(join(dataDir, 'gates', 'state.json'), 'utf8'));
@@ -266,6 +276,23 @@ test('a busy stage keeps its gate queued and retries it', async t => {
   assert.equal(h.manager.view().stages.beta.status, 'queued');
   while (h.manager.view().stages.beta.status !== 'passed') await new Promise(done => setTimeout(done, 2));
   assert.equal(busy, -1);
+});
+
+test('a queued gate is tried again at the next poll after the active source changes away and back', async t => {
+  // Retries are far apart, so only a poll can try the gate again within the test.
+  const h = await harness(t, { repository: null, stages: STAGES.filter(stage => stage.id !== 'gamma'), pollInterval: 20, retryInterval: 60_000 });
+  let busy = true;
+  h.holds.prepare = () => (busy ? Object.assign(new Error('This stage is busy.'), { statusCode: 409 }) : null);
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'queued');
+  h.current.key = 'github:owner/other:/';
+  h.manager.start(); // a pass while another source is active finds nothing to retry
+  await h.manager.idle();
+  h.current.key = KEY;
+  busy = false;
+  await until(() => h.manager.view().stages.beta?.status === 'passed');
+  assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta a twin-beta']);
 });
 
 test('a busy stage never holds back another stage; its newest commit runs once it is free', async t => {

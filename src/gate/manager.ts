@@ -508,7 +508,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     },
     start() {
       if (closed || timer) return;
-      timer = setInterval(() => { void watch().then(sync); }, pollInterval);
+      // Each poll also tries the queue, so a gate whose retries stopped while another source was active is checked again.
+      timer = setInterval(() => { void watch().then(() => { void sync(); kick(); }); }, pollInterval);
       timer.unref?.();
       void sync();
       kick();
