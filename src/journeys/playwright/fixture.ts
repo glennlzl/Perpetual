@@ -147,6 +147,10 @@ function unjudged(page: Page | undefined, guard: Guard) {
 // Checks that also hold on a page whose data has not arrived yet, an absent text or a placeholder number, pass only on
 // an observation made once the page's network was idle.
 const SETTLED = new Set<Check['type']>(['text-absent', 'read-number', 'compare-number']);
+// Why a page that no observation can read, as a crashed page or one whose main thread is blocked, stops the journey.
+const UNCHECKED = 'The current page could not be checked.', OBSERVE_GRACE_MS = 5000;
+// A browser call on such a page can wait without end, so an observation gets until the deadline and a grace period.
+const bounded = <T>(promise: Promise<T>, deadline: number) => Promise.race([promise, wait(Math.max(0, deadline - Date.now()) + OBSERVE_GRACE_MS).then((): T => { throw new Error(UNCHECKED); })]);
 
 // Actions return before the page settles, so a check waits for its condition up to the check timeout. A page no check
 // can judge stops the journey for review instead, at once after a refused navigation, else once the timeout passes.
@@ -158,14 +162,15 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
     if (reason && (guard.refused || late)) return { stop: reason };
     if (!reason) {
       const observed = record?.(target!);
-      let result: Observation;
-      // Browser errors can contain page text; keep only a fixed reason. A page is judgeable only while it is open.
-      try { result = await observe(target!, judged, captures); } catch { result = { passed: false, error: 'The current page could not be checked.' }; }
+      // Browser errors can contain page text; keep only a fixed reason. An observation that threw, or was still running,
+      // at the deadline judged nothing, so the journey stops for review rather than failing the check.
+      const result = await bounded(observe(target!, judged, captures), deadline).catch(() => null);
+      if (!result && Date.now() >= deadline) return { stop: UNCHECKED };
       // A document whose network was already idle resolves at once; one still loading its data is observed again once
       // it is idle, or judged as it is at the deadline.
-      const settle = result.passed && !late && !settled && SETTLED.has(check.type);
+      const settle = result?.passed === true && !late && !settled && SETTLED.has(check.type);
       if (settle && (settled = await target!.waitForLoadState('networkidle', { timeout: Math.max(1, deadline - Date.now()) }).then(() => true, () => false))) continue;
-      if (!settle && (result.passed || result.final || late)) {
+      if (result && !settle && (result.passed || result.final || late)) {
         // A passed read-number check always observed its number.
         if (check.type === 'read-number' && result.passed) captures[check.name] = result.observed!;
         const { final: _final, ...evaluated } = result;
@@ -415,7 +420,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         for (let streak = 0; streak < 3;) {
           if (Date.now() >= deadline || signing.isClosed()) throw new Error('The test account did not sign in.');
           await wait(250);
-          const gone = await signing.locator('input[type=password]').filter({ visible: true }).count().then(count => !count, () => false);
+          const gone = await bounded(signing.locator('input[type=password]').filter({ visible: true }).count(), deadline).then(count => !count, () => false);
           streak = gone && navigationAllowed(signing.url(), allowed) ? streak + 1 : 0;
         }
       };

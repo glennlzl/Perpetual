@@ -70,6 +70,9 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/items')return send(page('Items',`<h1>Items</h1><label>Title <input id=title></label><button id=add>Add</button><ul id=list></ul>
         <script>const load=()=>fetch('/items/list').then(r=>r.text()).then(html=>{list.innerHTML=html;});add.onclick=()=>fetch('/items',{method:'POST',body:title.value}).then(load);
         list.onclick=event=>{if(event.target.tagName==='BUTTON')fetch('/items/delete',{method:'POST',body:event.target.closest('li').querySelector('span').textContent}).then(load);};load();</script>`));
+      // A page whose own scripts break what every reviewed check reads, and one whose main thread stops once a button is clicked.
+      if(url.pathname==='/unreadable')return send(page('Unreadable','<h1>Unreadable</h1><label>Kept <input value=Kept></label><script>Element.prototype.matches=()=>{throw new Error(\'Unreadable\');};</script>'));
+      if(url.pathname==='/freeze')return send(page('Freeze','<h1>Freeze</h1><button onclick="setTimeout(()=>{for(;;){}},100)">Freeze</button>'));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -625,6 +628,19 @@ test('an absent text is judged once the reopened page has loaded its data, so a 
   f.app.state.failDelete=false;
   assert.deepEqual(ended(await runSpec(target,listSpec,{item:listed})),['add:completed','delete:completed']);
   assert.equal(f.app.state.items.length,1,'Only the broken delete kept its item.');
+});
+
+test('a page no observation can read stops the journey for review within its check timeout, never as a failed check',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const item={...journey,id:'unreadable',steps:[{id:'open',title:'Open the page',checks:[{type:'text-visible' as const,value:'Kept'}]}],assertions:[]};
+  for(const [path,action] of [['/unreadable',''],['/freeze',"await page.getByRole('button', { name: 'Freeze' }).click();"]]){
+    const code=`import { test } from 'perpetual';\ntest('Unreadable', async ({ page, journey }) => {\n  await journey.milestone('open', async () => {\n    await page.goto('${path}');\n    ${action}\n  });\n});\n`;
+    validateJourneySpec(code,item);
+    const started=Date.now(),events=await runSpec(target,code,{item,timeoutSeconds:120});
+    assert.deepEqual(events.at(-1)?.result,{caseId:item.id,assertions:[],stopCause:'action',error:'Action failed at “Open the page”: The current page could not be checked.'},path);
+    assert.ok(Date.now()-started<60000,`${path} settled ${Date.now()-started} ms after it started, well within its time limit.`);
+  }
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{
