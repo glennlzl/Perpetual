@@ -49,7 +49,8 @@ const good = { services: { database: {}, payments: {}, auth: { users: [{ id: 'ow
 const detected = { services: {}, apps: { web: app } };
 const APP_SOURCE = '// A fixture app; nothing runs it.\nexport const port = process.env.FIXTURE_PORT;\n';
 
-const lines = async (file: string): Promise<AuthorCall[]> => (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+// A call the fake author is still appending has no newline yet, so only finished lines are read.
+const lines = async (file: string): Promise<AuthorCall[]> => (await readFile(file, 'utf8').catch(() => '')).split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
 const exists = (path: string) => access(path).then(() => true, () => false);
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; } };
