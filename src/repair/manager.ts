@@ -267,6 +267,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const running = () => state.repairs.some(repair => ACTIVE.includes(repair.status));
   const busy = () => running() || controllers.size > 0 || recovering || state.repairs.some(repair => repair.cleanup);
   const scoped = (current: Managed) => state.repairs.filter(repair => repair.key === current.key && repair.branch === current.branch);
+  // Why work of another branch or root directory of the managed source's repository stops: nothing watches, shows or
+  // verifies it any more, while a check of the connection, which names only the repository, still passes for it. Work
+  // of another repository ends at its next GitHub call instead.
+  const left = (repair: Repair, current: Managed | null) => !current || repair.repository.toLowerCase() !== current.repository.toLowerCase() || repair.key === current.key && repair.branch === current.branch ? null
+    : repair.key === current.key ? `Interrupted when the pipeline switched to ${current.branch}.` : 'Interrupted when the pipeline switched to another source.';
   const track = <T>(promise: Promise<T>) => { tasks.add(promise); void promise.finally(() => tasks.delete(promise)).catch(() => {}); return promise; };
   // A repair's pull request open on GitHub as far as Perpetual knows: not merged, closed, closing, or refused a close.
   const unclosed = (repair: Repair) => Boolean(repair.pullRequest) && !repair.pullRequest!.closed && !repair.pullRequest!.closing && !repair.closeError && repair.status !== 'merged';
@@ -578,14 +583,17 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     await persist();
     begin(repair);
   }
-  // A rerun follows its own repository even after the active source changed. A failed attempt goes to repair, every
-  // attempt passing is flaky, and an attempt that was cancelled or waits for approval needs a person.
+  // A rerun follows its own repository even after the active source changed. A failed attempt goes to repair, unless
+  // the pipeline left its branch or root directory, every attempt passing is flaky, and an attempt that was cancelled
+  // or waits for approval needs a person.
   async function followRerun(repair: Repair, login: string) {
     const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login });
     if (closed || repair.status !== 'rerunning') return;
     const found = (repair.reruns || []).map(rerun => runs.find(run => run.id === rerun.id && run.attempt > rerun.attempt && run.status === 'completed'));
     if (!found.length || found.some(run => !run)) return;
     const attempts = found as WorkflowRun[], failed = attempts.filter(failedRun), other = attempts.find(run => !passedRun(run));
+    const reason = failed.length ? left(repair, managed()) : null;
+    if (reason) { repair.runs = failed.map(runOf); return await settle(repair, 'needs-person', reason); }
     if (failed.length) { await transition(repair, 'triaging', { runs: failed.map(runOf) }); return begin(repair); }
     if (!other) return await settle(repair, 'flaky');
     await settle(repair, 'needs-person', `The rerun ended as ${String(other.conclusion ?? 'unknown').replaceAll('_', ' ')}.`);
@@ -599,12 +607,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       catch (error) { recoveryError = text(error); }
       if (closed) return;
       const current = managed();
-      // Work under way for another branch of this pipeline stops, its pull request kept: that branch is no longer
-      // watched, shown or verified. A rerun follows its own repository, as after any change of source.
+      // Work under way for another branch or root directory of this repository stops, its pull request kept. A rerun
+      // follows its own repository, as after any change of source.
       if (current) for (const repair of state.repairs) {
-        if (repair.key !== current.key || repair.branch === current.branch || !ACTIVE.includes(repair.status) || repair.status === 'rerunning') continue;
+        const reason = ACTIVE.includes(repair.status) && repair.status !== 'rerunning' ? left(repair, current) : null;
+        if (!reason) continue;
         controllers.get(repair.id)?.controller.abort();
-        await settle(repair, 'needs-person', `Interrupted when the pipeline switched to ${current.branch}.`);
+        await settle(repair, 'needs-person', reason);
       }
       if (!current && !state.repairs.some(repair => repair.status === 'rerunning')) return;
       const connection = await github.connection();

@@ -554,6 +554,33 @@ test('switching the pipeline to another branch stops that branch\'s repair under
   assert.equal(a.contexts.length, 1);
 });
 
+// Another root directory of the same repository is another pipeline, whose connection check still passes for the repair.
+test('switching the pipeline to another root directory of the repository stops the repair under way of the one it left', async t => {
+  const a = agent(async (context, signal) => { await context.report({ status: 'verifying-ci', pullRequest: PULL }); await aborted(signal); return { status: 'ready' }; });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'verifying-ci');
+  Object.assign(h.current, { key: 'github:owner/app:/web', rootDirectory: '/web' });
+  await h.poll();
+  Object.assign(h.current, { key: KEY, rootDirectory: '/' });
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.pullRequest?.number], ['needs-person', 'Interrupted when the pipeline switched to another source.', 7]);
+});
+
+// A rerun follows its own repository whatever the pipeline shows, but no agent starts for a branch nothing watches.
+test('a rerun of a branch the pipeline left that fails again needs a person, and never starts the agent', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.availability;
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.equal(h.repair(B)?.status, 'rerunning');
+  h.current.branch = 'dev';
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll();
+  h.current.branch = 'main';
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.runs.map(item => item.id), a.contexts.length], ['needs-person', 'Interrupted when the pipeline switched to dev.', ['2'], 0]);
+});
+
 test('a person repairs the failed baseline head, may start a finished repair again, and never a held one', async t => {
   const h = await harness(t);
   h.github.runs[A] = [run('1', A, 'failure'), run('2', A, 'success', { path: LINT })];
