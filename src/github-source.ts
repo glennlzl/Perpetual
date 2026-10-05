@@ -307,6 +307,8 @@ export async function updateGitHubSource({ source, dataDir, sha }: { source?: Ma
     ]), 'Fetching the commit', 120_000, checkoutPath);
     // No checkout hook; global filters and templates are disabled for this operation.
     await command('git', gitArgs(['reset', '--hard', sha]), 'Updating the source files', 60_000, checkoutPath);
+    // The graph follows the fetched branch tip, which this fetch by commit does not advance: the next read syncs again.
+    historySyncs.delete(checkoutPath);
     const { stdout } = await command('git', gitArgs(['rev-parse', '--verify', 'HEAD']), 'Reading the checkout commit', API_TIMEOUT, checkoutPath);
     if (stdout.trim().toLowerCase() !== sha.toLowerCase()) throw new GitHubSourceError('The managed source did not move to this commit. Try again.');
     return { sha: stdout.trim() };
