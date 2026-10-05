@@ -1,12 +1,13 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp,rm,mkdir,readFile} from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {mkdtemp,rm,mkdir,readFile,readdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import type {AddressInfo} from 'node:net';
 import {createBrowserManager} from '../src/browser/manager.ts';
-import {createPlaywrightRuntime,type JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
+import {PLAYWRIGHT_CLI,createPlaywrightRuntime,journeyEnvironment,writeJourneyWorkspace,type JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
 import {specHash} from '../src/journeys/playwright/specs.ts';
 import type {BrowserManager,BrowserStageContext} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
@@ -183,4 +184,20 @@ test('the journey runtime refuses a sign-in page off its application URL’s ori
   const runtime=createPlaywrightRuntime(),input:JourneyRunInput={mode:'run',targetUrl:'http://127.0.0.1:3000/',timeoutSeconds:40,credentials:account,case:journey,spec:{code:spec,hash:specHash(spec)}};
   for(const signInUrl of ['http://127.0.0.1:3001/login','https://127.0.0.1:3000/login','http://localhost:3000/login','/login','',42])
     assert.throws(()=>runtime.start({...input,signInUrl:signInUrl as string},()=>{}),{message:'A Playwright journey’s sign-in page must be on its application URL’s origin.'},String(signInUrl));
+});
+
+test('a journey that fails while a filled sign-in form is open leaves no file holding the account',{timeout:120000},async t=>{
+  // A sign-in form that keeps what was typed and never signs in, until the journey's time limit.
+  const app=await served(t,{landing:'<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>'});
+  // The workspace, config and environment a journey process gets, kept after Playwright exits so its files can be read.
+  const workspace=await mkdtemp(join(tmpdir(),'perpetual-failed-journey-'));t.after(()=>rm(workspace,{recursive:true,force:true}));
+  const config=await writeJourneyWorkspace(workspace,{item:journey,targetUrl:app.url,timeoutSeconds:8,video:false});
+  await writeFile(join(workspace,'journey.spec.mjs'),spec);
+  const env=journeyEnvironment(process.env,workspace,{hash:specHash(spec),targetUrl:app.url,allowedOrigins:[new URL(app.url).origin],credentials:account,events:false});
+  const stdout=await new Promise<string>(resolve=>execFile(process.execPath,[PLAYWRIGHT_CLI,'test','--config',config],{cwd:workspace,env},(_error,out)=>resolve(String(out))));
+  const facts=stdout.split('\n').filter(line=>line.startsWith('{"type":"result"')).map(line=>JSON.parse(line).result);
+  assert.deepEqual(facts.map(result=>result.stopCause),['deadline'],'The journey ran out of time signing in.');
+  const files=(await readdir(workspace,{recursive:true,withFileTypes:true})).filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath,entry.name));
+  assert.ok(files.some(file=>file.includes(join(workspace,'output'))),'Playwright wrote its output for the failed test.');
+  for(const file of files)assert.ok(!(await readFile(file,'utf8')).includes(account.password),file);
 });

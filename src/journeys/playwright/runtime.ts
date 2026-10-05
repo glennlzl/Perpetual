@@ -74,7 +74,8 @@ export async function writeJourneyWorkspace(workspace: string, { item, targetUrl
  * attempt of a verification, types its own values.
  */
 export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], readOnlyRequests = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION, diagnostics = false }: JourneyEnvironmentOptions): Record<string, string> {
-  const childEnv: Record<string, string> = { FORCE_COLOR: '0' };
+  // Playwright would otherwise write a failed test's page snapshot, filled password field included, to a file.
+  const childEnv: Record<string, string> = { FORCE_COLOR: '0', PLAYWRIGHT_NO_COPY_PROMPT: '1' };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH']) if (typeof values[key] === 'string') childEnv[key] = values[key];
   return Object.assign(childEnv, {
     ...(events ? { PERPETUAL_EVENT_CHANNEL: `@${randomBytes(16).toString('hex')}@` } : {}),
