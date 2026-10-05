@@ -814,10 +814,10 @@ function PipelineApp() {
     if (stage.getSnapshot().pending) return;
     setError('');
     setDialog({ type: 'environment', stageId, tab: 'browser' });
+    // The workspace shows the stage's failed action on the canvas as well, so it is not raised here a second time.
     try { await stage.createEnvironment(); }
     catch (failure) {
       if (!stage.isCurrent()) return;
-      setError((failure as Error).message);
       setDialog(previous => previous?.type === 'environment' && previous.stageId === stageId ? { ...previous, error: (failure as Error).message } : previous);
     }
   }, [workspace]);

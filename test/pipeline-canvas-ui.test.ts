@@ -229,3 +229,20 @@ test('a failed first connection keeps Connect GitHub, while a failed pipeline re
   await expect(empty.getByRole('heading', { name: 'Connect your GitHub', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
+
+test('a refused Create environment is one canvas error that one Dismiss clears', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), refusal = 'Add an app before creating this environment.';
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(pipeline) };
+    if (path === '/api/environments/create') return { status: 409, json: { error: refusal } };
+    if (path === '/api/browser') return { json: { cases: [], runs: [], accounts: [], specs: {}, preparation: null, config: { targetUrl: '', scope: '', requirements: '', maxSteps: 60 }, capabilities: null } };
+    if (path === '/api/environments') return { json: { environments: [], plan: null } };
+  });
+  await open();
+  await page.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
+  const alert = page.locator('.canvas-alert');
+  await expect(alert).toContainText(refusal);
+  await alert.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(alert).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
