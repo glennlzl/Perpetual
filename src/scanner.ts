@@ -8,7 +8,7 @@ import { hasRepositoryFile, readRepositoryFile } from './repository-files.ts';
 import type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflow, ScanRepo, Scan, PreviewPlan } from '../contract/scanner.ts';
 export type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflowJob, ScanWorkflow, ScanRepo, ScanPlan, Scan, PreviewPlan } from '../contract/scanner.ts';
 
-export const DISCOVERY_VERSION = 5;
+export const DISCOVERY_VERSION = 6;
 
 // Parsed repository files are untrusted: these describe only the fields read below, and each is still checked where used.
 /** A repository's package.json as parsed JSON: only these fields are read, and each is checked where it is used. */
@@ -23,6 +23,7 @@ interface PackageManager { name: string; version: string | undefined; lock: stri
 interface WorkflowStep { name?: string; uses?: string; run?: string; with?: Record<string, string | boolean>; env?: Record<string, string>; 'working-directory'?: string }
 
 const SKIP = new Set(['node_modules', 'dist', 'build', 'coverage', 'vendor', 'graphify-out']);
+const DEPLOYMENT_FILES = new Set(['vercel.json', 'railway.toml', 'railway.json']);
 const SCRIPT_NAMES = ['build', 'test', 'lint', 'typecheck', 'check', 'test:changed', 'test:related'];
 const MAX_BYTES = 512 * 1024;
 const clean = (value: unknown) => redact(String(value ?? '').replace(/[\r\n\t]/g, ' ')).slice(0, 160);
@@ -44,8 +45,10 @@ async function safeFile(root: string, relative: string, { content = true }: { co
   return (await hasRepositoryFile(root, relative, { limit: MAX_BYTES })) ? true : null;
 }
 
+// Package manifests, and the directories that configure a deployment whether or not they hold one: a service in
+// another language deploys from its own directory.
 async function manifests(root: string) {
-  const found: string[] = [];
+  const found: string[] = [], deployments = new Set<string>();
   let visited = 0;
   async function walk(relative = '.', depth = 0) {
     if (depth > 4 || visited++ > 1200) return;
@@ -55,11 +58,12 @@ async function manifests(root: string) {
       if (entry.isSymbolicLink()) continue;
       const next = relative === '.' ? entry.name : `${relative}/${entry.name}`;
       if (entry.isFile() && entry.name === 'package.json') found.push(next);
+      else if (entry.isFile() && DEPLOYMENT_FILES.has(entry.name)) deployments.add(relative);
       else if (entry.isDirectory() && !entry.name.startsWith('.') && !SKIP.has(entry.name)) await walk(next, depth + 1);
     }
   }
   await walk();
-  return found.slice(0, 100);
+  return { packages: found.slice(0, 100), deployments: [...deployments].slice(0, 100) };
 }
 
 async function gitValue(root: string, args: string[]) {
@@ -160,7 +164,8 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
   const nodes: ScanNode[] = [], edges: ScanEdge[] = [], services: ScanService[] = [], workflows: ScanWorkflow[] = [], packages: { file: string; raw: string; data: PackageManifest }[] = [];
   const node = (n: ScanNode) => { if (!nodes.some(x => x.id === n.id)) nodes.push(n); };
   const edge = (source: string, target: string, label: string, confidence: Confidence = 'configured') => edges.push({ source, target, label, confidence });
-  for (const file of await manifests(root)) {
+  const found = await manifests(root);
+  for (const file of found.packages) {
     const raw = await safeFile(root, file);
     if (!raw) continue;
     try {
@@ -253,7 +258,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     }
   }
 
-  for (const location of new Set(['.', ...services.map(s => s.path)])) {
+  for (const location of new Set(['.', ...services.map(s => s.path), ...found.deployments])) {
     const prefix = location === '.' ? '' : `${location}/`;
     const vercelFile = `${prefix}vercel.json`;
     if (await safeFile(root, vercelFile, { content: false })) vercelConfigurations.push({ file: vercelFile, location });
@@ -274,7 +279,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
       const railwayId = `railway:${id(file)}`;
       const sources = [evidence(file, 'Railway deployment configuration; cloud settings are not verified.', 1)];
       if (dockerfile && await safeFile(root, path.posix.join(prefix, dockerfile), { content: false })) sources.push(evidence(path.posix.join(prefix, dockerfile), 'Configured Dockerfile exists.'));
-      node({ id: railwayId, label: service ? `${service.name} deployment` : 'Railway deployment', kind: 'deployment', provider: 'Railway', status: 'configured', detail: `Deployment configuration detected${dockerfile ? '; Docker build context must be verified' : ''}.`, evidence: sources });
+      node({ id: railwayId, label: service ? `${service.name} deployment` : location === '.' ? 'Railway deployment' : `${clean(location)} deployment`, kind: 'deployment', provider: 'Railway', status: 'configured', detail: `Deployment configuration detected${dockerfile ? '; Docker build context must be verified' : ''}.`, evidence: sources });
       edge(service?.id || 'repository', railwayId, 'deployment configuration');
       if (service) { service.provider = 'Railway'; nodes.find(n => n.id === service.id)!.provider = 'Railway'; }
       if (healthPath) warnings.push(`${file}: a configured health endpoint is not proof of verified business behavior; inspect the response and test the intended integration separately.`);

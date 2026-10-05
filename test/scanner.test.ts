@@ -56,6 +56,26 @@ test('discovers existing monorepo CI and provider clues without claiming authent
   assert.ok(plan.steps.some(s => /credentials|connect|authoriz/i.test(s)));
 });
 
+test('deployment configuration in a directory without a package manifest is a Production target', async t => {
+  // A Next.js frontend on Vercel, and a Python API and a worker each deployed from their own directory.
+  const root = await fixture(t, {
+    'frontend/package.json': { name: 'web', scripts: { build: 'next build' }, dependencies: { next: '16' } },
+    'frontend/vercel.json': { framework: 'nextjs' },
+    'backend/railway.toml': '[build]\nbuilder = "dockerfile"\ndockerfilePath = "Dockerfile"\n',
+    'backend/Dockerfile': 'FROM python:3.13-slim\nCOPY . /app\n',
+    'backend/requirements.txt': 'fastapi\n',
+    'worker/vercel.json': {},
+  });
+  const scan = await scanRepository(root);
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => [node.provider, node.label, node.evidence.map(item => item.file)]), [
+    ['Railway', 'backend deployment', ['backend/railway.toml', 'backend/Dockerfile']],
+    ['Vercel', 'web deployment', ['frontend/vercel.json']],
+    ['Vercel', 'worker deployment', ['worker/vercel.json']],
+  ]);
+  assert.deepEqual(scan.delivery.production.map(entry => 'deployments' in entry ? [entry.provider, entry.deployments.length] : entry.id), [['Railway', 1], ['Vercel', 2]]);
+  assert.deepEqual(scan.services.map(service => service.path), ['frontend'], 'a deployment directory is not promoted to a service');
+});
+
 test('proposes a bounded starter using detected pnpm workspace rather than fabricated commands', async t => {
   const root = await fixture(t, {
     'package.json': { name: 'workspace', packageManager: 'pnpm@10.33.0' },
