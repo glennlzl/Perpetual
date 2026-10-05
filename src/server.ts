@@ -1,12 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile, readdir, realpath } from 'node:fs/promises';
+import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepository, createPreviewPlan, DISCOVERY_VERSION, repositoryPath } from './scanner.ts';
-import { getProviderStatus, parseGitHubRemote } from './providers.ts';
+import { parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
@@ -25,6 +25,7 @@ import { sendVideo } from './browser/video-file.ts';
 import {holdsResources, createEnvironmentUsage } from './environments/usage.ts';
 import { createStageRemovalManager } from './environments/stage-removal.ts';
 import { acquireControllerOwnership } from './controller-ownership.ts';
+import { BROWSER_HEADER, SECRET_HEADER, launchSecret } from './launch-secret.ts';
 import { environmentInputs, fromAppSettings } from './environments/runtime.ts';
 import { createTwinInputs, services as twinServices } from './twin/index.ts';
 import { missingInputs } from './twin/inputs.ts';
@@ -52,7 +53,6 @@ import type { Scan, ScanRepo } from './scanner.ts';
 import type { EnvironmentContext, EnvironmentPlan, ManagedRuntime } from './environments/manager.ts';
 import type { Pipeline, Stage } from './pipeline.ts';
 import type { GitHubSession, PreparedGitHubSource } from './github-source.ts';
-import type { ProviderStatus } from './providers.ts';
 import type { GitHubAuthManager } from './github-auth.ts';
 import type { GitHubRunsReader } from './github-runs.ts';
 import type { GitHubDeploymentsReader } from './github-deployments.ts';
@@ -64,10 +64,10 @@ export interface GitHubSource extends Omit<PreparedGitHubSource, 'sha'> { sha: s
 export type GitHubConnectionRecord = NonNullable<PipelineStateReply['githubConnection']>;
 /** state.json (schema 1). Saved pipelines are normalized again on every read. */
 export interface ControllerState {
-  scan: Scan | null; providers: ProviderStatus[]; pipelines: Record<string, Pipeline>;
+  scan: Scan | null; pipelines: Record<string, Pipeline>;
   source?: GitHubSource | null; githubConnection?: GitHubConnectionRecord | null;
-  /** Retired repair reports and HTTP checks: removed on load, so the next save omits them. */
-  runs?: unknown; checks?: unknown;
+  /** Retired repair reports, HTTP checks and provider observations: removed on load, so the next save omits them. */
+  runs?: unknown; checks?: unknown; providers?: unknown;
 }
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
@@ -91,7 +91,8 @@ export interface ServerOptions {
    */
   repair?: { boxes?: RepairBoxes; host?: RepairHost; model?: ModelFactory; pullRequests?: RepairAgentGitHub['pullRequests']; merges?: Omit<MergeGitHub, 'connection' | 'head'>; ci?: Partial<typeof CI>; timing?: Partial<typeof MERGE> };
 }
-export interface Controller { url: string; server: ReturnType<typeof createServer>; close(): Promise<void> }
+/** A running controller. `launchUrl` carries its browser secret: opening it signs a browser in, as `serve` prints it. */
+export interface Controller { url: string; launchUrl: string; server: ReturnType<typeof createServer>; close(): Promise<void> }
 type HttpError = Error & { statusCode?: number };
 /** A request's JSON object or query parameters: every field is checked where it is used. */
 type RequestInput = { readonly [key: string]: unknown };
@@ -177,7 +178,9 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   const release=await acquireControllerOwnership(dataDir),cleanup: (() => unknown)[]=[];
   try {
     // Secure the owned directory without changing the configured path that existing runtime resource labels use.
-    await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
+    const root=await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
+    // Its files hold keys and test credentials: a repository the directory sits in never commits them.
+    await writeFile(join(root,'.gitignore'),'*\n',{flag:'wx',mode:0o600}).catch((error: NodeJS.ErrnoException)=>{if(error.code!=='EEXIST')throw error;});
     const app=await createController({...options,dataDir},dispose=>cleanup.push(dispose));
     let closing;
     return {...app,close(){return closing??=(async()=>{await app.close();await release();})();}};
@@ -195,22 +198,25 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
   const refreshAssets=async()=>{const scan=++assetScans,assets=await assetFiles(publicDir);if(scan>appliedAssetScan){appliedAssetScan=scan;publicFiles={...staticFiles,...assets};}};
   const stateFile=join(dataDir,'state.json');
-  let state: ControllerState={scan:null,providers:[],pipelines:{}};
-  // The controller's own state file: a JSON null or a schema 1 file without a state object cannot be read; any other file without schema 1 starts afresh.
+  let state: ControllerState={scan:null,pipelines:{}};
+  // The controller's own state file, which every build writes as schema 1 with a state object. Anything else, such as
+  // a newer build's schema, cannot be read, and is preserved rather than replaced by the next save.
   try {
     const saved=await readStateFile(stateFile,{limit:CONTROLLER_STATE_LIMIT,invalid:INVALID_STATE});
-    if(saved===null)throw new Error(INVALID_STATE);
-    if(typeof saved==='object'&&'schema' in saved&&saved.schema===1) {
-      const stored='state' in saved?saved.state:undefined;
+    if(saved!==undefined) {
+      const stored=saved&&typeof saved==='object'&&'schema' in saved&&saved.schema===1&&'state' in saved?saved.state:undefined;
       if(!stored||typeof stored!=='object'||Array.isArray(stored))throw new Error(INVALID_STATE);
       state=stored as ControllerState;
     }
   }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
-  // Retired repair reports, HTTP checks and their stage drafts; the next save omits them.
-  delete state.runs;delete state.checks;
+  // Retired repair reports, HTTP checks and their stage drafts; the next save omits them. Provider observations, once
+  // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
+  delete state.runs;delete state.checks;delete state.providers;
   for(const pipeline of Object.values(state.pipelines))if(Array.isArray(pipeline?.stages))for(const stage of pipeline.stages as SavedStage[])delete stage?.tests;
-  const token=randomBytes(32).toString('hex');
+  // The page's session token, which every change from the page carries, and the launch secret every API request needs,
+  // as it is or as the browser secret derived from it.
+  const token=randomBytes(32).toString('hex'),launch=await launchSecret(dataDir);
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
   onCleanup(()=>githubAuth.dispose());
@@ -271,8 +277,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     // A local GitHub project already has a source. Reuse its verified CLI
     // session unless this instance has an explicit connection choice. A null
     // record is a deliberate Disconnect, whereas an absent record is legacy.
+    // A managed source chosen meanwhile is a choice: it stays the account's that chose it.
     const reuseLocalSession=Boolean(detected) && !Object.hasOwn(state,'githubConnection');
-    const connected=!githubAuth.isPending() && session.authenticated && (reuseLocalSession || state.githubConnection?.login===session.account.login);
+    const account=reuseLocalSession?state.source?.connectedAccount:state.githubConnection?.login;
+    const connected=!githubAuth.isPending() && session.authenticated && (reuseLocalSession&&account===undefined || account===session.account.login);
     const source: PublicGitHubSource | null=state.source ?? (detected ? {
       repository:detected,branch:state.scan!.repo.branch,rootDirectory:'/',
     } : null);
@@ -300,8 +308,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     try {
       const scan = await scanRepository(state.scan.repo.path);
       await save(current => ({
-        state: { ...current, scan, providers: [] },
-        commit() { state.scan = scan; state.providers = []; },
+        state: { ...current, scan },
+        commit() { state.scan = scan; },
       }));
     } catch (error) {
       process.stderr.write(`Could not refresh repository discovery; retaining saved data: ${redact((error as Error).message)}\n`);
@@ -334,13 +342,18 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(!inside||inside.startsWith('..')||isAbsolute(inside))throw invalid();
     return path;
   }
-  // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs.
+  // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs. A source
+  // move during the session read, such as a gate moving the managed copy, is not a disconnect: the account is read once
+  // more for the moved source.
   async function connectedAccount(){
-    if(state.githubConnection===null||githubAuth.isPending())return null;
-    const scan=state.scan,source=state.source;
-    const connection=await githubConnection(await githubRuns.session());
-    if(state.scan!==scan||state.source!==source)return null;
-    return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
+    for(let attempt=0;attempt<2;attempt+=1){
+      if(state.githubConnection===null||githubAuth.isPending())return null;
+      const scan=state.scan,source=state.source;
+      const connection=await githubConnection(await githubRuns.session());
+      if(state.scan!==scan||state.source!==source)continue;
+      return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
+    }
+    return null;
   }
   // The watcher moves a managed source whose pipeline has no Sandbox stage to its branch head, never during a stage's
   // removal or another source change: it tries again at its next poll.
@@ -369,13 +382,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         usage.assertAvailable({key,stageId});
         const scan=await scanRepository(await repairSnapshot(snapshot));
         if(scan.repo.sha!==sha)throw new Error('The pull request checkout is not at its head.');
-        return {key,stageId,scan,repair,controllerOrigin:`http://127.0.0.1:${(server.address() as AddressInfo).port}`};
+        return {key,stageId,scan,repair,controllerOrigin:`http://127.0.0.1:${listeningPort}`};
       }
       requireSourceChangeIdle();
       if(!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch)throw conflict('The active source changed.');
       usage.assertAvailable({key,stageId});
       if(state.scan.repo.sha!==sha)await moveSource(sha);
-      return stageContext(state.scan,stageId,(server.address() as AddressInfo).port);
+      return stageContext(state.scan,stageId,listeningPort);
     },
     // A twin copies a local checkout as it is on disk, so the commit status the gate reports holds only for a clean
     // checkout at the gate's commit; a managed copy is reset to it before every gate.
@@ -402,12 +415,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     const store=await createBrowserModelSettings({dataDir}),model=store.configuration();
     return model.modelConfigured&&isOpenRouterEndpoint(model.baseUrl)?{apiKey:model.apiKey,model:model.model,escalationModel:store.escalationModel()??model.model}:null;
   };
-  // Deploy configuration the scan found for the repair's own source, relative to the repository: a change to it is
-  // rejected before any push (ADR 0002).
-  const deployFiles=({key,rootDirectory}: Pick<Repair,'key'|'rootDirectory'>)=>{
-    if(!state.scan||pipelineKey(state)!==key)return [];
-    const files=state.scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
-    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)).map(file=>repositoryPath(file,rootDirectory)))];
+  // Deploy configuration a scan of the repair's own checkout finds under its root directory, at the failed commit and
+  // relative to the repository: a change to it is rejected before any push (ADR 0002). An unreadable checkout ends the
+  // repair rather than allowing every change.
+  const deployFiles=async({rootDirectory}: Pick<Repair,'rootDirectory'>,clone: string)=>{
+    const parts=rootDirectory.split('/').filter(Boolean);
+    const scan=await scanRepository(join(clone,...parts)).catch(()=>{throw new Error('Could not read the deploy configuration of the failed commit.');});
+    const files=scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
+    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)))].map(file=>repositoryPath(file,rootDirectory));
   };
   const repairBoxes=repair.boxes??createRepairBoxes({dataDir}),repairHost=repair.host??createRepairHost({dataDir});
   // A pull request that passed CI goes through each Sandbox stage's journey gate at its head, over its own checkout, then
@@ -455,27 +470,45 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // A paused recording stream would otherwise hold shutdown open.
   const videoStreams=new Set<ServerResponse>();
   const reply=(res: ServerResponse,status: number,data: unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
+  // A body over its limit is still read to its end and discarded, so its client gets the refusal and the connection stays
+  // usable; one that runs on past this many more bytes is cut off, and its connection closed after the reply.
+  const DISCARDED=16*1024*1024,cutOff=new WeakSet<IncomingMessage>();
   async function body(req: IncomingMessage,limit=65536): Promise<RequestInput> {
     const chunks: Buffer[]=[];let size=0;
-    for await(const chunk of req){size+=chunk.length;if(size>limit)throw new Error('Request exceeds the allowed size.');chunks.push(chunk);}
+    for await(const chunk of req){size+=chunk.length;if(size<=limit)chunks.push(chunk);else if(size>limit+DISCARDED){cutOff.add(req);break;}}
+    if(size>limit)throw new Error('Request exceeds the allowed size.');
     const content=Buffer.concat(chunks).toString('utf8');
     const input: unknown=content?JSON.parse(content):{};
     // A JSON null or scalar has no fields: reject it here instead of failing on its first field.
     if(!input||typeof input!=='object')throw new Error('Send a JSON object.');
     return input as RequestInput;
   }
+  // The port it listens on, kept: a closing server has no address, and its last replies still check the Host they name.
+  let listeningPort: number | undefined;
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
-    const actualPort=(server.address() as AddressInfo | null)?.port;
+    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+    const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
-    const origin=req.headers.origin;
-    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || req.headers['sec-fetch-site']==='cross-site')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
-    if(req.method==='POST'&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
-    if(closed)return reply(res,503,{error:'The controller is shutting down.'});
+    const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
+    // A browser names where a request comes from: the page itself, or a person's own visit. Another site on this host,
+    // such as a twin's app on another port, is same-site, not same-origin.
+    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
+    // The path the routes below read, so the checks here hold for the route a request reaches.
+    const target=URL.parse(req.url??'','http://localhost');
+    if(!target)return reply(res,400,{error:'Invalid URL.'});
+    const requestUrl=target,path=requestUrl.pathname,tool=launch.matches(req.headers[SECRET_HEADER]);
+    // Every API request, reads included, needs the launch secret a local tool sends, or the browser secret the page sends,
+    // which the launch link gave it. Both come in headers only: a browser sends a host's cookies to every port on it, a
+    // twin's app included. The interface's own files hold no secret and stay public.
+    if((path==='/api'||path.startsWith('/api/'))&&!tool&&!launch.signedIn(req.headers[BROWSER_HEADER]))return reply(res,401,{error:'Open the link perpetual serve printed, or send its secret in the X-Perpetual-Secret header.'});
+    // Every change from the page also needs its session token, whatever its method: only a GET reads without it. A local
+    // tool's secret is proof enough.
+    if(req.method!=='GET'&&!tool&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
+    // A connection still open at shutdown, such as a polling page's, ends with this reply.
+    if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
-      const requestUrl=new URL(req.url!,'http://localhost'),path=requestUrl.pathname;
       if(req.method==='GET'&&!publicFiles[path]&&/^\/(build\/)?assets\//.test(path))await refreshAssets();
       if(req.method==='GET'&&publicFiles[path]) {
         const [file,type]=publicFiles[path];
@@ -505,7 +538,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(path==='/api/twin/inputs') {
         if(req.method==='GET')return reply(res,200,{services:await twinInputs.view()} satisfies TwinInputsReply);
         if(req.method!=='PUT')return reply(res,404,{error:'Not found.'});
-        if(req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
         const input=await body(req,16384);
         return reply(res,200,{services:await twinInputs.set(String(input.service),input.inputs)} satisfies TwinInputsReply);
       }
@@ -520,10 +552,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           return {services,generated:'provenance' in plan} satisfies TwinServicesReply;
         }));
       }
-      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo,capabilities:{modelConfigured:!!((process.env.PERPETUAL_MODEL_API_KEY&&process.env.PERPETUAL_MODEL)||process.env.OPENROUTER_API_KEY),browserAgent:true,localBrowser:true,cloudProvisioning:false,businessDiscovery:true}} satisfies PipelineStateReply);
+      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo} satisfies PipelineStateReply);
       if(path==='/api/stages/remove'||path==='/api/stages/removal'){
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
+        // Admitted once the body has arrived, so a source change that began meanwhile is seen.
+        requireSourceIdle();
         activeScan(input.repoPath);
         const context={key:pipelineKey(state),stageId:text(input.stageId)};
         const stage=currentPipeline(state).stages.find(item=>item.id===input.stageId),previous=removals.view(context);
@@ -570,7 +603,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(path==='/api/autopilot'||path.startsWith('/api/autopilot/')) {
         // GET reads the view; a mode, a person's Repair of a failed run at the watched head, and Stop are posted for the Build stage.
         const operation=path.slice('/api/autopilot'.length);
-        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation===''))return reply(res,404,{error:'Autopilot operation not found.'});
+        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/repair'?202:200,await withActiveScan(input.repoPath,async scan=>{
           if(operation==='/mode'){autopilotStage(input.stageId);await repairs.setAutoMerge({enabled:autopilotMode(input.mode)==='merge'});}
@@ -580,8 +613,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         }));
       }
       if(path==='/api/browser'||path.startsWith('/api/browser/')) {
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req,path==='/api/browser/transcribe'?12*1024*1024:1024*1024);
+        requireSourceIdle();
         const scan=activeScan(input.repoPath),stage=sandboxStage(input.stageId),context=stageContext(scan,stage.id,actualPort);
         const browserRun=path.match(/^\/api\/browser\/runs\/([a-f0-9-]{36})(\/frame|\/video)?$/);
         if(req.method==='GET'&&browserRun) {
@@ -629,8 +662,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return reply(res,404,{error:'Browser operation not found.'});
       }
       if(path==='/api/environments'||path.startsWith('/api/environments/')) {
-        requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req,1024*1024);
+        requireSourceIdle();
         const scan=activeScan(input.repoPath),stage=sandboxStage(input.stageId),context=stageContext(scan,stage.id,actualPort);
         if(req.method==='GET'&&path==='/api/environments')return reply(res,200,await environments.view(context));
         if(req.method==='POST') {
@@ -704,8 +737,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
             const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
             pipelines[key]=pipeline;
-            return {state:{...current,scan,source,providers:[],pipelines},
-              commit(){state.scan=scan;state.source=source;state.providers=[];state.pipelines=pipelines;},
+            return {state:{...current,scan,source,pipelines},
+              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;},
               result:{scan,source,pipeline} satisfies SourceReply};
           }).catch(discard);
           return reply(res,200,result);
@@ -714,7 +747,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/scan') {
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const input=await body(req),scan=await scanRepository(input.path||repo);
-          await save(current=>({state:{...current,providers:[],scan,source:null},commit(){state.providers=[];state.scan=scan;state.source=null;}}));
+          await save(current=>({state:{...current,scan,source:null},commit(){state.scan=scan;state.source=null;}}));
           return reply(res,200,scan);
         });
       }
@@ -751,8 +784,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         },'The active repository changed. Reopen its settings.'));
       }
       if(req.method==='POST'&&path==='/api/pipeline/action') {
-        requireSourceIdle();
         const input=await body(req);
+        requireSourceIdle();
         const pipeline=await save(current=>{
           const repoPath=current.scan?.repo?.path;
           if(!repoPath || input?.repoPath!==repoPath) {
@@ -770,12 +803,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
         });
         return reply(res,200,{pipeline});
-      }
-      if(req.method==='GET'&&path==='/api/providers') {
-        if(!state.scan)throw new Error('Scan a repository first.');
-        const scan=state.scan,providers=await getProviderStatus(scan);
-        if(state.scan===scan){state.providers=providers;await save();}
-        return reply(res,200,{providers});
       }
       // A current-commit GitHub read as the connected account: an explicit Disconnect refuses before any
       // session read, the session is verified once per request, and the reply never describes another source.
@@ -826,10 +853,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         const input=await body(req);return reply(res,200,createPreviewPlan(state.scan,input.environment||'alpha'));
       }
       return reply(res,404,{error:'Not found.'});
-    } catch(error) {const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});}
+    } catch(error) {
+      // The unread rest of a body cut off before its end would stall the connection's next request: close it instead.
+      if(cutOff.has(req))res.shouldKeepAlive=false;
+      const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});
+    }
   });
   onCleanup(()=>server.listening?new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())):undefined);
-  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
+  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{listeningPort=(server.address() as AddressInfo).port;resolve();});});
   const timer=setInterval(()=>{
     if(tickTask||closed)return;
     tickTask=(async()=>{
@@ -839,11 +870,17 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   },1000);timer.unref();
   gates.start();
   repairs.start();
-  return {url:`http://127.0.0.1:${(server.address() as AddressInfo).port}`,server,close(){
+  const url=`http://127.0.0.1:${listeningPort}`;
+  return {url,launchUrl:launch.link(url),server,close(){
     if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
-    closing=(async()=>{const results=await Promise.allSettled(draining);await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
+    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
+    // still unfinished a moment later, such as one whose body never arrives, is cut off.
+    closing=(async()=>{
+      const results=await Promise.allSettled(draining);server.closeIdleConnections();
+      const cut=setTimeout(()=>server.closeAllConnections(),2000);results.push(...await Promise.allSettled([stopped]));clearTimeout(cut);
+      await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }

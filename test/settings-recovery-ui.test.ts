@@ -30,7 +30,7 @@ test('Settings read and save recovery preserve the draft and keyboard position',
       if (post) model = route.request().postDataJSON().model;
       await route.fulfill({ json: path.endsWith('/models') ? models : { capabilities: { provider: 'openrouter', model, escalationModel: 'acme/strong', keyConfigured: true, modelConfigured: true } } });
     });
-    await page.goto(app.url); await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.goto(app.launchUrl); await page.getByRole('button', { name: 'Settings', exact: true }).click();
     const key = page.getByRole('textbox', { name: 'OpenRouter API Key', exact: true });
     const modelSelect = page.getByRole('combobox', { name: 'Model', exact: true });
     const retry = page.getByRole('button', { name: kind === 'settings' ? 'Try again' : kind === 'catalog' ? 'Reload models' : 'Save changes', exact: true });

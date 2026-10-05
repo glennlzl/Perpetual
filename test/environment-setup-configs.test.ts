@@ -262,6 +262,8 @@ test('each reader takes time in proportion to its file, however the file is craf
   for (const [name, read] of cases) {
     const started = performance.now();
     read();
-    assert.ok(performance.now() - started < 3000, `${name}: ${Math.round(performance.now() - started)} ms`);
+    // Each case takes about a tenth of a second alone; quadratic work on these inputs takes minutes. Ten seconds keeps
+    // that apart while CI runs test files side by side.
+    assert.ok(performance.now() - started < 10000, `${name}: ${Math.round(performance.now() - started)} ms`);
   }
 });

@@ -23,7 +23,7 @@ Thanks for helping. Issues, bug reports and pull requests are welcome. Everyone 
    npm run test:browser
    ```
 
-   `npm run setup` installs the dependencies, builds the interface, installs Chromium and, with [uv](https://docs.astral.sh/uv/), the Python browser runtime that `npm run test:browser` needs. `npm run typecheck` checks both TypeScript projects, `tsconfig.json` and `client/tsconfig.json`, which both include `contract/`, the reply shapes the controller implements and the client imports as types, and must report no errors; `npm test` runs it first, serves the built interface and runs journey code in that Chromium. Tests that need Docker are skipped unless you set `PERPETUAL_DOCKER_TESTS=1`. CI runs the same checks on every pull request.
+   `npm run setup` installs the dependencies, builds the interface, installs Chromium and, with [uv](https://docs.astral.sh/uv/), the Python browser runtime that `npm run test:browser` needs. `npm run typecheck` checks both TypeScript projects, `tsconfig.json` and `client/tsconfig.json`, which both include `contract/`, the reply shapes the controller implements and the client imports as types, and must report no errors; `npm test` runs it first, serves the built interface and runs journey code in that Chromium. Tests that need Docker are skipped unless you set `PERPETUAL_DOCKER_TESTS=1`, or `PERPETUAL_REPAIR_DOCKER_TESTS=1` for the repair box tests. CI runs the same checks on every pull request.
 
 ## Contributor License Agreement
 

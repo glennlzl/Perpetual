@@ -13,6 +13,8 @@ test('redact knows every secret shape once: named values, tokens, key blocks, us
     ['GET /callback?access_token=q1&other=keep&api_key=q2', ['q1', 'q2']],
     ['github_pat_11AAA sk-abcdefghijklmnop sbp_0123456789 AKIAABCDEFGHIJKLMNOP eyJhbGci.eyJzdWIi.SflKxw', ['github_pat_11AAA', 'sk-abcdefghijklmnop', 'sbp_0123456789', 'AKIAABCDEFGHIJKLMNOP', 'eyJhbGci.eyJzdWIi.SflKxw']],
     ['https://u:pass@example.com postgres://postgres:secret@db/app', ['u:pass', 'postgres:secret']],
+    // The controller's secrets: the browser secret in the launch link and its header, and the launch secret in its header.
+    ['http://127.0.0.1:4317/#secret=link1 X-Perpetual-Browser-Secret: browser2 X-Perpetual-Secret: header3', ['link1', 'browser2', 'header3']],
   ];
   for (const [input, secrets] of cases) {
     const output = redact(input);
@@ -26,6 +28,103 @@ test('redact knows every secret shape once: named values, tokens, key blocks, us
   const colons = 'https://' + ':'.repeat(220000);
   assert.equal(redact(colons), colons, 'A long URL-shaped value without user info comes back unchanged.');
   assert.equal(redact(undefined), '');
+});
+
+test('a long run of name characters is read once, so a log of hyphenated or base64url text never stalls the controller', () => {
+  for (const run of ['a-'.repeat(30000), '-'.repeat(60000), 'Zm9v_-YmFy'.repeat(8000), Array.from({ length: 3000 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`).join('_')]) {
+    const started = performance.now();
+    assert.equal(redact(run), run);
+    assert.equal(hasCredential(run), false);
+    assert.equal(hasCredential(run, { code: true }), false);
+    assert.ok(performance.now() - started < 2000, `${run.slice(0, 20)}… took ${Math.round(performance.now() - started)} ms`);
+  }
+  assert.equal(redact(`${'a-'.repeat(30000)} token=abc`), `${'a-'.repeat(30000)} token=${REDACTED}`, 'A name after the run is still found.');
+  // A run of spaces after a credential name is read once too, where a type annotation could start.
+  const spaced = `password:${' '.repeat(60000)}${'x'.repeat(60000)}`, started = performance.now();
+  hasCredential(spaced); hasCredential(spaced, { code: true });
+  assert.ok(performance.now() - started < 2000, `A run of spaces took ${Math.round(performance.now() - started)} ms`);
+});
+
+test('an Authorization value of any scheme and every part of a named value or URL user info are hidden', () => {
+  const cases: [string, string][] = [
+    ['curl -H "Authorization: token 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
+    ['Authorization: ApiKey opaque-value-12345', `Authorization: ${REDACTED}`],
+    ["headers: { Authorization: 'Bot opaque-value' }", `headers: { Authorization: ${REDACTED} }`],
+    ['const password: string = "fixture-literal-1";', `const password: ${REDACTED};`],
+    ['{"password":"fixture\\"literal"}', `{"password":"${REDACTED}"}`],
+    ['env DB_PASSWORD=fixture,literal;tail next', `env DB_PASSWORD=${REDACTED} next`],
+    ['  token: process.env.TOKEN,', `  token: ${REDACTED},`],
+    ['password: correct horse battery\nother: kept', `password: ${REDACTED}\nother: kept`],
+    ['token=abc user=bob', `token=${REDACTED} user=bob`],
+    ['postgres://user:fixture@literal@db.example.test/app', `postgres://${REDACTED}@db.example.test/app`],
+    ['REDIS_URL=redis://:fixture-literal@cache:6379/0', `REDIS_URL=redis://${REDACTED}@cache:6379/0`],
+    ['git clone https://0123456789abcdef@github.com/acme/app.git', `git clone https://${REDACTED}@github.com/acme/app.git`],
+    ['DATABASE_URL=postgres://app:fixture#literal@db.example.test:5432/app', `DATABASE_URL=postgres://${REDACTED}@db.example.test:5432/app`],
+    ['mysql://root:fixture?literal-1@db:3306/app', `mysql://${REDACTED}@db:3306/app`],
+    ['request headers: Authorization: token 0123456789abcdef, Accept: application/json', `request headers: Authorization: ${REDACTED}, Accept: application/json`],
+    ['headers.set("Authorization", "Basic Zml4dHVyZTpsaXRlcmFs");', `headers.set("Authorization", ${REDACTED});`],
+    ["headers['Authorization'] = 'token fixture-literal'", `headers['Authorization'] = ${REDACTED}`],
+    ['fetch(url, { headers: { Authorization: `token fixture-literal` } });', `fetch(url, { headers: { Authorization: ${REDACTED} } });`],
+  ];
+  for (const [input, output] of cases) assert.equal(redact(input), output, input);
+  const paths = 'http://localhost:3000/@vite/client https://registry.npmjs.org/@types/node webpack://@acme/app/./src/index.ts https://app.example.test?email=owner@example.test';
+  assert.equal(redact(paths), paths, 'An @ after the host, or in a query, is not user info.');
+  assert.equal(hasCredential(paths), false);
+  assert.equal(hasCredential('REDIS_URL=redis://:fixture-literal@cache:6379/0'), true, 'A password alone is a literal URL password.');
+  assert.equal(hasSecretLiteral(JSON.stringify({ url: 'redis://:fixture-literal@cache:6379/0' })), true);
+  for (const url of ['postgres://app:fixture#literal@db.example.test:5432/app', 'mysql://root:fixture?literal-1@db:3306/app']) {
+    assert.equal(hasCredential(url), true, `A password may hold ? or #: ${url}`);
+    assert.equal(hasCredential(`const url = "${url}";`, { code: true }), true, url);
+    assert.equal(hasSecretLiteral(JSON.stringify({ url })), true, url);
+  }
+  assert.equal(hasCredential('git clone https://user@github.com/acme/app.git'), false, 'A user alone is not a password.');
+});
+
+test('ordinary code and commands around a credential name stay readable', () => {
+  const cases: [string, string][] = [
+    ['  DATABASE_PASSWORD=postgres npm run test:integration', `  DATABASE_PASSWORD=${REDACTED} npm run test:integration`],
+    ['  NPM_TOKEN=fixture-literal npm publish', `  NPM_TOKEN=${REDACTED} npm publish`],
+    ['const authorization = req.headers.authorization; if (!authorization) return 401;', `const authorization = ${REDACTED}; if (!authorization) return 401;`],
+  ];
+  for (const [input, output] of cases) assert.equal(redact(input), output, input);
+  // A key that is no secret: an ORM column, a markup attribute, a cache or storage key, a public client key.
+  for (const line of ['id = Column(Integer, primary_key=True)', 'foreign_key: true', '<li data-key="row-1">', 'const cache_key = `user:${id}`;', 'CACHE_KEY=user-profile-v2',
+    'STRIPE_PUBLISHABLE_KEY=pk_test_fixture', 'NEXT_PUBLIC_SUPABASE_ANON_KEY=fixture-anon', "cors({ allowedHeaders: ['Authorization', 'Content-Type'] })", 'cat: /etc/passwd: Permission denied']) {
+    assert.equal(redact(line), line, line);
+  }
+});
+
+test('common credential names, token shapes, escaped JSON and PGP key blocks are secrets too', () => {
+  assert.equal(redact('request failed: {\\"password\\":\\"fixture-literal\\"}'), `request failed: {\\"password\\":\\"${REDACTED}\\"}`);
+  assert.equal(redact('PRIVATE_KEY=fixture-a ENCRYPTION_KEY=fixture-b SIGNING_KEY: fixture-c'), `PRIVATE_KEY=${REDACTED} ENCRYPTION_KEY=${REDACTED} SIGNING_KEY: ${REDACTED}`);
+  assert.equal(redact('SUPABASE_SERVICE_ROLE_KEY=fixture-a RAILS_MASTER_KEY=fixture-b jwt_key: fixture-c'), `SUPABASE_SERVICE_ROLE_KEY=${REDACTED} RAILS_MASTER_KEY=${REDACTED} jwt_key: ${REDACTED}`);
+  assert.equal(redact('DB_PASS=fixture-a MYSQL_PWD=fixture-b passphrase: fixture-c'), `DB_PASS=${REDACTED} MYSQL_PWD=${REDACTED} passphrase: ${REDACTED}`);
+  assert.equal(redact('DB_PASSWD=fixture-a passwd: fixture-b'), `DB_PASSWD=${REDACTED} passwd: ${REDACTED}`);
+  assert.equal(hasCredential('DB_PASSWD=fixture-literal'), true);
+  assert.equal(hasCredential('passwd: "fixture-literal-1"', { code: true }), true);
+  const ordinary = 'tests_passed=12 bypass=true passenger=3 pass_count=4 npm_lifecycle_event=test';
+  assert.equal(redact(ordinary), ordinary, 'A name holding PASS, or npm\'s own variables, is not a credential.');
+  // Built at run time, so the file itself holds no token-shaped text.
+  for (const token of [`sb_secret_${'x'.repeat(24)}`, `xoxb-${'0'.repeat(12)}-fixture-value`, `npm_${'a1'.repeat(18)}`, `AIza${'x'.repeat(35)}`, `ASIA${'X'.repeat(16)}`, `glpat-${'x'.repeat(20)}`]) {
+    assert.equal(redact(`value ${token} end`), `value ${REDACTED} end`, token);
+    assert.equal(hasCredential(`const value = "${token}";`, { code: true }), true, token);
+  }
+  const block = 'before\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nafter';
+  assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
+  assert.equal(hasSecretLiteral(JSON.stringify({ value: block })), true);
+  assert.equal(hasCredential('const CACHE_KEY = "user-profile-v2";', { code: true }), false, 'The change rule leaves a cache key alone.');
+});
+
+test('a change that adds a private key or a credential literal in an ordinary code form holds a credential', () => {
+  for (const line of ['-----BEGIN RSA PRIVATE KEY-----', '-----BEGIN OPENSSH PRIVATE KEY-----', '-----BEGIN PGP PRIVATE KEY BLOCK-----', 'const pem = "-----BEGIN PRIVATE KEY-----\\nMIIE";',
+    'const password: string = "fixture-literal-1";', 'password: Optional[str] = "fixture-literal-1"', 'const password = `fixture-literal-1`;',
+    'const key = process.env.API_KEY || "fixture-literal-1";', 'process.env.API_KEY ??= "fixture-literal-1";', 'const privateKey = "fixture-literal-1";', 'DB_PASS: "fixture-literal-1"']) {
+    assert.equal(hasCredential(line, { code: true }), true, line);
+  }
+  for (const line of ['-----BEGIN CERTIFICATE-----', 'token: string;', 'password?: string;', 'const token = `Bearer ${value}`;', 'const token = `fixture-${id}-value`;',
+    'const required = ["API_KEY", "DATABASE_URL"];', 'const pwd = process.cwd();', 'const passenger = "fixture-literal-1";']) {
+    assert.equal(hasCredential(line, { code: true }), false, line);
+  }
 });
 
 test('a private key block is blanked line by line, so line numbers hold', () => {

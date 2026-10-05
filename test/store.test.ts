@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../src/store.ts';
+import { createSaveQueue, privateDirectory, readPrivateFile, readStateFile, writeStateFile } from '../src/store.ts';
 import { IN_PROGRESS, holdsResources, scopeId } from '../src/environments/usage.ts';
 
 test('a private directory is the controller\'s own: created 0700, never a link, and its real path', async t => {
@@ -17,16 +17,18 @@ test('a private directory is the controller\'s own: created 0700, never a link, 
   assert.equal(await privateDirectory(join(base, 'kept'), 'x', { resolveAliases: false }), join(base, 'kept'), 'A caller may keep the configured path.');
 });
 
-test('a state file reads back as its JSON, is absent as undefined, and is refused as a link, a folder or an oversize file', async t => {
+test('a state file reads back as its text or JSON, is absent as undefined, and is refused as a link, a folder or an oversize file', async t => {
   const base = await mkdtemp(join(tmpdir(), 'perpetual-store-'));
   t.after(() => rm(base, { recursive: true, force: true }));
   const file = join(base, 'state.json');
   assert.equal(await readStateFile(file, { limit: 100, invalid: 'Invalid state.' }), undefined);
   await writeFile(file, '{"version":1}');
   assert.deepEqual(await readStateFile(file, { limit: 100, invalid: 'Invalid state.' }), { version: 1 });
+  assert.equal(await readPrivateFile(file, { limit: 100, invalid: 'Invalid state.' }), '{"version":1}');
   await assert.rejects(readStateFile(file, { limit: 5, invalid: 'Invalid state.' }), /Invalid state\./);
   await symlink(file, join(base, 'link.json'));
   await assert.rejects(readStateFile(join(base, 'link.json'), { limit: 100, invalid: 'Invalid state.' }), /Invalid state\./);
+  await assert.rejects(readPrivateFile(join(base, 'link.json'), { limit: 100, invalid: 'Invalid state.' }), /Invalid state\./);
   await assert.rejects(readStateFile(base, { limit: 100, invalid: 'Invalid state.' }), /Invalid state\./);
   await writeFile(file, '{oops');
   await assert.rejects(readStateFile(file, { limit: 100, invalid: 'Invalid state.' }), SyntaxError, 'Unreadable JSON is the caller\'s to judge.');
@@ -43,6 +45,15 @@ test('a state file is written beside itself and renamed into place, private, wit
   assert.equal(await readFile(file, 'utf8'), '{"a":2}');
   assert.deepEqual(await readdir(base), ['state.json']);
   await assert.rejects(writeStateFile(join(base, 'missing', 'state.json'), '{}'), /ENOENT/, 'A failure is the file system\'s, unchanged.');
+});
+
+test('a failed save leaves no temporary file behind and reports its own error', async t => {
+  const base = await mkdtemp(join(tmpdir(), 'perpetual-store-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // A folder where the file belongs refuses the rename.
+  await mkdir(join(base, 'state.json'));
+  for (let attempt = 0; attempt < 3; attempt += 1) await assert.rejects(writeStateFile(join(base, 'state.json'), '{}'), { code: 'EISDIR' });
+  assert.deepEqual(await readdir(base), ['state.json']);
 });
 
 test('a save queue runs saves in order, lets a failed save through and settles idle after the last', async () => {

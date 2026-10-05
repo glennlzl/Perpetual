@@ -1,14 +1,16 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, rm, symlink, writeFile, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, realpath, rm, symlink, writeFile, stat} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {startServer,type Controller} from '../src/server.ts';
+import type {Controller} from '../src/server.ts';
+import {fetch,signIn,startServer} from './fixtures/controller.ts';
 
 // What a child controller reports back over IPC.
-type Outcome={url?:string;error?:string;waiting?:true};
+type Outcome={url?:string;launchUrl?:string;error?:string;waiting?:true};
 
 function controllerChild(t: TestContext,dataDir: string,{barrier=false}={}){
   const script=`
@@ -16,7 +18,7 @@ function controllerChild(t: TestContext,dataDir: string,{barrier=false}={}){
     let app;
     process.on('message',async message=>{
       if(message==='start'){
-        try{app=await startServer({port:0,dataDir:process.argv[1]});process.send({url:app.url});}
+        try{app=await startServer({port:0,dataDir:process.argv[1]});process.send({url:app.url,launchUrl:app.launchUrl});}
         catch(error){process.send({error:error.code||error.message});}
       }
       if(message==='close'){await app?.close();process.exit(0);}
@@ -86,7 +88,8 @@ test('an abrupt owner exit permits recovery of its persisted pipeline',async t=>
   let restarted: Controller|undefined;
   t.after(async()=>{await restarted?.close();await rm(dir,{recursive:true,force:true});});
   await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');
-  const owner=controllerChild(t,dataDir),{url}=(await owner.ready)!;
+  const owner=controllerChild(t,dataDir),{url,launchUrl}=(await owner.ready)!;
+  signIn(launchUrl!);
   const {token}=await (await fetch(url+'/api/session')).json();
   const post=(path: string,value: object)=>fetch(url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':token},body:JSON.stringify(value)});
   assert.equal((await post('/api/scan',{path:repo})).status,200);
@@ -112,6 +115,19 @@ test('simultaneous processes admit at most one controller and release rejected c
   for(const outcome of outcomes)if(!outcome.url)assert.equal(outcome.error,'CONTROLLER_ALREADY_RUNNING');
   await Promise.all(contenders.map(async({child})=>{const exited=once(child,'exit');child.send('close');await exited;}));
   const app=await startServer({port:0,dataDir:dir});await app.close();
+});
+
+test('a hidden file beside the records is ignored, and a refusal names the record to remove when no controller runs',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'perpetual-controller-records-')),owners=join(dir,'.controller-owners');
+  let app: Controller|undefined;
+  t.after(async()=>{await app?.close();await rm(dir,{recursive:true,force:true});});
+  await mkdir(owners);await writeFile(join(owners,'.DS_Store'),'');
+  app=await startServer({port:0,dataDir:dir});
+  await app.close();app=undefined;
+  // A record whose process is alive, here this test's own, as a reused id after a reboot would be.
+  const record=join(await realpath(owners),`${process.pid}-${randomUUID()}.lock`);
+  await writeFile(record,'');
+  await assert.rejects(startServer({port:0,dataDir:dir}),(error: Error&{code?: string})=>error.code==='CONTROLLER_ALREADY_RUNNING'&&error.message.includes(`process ${process.pid}`)&&error.message.includes(record));
 });
 
 test('failed startup releases ownership so a different port can retry',async t=>{

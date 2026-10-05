@@ -4,29 +4,53 @@
 // failures (a gh or docker error mapped to one sentence) need neither: they discard the raw output.
 
 export const REDACTED = '[REDACTED]';
-const NAMES = 'token|secret|password|api[-_]?key|access[-_]?(?:key|token)|authorization';
+// Credential names, found inside a longer name such as STRIPE_SECRET_KEY. A short one, PASS or PWD, counts only where a
+// name ends, so BYPASS and PASS_COUNT are not one, and PASSWD never as the file in a path such as /etc/passwd.
+// Redaction also hides the keys that read as secrets, such as ENCRYPTION_KEY or SUPABASE_SERVICE_ROLE_KEY, which the
+// change and request rules leave to ordinary values; a key that is no secret, such as a primary, foreign, cache or
+// publishable key, is ordinary text.
+const NAMES = 'token|secret|password|(?<!/)passwd|passphrase|(?<![a-z])(?:pass|pwd)(?![\\w-])|api[-_]?key|access[-_]?(?:key|token)|private[-_]?key|authorization';
+const SECRET_NAMES = `${NAMES}|(?:encryption|signing|master|license|service[-_]?role|hmac|jwt)[-_]?key`;
+const PRIVATE_KEY = '[A-Z ]*PRIVATE KEY(?: BLOCK)?';
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
-const PEM = /-----BEGIN (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----[\s\S]*?(?:-----END (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----|(?![\s\S]))/g;
-const QUOTED_KEY = new RegExp(`(["'])([\\w-]*(?:${NAMES})[\\w-]*)\\1(\\s*:\\s*)(["'])([^\\r\\n]*?)\\4`, 'gi');
-const NAMED_VALUE = new RegExp(`(\\b[\\w-]*(?:${NAMES})[\\w-]*\\s*[=:]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'[^']*'|[^\\s,;]+)`, 'gi');
-const FLAG_VALUE = new RegExp(`(--?[\\w-]*(?:${NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
-const QUERY_VALUE = new RegExp(`([?&](?:${NAMES})=)[^&\\s"'<>]+`, 'gi');
-const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|AKIA[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
+const PEM = new RegExp(`-----BEGIN (?:${PRIVATE_KEY}|CERTIFICATE)-----[\\s\\S]*?(?:-----END (?:${PRIVATE_KEY}|CERTIFICATE)-----|(?![\\s\\S]))`, 'g');
+// JSON members, also inside a string whose quotes are escaped, and whose value may hold escaped quotes.
+const QUOTED_KEY = new RegExp(`(\\\\?["'])([\\w-]*(?:${SECRET_NAMES})[\\w-]*)\\1(\\s*:\\s*)(\\\\?["'])((?:\\\\.|[^\\\\\\r\\n])*?)\\4`, 'gi');
+// A name starts where a run of name characters starts, so a long run is read once, not once per hyphen in it. A value
+// ends at whitespace, keeping trailing punctuation and quotes, and in code it runs on through the quoted literal a type
+// annotation is set to (`password: string = "…"`).
+const QUOTED_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'`, WORD = `["']*[^\\s,;"']+(?:[,;"']+[^\\s,;"']+)*`;
+const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${SECRET_NAMES})[\\w-]*\\s*[=:]\\s*)(?:${QUOTED_VALUE}|${WORD}(?:[ \\t]*=[ \\t]*(?:${QUOTED_VALUE}))?)`, 'gi');
+// A YAML line: an unquoted value runs on over spaces, up to the next name set with = or :. A shell line's value ends at
+// its first space, where its command starts (`NPM_TOKEN=… npm publish`).
+const LINE_VALUE = new RegExp(`^([ \\t]*(?:-[ \\t]+)?[\\w-]*(?:${SECRET_NAMES})[\\w-]*[ \\t]*:[ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
+const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
+const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
+// An Authorization value of any scheme. On a header line, at the start of a line or a quoted string, it runs through the
+// end of the line or the closing quote. Elsewhere, as in code or passed with its quoted name (`headers.set("Authorization",
+// …)`, `headers["Authorization"] = …`), it is a quoted value, or a scheme and its credential up to the space, ; , ) or }
+// that ends the expression.
+const AUTHORIZATION_HEADER = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[^\s"'][^\r\n"']*/gim;
+const AUTHORIZATION = /((?:Authorization\s*[:=]|\(\s*["']Authorization["']\s*,|\[\s*["']Authorization["']\s*\]\s*=)\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
+const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
-// Require the closing @ before splitting user/password, avoiding quadratic colon backtracking when it is absent.
-const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)(?=[^\s/@]+@)[^\s/@]+:[^\s/@]+@/gi;
+// User info, a user or a password alone too, ends at the last @ before the path. The user ends at ? or #, so an @ in a
+// query (`https://host?email=…@…`) is no user info, while a password may hold ?, # and @. Each part is read once.
+const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)(?!@)[^\s/?#@:]*(?::[^\s/]*)?@/gi;
 function literalUrlPassword(text: string): boolean {
   return [...text.matchAll(USER_INFO)].some(([match, scheme]) => {
-    const userinfo = match.slice(scheme.length, -1), password = userinfo.slice(userinfo.indexOf(':') + 1);
-    return !/^(?:\{\{[\w.-]+\}\}|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)$/.test(password);
+    const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':'), password = userinfo.slice(colon + 1);
+    return colon >= 0 && password !== '' && !/^(?:\{\{[\w.-]+\}\}|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)$/.test(password);
   });
 }
-// A credential written as a literal, which a repair's change may never add: a credential name set to a quoted value
-// anywhere, or to an unquoted one on an env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a
-// template, `process.env.X`), a URL or path without a password, or a type is not one.
+// A credential written as a literal, which a repair's change may never add: a private key block, a credential name set
+// to a quoted value anywhere (after a type annotation, and as a || or ?? fallback, too), or to an unquoted one on an
+// env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a template, `process.env.X`), a URL or path
+// without a password, or a type is not one.
 const CREDENTIAL_NAME = `[\\w-]*(?:${NAMES})[\\w-]*`;
 const CREDENTIAL_MEMBER = new RegExp(`^${CREDENTIAL_NAME}$`, 'i');
+const PRIVATE_KEY_BLOCK = new RegExp(`-----BEGIN ${PRIVATE_KEY}-----`);
 // Decode URL escapes for inspection without changing ordinary source text. Malformed escapes remain data.
 const decodedUri = (text: string) => {
   for (let depth = 0; depth < 4; depth += 1) {
@@ -39,17 +63,19 @@ const decodedUri = (text: string) => {
   return text;
 };
 const NOT_LITERAL = '(?![$<{%/]|\\w+://)';
-const QUOTED_LITERAL = new RegExp(`\\b${CREDENTIAL_NAME}["']?\\s*[=:]\\s*(["'])${NOT_LITERAL}[^"'\\s]{8,}\\1`, 'i');
+// A type annotation starts with no space, so a run of spaces is read once.
+const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?:[=:]|\\|\\|=?|\\?\\?=?)\\s*(["'\`])${NOT_LITERAL}(?:(?!\\$\\{)[^"'\`\\s]){8,}\\1`, 'i');
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
 
 /**
  * Text with every secret-shaped value replaced by the marker: ANSI colour removed; private key and
- * certificate blocks blanked line by line, so line numbers hold; Authorization and Bearer values;
- * named values in JSON, YAML, env and CLI form (`API_KEY=…`, `"token": "…"`, `--password …`,
- * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
- * and user info in any URL. Ordinary text, however long, comes back unchanged. `names: false` leaves the
+ * certificate blocks blanked line by line, so line numbers hold; Authorization values of any scheme and
+ * Bearer values; named values in JSON (escaped JSON too), YAML, env, code and CLI form (`API_KEY=…`,
+ * `"token": "…"`, `password: string = "…"`, `--password …`, `?access_token=…`); known token shapes
+ * (GitHub, GitLab, OpenAI and OpenRouter, Stripe, Supabase, Slack, npm, Google, AWS, JWT); and user info
+ * in any URL, with or without a password. Ordinary text, however long, comes back unchanged. `names: false` leaves the
  * values after credential names and Authorization alone, for text formatted from values already redacted one
  * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced.
  */
@@ -61,10 +87,11 @@ export function redact(input: unknown = '', { decodeUri = false, names = true, s
   let text = (decodeUri ? known(decodedUri(supplied)) : supplied)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block));
-  if (names) text = text.replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`);
+  if (names) text = text.replace(AUTHORIZATION_HEADER, `$1${REDACTED}`).replace(AUTHORIZATION, `$1${REDACTED}`);
   text = text.replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`);
   if (names) text = text
     .replace(QUOTED_KEY, `$1$2$1$3$4${REDACTED}$4`)
+    .replace(LINE_VALUE, `$1${REDACTED}`)
     .replace(NAMED_VALUE, namedValue)
     .replace(FLAG_VALUE, namedValue)
     .replace(QUERY_VALUE, `$1${REDACTED}`);
@@ -83,12 +110,13 @@ export function redactUri(input: unknown, secrets: Iterable<unknown> = []): stri
 }
 
 /**
- * Whether text holds a credential as a literal value: a known token shape, a URL with a password, or a credential
- * name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted one counts.
+ * Whether text holds a credential as a literal value: a known token shape, a private key block, a URL with a password,
+ * or a credential name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted
+ * one counts.
  */
 export function hasCredential(input: string, { code = false, url = false }: { code?: boolean; url?: boolean } = {}): boolean {
   if (url) { const value = decodedUri(input); return redact(value) !== value; }
-  return new RegExp(TOKEN_SHAPE.source).test(input) || literalUrlPassword(input)
+  return new RegExp(TOKEN_SHAPE.source).test(input) || PRIVATE_KEY_BLOCK.test(input) || literalUrlPassword(input)
     || QUOTED_LITERAL.test(input) || !code && UNQUOTED_LITERAL.test(input);
 }
 
