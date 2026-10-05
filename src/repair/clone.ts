@@ -54,6 +54,9 @@ export function createRepairHost({ dataDir, run = exec }: { dataDir: string; run
       const source = { repository: repair.repository, branch: repair.branch, rootDirectory: repair.rootDirectory, checkoutPath: repair.checkoutPath, scanPath: join(repair.checkoutPath, ...root) };
       await cloneGitHubSourceCommit({ source, dataDir, sha: repair.sha, directory, branch: repairBranch(repair.sha) });
       await git(directory, ['config', 'core.ignorecase', 'false'], 'Could not prepare the repair copy.');
+      // The checkout's reflog names the host's user, login and hostname, which the box it is copied into never learns.
+      await git(directory, ['config', 'core.logAllRefUpdates', 'false'], 'Could not prepare the repair copy.');
+      await rm(join(directory, '.git', 'logs'), { recursive: true, force: true });
     },
     async stage({ directory, diff, base }) {
       if (!SHA.test(base)) throw new Error('Invalid base commit.');

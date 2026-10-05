@@ -86,6 +86,7 @@ test('the host copy stages a case-only rename into its index, whatever the host 
   const host = createRepairHost({ dataDir: f.dataDir, run: (file, args, options) => exec(file, args, { ...options, env: { ...options.env, GIT_TRACE2_EVENT: trace } }) });
   await host.clone({ repair: { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair, directory });
   assert.equal(fixtureGit(directory, 'config', 'core.ignorecase'), 'false', 'The copy the box gets reads names with their case, as Linux does.');
+  await assert.rejects(stat(join(directory, '.git', 'logs')), { code: 'ENOENT' }, 'The copy the box gets keeps no reflog naming the host\'s user and hostname.');
   const rename = ['diff --git a/add.js b/add.js', 'deleted file mode 100644', '--- a/add.js', '+++ /dev/null', '@@ -1 +0,0 @@', '-module.exports = (a, b) => a - b;',
     'diff --git a/Add.js b/Add.js', 'new file mode 100644', '--- /dev/null', '+++ b/Add.js', '@@ -0,0 +1 @@', '+module.exports = (a, b) => a + b;', ''].join('\n');
   const staged = await host.stage({ directory, diff: Buffer.from(rename), base: f.sha });
