@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ExternalLink, RefreshCw, Rocket, Settings2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -53,8 +53,8 @@ function TargetDialog({ repoPath, target, onClose, focusFallback }: { repoPath: 
     } catch (failure) { setError((failure as Error).message); }
     finally { setPending(false); }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !pending) onClose(); }}><DialogContent onCloseAutoFocus={returnFocus} showCloseButton={!pending}>
-    <DialogHeader><DialogTitle>Deployment target</DialogTitle><DialogDescription>The workflow must handle GitHub deployment events.</DialogDescription></DialogHeader>
+  return <Dialog open onOpenChange={open => { if (!open && !pending) onClose(); }}><DialogContent aria-describedby={undefined} onCloseAutoFocus={returnFocus} showCloseButton={!pending}>
+    <DialogHeader><DialogTitle>Deployment target</DialogTitle></DialogHeader>
     <form onSubmit={save} className="space-y-4">
       <fieldset disabled={pending} className="grid gap-4">
         <div className="grid gap-2"><Label htmlFor={`${id}-environment`}>Environment</Label><Input id={`${id}-environment`} value={environment} onChange={event => setEnvironment(event.target.value)} required autoComplete="off" /></div>
@@ -110,7 +110,8 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
     {!confirmation && error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
     {readError && <p role="alert" className="basis-full break-words text-xs text-destructive">{readError}</p>}
     {!readError && !current && <p role="status" className="basis-full text-xs text-muted-foreground">Loading release status…</p>}
-    {current?.blockedReason && <p className="basis-full break-words text-xs text-muted-foreground">{current.blockedReason}</p>}
+    {/* Why a configured target cannot be deployed yet; without one, Configure deployment is the next step. */}
+    {target && current?.blockedReason && <p className="basis-full break-words text-xs text-muted-foreground">{current.blockedReason}</p>}
     {configure && <TargetDialog repoPath={repoPath} target={target || null} onClose={() => setConfigure(false)} focusFallback={focusFallback} />}
     {confirmation && <DeployDialog confirmation={confirmation} view={current} pending={pending === 'deploy'} disabled={locked} error={error}
       onClose={() => { setConfirmation(null); setError(''); }} onDeploy={async request => { if (await act('deploy', request)) setConfirmation(null); }} focusFallback={focusFallback} />}
