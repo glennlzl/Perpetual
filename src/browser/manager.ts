@@ -7,7 +7,7 @@ import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {hide,redact} from '../redaction.ts';
 import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
-import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
+import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
@@ -242,12 +242,18 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const generationRoot=join(root,'generations');await mkdir(generationRoot,{recursive:true,mode:0o700});
   const generationInfo=await lstat(generationRoot);if(generationInfo.isSymbolicLink()||!generationInfo.isDirectory())throw new Error('Code generation storage must not be a symbolic link.');
   const modelSettings=await createBrowserModelSettings({dataDir});
-  const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([modelSettings.configuration().apiKey,...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
+  const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([...modelKeys(modelSettings.configuration().apiKey),...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
   let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};
-  {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
-  for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
+  // The file is data: every record the restart and the views read is checked first. A run from an older controller may
+  // lack its progress, results or newer fields.
+  const records=(value:unknown)=>isRecord(value)&&Object.values(value).every(isRecord);
+  const optionalRecords=(value:unknown)=>value==null||Array.isArray(value)&&value.every(isRecord);
+  const storedRun=(run:unknown)=>isRecord(run)&&['id','scope','status'].every(key=>typeof run[key]==='string')&&Array.isArray(run.caseIds)&&optionalRecords(run.approvedCases)&&optionalRecords(run.results)
+    &&(run.progress==null||isRecord(run.progress)&&Array.isArray(run.progress.cases)&&run.progress.cases.every(item=>isRecord(item)&&optionalRecords(item.steps)));
+  {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.runs.every(storedRun)||!records(saved.configs)||!isRecord(saved.cases)||!isRecord(saved.analyses))throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
+  for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key])||(key==='preparations'||key==='configTargets')&&!records(state[key]))throw new Error('Unsupported browser preparation state.');}
   // A stored transport refusal has the same fixed shape as live worker facts, before history or
   // verification is reconstructed. Legacy results without this optional field remain unchanged.
   for(const run of state.runs)for(const result of run.results||[]){
@@ -388,7 +394,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(run.mode!=='run'||(run.results||[]).some(result=>result.caseId===item.id))continue;
       // An interrupted journey ended on the controller's exception; cancelled and skipped journeys have no verdict.
       // A run's journeys are its approved cases.
-      const result=status==='failed'?journeyResult(run.approvedCases.find(value=>value.id===item.id)!,{caseId:item.id,stopCause:'exception',error:'The controller stopped during this journey.'},item.steps):{caseId:item.id,status,assertions:[],...(unstarted?{error:'Controller stopped before this journey started'}:{})};
+      const result=status==='failed'?journeyResult((run.approvedCases||[]).find(value=>value.id===item.id)??{id:item.id},{caseId:item.id,stopCause:'exception',error:'The controller stopped during this journey.'},item.steps):{caseId:item.id,status,assertions:[],...(unstarted?{error:'Controller stopped before this journey started'}:{})};
       run.results=[...(run.results||[]),result].sort((a,b)=>run.caseIds.indexOf(a.caseId)-run.caseIds.indexOf(b.caseId));
     }
     if(run.progress)touch(run);
@@ -447,7 +453,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const account=Object.fromEntries((['credentials','accountId'] as const).filter(name=>input[name]!==undefined).map((name):[string,unknown]=>[name,input[name]]));
     // Every attempt runs with the config and on the twin the verification starts with, so another twin of the stage that
     // becomes ready meanwhile never takes over some of its attempts.
-    const config=normalizedConfig(state.configs[scope]||defaults,context),target={config,environmentId:config.targetUrl&&resolveEnvironment(config.targetUrl)?.id||null};
+    const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
+    // A twin a run would refuse is refused before anything is recorded; only a change between attempts ends a verification.
+    const environment=resolveEnvironment(config.targetUrl);
+    if(environment&&environment.status!=='ready')throw conflict('The selected application environment is not ready. Choose an available application URL.');
+    if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
+    const target={config,environmentId:environment?.id||null};
     // The verification holds that twin from its start to its end: it takes it here, and each attempt's lease passes to the
     // next, so nothing else, such as a health check, takes it while the verification records its start or an attempt, or
     // waits for the stage. A twin in use refuses the verification.
@@ -733,17 +744,25 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
-      const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null;
+      const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
       if(preparation){Object.assign(preparation,{status:'discovering',targetUrl:config.targetUrl,runId:run.id});delete preparation.error;delete preparation.completedAt;}
       const admittedRuns=()=>[run,...state.runs].filter(kept);
-      await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});
+      // A discovery that could not be admitted leaves the stage's preparation as it was.
+      try{await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});}
+      catch(error){if(preparation){delete preparation.runId;delete preparation.targetUrl;Object.assign(preparation,before);}throw error;}
       if(closed){run.status='cancelled';run.completedAt=now();await persist();throw conflict('The controller is shutting down.');}
       const execution=async()=>{
         const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,Object.values(credentials??{}));
         // Set by the worker's discovery event.
-        let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown;
+        let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown,progressQueued=false;
         // Registered before execution starts.
         const entry=jobs.get(run.id)!;
+        // A journey's start, its milestones and its end survive a controller interruption, so a restart judges what it
+        // began. A save not yet started takes every later change with it.
+        const saveProgress=()=>{
+          if(progressQueued||progressError)return;progressQueued=true;
+          progressPersistence=progressPersistence.then(()=>{progressQueued=false;return persist();}).catch(error=>{progressError||=error;entry.cancel();});
+        };
         const assertCurrent=()=>{if(options.isCurrent&&!options.isCurrent())throw new Error('The active source changed. Open this source and discover cases to continue.');};
         function progressEvent(event:WorkerEvent,caseId:string){
           if(event.caseId!==undefined&&event.caseId!==caseId)throw new Error('Browser progress referenced another journey.');
@@ -773,7 +792,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
               progress.actionCount=typeof event.actionCount==='number'&&Number.isSafeInteger(event.actionCount)&&event.actionCount>=event.actions.length?event.actionCount:event.actions.length;
               const last=progress.actions.at(-1);if(last)progress.lastAction={type:last.type,status:last.status};else delete progress.lastAction;
             }
-          }else if(event.type==='journey-step')acceptMilestone(progress,event,run.approvedCases.find(item=>item.id===caseId));
+          }else if(event.type==='journey-step'){acceptMilestone(progress,event,run.approvedCases.find(item=>item.id===caseId));saveProgress();}
           else return;
           touch(run);
         }
@@ -820,9 +839,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                   run.results=[...(run.results||[]).filter(previous=>previous.caseId!==caseId),result].sort((a,b)=>run.caseIds.indexOf(a.caseId)-run.caseIds.indexOf(b.caseId));
                   // An unreported milestone is unconfirmed, never a blocked prerequisite.
                   settleSteps(progress,status);
-                  // Completed journeys survive a later worker/controller interruption.
-                  progressPersistence=progressPersistence.then(()=>persist()).catch(error=>{progressError||=error;entry.cancel();});
                 }
+                if(status!=='queued')saveProgress();
                 touch(run);
               },
               launch(item){
@@ -870,7 +888,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             const errors=finished.filter(item=>item.error&&item.status==='failed');
             if(errors.length)run.error=diagnostic(errors[0].error);
             // Every journey has a result row by now.
-            run.status=runStatus(run.results!);
+            run.status=runStatus(run.results!,run.caseIds);
           }else{
             const job=runtime!.start(workerInput,event=>{
               if(event.type==='discovery'){

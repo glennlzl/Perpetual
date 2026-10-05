@@ -40,7 +40,8 @@ async function fixture(t: TestContext) {
   await manager.saveConfig(context, { targetUrl: 'http://127.0.0.1:54300' });
   await manager.saveCases(context, [scenario]); await draftCode(manager, context, [scenario]);
   async function terminal(id: string) {
-    for (let i = 0; i < 200; i++) { const report = await manager.runProgress(context, id); if (!['queued', 'running'].includes(report.run.status)) return report; await delay(5); }
+    // Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+    for (const deadline = Date.now() + 10000; Date.now() < deadline; await delay(5)) { const report = await manager.runProgress(context, id); if (!['queued', 'running'].includes(report.run.status)) return report; }
     throw new Error('Run did not finish');
   }
   return { dataDir, context, manager, calls, terminal, runtime };

@@ -23,6 +23,38 @@ test('OpenRouter key is persisted privately, omitted from view, and retained dur
   const restored=await createBrowserModelSettings({dataDir,env:{}});assert.equal(restored.environment().PERPETUAL_MODEL_API_KEY,'openrouter-private-fixture');
 });
 
+test('a key the environment supplies is never saved, and a saved key never follows a new endpoint',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-model-key-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const file=join(dataDir,'browser-model.json');
+  const exported=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'environment-fixture-one'}});
+  await exported.saveOpenRouter({model:'anthropic/claude-sonnet-4.6'});
+  assert.equal(JSON.parse(await readFile(file,'utf8')).apiKey,undefined,'Choosing a model does not copy the exported key to disk.');
+  assert.equal(exported.configuration().apiKey,'environment-fixture-one');
+  const rotated=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'environment-fixture-two'}});
+  assert.deepEqual([rotated.configuration().apiKey,rotated.configuration().model,rotated.view().modelConfigured],['environment-fixture-two','anthropic/claude-sonnet-4.6',true],'A rotated exported key takes effect.');
+  // The exported key is for its own endpoint only.
+  await assert.rejects(rotated.save({baseUrl:'https://other-provider.example/v1'}),/API key/);
+  await rotated.saveOpenRouter({apiKey:'entered-fixture-only',model:'anthropic/claude-sonnet-4.6'});
+  assert.equal(JSON.parse(await readFile(file,'utf8')).apiKey,'entered-fixture-only','An entered key is saved.');
+  await assert.rejects(rotated.save({baseUrl:'https://other-provider.example/v1'}),/Enter the API key for the new model API URL/);
+  assert.equal(JSON.parse(await readFile(file,'utf8')).baseUrl,'https://openrouter.ai/api/v1','A refused endpoint change saves nothing.');
+  await rotated.save({apiKey:'other-fixture-only',baseUrl:'https://other-provider.example/v1'});
+  assert.deepEqual([rotated.configuration().apiKey,rotated.configuration().baseUrl],['other-fixture-only','https://other-provider.example/v1']);
+  await rotated.save({baseUrl:'https://other-provider.example/v2'});
+  assert.equal(rotated.configuration().apiKey,'other-fixture-only','A path on the same host keeps its key.');
+});
+
+test('an exported key stays with its endpoint however the environment writes the address',async t=>{
+  for(const baseUrl of ['https://API.example.com/v1','https://api.example.com:443/v1/']){
+    const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-model-endpoint-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+    const env={PERPETUAL_MODEL_API_KEY:'exported-fixture-only',PERPETUAL_MODEL_BASE_URL:baseUrl};
+    await (await createBrowserModelSettings({dataDir,env})).save({model:'vendor/chat'});
+    assert.equal(JSON.parse(await readFile(join(dataDir,'browser-model.json'),'utf8')).apiKey,undefined,baseUrl);
+    const restored=await createBrowserModelSettings({dataDir,env});
+    assert.deepEqual([restored.configuration().apiKey,restored.configuration().baseUrl,restored.view().modelConfigured],['exported-fixture-only','https://api.example.com/v1',true],baseUrl);
+  }
+});
+
 test('generic provider credentials require an explicit model while an empty install shows OpenRouter defaults',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-generic-model-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const generic=await createBrowserModelSettings({dataDir,env:{PERPETUAL_MODEL_API_KEY:'generic-private-fixture'}});
@@ -101,6 +133,27 @@ test('draft effort uses cached catalog capabilities and never guesses support fr
   assert.equal(calls,1,'Drafting reuses the settings catalog without transmitting credentials');
   t.mock.method(globalThis,'fetch',async()=>{throw new Error('Catalog unavailable');});
   assert.deepEqual(await createOpenRouterModelCatalog().draftReasoning('vendor/low'),{exclude:true},'An unavailable catalog retains provider defaults rather than guessing an unsupported effort');
+});
+
+test('a failed catalog refresh serves the last catalog and its efforts, without models that have expired since',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-01T00:00:00Z')});
+  let available=true,calls=0;
+  const model=(id:string,extra:Record<string,unknown>={})=>({id,name:id,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],...extra});
+  t.mock.method(globalThis,'fetch',async()=>{
+    calls++;if(!available)throw new Error('Catalog unavailable');
+    return Response.json({data:[model('vendor/kept',{reasoning:{supported_efforts:['low','medium']}}),model('vendor/retiring',{expiration_date:'2026-10-01T00:30:00Z'})]});
+  });
+  const catalog=createOpenRouterModelCatalog(),listed=async()=>(await catalog.view()).models.map(item=>item.id);
+  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring']);
+  available=false;t.mock.timers.tick(10*60*1000);
+  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring'],'Settings can still be saved.');
+  assert.equal(calls,2);
+  t.mock.timers.tick(30*1000);await listed();
+  assert.equal(calls,2,'A failed refresh is tried again a minute later, not on every read.');
+  t.mock.timers.tick(25*60*1000);
+  assert.deepEqual(await listed(),['vendor/kept'],'A model that expired meanwhile is no longer offered.');
+  assert.deepEqual([await catalog.generationReasoning('vendor/kept'),await catalog.draftReasoning('vendor/kept')],[{effort:'medium'},{effort:'low',exclude:true}]);
+  await assert.rejects(createOpenRouterModelCatalog().view(),/Could not load OpenRouter models/,'Without an earlier catalog nothing is served.');
 });
 
 test('journey code generation enables medium reasoning only when the catalog explicitly supports it',async t=>{

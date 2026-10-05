@@ -7,6 +7,7 @@ import type {ModelSettingsView} from '../../contract/settings.ts';
 import {OPENROUTER_BASE_URL,isOpenRouterEndpoint} from './openrouter-models.ts';
 
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
+const originOf=(value:string)=>{try{return new URL(value).origin;}catch{return null;}};
 // A model ID as the Settings Select stores it; the escalation model is checked like the model.
 const modelId=(value:unknown):value is string=>typeof value==='string'&&Boolean(value.trim())&&value.length<=200&&!/[\s\u0000-\u001f]/.test(value)&&!/(?:^|\/)jev(?:-|$)/i.test(value);
 
@@ -29,12 +30,16 @@ export async function createBrowserModelSettings({dataDir,env=process.env}:{data
         if(input.escalationModel!==undefined&&!modelId(input.escalationModel))throw new Error('Choose an OpenRouter escalation model.');
         const current=configuration();
         if(openRouterOnly&&input.apiKey===undefined&&!isOpenRouterEndpoint(current.baseUrl))throw new Error('Enter your OpenRouter API key to switch providers.');
-        const apiKey=input.apiKey===undefined?current.apiKey:input.apiKey,model=input.model??current.model,baseUrl=openRouterOnly?OPENROUTER_BASE_URL:input.baseUrl??current.baseUrl;
-        const resolved=resolveBrowserModel({saved:{apiKey,model,baseUrl}});
+        // Only an entered key is saved; one the environment supplies stays there, so rotating it takes effect.
+        const apiKey=input.apiKey===undefined?saved?.apiKey:input.apiKey,model=input.model??current.model,baseUrl=openRouterOnly?OPENROUTER_BASE_URL:input.baseUrl??current.baseUrl;
+        const settings={...(apiKey===undefined?{}:{apiKey}),model,baseUrl};
+        const resolved=resolveBrowserModel({saved:settings,env});
         if(!resolved.modelConfigured)throw new Error(resolved.modelError);
         const normalizedUrl=validateBrowserTarget(String(baseUrl)).replace(/\/$/,'');
+        // A saved key is never sent to another host than the one it was entered for.
+        if(input.apiKey===undefined&&apiKey!==undefined&&new URL(normalizedUrl).origin!==originOf(current.baseUrl))throw new Error('Enter the API key for the new model API URL.');
         const escalation=input.escalationModel??escalationModel();
-        const next={apiKey,model,baseUrl:normalizedUrl,...(escalation?{escalationModel:escalation}:{})};
+        const next={...settings,baseUrl:normalizedUrl,...(escalation?{escalationModel:escalation}:{})};
         await writeStateFile(file,JSON.stringify(next),{prefix:'.browser-model-'});saved=next;return view();
       });
   }

@@ -13,8 +13,28 @@ const MAX_FILES = 200;
 const MAX_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_MODEL_BYTES = 180 * 1024;
-const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'out', 'target', '__pycache__', '__tests__', 'test', 'tests', 'fixtures', '.next', '.nuxt', '.cache', '.perpetual']);
-const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.md', '.mdx']);
+const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'out', 'target', '__pycache__', '__tests__', '.next', '.nuxt', '.cache', '.perpetual']);
+// Retired code and past plans are skipped wherever they are.
+const RETIRED_DIRS = new Set(['archived', 'graveyard', 'deprecated', 'superpowers']);
+// By convention these folders hold tests and fixtures, or tooling, yet a product route can have the same name, such as
+// app/tests/page.tsx or app/api/agents/route.ts. One at the repository root is skipped. Below it, a test folder is
+// sampled only when it holds a route's own page, never for helpers such as test-utils.tsx; a tooling folder is sampled
+// like any other. Neither is sampled for its documentation.
+const TEST_DIRS = new Set(['test', 'tests', 'fixtures']);
+const TOOLING_DIRS = new Set(['agents', 'scripts', 'eval', 'evals', 'archive', 'archives']);
+// Components and server templates render pages too.
+const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.vue', '.svelte', '.astro', '.erb', '.ejs', '.hbs', '.twig', '.cshtml', '.md', '.mdx']);
+const UI_FILE = /\.(?:jsx|tsx|html|htm|vue|svelte|astro|erb|ejs|hbs|twig|cshtml)$/i;
+const sampled = (name: string) => SOURCE_EXTENSIONS.has(path.extname(name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(name);
+// A route's own page or handler in a folder: page.tsx, +page.svelte, route.ts, or an index page below app, pages or routes.
+const routePage = (folder: string, name: string) => sampled(name) && !/\.mdx?$|test|spec|mock|setup|fixture/i.test(name)
+  && (/^(?:\+?page|route)\./i.test(name) || /^index\./i.test(name) && /(?:^|\/)(?:app|pages|routes)\//i.test(folder));
+const category = (name: string) => {
+  if (/\.mdx?$/i.test(name)) return 'product';
+  if (/(?:^|\/)(?:api|backend|server|routes)(?:\/|$)/i.test(name)) return 'api';
+  if (UI_FILE.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
+  return 'other';
+};
 // Generic journey vocabulary shared by most products; nothing product-specific.
 const BILLING_PATH = /billing|payment|stripe|checkout|subscription|credit|wallet|refund/i;
 const ACTION_PATH = /(?:^|\/)(?:new|create|edit|run|submit|result)(?:\/|\.|-|$)/i;
@@ -55,7 +75,6 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
   const rootStat = await lstat(repoPath);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Repository source must be a regular directory.');
   const root = await realpath(repoPath), candidates: string[] = [], files: SourceFile[] = [], warnings: string[] = [];
-  const historicalDirectories = new Set(['archive', 'archives', 'archived', 'graveyard', 'deprecated', 'superpowers', 'agents', 'scripts', 'eval', 'evals']);
   const tokens = [...new Set(String(scope || '').toLowerCase().match(/[a-z0-9]{3,}/g) || [])].filter(token => !['the', 'and', 'for', 'with', 'test', 'tests', 'case', 'cases', 'user', 'users', 'work', 'from', 'this', 'that', 'should', 'through', 'using', 'into', 'when', 'then'].includes(token)).slice(0, 30);
   const score = (name: string) => {
     const normalized = name.toLowerCase();
@@ -69,19 +88,15 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       + (/(?:^|\/)docs\/(?:user|product)\//.test(normalized) ? 100 : 0)
       - (/(?:^|\/)(?:plans|changelog|history)(?:\/|\.)/.test(normalized) ? 30 : 0);
   };
-  const category = (name: string) => {
-    if (/\.mdx?$/i.test(name)) return 'product';
-    if (/(?:^|\/)(?:api|backend|server|routes)(?:\/|$)/i.test(name)) return 'api';
-    if (/\.(?:jsx|tsx|html|htm)$/i.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
-    return 'other';
-  };
   let visited = 0, total = 0, limited = false;
-  const queue = [{ relative: '', depth: 0 }];
+  // aside: inside a test or tooling folder, whose documentation stays out.
+  const queue = [{ relative: '', depth: 0, tests: false, aside: false }];
   while (queue.length && visited < 5000) {
-    const { relative, depth } = queue.shift()!;
+    const { relative, depth, tests, aside } = queue.shift()!;
     if (depth > 8) { limited = true; continue; }
     let entries;
     try { entries = await readdir(path.join(root, relative), { withFileTypes: true }); } catch { continue; }
+    if (tests && !entries.some(entry => entry.isFile() && routePage(relative, entry.name))) continue;
     entries.sort((a, b) => score(`${relative}/${b.name}`) - score(`${relative}/${a.name}`) || a.name.localeCompare(b.name));
     // A single generated/very wide directory cannot consume all traversal slots.
     if (entries.length > 512) limited = true;
@@ -89,8 +104,12 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       if (++visited > 5000) { limited = true; break; }
       const name = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink() || SECRET_PATH.test(name) || entry.name.startsWith('.') || /^(?:AGENTS|CLAUDE|GEMINI|SKILL)\.md$/i.test(entry.name)) continue;
-      if (entry.isDirectory()) { if (!SKIP_DIRS.has(entry.name) && !historicalDirectories.has(entry.name.toLowerCase())) queue.push({ relative: name, depth: depth + 1 }); continue; }
-      if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(entry.name)) candidates.push(name);
+      if (entry.isDirectory()) {
+        const lower = entry.name.toLowerCase(), test = TEST_DIRS.has(lower), named = test || TOOLING_DIRS.has(lower);
+        if (!SKIP_DIRS.has(entry.name) && !RETIRED_DIRS.has(lower) && !(named && !relative)) queue.push({ relative: name, depth: depth + 1, tests: test, aside: aside || named });
+        continue;
+      }
+      if (entry.isFile() && sampled(entry.name) && !(aside && /\.mdx?$/i.test(entry.name))) candidates.push(name);
     }
   }
   if (queue.length) limited = true;
@@ -118,15 +137,17 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       if (!resolved.startsWith(`${root}${path.sep}`) || resolved !== path.join(root, name)) continue;
       handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES || stat.size > MAX_BYTES - total) { limited = true; continue; }
-      const buffer = Buffer.alloc(Math.min(MAX_FILE_BYTES, MAX_BYTES - total) + 1);
+      // A file over its bound contributes its first 64 KiB, as the model sees at most part of one anyway.
+      if (!stat.isFile() || Math.min(stat.size, MAX_FILE_BYTES) > MAX_BYTES - total) { limited = true; continue; }
+      const room = Math.min(MAX_FILE_BYTES, MAX_BYTES - total), buffer = Buffer.alloc(room + 1);
       let size = 0;
       while (size < buffer.length) {
         const chunk = await handle.read(buffer, size, buffer.length - size, size);
         if (!chunk.bytesRead) break;
         size += chunk.bytesRead;
       }
-      if (size >= buffer.length) { limited = true; continue; }
+      // Cut at its last whole line, so no character is split and every line keeps its number.
+      if (size > room) { limited = true; size = buffer.lastIndexOf(0x0a, room - 1); if (size <= 0) continue; }
       total += size;
       const raw = buffer.subarray(0, size).toString('utf8');
       if (raw.includes('\0')) continue;
@@ -135,7 +156,7 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
     } catch { /* Unreadable and changing source files are omitted. */ }
     finally { await handle?.close(); }
   }
-  if (limited) warnings.push('Browser source discovery used a balanced sample bounded to 200 files, 1 MiB, eight directory levels and 5,000 entries; some files were omitted.');
+  if (limited) warnings.push('Browser source discovery used a balanced sample bounded to 200 files, 1 MiB, 64 KiB per file, eight directory levels and 5,000 entries; some files were omitted or shortened.');
   if (!files.length) warnings.push('No supported source files were available for discovery.');
   return { files, warnings };
 }
@@ -144,9 +165,12 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
  * useful interior implementation lines over spending the whole budget on imports
  * or the first few large files. Citations always retain original line numbers. */
 function browserModelSources(files: SourceFile[]): ModelSource[] {
-  let auxiliary = 0;
-  const selected = files.filter(file => !/\.mdx?$/i.test(file.path) &&
-    (/(?:^|\/)(?:api|backend|server|routes|frontend|client|web|pages|components)(?:\/|$)/i.test(file.path) || ++auxiliary <= 6)).slice(0, 56);
+  // The files arrive balanced across UI, API, documentation and shared code. UI and API files take the slots first;
+  // shared code takes at most a quarter of them while those last, and the rest once they run out. The order is kept.
+  const code = files.filter(file => !/\.mdx?$/i.test(file.path)), shared = code.filter(file => category(file.path) === 'other');
+  const room = Math.min(shared.length, Math.max(14, 56 - (code.length - shared.length)));
+  const kept = new Set([...code.filter(file => category(file.path) !== 'other').slice(0, 56 - room), ...shared.slice(0, room)]);
+  const selected = code.filter(file => kept.has(file));
   selected.push(...files.filter(file => /\.mdx?$/i.test(file.path)).slice(0, 4));
   if (!selected.length) return [];
   let remaining = MAX_MODEL_BYTES;
