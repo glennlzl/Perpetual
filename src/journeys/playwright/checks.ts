@@ -52,7 +52,8 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * The first number after a visible label, { value, gap, own }, or null: 1,240, 1240.5, -3 or $12.00.
  * adjacent: only separators may sit between them, so an ancestor's sibling text is never read.
  * The label is read where it stands on its own, not within a longer word (Total, not the end of Subtotal), else where it
- * first occurs, as in scripts that write words without spaces; own says which.
+ * first occurs, as in scripts that write words without spaces; own says which. A digit beside it, as its own number in
+ * Credits10, is no part of a word.
  * A number that another format continues, as 1.240,50, 12,5, 1'240, 1 240 grouped with a no-break space, or 1.2k, is
  * read as NaN rather than as its first part.
  */
@@ -60,7 +61,7 @@ export function numberAfter(text: string, label: string, adjacent = false): Read
   // Digits grouped by a no-break or thin space are one number, which squashing would split into two.
   text = squash(text.replace(/(?<=\d)[   ](?=\d)/gu, "'")); label = squash(label);
   const found = label ? [...text.matchAll(new RegExp(escape(label), 'giu'))] : [];
-  const alone = found.find(item => !/[\p{L}\p{N}]$/u.test(text.slice(0, item.index)) && !/^[\p{L}\p{N}]/u.test(text.slice(item.index + item[0].length)));
+  const alone = found.find(item => !/\p{L}$/u.test(text.slice(0, item.index)) && !/^\p{L}/u.test(text.slice(item.index + item[0].length)));
   const at = alone ?? found[0];
   if (!at) return null;
   const end = at.index + at[0].length;

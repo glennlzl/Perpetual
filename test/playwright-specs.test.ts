@@ -206,6 +206,9 @@ test('the fixture reads numbers after their label and guards navigation and paym
   assert.deepEqual(numberAfter('Subtotal $10.00 Shipping $2.00 Total $12.00','Total'),{value:12,gap:1,own:true});
   assert.deepEqual(numberAfter('Unpaid invoices 7 Paid invoices 3','paid invoices',true),{value:3,gap:1,own:true});
   assert.deepEqual(numberAfter('Subtotal $10.00','Total',true),{value:10,gap:1,own:false});
+  // A digit beside the label, as adjacent inline elements leave it, is a number, never part of the label's word.
+  for(const [text,label,value] of [['Credits10','Credits',10],['Total:12','Total:',12],['Subtotal$10.00Total$12.00','Total',12]] as const)
+    assert.deepEqual(numberAfter(text,label,true),{value,gap:0,own:true},text);
   assert.deepEqual(numberAfter('税込合計 1200','合計'),{value:1200,gap:1,own:false});
   // A number another format continues is no number to compare: its first part is never read.
   for(const text of ['Credits 1.240,50','Credits 12,5','Credits 1\'240','Credits 1’240','Credits 1\u00a0240','Credits 1\u202f240','Credits 1.2k','Credits 3M users','Credits 2B'])assert.ok(Number.isNaN(numberAfter(text,'Credits')?.value),text);
