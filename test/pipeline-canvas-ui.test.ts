@@ -246,3 +246,23 @@ test('a refused Create environment is one canvas error that one Dismiss clears',
   await expect(alert).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });
+
+test('a view that failed for one stage does not stand in for the next stage opened in the same sheet', { timeout: 60000 }, async t => {
+  const beta = withBeta(), betaId = beta.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const pipeline = applyPipelineAction(beta, { action: 'add-stage', afterStageId: betaId, name: 'Gamma' });
+  const view = { cases: [], runs: [], accounts: [], specs: {}, preparation: null, config: { targetUrl: '', scope: '', requirements: '', maxSteps: 60 }, capabilities: null };
+  const { page, open } = await openApp(t, (path, request) => {
+    if (path === '/api/state') return { json: pipelineState(pipeline) };
+    // A malformed view makes Beta's inspector throw while rendering.
+    if (path === '/api/browser') return { json: new URL(request.url()).searchParams.get('stageId') === betaId ? { ...view, cases: null } : view };
+    if (path === '/api/environments') return { json: { environments: [], plan: null } };
+  });
+  await open();
+  const sheet = page.locator('.pipeline-inspector');
+  await page.getByRole('group', { name: 'Beta', exact: true }).getByRole('button', { name: 'Integration tests, 0', exact: true }).click();
+  await expect(sheet.getByText('Could not load this view.', { exact: true })).toBeVisible();
+  // The open sheet covers the canvas's right side, so Gamma's entry is reached from the keyboard.
+  await page.getByRole('group', { name: 'Gamma', exact: true }).getByRole('button', { name: 'Integration tests, 0', exact: true }).press('Enter');
+  await expect(sheet.getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
+  await expect(sheet.getByText('Could not load this view.', { exact: true })).toHaveCount(0);
+});

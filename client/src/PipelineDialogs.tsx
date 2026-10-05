@@ -265,7 +265,8 @@ export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSou
       onEscapeKeyDown={event => { if (locked) event.preventDefault(); }} onInteractOutside={event => event.preventDefault()} onKeyDownCapture={event => releaseTabAtEdges(event, focusOrigin.current)}>
       {dialog.type === 'git-graph' || dialog.type === 'environment' ? <>
       {dialog.type === 'git-graph' ? <GitGraphHeader onClose={onClose} /> : <EnvironmentHeader repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} busy={locked} onClose={onClose} />}
-      <DeferredView key={dialog.type} fallback={failed => <div className="inspector-body min-h-0 flex-1 overflow-y-auto p-4"><ViewLoadState failed={failed} /></div>}>
+      {/* Keyed like the view it holds, so another stage's view never inherits this one's failure. */}
+      <DeferredView key={dialog.type === 'git-graph' ? `git-graph:${scan?.repo?.path}:${scan?.repo?.branch}` : `environment:${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} fallback={failed => <div className="inspector-body min-h-0 flex-1 overflow-y-auto p-4"><ViewLoadState failed={failed} /></div>}>
       {dialog.type === 'git-graph'
         ? <GitGraphPanel key={`${scan?.repo?.path}:${scan?.repo?.branch}`} scan={scan} onClose={onClose} showHeader={false} />
         : <EnvironmentSettings key={`${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} initialTab={dialog.tab} initialError={dialog.error} initialWatch={dialog.watch} initialRunId={dialog.runId} initialCaseId={dialog.caseId} caseRequestKey={dialog.caseRequestKey} onClose={onClose} onBusyChange={setPending} onAppSettings={onAppSettings} busy={busy} showHeader={false} />}
