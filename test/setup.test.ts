@@ -1,15 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { TWINS_NEED_DESKTOP, engineNote, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { INSTALL, TWINS_NEED_DESKTOP, engineNote, isEntryPoint, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
 
 const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+
+test('setup runs when it is the process entry point, named through a link or not, and not when imported', async t => {
+  // A path through a link, such as macOS's /tmp, once made setup exit 0 without running anything.
+  const directory = await mkdtemp(join(tmpdir(), 'perpetual-setup-link-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await symlink(fileURLToPath(new URL('../scripts', import.meta.url)), join(directory, 'scripts'));
+  assert.equal(isEntryPoint(join(directory, 'scripts', 'setup.ts')), true);
+  assert.equal(isEntryPoint(fileURLToPath(new URL('../scripts/setup.ts', import.meta.url))), true);
+  assert.equal(isEntryPoint(fileURLToPath(import.meta.url)), false, 'A script that imports setup runs nothing.');
+  assert.equal(isEntryPoint(join(directory, 'scripts', 'missing.ts')), false);
+});
 
 test('setup admits the Node.js versions package.json engines names, and refuses older ones', async () => {
   const { engines } = JSON.parse(await read('package.json')) as { engines: { node: string } };
   assert.equal(engines.node, '>=24.12');
   for (const version of ['v24.12.0', 'v24.13.1', 'v26.7.0']) assert.ok(nodeSatisfies(version, engines.node), version);
   for (const version of ['v24.11.9', 'v22.18.0', 'v23.6.0']) assert.ok(!nodeSatisfies(version, engines.node), version);
+});
+
+test('setup installs the devDependencies the interface build runs, even where NODE_ENV is production', async () => {
+  const { scripts, devDependencies } = JSON.parse(await read('package.json')) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
+  assert.equal(scripts.build, 'vite build');
+  assert.ok(Object.hasOwn(devDependencies, 'vite'), 'The interface build runs a devDependency.');
+  // A bare npm ci omits devDependencies under NODE_ENV=production, and the build then cannot find vite.
+  assert.deepEqual(INSTALL, { title: 'Install dependencies', command: 'npm', args: ['ci', '--include=dev'] });
 });
 
 test('the setup report names what was installed, each missing tool with its fix, and the command that starts Perpetual', () => {
@@ -41,5 +63,7 @@ test('the Quickstart, the contributor guide and package.json name the one setup 
   for (const part of ['npm run setup', 'docs/onboarding.md', 'Leave this repository unchanged']) assert.ok(prompt.includes(part), part);
   assert.match(readme, /```sh\ngit clone https:\/\/github\.com\/willlzl\/Perpetual\.git && cd Perpetual\nnpm run setup\nnode src\/cli\.ts serve --repo \/path\/to\/your\/app\n```/);
   assert.doesNotMatch(readme, /uv sync|playwright install/, 'The README leaves the install steps to setup.');
+  // serve does not rebuild the interface, so an update reruns setup.
+  assert.match(readme, /`git pull` and then `npm run setup` again/);
   assert.match(await read('CONTRIBUTING.md'), /npm run setup/);
 });

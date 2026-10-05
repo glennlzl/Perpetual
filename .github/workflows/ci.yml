@@ -1,6 +1,7 @@
-# Builds the interface and runs the Node and Python browser runtime tests, and type-checks and tests the repair-agent
-# bench, which imports the product's repair modules. Tests that need Docker skip unless PERPETUAL_DOCKER_TESTS=1 or
-# BENCH_DOCKER=1, so no job starts containers.
+# Builds the interface and runs the Node and Python browser runtime tests, drives the Python worker through the real
+# controller, and type-checks and tests the repair-agent bench, which imports the product's repair modules. Tests that
+# need Docker skip unless PERPETUAL_DOCKER_TESTS=1 (twins), PERPETUAL_REPAIR_DOCKER_TESTS=1 (the repair box) or
+# BENCH_DOCKER=1 (the bench's boxes) is set, so no job starts containers.
 name: CI
 
 on:
@@ -64,6 +65,12 @@ jobs:
         with:
           python-version: "3.12"
           cache-dependency-glob: integrations/browser-use/uv.lock
+      # actions/setup-node v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: uv run --project integrations/browser-use --frozen python -m playwright install --with-deps chromium
       # The owned Chromium keeps its sandbox. The runner image restricts the unprivileged
       # user namespaces that sandbox needs, so lift the restriction on this disposable runner.
@@ -73,11 +80,16 @@ jobs:
             echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
           fi
       - run: npm run test:browser
+      # The real controller drives this worker: discovery end to end against a disposable page and a deterministic
+      # model, then the runtime tests that skip without the worker, which must not skip here.
+      - run: node scripts/browser-agent-contract.ts
+      - name: Runtime tests with the real worker
+        # Naming bash adds pipefail, so a failing test fails the step through tee; the default shell runs without it.
+        shell: bash
+        run: |
+          node --test --test-reporter=tap test/browser-runtime.test.ts | tee "$RUNNER_TEMP/browser-runtime.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/browser-runtime.tap"
       # The Cua bridge's test runs the bridge with this job's locked Python environment, which the Node job lacks.
-      # actions/setup-node v7.0.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
       - run: node --test test/cua-bridge.test.ts
 
   bench:

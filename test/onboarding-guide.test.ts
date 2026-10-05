@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { IN_PROGRESS } from '../src/environments/usage.ts';
 
 const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -25,4 +26,28 @@ test('the onboarding guide names only API routes the controller serves and CLI c
   for (const question of questions) assert.ok(question.options >= 2, question.text);
   assert.equal(guide.match(/\*\*Ask:\*\*/g)?.length, questions.length, 'Every question lists its options.');
   for (const text of ['Connect your GitHub account to Perpetual?', 'Which branch should Perpetual gate?', 'Create the Beta environment?']) assert.ok(questions.some(question => question.text.startsWith(text)), text);
+});
+
+test('the guide waits for every state the controller can settle in, and reads the sign-in code once it exists', async () => {
+  const [guide, github, auth, environments] = await Promise.all([read('docs/onboarding.md'), read('contract/github.ts'), read('src/github-auth.ts'), read('src/environments/manager.ts')]);
+  const union = (source: string, name: string) => [...(new RegExp(`export type ${name} = ([^;]+);`).exec(source)?.[1] ?? '').matchAll(/'([\w-]+)'/g)].map(match => match[1]);
+  const step = (number: number) => guide.slice(guide.indexOf(`## ${number}.`), guide.indexOf(`## ${number + 1}.`));
+  const unnamed = (text: string, states: string[]) => states.filter(state => !text.includes(`\`${state}\``));
+  // A browser sign-in ends in every status but starting and pending, and its start reply carries no code yet.
+  const signIn = union(github, 'SignInStatus');
+  assert.ok(signIn.includes('pending') && signIn.includes('complete'), signIn.join(', '));
+  assert.deepEqual(unnamed(step(3), signIn.filter(status => !['starting', 'pending'].includes(status))), []);
+  assert.match(step(3), /`pending`[^\n]*`userCode`/);
+  // Cancelling ends a sign-in without an error, so the guide relays `error` for exactly the end states that set one.
+  const unset = new Set([...auth.matchAll(/finish\(session, '(\w+)'\)/g)].map(match => match[1]));
+  assert.ok(unset.has('complete'), [...unset].join(', '));
+  const relayed = /\bon ([^;.]+), give them its `error`/i.exec(step(3))?.[1] ?? '';
+  const failed = signIn.filter(status => !['starting', 'pending', 'complete'].includes(status));
+  assert.deepEqual(failed.filter(status => relayed.includes(`\`${status}\``)), failed.filter(status => !unset.has(status)));
+  // A creation settles in every status that is neither in progress nor a deletion's.
+  const settled = union(environments, 'EnvironmentStatus').filter(status => !IN_PROGRESS.includes(status) && status !== 'destroyed');
+  assert.deepEqual(settled, ['ready', 'failed', 'cleanup_failed']);
+  assert.deepEqual(unnamed(step(6), settled), []);
+  // Only an OpenRouter model writes the twin config, drafts and code, so another provider's model does not end step 2.
+  assert.match(step(2), /`capabilities\.provider: "openrouter"`/);
 });

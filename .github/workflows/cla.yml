@@ -16,10 +16,15 @@ permissions:
 
 jobs:
   cla:
+    # The action locks a pull request on any close, so a closed one runs it only once merged. Comments run it only on a
+    # pull request, and only to sign or recheck; any other comment starts no runner.
+    if: >-
+      (github.event_name == 'pull_request_target' && (github.event.action != 'closed' || github.event.pull_request.merged))
+      || (github.event.issue.pull_request && (github.event.comment.body == 'recheck'
+      || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     runs-on: ubuntu-latest
     steps:
       - name: CLA Assistant
-        if: github.event_name == 'pull_request_target' || github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
         # contributor-assistant/github-action v2.6.1, pinned by commit. pull_request_target never checks out PR code here.
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
         env:

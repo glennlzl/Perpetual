@@ -31,7 +31,9 @@ const model=createServer((req,res)=>{void(async()=>{
   // One read-only look first, then the proposals.
   const action=observations===1?{scroll:{down:true}}:{done:{data:{summary:'Fixture workspace observed',cases:Object.entries(plans).map(([name,plan])=>({name,goal:`${name} and verify the result`,steps:plan.steps.map(id=>({id,title:`${name}: ${id}`})),preconditions:[],expectedOutcomes:[`${plan.done} visible`],assertions:[{type:'text-visible',value:plan.done}],evidence:[]}))}}};
   const output={evaluation_previous_goal:'Observed fixture page',memory:'Choose from current page',next_goal:'Propose journeys',action:[action]};
-  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:'fixture',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:JSON.stringify(output)}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+  // The worker takes each decision as exactly one browser_decision tool call (integrations/browser-use/decision_model.py).
+  const call={id:`call-${observations}`,type:'function',function:{name:'browser_decision',arguments:JSON.stringify(output)}};
+  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:'fixture',choices:[{index:0,finish_reason:'tool_calls',message:{role:'assistant',content:null,tool_calls:[call]}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
 })().catch(error=>{res.statusCode=500;res.end(JSON.stringify({error:error.message}));});});
 let app: Controller|undefined,secret='',stageId='',frames=0,frameBytes=0,activity=0;
 async function listen(server: Server){await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;}
