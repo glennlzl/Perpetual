@@ -29,7 +29,8 @@ const SCRIPT_NAMES = ['build', 'test', 'lint', 'typecheck', 'check', 'test:chang
 const MAX_BYTES = 512 * 1024;
 const clean = (value: unknown) => redact(String(value ?? '').replace(/[\r\n\t]/g, ' ')).slice(0, 160);
 const slash = (value: string) => value.split(path.sep).join('/');
-const id = (value: string) => encodeURIComponent(value);
+// A lone surrogate, from a YAML escape or a clip through a pair, would make encodeURIComponent throw.
+const id = (value: string) => encodeURIComponent(value.toWellFormed());
 const evidence = (file: string, summary: string, line?: number): Evidence => ({ file, ...(line ? { line } : {}), summary });
 const lineOf = (text: string, search: string) => text.slice(0, Math.max(0, text.indexOf(search))).split('\n').length;
 const appendEvidence = (sources: Evidence[], item: Evidence) => {

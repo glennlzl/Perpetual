@@ -275,3 +275,14 @@ test('a workflow that mentions Vercel only in a comment, an @vercel/ package or 
   const scan = await scanRepository(root);
   assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => node.evidence.map(item => [item.file, item.line])), [[['.github/workflows/deploy.yml', 8]]]);
 });
+
+test('a workflow job key that is not well-formed text keeps the scan', async t => {
+  const root = await fixture(t, {
+    'package.json': { name: 'app' },
+    // A lone surrogate written as a YAML escape, and a key whose clip falls inside a surrogate pair.
+    '.github/workflows/ci.yml': `name: CI\non: push\njobs:\n  "\\uD83D":\n    runs-on: ubuntu-latest\n  ${'a'.repeat(159)}\u{1F600}:\n    runs-on: ubuntu-latest\n`,
+  });
+  const scan = await scanRepository(root);
+  assert.equal(scan.workflows[0].jobs.length, 2);
+  assert.equal(scan.nodes.filter(node => node.kind === 'job').length, 2);
+});
