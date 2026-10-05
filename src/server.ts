@@ -369,13 +369,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         usage.assertAvailable({key,stageId});
         const scan=await scanRepository(await repairSnapshot(snapshot));
         if(scan.repo.sha!==sha)throw new Error('The pull request checkout is not at its head.');
-        return {key,stageId,scan,repair,controllerOrigin:`http://127.0.0.1:${(server.address() as AddressInfo).port}`};
+        return {key,stageId,scan,repair,controllerOrigin:`http://127.0.0.1:${listeningPort}`};
       }
       requireSourceChangeIdle();
       if(!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch)throw conflict('The active source changed.');
       usage.assertAvailable({key,stageId});
       if(state.scan.repo.sha!==sha)await moveSource(sha);
-      return stageContext(state.scan,stageId,(server.address() as AddressInfo).port);
+      return stageContext(state.scan,stageId,listeningPort);
     },
     // A twin copies a local checkout as it is on disk, so the commit status the gate reports holds only for a clean
     // checkout at the gate's commit; a managed copy is reset to it before every gate.
@@ -466,16 +466,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(!input||typeof input!=='object')throw new Error('Send a JSON object.');
     return input as RequestInput;
   }
+  // The port it listens on, kept: a closing server has no address, and its last replies still check the Host they name.
+  let listeningPort: number | undefined;
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
-    const actualPort=(server.address() as AddressInfo | null)?.port;
+    const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
     const origin=req.headers.origin;
     if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || req.headers['sec-fetch-site']==='cross-site')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
     if(req.method==='POST'&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
-    if(closed)return reply(res,503,{error:'The controller is shutting down.'});
+    // A connection still open at shutdown, such as a polling page's, ends with this reply.
+    if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
       const requestUrl=new URL(req.url!,'http://localhost'),path=requestUrl.pathname;
       if(req.method==='GET'&&!publicFiles[path]&&/^\/(build\/)?assets\//.test(path))await refreshAssets();
@@ -822,7 +825,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     } catch(error) {const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});}
   });
   onCleanup(()=>server.listening?new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())):undefined);
-  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
+  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{listeningPort=(server.address() as AddressInfo).port;resolve();});});
   const timer=setInterval(()=>{
     if(tickTask||closed)return;
     tickTask=(async()=>{
@@ -832,11 +835,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   },1000);timer.unref();
   gates.start();
   repairs.start();
-  return {url:`http://127.0.0.1:${(server.address() as AddressInfo).port}`,server,close(){
+  return {url:`http://127.0.0.1:${listeningPort}`,server,close(){
     if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask,stopped];
-    closing=(async()=>{const results=await Promise.allSettled(draining);await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
+    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    // Once the work the requests waited on drains, the connections their replies left open are closed too.
+    closing=(async()=>{const results=await Promise.allSettled(draining);server.closeIdleConnections();results.push(...await Promise.allSettled([stopped]));await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }

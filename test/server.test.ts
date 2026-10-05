@@ -1,10 +1,28 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { request } from 'node:http';
-import { startServer, type Controller } from '../src/server.ts';
+import { Agent, request } from 'node:http';
+import { startServer, type Controller, type ServerOptions } from '../src/server.ts';
+import { DISCOVERY_VERSION } from '../src/scanner.ts';
+import type { GitHubSession } from '../src/github-source.ts';
+
+const SIGNED_IN = (login: string): GitHubSession => ({ available: true, authenticated: true, account: { login, name: null } });
+const NO_SIGN_IN = { isPending: () => false, dispose() {}, start(): never { throw new Error('unused'); }, status(): never { throw new Error('unused'); }, cancel(): never { throw new Error('unused'); } };
+
+/** A controller over a scanned acme/app checkout with a Beta stage; GitHub is the seams given, so no gh runs. */
+async function scanned(t: TestContext, { github = {}, state = {} }: { github?: ServerOptions['github']; state?: Record<string, unknown> } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-scanned-')), dataDir = join(dir, 'data');
+  await mkdir(dataDir);
+  const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: 'a'.repeat(40), branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
+  const stages = [['source', 'Source'], ['build', 'Build'], ['beta', 'Beta'], ['production', 'Production']].map(([id, name]) => ({ id, name, kind: id === 'beta' ? 'sandbox' : id, collapsed: false }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [dir]: { repoPath: dir, stages } }, ...state } }));
+  const app = await startServer({ port: 0, repo: dir, dataDir, github: { auth: NO_SIGN_IN, ...github } });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${app.url}/api/session`)).json();
+  return { dir, dataDir, app, token };
+}
 
 test('controller state refuses a linked snapshot and releases ownership after refusing it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-linked-state-')), dataDir = join(dir, 'data');
@@ -205,4 +223,34 @@ test('configuration edit links need the branch on GitHub, and the original check
   await git('checkout','-q','--detach');
   assert.deepEqual((await (await fetch(`${app.url}/api/github/connection`)).json()).localCheckout,{path:repo,branch:null});
   assert.equal((await git('rev-parse','HEAD')).stdout,head,'Reading the original checkout never moves it');
+});
+
+test('closing the controller ends a polling page\'s connection with 503, so shutdown finishes', async t => {
+  const asked = Promise.withResolvers<void>(), answer = Promise.withResolvers<void>();
+  const f = await scanned(t, { github: { runs: {
+    async session() { asked.resolve(); await answer.promise; return SIGNED_IN('developer'); },
+    async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; },
+  } } });
+  // One kept-alive connection, as a polling page holds one.
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => agent.destroy());
+  const get = (path: string) => new Promise<{ status: number; connection?: string }>((resolve, reject) => {
+    const req = request(f.app.url + path, { agent }, res => { res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection })); });
+    req.on('error', reject); req.end();
+  });
+  const inFlight = get(`/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`);
+  await asked.promise;
+  let closed = false;
+  const closing = f.app.close().then(() => { closed = true; });
+  answer.resolve();
+  assert.equal((await inFlight).status, 200, 'A request in flight at shutdown still gets its reply.');
+  const polls: { status: number; connection?: string }[] = [];
+  for (const deadline = Date.now() + 10_000; !closed && Date.now() < deadline;) {
+    // A refused connection is the controller gone.
+    polls.push(await get('/api/state').catch(() => ({ status: 0 })));
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  assert.equal(closed, true, `Shutdown finished while the page polled: ${JSON.stringify(polls)}`);
+  await closing;
+  for (const poll of polls) assert.ok(poll.status === 0 || poll.status === 503 && poll.connection === 'close', JSON.stringify(poll));
 });
