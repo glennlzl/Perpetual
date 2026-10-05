@@ -100,6 +100,10 @@ function application({persist=true}:{persist?:boolean}={}){
       // A landing page with no sign-in form, and a sign-in page whose form, shown at once, signs in over its socket.
       if(url.pathname==='/welcome')return send(page('Welcome','<h1>Welcome</h1>'));
       if(url.pathname==='/socket-sign-in')return send(page('Sign in',`<form><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0];form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';location.assign('/live');});</script>`));
+      if(url.pathname==='/socket-identifier')return send(page('Sign in','<form method=post action=/socket-identify><label>Email <input type=email name=email autocomplete=username></label><button>Continue</button></form>'));
+      if(url.pathname==='/socket-identify'&&req.method==='POST')return form.get('email')===account.username?redirect('/socket-password',{'set-cookie':'identified=1; Path=/; HttpOnly'}):redirect('/socket-identifier');
+      // A full navigation creates a new document and socket before the password is entered.
+      if(url.pathname==='/socket-password')return /identified=1/.test(req.headers.cookie||'')?send(page('Sign in',`<form><label>Email <input type=email name=email autocomplete=username value="${account.username}" readonly></label><label>Password <input type=password name=password autocomplete=current-password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0];form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';location.assign('/live');});</script>`)):redirect('/socket-identifier');
       if(!signedIn)return redirect('/login');
       if(url.pathname==='/live')return send(page('Notes',`<p></p><button>Add note</button><script>${SOCKET}socket.addEventListener('message',event=>{if(event.data.startsWith('Notes '))document.querySelector('p').textContent=event.data;});const via=new URLSearchParams(location.search).get('via'),port=via==='worker'?new Worker('/note-worker.js'):via==='shared'?new SharedWorker('/note-worker.js').port:null,added=()=>document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');if(port)port.onmessage=added;const writers={stream:async()=>{const writer=(await new WebSocketStream(SOCKET_URL).opened).writable.getWriter();for(const type of ['hello','add'])await writer.write(JSON.stringify({type}));},lazy:()=>new Promise(resolve=>{const lazy=new WebSocket(SOCKET_URL);lazy.onopen=()=>{for(const type of ['hello','add'])lazy.send(JSON.stringify({type}));resolve();};})};document.querySelector('button').onclick=()=>port?port.postMessage('add'):(writers[via]||(()=>say({type:'add'})))().then(added);</script>`));
       if(url.pathname==='/settings'&&req.method==='POST'){state.credits--;if(persist)state.name=form.get('name')!;return redirect('/settings?saved=1');}
@@ -273,7 +277,7 @@ test('a control run blocks every write from the page but lets the fixture sign i
   assert.deepEqual(steps.map(event=>`${event.stepId}:${event.status}`),['open-settings:running','open-settings:completed','save-name:running','save-name:failed']);
   assert.equal(steps.at(-1)?.evidence,'Reviewed check failed: Text visible “Saved”.');
   const facts=events.at(-1)?.result;
-  assert.deepEqual(facts,{caseId:journey.id,assertions:[],controlRead:false,stopCause:'none'});
+  assert.deepEqual(facts,{caseId:journey.id,assertions:[],controlRead:false,controlReadReason:'blocked-request-failed',controlBlocks:[{kind:'http',method:'POST',url:new URL('/settings',target).href,afterRead:false}],stopCause:'none'});
   assert.equal(journeyResult(journey,facts,journey.steps.map(({id,title},index)=>({id,title,status:['completed','failed','pending'][index]}))).status,'failed');
   // The same code without the block saves the name.
   await runSpec(target,spec());
@@ -356,17 +360,53 @@ test('Add a note', async ({ page, journey }) => {
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','sign-in','hello','hello']]);
 });
 
+test('identifier-first navigation permits password-step socket authentication, then the control catches the blocked note',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=new URL('/welcome',f.app.url).href;
+  const code=`import { test } from 'perpetual';
+test('Add a note', async ({ page, journey }) => {
+  await journey.milestone('open-notes', async () => { await journey.signIn(); });
+  await journey.milestone('add-note', async () => { await page.getByRole('button', { name: 'Add note' }).click(); });
+  await journey.milestone('reload', async () => { await page.reload(); });
+});`;
+  const options={item:live,signInUrl:new URL('/socket-identifier',target).href};
+  const saved=await runSpec(target,code,options);
+  const blocked=await runSpec(target,code,{...options,blockWrites:true});
+  const statuses=(events:RunEvent[])=>events.filter(event=>event.type==='journey-step'&&event.status!=='running').map(event=>`${event.stepId}:${event.status}`);
+  assert.deepEqual(statuses(saved),['open-notes:completed','add-note:completed','reload:completed'],JSON.stringify(saved.at(-1)));
+  assert.deepEqual(statuses(blocked),['open-notes:completed','add-note:completed','reload:failed'],JSON.stringify(blocked.at(-1)));
+  assert.deepEqual([f.app.state.notes,f.app.posts],[1,['POST /socket-identify','POST /socket-identify']]);
+  assert.deepEqual(f.app.received,['hello','sign-in','hello','add','hello','hello','sign-in','hello','hello']);
+});
+
+test('a control run blocks a page socket opened by the business action, with a fresh outcome check',{timeout:60000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const events=await runSpec(target,liveSpec('lazy'),{item:live,blockWrites:true});
+  assert.equal(f.app.state.notes,0,'A newly opened socket must not deliver the click-triggered write.');
+  assert.deepEqual(events.at(-1)?.result,{caseId:journey.id,assertions:[],controlRead:true,stopCause:'none'});
+  assert.equal(events.some(event=>event.type==='journey-step'&&event.stepId==='reload'&&event.status==='failed'),true);
+  assert.equal(f.app.received.includes('add'),false);
+});
+
 test('a control run that a write could get around cannot pass, so its verification is never missed',{timeout:180000},async t=>{
   const f=await setup(t);
   const target=(await f.manager.view(f.context)).config.targetUrl;
   const ends=async(via:string,item:ApprovedCase=live)=>(await runSpec(target,liveSpec(via),{item,blockWrites:true})).at(-1)?.result;
-  // A worker's socket, a shared worker and a page's WebSocketStream bypass every route, and a socket that opens after the
-  // click sends before the journey acts again: the note is kept and every check passes, which proves nothing.
-  for(const via of ['worker','shared','stream','lazy'])assert.deepEqual(await ends(via),{caseId:journey.id,assertions:[],stopCause:'action',error:'The control run could not block everything the pages sent.'},via);
-  assert.equal(f.app.state.notes,4);
+  // A worker's socket, a shared worker and a page's WebSocketStream bypass every route: the note is kept and
+  // every check passes, which proves nothing. A late-opening page socket is intercepted in the test above.
+  for(const via of ['worker','shared','stream'])assert.deepEqual(await ends(via),{caseId:journey.id,assertions:[],stopCause:'action',error:via==='shared'?'The control run cannot block shared-worker communication.':'The control run could not block everything the pages sent.'},via);
+  assert.equal(f.app.state.notes,3);
   // The page's own socket signs in, and checks that cannot tell pass: the sign-in it forwarded is no write around the block.
   assert.deepEqual(await ends('page',{...live,steps:live.steps.map((step,index)=>index?{...step,checks:[]}:step)}),{caseId:journey.id,assertions:[],stopCause:'none'});
-  assert.deepEqual([f.app.state.notes,f.app.received.filter(type=>type!=='hello')],[4,['sign-in','add','sign-in','add','sign-in','add','sign-in','add','sign-in']]);
+  assert.deepEqual([f.app.state.notes,f.app.received.filter(type=>type!=='hello')],[3,['sign-in','add','sign-in','add','sign-in','add','sign-in']]);
+});
+
+test('a failed reviewed check retains the shared-worker control refusal',{timeout:60000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const item={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[{type:'text-visible' as const,value:'Name {run}'}]}:step)};
+  const events=await runSpec(target,liveSpec('shared'),{item,blockWrites:true});
+  assert.equal(events.some(event=>event.type==='journey-step'&&event.stepId===item.steps[2].id&&event.status==='failed'),true);
+  assert.deepEqual(events.at(-1)?.result,{caseId:journey.id,assertions:[],controlRead:false,controlBlocker:'shared-worker',stopCause:'action',error:'The control run cannot block shared-worker communication.'});
 });
 
 test('a reviewed check the application does not satisfy fails the journey',{timeout:120000},async t=>{

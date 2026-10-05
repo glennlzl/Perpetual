@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {hasJourneyChecks} from '../business/browser-cases.ts';
 import {caseHash,specHash,validateJourneySpec} from '../journeys/playwright/specs.ts';
 import {CHECK_VERSION} from '../journeys/playwright/checks.ts';
+import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
 import type {BrowserCase} from '../business/browser-cases.ts';
 import type {JourneyResult} from './results.ts';
 
@@ -106,7 +107,7 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
     if(passes<3)return {status:'cancelled',passes,control:null};
     if(!result)return failed();
     if(result.status==='passed')return {status:'failed',passes,control:'missed',error:MISSED};
-    if(noticed(run,caseId,result)&&result.controlRead!==true)return {status:'failed',passes,control:'missed',error:UNREAD};
+    if(noticed(run,caseId,result)&&result.controlRead!==true)return {status:'failed',passes,control:'missed',error:controlBlockerText(result.controlBlocker)||controlReadReasonText(result.controlReadReason)||UNREAD};
     return noticed(run,caseId,result)?{status:'passed',passes,control:'caught'}:failed(result.error?`${UNJUDGED} ${result.error}`:UNJUDGED);
   }
   return error?{status:'failed',passes,control:null,error}:{status:'cancelled',passes,control:null};
@@ -230,7 +231,8 @@ export function createJourneyCode(storage:Persistence){
       // Only terminal summaries scrubbed with the account of that run may reach a later model.
       // A current account cannot remove a former account's username from legacy raw diagnostics.
       const latest=failures.find(run=>evidence!.runIds.includes(run.id)&&run.verification?.hash===draft.hash);
-      const error=own(latest?.codeFeedback,caseId);
+      const diagnosed=current.runs.find(run=>evidence!.runIds.includes(run.id)&&run.verification?.control&&run.verification.hash===draft.hash&&run.verification.caseHash===draft.caseHash&&run.verification.checkVersion===CHECK_VERSION&&policyMatches(current,run.verification)&&own(run.specHashes,caseId)===draft.hash)?.results?.find(result=>result.caseId===caseId&&result.controlRead===false);
+      const error=controlReadReasonText(diagnosed?.controlReadReason)||own(latest?.codeFeedback,caseId);
       if(!error)return undefined;
       // A later replacement must not forget an earlier locator or navigation failure of this same contract.
       // Retain diagnostics only, never historical code or input literals, and never expected control failures.

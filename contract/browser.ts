@@ -22,6 +22,8 @@ export type CaseSummary = Pick<BrowserCase, 'id' | 'name' | 'steps' | 'isolation
 /** null explicitly reviews a bodyless POST with no Content-Type; a string reviews exact JSON bytes. */
 export interface ReadOnlyRequest { url: string; body: string | null }
 export interface BlockedRequest { method: string; url: string }
+/** Diagnostic identity only: never a request body, query, header or socket payload. */
+export type ControlBlockedTransport = ({ kind: 'http'; method: string; url: string } | { kind: 'socket'; transport: 'websocket' }) & { afterRead: boolean };
 export interface BrowserConfig {
   targetUrl: string; signInUrl: string; scope: string; requirements: string; maxSteps: number;
   journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[]; readOnlyRequests?: ReadOnlyRequest[];
@@ -35,7 +37,9 @@ export type BlockerKind = 'account' | 'fixture' | 'integration' | 'permission' |
 export interface Blocker { stepId?: string; kind: BlockerKind; evidence: string }
 export type AssertionResult = FinalAssertion & { passed: boolean; resolved?: string; reached?: false };
 export type JourneyVerdict = 'passed' | 'failed' | 'blocked' | 'needs_review';
-export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
+export type ControlBlocker = 'shared-worker' | 'unguarded-transport';
+export type ControlReadReason = 'page-unavailable' | 'no-blocked-change' | 'no-fresh-document' | 'blocked-after-read' | 'blocked-request-failed' | 'read-failed' | 'read-incomplete' | 'document-not-committed' | 'document-replaced' | 'url-changed' | 'check-unreadable' | 'baseline-not-before-change' | 'check-not-run-owned';
+export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[]; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
 export type RunStatus = JourneyVerdict | 'cancelled' | 'completed';
 export type ConcurrencyLimit = 'account' | 'shared-data' | null;
 export type MilestoneCheckResult = MilestoneCheck & { passed: boolean; observed?: number; resolved?: string; error?: string; provenance?: 'independent' };

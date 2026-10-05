@@ -522,6 +522,18 @@ test('read-only POST selection keeps an exact reviewed request and rejects unsaf
   assert.deepEqual(((await reopened.view(f.context)).config as unknown as {readOnlyRequests:unknown}).readOnlyRequests,readOnlyRequests);
 });
 
+test('up to 32 distinct reviewed POST reads survive reopening and an oversized save leaves them intact', async t => {
+  const f=await fixture(t), targetUrl='http://localhost:3000/';
+  const rules=Array.from({length:33},(_,index)=>({url:'http://localhost:3000/rpc',body:JSON.stringify({operation:'readWorkspace',workspaceId:index})}));
+  const save=(readOnlyRequests:unknown)=>f.manager.saveConfig(f.context,{targetUrl,readOnlyRequests});
+  assert.deepEqual((await save(rules.slice(0,11))).config.readOnlyRequests,rules.slice(0,11));
+  assert.deepEqual((await save(rules.slice(0,32))).config.readOnlyRequests,rules.slice(0,32));
+  await assert.rejects(save(rules),/at most 32 read-only POST requests/);
+  assert.deepEqual((await f.manager.view(f.context)).config.readOnlyRequests,rules.slice(0,32));
+  await f.manager.close();
+  assert.deepEqual((await (await f.reopen()).view(f.context)).config.readOnlyRequests,rules.slice(0,32));
+});
+
 test('failed discovery retains bounded blocked-request evidence and an actionable explanation without request secrets', async t => {
   const f=await fixture(t), {run}=await f.manager.discover(f.context);
   await until(()=>f.workers.length===1);

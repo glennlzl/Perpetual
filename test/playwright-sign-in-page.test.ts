@@ -18,7 +18,7 @@ import type {BrowserCase} from '../src/business/browser-cases.ts';
 // elsewhere.
 const account={username:'landing-tester@example.com',password:'pw-landing-5190'};
 const SIGN_IN_FORM='<form method=post action=/login><label>Email <input type=email name=email></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>';
-function application({landing='<h1>Plan your week</h1><a href="/login">Sign in</a>',elsewhere=''}:{landing?:string;elsewhere?:string}={}){
+function application({landing='<h1>Plan your week</h1><a href="/login">Sign in</a>',elsewhere='',identifierFirst=false,identifierRedirect='',passwordIdentity=account.username,newPassword=false}:{landing?:string;elsewhere?:string;identifierFirst?:boolean;identifierRedirect?:string;passwordIdentity?:string;newPassword?:boolean}={}){
   const posts:string[]=[];
   const server=http.createServer((req,res)=>{
     const url=new URL(req.url!,'http://app'),signedIn=/session=1/.test(req.headers.cookie||'');
@@ -29,7 +29,10 @@ function application({landing='<h1>Plan your week</h1><a href="/login">Sign in</
       if(req.method!=='GET')posts.push(`${req.method} ${url.pathname}`);
       if(url.pathname==='/')return send(landing);
       if(url.pathname==='/elsewhere'&&elsewhere)return redirect(elsewhere);
+      if(identifierFirst&&url.pathname==='/identify'&&req.method==='POST')return new URLSearchParams(body).get('email')===account.username?redirect(identifierRedirect||'/password',{'set-cookie':'identified=1; Path=/; HttpOnly'}):redirect('/login');
+      if(identifierFirst&&url.pathname==='/password')return /identified=1/.test(req.headers.cookie||'')?send(`<form method=post action=/login><label>Email <input type=email name=email value="${passwordIdentity}" readonly></label><label>Password <input type=password name=password autocomplete=${newPassword?'new-password':'current-password'}></label><button type=submit>Sign in</button></form>`):redirect('/login');
       if(url.pathname==='/login'&&req.method==='POST'){const form=new URLSearchParams(body);return form.get('email')===account.username&&form.get('password')===account.password?redirect('/dashboard',{'set-cookie':'session=1; Path=/'}):redirect('/login');}
+      if(identifierFirst&&url.pathname==='/login')return send('<form method=post action=/identify><label>Email <input type=email name=email autocomplete=username></label><button type=submit>Continue</button></form>');
       if(url.pathname==='/login')return send(SIGN_IN_FORM);
       if(url.pathname==='/dashboard/save'&&req.method==='POST')return redirect(signedIn?'/dashboard?saved=1':'/login');
       if(url.pathname==='/dashboard')return signedIn?send(`<h1>Dashboard</h1><p>Your week is planned</p>${url.searchParams.has('saved')?'<p>Week saved</p>':''}<form method=post action=/dashboard/save><button>Save the week</button></form>`):redirect('/login');
@@ -178,6 +181,48 @@ test('a control run lets the sign-in on the sign-in page through and blocks ever
   // Without write blocking, the same code saves the week.
   assert.deepEqual(milestones(saved),[['sign-in','completed'],['save','completed']]);
   assert.deepEqual(plain.posts,['POST /login','POST /dashboard/save']);
+});
+
+test('identifier-first sign-in reaches the reviewed outcome, while a control still blocks the later business write',{timeout:120000},async t=>{
+  const [control,plain]=await Promise.all([served(t,{identifierFirst:true}),served(t,{identifierFirst:true})]);
+  const [blocked,saved]=await Promise.all([
+    runSpec(control.url,{signInUrl:`${control.url}login`,blockWrites:true,item:saving,code:saveSpec}),
+    runSpec(plain.url,{signInUrl:`${plain.url}login`,item:saving,code:saveSpec}),
+  ]);
+  assert.deepEqual(milestones(saved),[['sign-in','completed'],['save','completed']],JSON.stringify(resultOf(saved)));
+  assert.deepEqual(milestones(blocked),[['sign-in','completed'],['save','failed']],JSON.stringify(resultOf(blocked)));
+  assert.deepEqual(plain.posts,['POST /identify','POST /login','POST /dashboard/save']);
+  assert.deepEqual(control.posts,['POST /identify','POST /login'],'The control permits only the two sign-in steps.');
+  assert.ok(secretFree(saved)&&secretFree(blocked),'Neither sign-in step emits the account values.');
+});
+
+test('identifier-first sign-in refuses a changed identity or a new-password step without submitting the password',{timeout:120000},async t=>{
+  const [changed,signup]=await Promise.all([served(t,{identifierFirst:true,passwordIdentity:'another-tester@example.com'}),served(t,{identifierFirst:true,newPassword:true})]);
+  const [mismatch,newPassword]=await Promise.all([runSpec(changed.url,`${changed.url}login`),runSpec(signup.url,`${signup.url}login`)]);
+  assert.equal(resultOf(mismatch).error,'Action failed at “Sign in”: The password step is for a different test account.');
+  assert.equal(resultOf(newPassword).error,'Action failed at “Sign in”: The password step shows no matching sign-in form. Check the sign-in flow.');
+  assert.deepEqual([changed.posts,signup.posts],[['POST /identify'],['POST /identify']]);
+  assert.ok(secretFree(mismatch)&&secretFree(newPassword));
+});
+
+test('identifier-first sign-in never enters the password on a second origin, even one approved for navigation',{timeout:120000},async t=>{
+  const other=await served(t,{landing:`<form><label>Email <input type=email value="${account.username}" readonly></label><label>Password <input type=password autocomplete=current-password></label><button>Sign in</button></form>`});
+  const app=await served(t,{identifierFirst:true,identifierRedirect:other.url});
+  const events=await runSpec(app.url,{signInUrl:`${app.url}login`,origins:[new URL(app.url).origin,new URL(other.url).origin]});
+  assert.equal(resultOf(events).error,'Action failed at “Sign in”: The sign-in form is not on the application origin.');
+  assert.deepEqual([app.posts,other.posts],[['POST /identify'],[]]);
+  assert.ok(secretFree(events));
+});
+
+test('identifier-only forms need a configured sign-in page and an unambiguous identifier and submit',{timeout:120000},async t=>{
+  const identifier='<form method=post action=/identify><label>Email <input type=email autocomplete=username name=email></label><button>Continue</button></form>';
+  const forms=[identifier.replace('</label>','</label><label>Other email <input type=email name=other></label>'),identifier.replace('</form>','<button>Use another account</button></form>'),identifier+identifier];
+  const [unset,...ambiguous]=await Promise.all([served(t,{landing:identifier}),...forms.map(landing=>served(t,{landing}))]);
+  const [unconfigured,...refused]=await Promise.all([runSpec(unset.url),...ambiguous.map(app=>runSpec(app.url,app.url))]);
+  assert.equal(resultOf(unconfigured).error,'Action failed at “Sign in”: The application URL shows no sign-in form. Set the sign-in page.');
+  for(const events of refused)assert.equal(resultOf(events).error,'Action failed at “Sign in”: The sign-in page shows no sign-in form. Check the sign-in page.');
+  assert.ok([unconfigured,...refused].every(secretFree));
+  assert.deepEqual([unset,...ambiguous].map(app=>app.posts),[[],[],[],[]],'No account is submitted to an unconfigured or ambiguous form.');
 });
 
 test('the journey runtime refuses a sign-in page off its application URL’s origin',()=>{

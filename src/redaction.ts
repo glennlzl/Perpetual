@@ -51,8 +51,12 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
  * and user info in any URL. Ordinary text, however long, comes back unchanged.
  */
-export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?: boolean } = {}): string {
-  return (decodeUri ? decodedUri(String(input)) : String(input))
+export function redact(input: unknown = '', { decodeUri = false, secrets = [] }: { decodeUri?: boolean; secrets?: Iterable<unknown> } = {}): string {
+  // A shaped substring may be only part of a supplied credential. Hide that whole value first,
+  // after optional URI decoding, so shape replacements cannot leave its prefix or suffix behind.
+  const values = [...secrets], known = hide(decodeUri ? [...values, ...values.filter((value): value is string => typeof value === 'string').map(decodedUri)] : values);
+  const text = known(input);
+  return (decodeUri ? known(decodedUri(text)) : text)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block))
     .replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`)
@@ -63,6 +67,12 @@ export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?:
     .replace(QUERY_VALUE, `$1${REDACTED}`)
     .replace(TOKEN_SHAPE, REDACTED)
     .replace(USER_INFO, `$1${REDACTED}@`);
+}
+
+/** Diagnostic URI text is opaque if bounded decoding leaves escapes another boundary could reveal. */
+export function redactUri(input: unknown, secrets: Iterable<unknown> = []): string {
+  const text = redact(input, { decodeUri: true, secrets });
+  return /%[a-f\d]{2}/i.test(text) ? REDACTED : text;
 }
 
 /**

@@ -1,6 +1,7 @@
 // Check semantics shared by the Playwright journey fixture and its reporter; discovery proposes checks in these terms
 // (integrations/browser-use/journey_steps.py validates them).
 import type { BrowserCase, CompareNumberCheck, JourneyStep, MilestoneCheck, TextCheck } from '../../business/browser-cases.ts';
+import type { ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
 
 export type { JourneyStep, TextCheck };
 /** A reviewed milestone check or final assertion, as src/business/browser-cases.ts validates it. */
@@ -26,7 +27,7 @@ export function approvedCase(value: unknown): ApprovedCase {
 export type FixtureEvent =
   | { type: 'journey-stop'; error: string }
   | { type: 'action-feedback'; feedback: string }
-  | { type: 'control-read'; eligible: boolean }
+  | { type: 'control-read'; eligible: boolean; reason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[] }
   | { type: 'frame'; data: string; timestamp: number }
   | { type: 'journey-step'; stepId: string; status: 'running' | 'completed' | 'failed'; evidence?: string; checks?: EvaluatedCheck[] }
   | { type: 'assertions'; assertions: { type: TextCheck['type']; value: string; passed: boolean; resolved?: string }[] };
