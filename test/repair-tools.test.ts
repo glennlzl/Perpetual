@@ -85,20 +85,33 @@ test('edit and write explain the redaction marker, and never put it into a file 
   assert.equal((await f.call('write', { path: 'mask.js', text: "module.exports = value => value ? '[REDACTED]' : '';\n" })).ok, true, 'A marker the file already holds may stay.');
 });
 
-test('run returns the exit code, withholds incomplete output and stops at its time limit', async t => {
+test('run returns the exit code, the end of a long output from a line start, and stops at its time limit', async t => {
   const f = await tools(t);
   const failing = await f.call('run', { command: 'node check.js' });
-  assert.deepEqual([failing.exitCode, failing.timedOut], [1, false]);
+  assert.deepEqual([failing.exitCode, failing.timedOut, failing.truncated], [1, false, false]);
   assert.match(String(failing.output), /add\(2, 3\) returned -1, expected 5/);
-  const long = await f.call('run', { command: 'for i in $(seq 1 20000); do echo "line $i"; done' });
-  assert.equal(long.truncated, true);
-  assert.equal(long.output, undefined);
-  assert.equal(long.exitCode, 0);
-  assert.match(long.error ?? '', /observation unavailable/i);
+  // About 200 KB: within the capture, so its last 30 KB are returned whole lines first, marked truncated.
+  const long = await f.call('run', { command: 'for i in $(seq 1 20000); do echo "line $i"; done; exit 4' });
+  const output = String(long.output);
+  assert.deepEqual([long.ok, long.exitCode, long.truncated], [true, 4, true]);
+  assert.ok(output.length <= 30_000 && output.length > 29_000, String(output.length));
+  assert.match(output, /^line \d+\n/);
+  assert.ok(output.endsWith('line 19999\nline 20000\n'));
   const slow = await f.call('run', { command: 'sleep 5', timeoutSeconds: 1 });
   assert.equal(slow.timedOut, true);
   assert.match((await f.call('run', { command: 'true', timeoutSeconds: 901 })).error ?? '', /at most|from 1 to 900/);
-  assert.deepEqual(f.events.runs.map(([, code]) => code).slice(0, 2), [1, 0]);
+  assert.deepEqual(f.events.runs.map(([, code]) => code).slice(0, 2), [1, 4]);
+});
+
+test('run redacts its whole capture before it returns the end, so a credential begun before the end stays hidden', async t => {
+  // 3000 lines of a key's body: over 30 KB even as markers, so its BEGIN line lies before the end the reply returns.
+  const f = await tools(t), body = Array.from({ length: 3000 }, (_, index) => `${String(index).padStart(4, '0')}${'QUJD'.repeat(15)}`).join('\n');
+  await writeFile(join(f.root, 'key.txt'), `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\ndone\n`);
+  const result = await f.call('run', { command: 'cat key.txt' });
+  const output = String(result.output);
+  assert.deepEqual([result.ok, result.exitCode, result.truncated], [true, 0, true]);
+  assert.ok(output.endsWith('[REDACTED]\n[REDACTED]\ndone\n'));
+  assert.ok(!output.includes('QUJD'), 'The key\'s body after the returned end\'s start is hidden.');
 });
 
 test('read redacts complete credentials before line numbering and clipping without changing the file', async t => {
@@ -230,15 +243,19 @@ test('tool replies still hide token shapes, key blocks, quoted literals and URL 
 test('a small selected line does not bypass the complete-file observation limit', async t => {
   const f = await tools(t);
   await writeFile(join(f.root, 'large.txt'), `needle\n${'x\n'.repeat(140_000)}`);
-  for (const [name, input] of [
-    ['read', { path: 'large.txt', offset: 1, limit: 1 }],
-    ['grep', { pattern: '^needle$', include: 'large.txt' }],
-  ] as const) await t.test(name, async () => {
-    const result = await f.call(name, input);
-    assert.equal(result.ok, false);
-    assert.equal(result.truncated, true);
-    assert.match(result.error ?? '', /observation unavailable/i);
-  });
+  const read = await f.call('read', { path: 'large.txt', offset: 1, limit: 1 });
+  assert.deepEqual([read.ok, read.truncated], [false, true]);
+  assert.match(read.error ?? '', /observation unavailable/i);
+  const grep = await f.call('grep', { pattern: '^needle$', include: 'large.txt' });
+  assert.deepEqual([grep.ok, grep.matches, grep.skipped], [true, [], ['large.txt is over 256 KB.']], 'grep names the file it cannot show, and shows none of it.');
+});
+
+test('grep names a matched file it cannot show completely and still answers from the others', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'package-lock.json'), `{\n  "typescript": "5.6.3",\n${'  "padding": "x",\n'.repeat(20_000)}}\n`);
+  await writeFile(join(f.root, 'package.json'), '{ "devDependencies": { "typescript": "5.6.3" } }\n');
+  const result = await f.call('grep', { pattern: 'typescript' });
+  assert.deepEqual([result.ok, result.matches, result.skipped], [true, ['package.json:1:{ "devDependencies": { "typescript": "5.6.3" } }'], ['package-lock.json is over 256 KB.']]);
 });
 
 test('grep refuses a file changed after its native match was observed', async t => {

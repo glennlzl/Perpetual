@@ -1,6 +1,6 @@
 // The repair agent's tools, its only permissions. Each runs inside the repair box: list, read and grep within the
 // workspace with capped output and a `truncated` flag; edit and write within the workspace, never .git; run a shell
-// command with a time limit, returning its exit code and bounded output; and done. A path is checked twice: as
+// command with a time limit, returning its exit code and the end of its output; and done. A path is checked twice: as
 // text on the host (relative, no `..`, no .git) and by its real path in the box, so a link cannot lead out.
 import { posix } from 'node:path';
 import { jsonSchema, tool, type JSONSchema7 } from 'ai';
@@ -9,7 +9,7 @@ import { REDACTED, redact } from '../redaction.ts';
 
 export const LIMITS = {
   path: 1024, entries: 500, lines: 2000, readBytes: 64 * 1024, lineChars: 2000, matches: 100, matchChars: 300, pattern: 500, include: 200,
-  editBytes: 1024 * 1024, command: 20_000, output: 30_000, searchSeconds: 30, runSeconds: 900, defaultRunSeconds: 300,
+  editBytes: 1024 * 1024, command: 20_000, output: 30_000, capture: 1024 * 1024, searchSeconds: 30, runSeconds: 900, defaultRunSeconds: 300,
 };
 type Refusal = { ok: false; error: string };
 type Result = { ok: true; [key: string]: unknown } | Refusal;
@@ -28,6 +28,12 @@ const markers = (text: string) => text.split(REDACTED).length - 1;
 const MARKED = `${REDACTED} stands for text the tools hide, such as a literal set to a name like token or password, and is never code`;
 const oneLine = (value: unknown, limit = 200) => clip(scrub(value).replace(/\s+/g, ' ').trim(), limit);
 const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
+/** The last limit characters of text from a line start, or the end of its last line when that alone is longer. */
+function lastLines(text: string, limit: number) {
+  if (text.length <= limit) return text;
+  const tail = text.slice(-limit), start = text[text.length - limit - 1] === '\n' ? 0 : tail.indexOf('\n') + 1;
+  return start > 0 && start < tail.length ? tail.slice(start) : tail;
+}
 /** Model-facing text only; internal paths, file edits and change validation keep their original bytes. */
 function modelResult(result: Result): Result {
   const strings = (value: unknown): unknown => typeof value === 'string' ? scrub(value)
@@ -137,7 +143,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       count += 1;
       cursor = end + 1;
     }
-    const files = new Map<string, FileObservation>(), matches: string[] = [];
+    const files = new Map<string, FileObservation>(), matches: string[] = [], skipped: string[] = [];
     for (const match of selected) {
       if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
       let file = files.get(match.file);
@@ -146,12 +152,15 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
         if (located.error !== undefined) return refused(located.error);
         file = await observeFile(located);
         files.set(match.file, file);
+        // A matched file the tools cannot show completely, such as a large or binary one, is named and its matches left
+        // out; the rest of the search still answers.
+        if (!file.ok) skipped.push('truncated' in file && file.truncated ? `${located.name} is over ${4 * LIMITS.readBytes / 1024} KB.` : file.error);
       }
-      if (!file.ok) return file;
+      if (!file.ok) continue;
       if (file.raw[match.line - 1] !== match.text) return refused(`${shown(match.file)} changed after the search; search again.`);
       matches.push(`${shown(match.file)}:${clip(`${match.line}:${file.redacted[match.line - 1]}`.trim(), LIMITS.matchChars)}`);
     }
-    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches };
+    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches, ...(skipped.length ? { skipped } : {}) };
   }
   async function write(found: { full: string; name: string }, text: string) {
     const result = await exec(['sh', '-c', '[ -d "$1" ] && exit 3; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', found.full], { stdin: text });
@@ -194,10 +203,13 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const command = field(input, 'command'), seconds = field(input, 'timeoutSeconds') ?? LIMITS.defaultRunSeconds;
     if (typeof command !== 'string' || !command.trim() || command.length > LIMITS.command) return refused(`Pass a shell command of at most ${LIMITS.command} characters.`);
     if (!whole(seconds) || seconds > LIMITS.runSeconds) return refused(`timeoutSeconds is a whole number from 1 to ${LIMITS.runSeconds}.`);
-    const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.output, keep: 'tail' });
+    const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.capture, keep: 'tail' });
     events.run?.(command, result.exitCode);
+    // A capture the box cut short lost its start, which may hold a credential's context, so it is withheld. A complete
+    // one is redacted whole, then its end returned, so a credential begun before that end is still hidden.
     if (result.truncated) return unavailable(result);
-    return { ok: true, exitCode: result.exitCode, output: scrub(result.stdout + result.stderr), timedOut: result.timedOut, truncated: result.truncated };
+    const output = scrub(result.stdout + result.stderr), tail = lastLines(output, LIMITS.output);
+    return { ok: true, exitCode: result.exitCode, output: tail, timedOut: result.timedOut, truncated: tail.length < output.length };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.
   const guarded = (name: string, work: (input: unknown) => Promise<Result>) => async (input: unknown) => {
@@ -214,7 +226,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       execute: guarded('read', read),
     }),
     grep: tool({
-      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). Pass a narrow path and an include glob.`,
+      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). A matched file it cannot show, such as a larger or binary one, is named in skipped. Pass a narrow path and an include glob.`,
       inputSchema: schema({ pattern: { type: 'string', maxLength: LIMITS.pattern }, path: PATH, include: { type: 'string', description: 'A file name glob, such as *.ts.' } }, ['pattern']),
       execute: guarded('grep', grep),
     }),
@@ -225,7 +237,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     }),
     write: tool({ description: 'Writes a whole file of /workspace, creating its folders.', inputSchema: schema({ path: PATH, text: { type: 'string' } }, ['path', 'text']), execute: guarded('write', create) }),
     run: tool({
-      description: `Runs a bash command in /workspace and returns its exit code and up to ${LIMITS.output / 1000} KB of redacted output. Incomplete captures are withheld; narrow the command to observe less output. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
+      description: `Runs a bash command in /workspace and returns its exit code and the last ${LIMITS.output / 1000} KB of its redacted output, from a line start, with truncated set when it printed more. Output over ${LIMITS.capture / 1024 / 1024} MB is withheld; narrow the command. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
       inputSchema: schema({ command: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: LIMITS.runSeconds } }, ['command']),
       execute: guarded('run', run),
     }),
