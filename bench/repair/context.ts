@@ -35,22 +35,39 @@ export async function buildContext({ c, snapshot, sha, job, capture }: { c: Pick
   };
 }
 
+/** Why a capture is not the case's stated failure: CI must fail first at meta.failingStep, its log matching meta.expect.logRegex. */
+export function captureProblems(c: Pick<Case, 'meta'>, capture: readonly StepRun[]) {
+  const failed = capture.find(run => run.exit !== 0);
+  if (!failed) return ['CI passed before any change.'];
+  return [
+    ...(failed.name === c.meta.failingStep ? [] : [`CI failed at ${failed.name}, not ${c.meta.failingStep}.`]),
+    ...(new RegExp(c.meta.expect.logRegex).test(failed.output) ? [] : [`The failed log does not match ${c.meta.expect.logRegex}.`]),
+  ];
+}
+
 /**
  * Materializes the case under directory/snapshot and captures its failure in a throwaway box, once: a saved capture
- * (directory/capture.json) is reused, so a resumed run prompts exactly as before. Files written are redacted and scrubbed.
+ * (directory/capture.json) is reused, so a resumed run prompts exactly as before. A strict capture, a run's, must be the
+ * case's stated failure: one that is not, such as a registry timeout, is captured again once, then the case fails, and
+ * such a capture is never saved or reused. Files written are redacted and scrubbed.
  */
-export async function prepareCase(c: Case, { directory, root, signal, onScope, scrub = async text => text }: {
-  directory: string; root: string; signal?: AbortSignal; onScope?(scope: string): void | Promise<void>; scrub?(text: string): Promise<string>;
+export async function prepareCase(c: Case, { directory, root, signal, onScope, scrub = async text => text, strict = false }: {
+  directory: string; root: string; signal?: AbortSignal; onScope?(scope: string): void | Promise<void>; scrub?(text: string): Promise<string>; strict?: boolean;
 }): Promise<CaseContext> {
   const snapshot = join(directory, 'snapshot');
   await mkdir(directory, { recursive: true });
   const sha = await lstat(join(snapshot, '.git')).then(() => head(snapshot), () => materialize(c, snapshot));
   const job = workflowJob(await readFile(join(snapshot, WORKFLOW.path), 'utf8'));
   const saved = await readFile(join(directory, 'capture.json'), 'utf8').then(text => JSON.parse(text) as unknown, () => null);
-  let capture = Array.isArray(saved) ? saved as StepRun[] : null;
-  if (!capture) {
+  let capture = Array.isArray(saved) && (!strict || !captureProblems(c, saved as StepRun[]).length) ? saved as StepRun[] : null;
+  for (let tries = 0; !capture; tries += 1) {
     const box = await createBenchBox({ image: await imageFor(snapshot), source: snapshot, root, signal, onScope });
-    try { capture = await runSteps(box, job.steps, { signal }); } finally { await box.remove(); }
+    let runs: StepRun[];
+    try { runs = await runSteps(box, job.steps, { signal }); } finally { await box.remove(); }
+    const problems = strict ? captureProblems(c, runs) : [];
+    if (problems.length && tries) throw new Error(`The captured failure is not the case's: ${problems.join(' ')}`);
+    if (problems.length) continue;
+    capture = runs;
     await writeFile(join(directory, 'capture.json'), await safeJson(capture, scrub, 2));
   }
   const context = await buildContext({ c, snapshot, sha, job, capture });

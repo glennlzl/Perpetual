@@ -116,7 +116,7 @@ For each (framework, model, case, seed), in an interleaved order (seed → case 
 
 1. **Case preparation**, once per run.
    - The snapshot is materialized as one commit, with a fixed identity and date, on `perpetual/repair/<short>`, as the product's host copy is.
-   - Its CI runs once in a throwaway box to capture the real failure.
+   - Its CI runs once in a throwaway box to capture the real failure. The capture must be the case's stated one, failing first at `meta.failingStep` with a log matching `expect.logRegex`, as the self-check requires: one that is not, such as a registry timeout or a CI that passes, is captured again once, then the case is left out of the run before any paid attempt, and such a capture is never kept for a resume.
    - That failure goes through the product's `getGitHubFailure` (fed by a fake `gh`), then `describeFailures`, `chooseImage`, `repositoryDigest`, and `attemptPrompt` (attempt 1 of 4, no feedback).
    - `cases/<case>/prompt.md` and `failure.json` are kept for audit.
 2. **Attempt.**

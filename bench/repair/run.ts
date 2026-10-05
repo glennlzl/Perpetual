@@ -146,19 +146,27 @@ export async function runBench(options: RunOptions) {
   try {
     const models: Map<string, ModelInfo> = await modelInfo(options.models, prices ?? upstream);
     const contexts = new Map<string, { c: Case; context: CaseContext }>();
+    // A case whose captured failure is not its stated one is left out before any paid attempt.
     await pool(cases, options.concurrency, async c => {
-      const context = await prepareCase(c, { directory: join(paths.cases, c.name), root: paths.boxRoot, signal, onScope, scrub: gateway.scrub });
+      const context = await prepareCase(c, { directory: join(paths.cases, c.name), root: paths.boxRoot, signal, onScope, scrub: gateway.scrub, strict: true }).catch((error: unknown) => {
+        if (signal.aborted) throw error;
+        log(`left out ${c.name}: ${String((error as Error)?.message ?? error).slice(0, 500)}`);
+        return null;
+      });
+      if (!context) return;
       contexts.set(c.name, { c, context });
       log(`prepared ${c.name}: ${context.failure.diagnosis.category} at ${context.capture.find(step => step.exit !== 0)?.name ?? 'no failure'}`);
     }, signal);
-    const run = randomUUID(), cells = matrix({ frameworks: [...adapters.keys()], models: [...models.keys()], cases: cases.map(c => c.name), seeds: options.seeds });
+    const prepared = cases.filter(c => contexts.has(c.name)).map(c => c.name);
+    if (!prepared.length) throw new Error('No case could be prepared.');
+    const run = randomUUID(), cells = matrix({ frameworks: [...adapters.keys()], models: [...models.keys()], cases: prepared, seeds: options.seeds });
     const done = new Set((await readRecords(paths.results)).filter(record => record.status === 'judged').map(record => record.key));
     const todo = remaining(cells, done);
     // The rates the run's models are priced at, so its dollars stay reproducible after the table changes.
     const priced = prices ? { source: prices.source, checked: prices.checked, tiers: prices.tiers, models: Object.fromEntries([...models.keys()].map(id => [id, priceFor(prices, id)])) } : null;
     await writeFile(paths.run, await safeJson({ run, startedAt: new Date().toISOString(), dryRun: options.dryRun, provider, prices: priced,
       frameworks: [...adapters.values()].map(adapter => ({ key: adapter.key, version: adapter.version, wire: wireOf(adapter, provider) })),
-      models: [...models.values()], cases: cases.map(c => c.name), seeds: options.seeds, budget: options.budget, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null,
+      models: [...models.values()], cases: prepared, seeds: options.seeds, budget: options.budget, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null,
       cells: cells.length, resumed: cells.length - todo.length }, gateway.scrub, 2), { mode: 0o600 });
     log(`${todo.length} of ${cells.length} attempts to run (${cells.length - todo.length} already done); budget $${options.budget}, cap $${options.limits.cost} each`);
     let exhausted = false;
