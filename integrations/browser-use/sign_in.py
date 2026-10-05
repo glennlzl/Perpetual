@@ -79,7 +79,18 @@ async def sign_in_on_page(page, credentials, on_application, allowed, seconds=No
     allowed(url): the page is within the approved origins, so reaching it can count as signed in.
     A signed_in result also carries the URL of the page the form was on before it was submitted.
     """
-    handles = []
+    handles, pending = [], set()
+
+    def sent(request):
+        # What the form submits, and any other change the page sends, until its response arrives.
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            pending.add(request)
+
+    def answered(request):
+        pending.discard(request)
+    listeners = {"request": sent, "requestfinished": answered, "requestfailed": answered}
+    for event, listener in listeners.items():
+        page.on(event, listener)
     try:
         found = await asyncio.wait_for(page.main_frame.evaluate_handle(FIND_FORM), 5)
         handles.append(found)
@@ -97,16 +108,18 @@ async def sign_in_on_page(page, credentials, on_application, allowed, seconds=No
             await fields[name].fill(credentials[name], timeout=5000)
         form_url = page.url
         await submit(fields)
+        outcome = await settled(page, credentials, allowed, fields["password"], pending, SIGN_IN_SECONDS if seconds is None else seconds)
     except asyncio.CancelledError:
         raise
     except Exception:
         # Browser errors can contain page text or typed values; keep only a fixed code.
         return {"result": "error", "code": "browser_action_failed"}
     finally:
+        for event, listener in listeners.items():
+            page.remove_listener(event, listener)
         for handle in handles:
             with contextlib.suppress(Exception):
                 await handle.dispose()
-    outcome = await settled(page, credentials, allowed, SIGN_IN_SECONDS if seconds is None else seconds)
     return {**outcome, "url": form_url} if outcome["result"] == "signed_in" else outcome
 
 
@@ -123,12 +136,15 @@ async def submit(fields):
         await fields["password"].press("Enter", timeout=3000)
 
 
-async def settled(page, credentials, allowed, seconds):
-    """Signed in once the approved page stays without a visible password field, so a brief transition does not count."""
+async def settled(page, credentials, allowed, password, pending, seconds):
+    """Signed in once the approved page stays without a visible password field, so a brief transition does not count.
+
+    A form hidden while its submission waits for a response has not gone yet.
+    """
     loop = asyncio.get_running_loop()
     deadline, state, streak = loop.time() + seconds, None, 0
     while True:
-        current = await form_state(page, allowed)
+        current = None if pending else await form_state(page, allowed, password)
         state, streak = current, streak + 1 if current == state else 1
         if state == "closed" or state in {"gone", "outside"} and streak >= 3 or loop.time() >= deadline:
             break
@@ -148,14 +164,16 @@ async def settled(page, credentials, allowed, seconds):
     return {"result": "still_on_sign_in", "code": "browser_action_failed", **({"message": message} if message else {})}
 
 
-async def form_state(page, allowed):
+async def form_state(page, allowed, password):
     if page.is_closed():
         return "closed"
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=2000)
         if not allowed(page.url):
             return "outside"
-        return "form" if await page.main_frame.locator("input[type=password]").filter(visible=True).count() else "gone"
+        # The filled field counts whatever its type now: a show-password control turns it into text.
+        shown = await password.is_visible() or await page.main_frame.locator("input[type=password]").filter(visible=True).count()
+        return "form" if shown else "gone"
     except Exception:
         # A navigation replaced the document; observe it again.
         return None

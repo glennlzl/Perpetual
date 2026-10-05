@@ -6,6 +6,9 @@ import re
 ALIASES = {"username": "perpetual_test_username", "password": "perpetual_test_password"}
 # Each value fills only its own kind of login field.
 FIELD_TYPES = {"username": {"text", "email"}, "password": {"password"}}
+# Redaction hides every copy of a value in any letter case, so a shorter value, or a word the agent's own instructions
+# use, would also hide ordinary page text, proposals and those instructions.
+MINIMUM_LENGTH = 6
 
 
 def credential_field_error(name, same_origin, agent_tab, top_frame, tag, input_type):
@@ -21,7 +24,14 @@ def credential_field_error(name, same_origin, agent_tab, top_frame, tag, input_t
     return None
 
 
-def validate_credentials(raw, mode):
+def shown_forms(value):
+    """A value as a page may show it: as given or stripped, each also clipped to the 100 characters Browser Use shows of
+    a field's value."""
+    return {form for shown in (value, value.strip()) for form in (shown, shown[:100])} - {""}
+
+
+def validate_credentials(raw, mode, own_text=""):
+    """A run-only account for discovery; own_text is what the adapter itself tells the agent."""
     if raw is None:
         return None
     if mode != "discover" or not isinstance(raw, dict) or set(raw) != set(ALIASES):
@@ -30,15 +40,32 @@ def validate_credentials(raw, mode):
         value = raw[name]
         if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\x00" in value:
             raise ValueError("Enter a valid test username and password.")
+        if len(value.strip()) < MINIMUM_LENGTH or any(form.lower() in own_text.lower() for form in shown_forms(value)):
+            raise ValueError(f"Use a test username and password of at least {MINIMUM_LENGTH} characters that are not common words, such as password or test.")
     return dict(raw)
 
 
 def redact(text, credentials):
-    """Account values in text the model receives, longest first, become [REDACTED]."""
+    """Account values in text the model receives, longest first, become [REDACTED].
+
+    Matching ignores letter case and covers a value as Browser Use shows a field's value too: stripped, and clipped to
+    its first 100 characters.
+    """
     if not credentials:
         return text
-    secrets = sorted(set(credentials.values()), key=len, reverse=True)
-    return re.sub("|".join(re.escape(item) for item in secrets), "[REDACTED]", text)
+    secrets = {form for value in credentials.values() for form in shown_forms(value)}
+    return re.sub("|".join(re.escape(item) for item in sorted(secrets, key=len, reverse=True)), "[REDACTED]", text, flags=re.IGNORECASE)
+
+
+def contains_account(value, credentials):
+    """Whether a string in JSON-like data holds an account value as redact() finds one."""
+    if isinstance(value, str):
+        return redact(value, credentials) != value
+    if isinstance(value, dict):
+        return any(contains_account(child, credentials) for child in value.values())
+    if isinstance(value, (tuple, list)):
+        return any(contains_account(child, credentials) for child in value)
+    return False
 
 
 def credential_alias(text):

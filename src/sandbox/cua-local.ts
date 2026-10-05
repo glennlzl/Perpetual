@@ -2,9 +2,9 @@ import { execFile, type ExecFileException } from 'node:child_process';
 import { localDockerEnvironment } from '../process.ts';
 import { randomUUID } from 'node:crypto';
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
-import { get } from 'node:http';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -13,8 +13,8 @@ export interface SandboxResources { cpus: number; memoryMiB: number; pids: numbe
 export type SandboxStatus = 'creating' | 'running' | 'paused' | 'restarting' | 'stopped' | 'missing' | 'destroyed' | 'failed' | 'cleanup_failed';
 export interface SandboxRecord {
   version: 1; id: string; ownerId: string; name: string; status: SandboxStatus;
-  image: string; imageId: string | null; containerId: string | null; apiUrl: string | null; desktopUrl: string | null; dockerHost: string | null;
-  resources: SandboxResources; createdAt: string; persistence: 'manual'; updatedAt?: string; publishedPorts?: Record<string, number>;
+  image: string; imageId: string | null; containerId: string | null; dockerHost: string | null;
+  resources: SandboxResources; createdAt: string; persistence: 'manual'; updatedAt?: string;
   readyAt?: string; inspectedAt?: string; destroyedAt?: string; cleanedAt?: string; error?: string; errorCode?: string; cleanupError?: string;
 }
 export interface LocalDocker { host: string; command(args: string[], operation: string, timeout?: number, maxOutputBytes?: number): Promise<string> }
@@ -46,13 +46,15 @@ const LABELS = { managed: 'perpetual.managed', owner: 'perpetual.owner', id: 'pe
 const COMMAND_TIMEOUT = 30_000;
 const READINESS_TIMEOUT = 120_000;
 const LOCK_TIMEOUT = 15_000;
-// The Cua guest image publishes computer-server (API) and noVNC (desktop) on these ports.
-const GUEST_PORTS = { api: 8000, desktop: 6080 };
-const tcp = (port: number) => `${port}/tcp`;
-const PUBLISHED_PORTS = Object.values(GUEST_PORTS).map(tcp);
+// A desktop publishes no port. computer-server listens on apiPort inside the guest, where integrations/cua/relay.py
+// reaches it on the guest's loopback, run through docker exec as the guest's UID with computer-server's own Python,
+// the way the Driver is reached. integrations/cua/bridge.py runs the relay with the same values.
+const GUEST = { python: '/opt/computer-server/venv/bin/python', user: '1000', apiPort: 8000 };
+const RELAY = resolve(dirname(fileURLToPath(import.meta.url)), '../../integrations/cua/relay.py');
 
 class SandboxError extends Error {
   declare code: string;
+  declare exitCode?: number;
   declare sandboxId?: string;
   declare record?: SandboxRecord;
   constructor(message: string, code = 'SANDBOX_ERROR') {
@@ -148,10 +150,11 @@ const isResources = (value: unknown): value is SandboxResources => Boolean(value
 const validRecord = (record: Fields): record is Fields & SandboxRecord => record.version === 1 && typeof record.id === 'string' && typeof record.ownerId === 'string'
   && typeof record.status === 'string' && Object.hasOwn(STATUSES, record.status)
   && typeof record.image === 'string' && typeof record.createdAt === 'string' && record.persistence === 'manual' && isResources(record.resources)
-  && (['imageId', 'containerId', 'apiUrl', 'desktopUrl', 'dockerHost'] as const).every(field => textOrNull(record[field]));
+  && (['imageId', 'containerId', 'dockerHost'] as const).every(field => textOrNull(record[field]));
 
 async function readRecord(store: Store, id: unknown): Promise<SandboxRecord> {
-  const record = await jsonFile(join(store.directory, `${sandboxId(id)}.json`), 'SANDBOX_NOT_FOUND');
+  // A record saved while desktops published ports also holds their URLs and ports, which reach nothing now; they are dropped.
+  const { apiUrl, desktopUrl, publishedPorts, ...record } = await jsonFile(join(store.directory, `${sandboxId(id)}.json`), 'SANDBOX_NOT_FOUND');
   if (record.version !== 1 || record.id !== id || record.ownerId !== store.ownerId
     || (record.containerId != null && !CONTAINER_ID.test(String(record.containerId)))
     || (record.imageId != null && !IMAGE_ID.test(String(record.imageId)))) {
@@ -246,7 +249,10 @@ function dockerFailure(error: ExecFileException | SandboxError, operation: strin
   if (/cannot connect|is the docker daemon running|error during connect|connection refused/.test(detail)) {
     return new SandboxError('The local Docker engine is unavailable.', 'DOCKER_UNAVAILABLE');
   }
-  return new SandboxError(`${operation} failed. Check the local Docker engine.`, 'DOCKER_ERROR');
+  const failure = new SandboxError(`${operation} failed. Check the local Docker engine.`, 'DOCKER_ERROR');
+  // A caller of docker exec reads the guest command's own exit status from it.
+  if (typeof error.code === 'number') failure.exitCode = error.code;
+  return failure;
 }
 
 async function dockerCommand(args: string[], operation: string, timeout = COMMAND_TIMEOUT, maxOutputBytes = 4 * 1024 * 1024) {
@@ -260,7 +266,7 @@ async function dockerCommand(args: string[], operation: string, timeout = COMMAN
 }
 
 function localDockerHost(host: unknown) {
-  // A TCP/SSH daemon may bind ports on another machine, making loopback URLs unsafe.
+  // A TCP/SSH daemon would run the desktop, and every docker exec into it, on another machine.
   if (typeof host !== 'string' || host.includes('\0') || (!/^unix:\/\/\/[^\r\n]+$/.test(host)
     && !/^npipe:\/\/\/\/\.\/pipe\/[a-zA-Z0-9_.-]+$/.test(host))) {
     throw new SandboxError('Choose a local Docker socket; remote Docker contexts are not supported.', 'DOCKER_REMOTE_UNSUPPORTED');
@@ -321,29 +327,9 @@ async function lookupContainer(docker: LocalDocker, record: SandboxRecord): Prom
   return container as OwnedContainer;
 }
 
-function exposedPorts(container: DockerContainer) {
-  const ports: DockerPorts = container.NetworkSettings?.Ports || {};
-  const allocated: Record<string, number> = {};
-  for (const [port, bindings] of Object.entries(ports)) {
-    if (bindings == null) continue;
-    if (!PUBLISHED_PORTS.includes(port) || !Array.isArray(bindings) || bindings.length !== 1) {
-      throw new SandboxError('Sandbox port bindings do not match the local-only configuration.', 'SANDBOX_PORTS_INVALID');
-    }
-    const binding = bindings[0];
-    if (binding?.HostIp !== '127.0.0.1' || !/^\d{1,5}$/.test(binding.HostPort || '')
-      || Number(binding.HostPort) < 1 || Number(binding.HostPort) > 65535) {
-      throw new SandboxError('Sandbox ports must be bound to 127.0.0.1.', 'SANDBOX_PORTS_INVALID');
-    }
-    allocated[port] = Number(binding.HostPort);
-  }
-  const api = allocated[tcp(GUEST_PORTS.api)], desktop = allocated[tcp(GUEST_PORTS.desktop)];
-  if (!api || !desktop) throw new SandboxError('Sandbox API or desktop port is not available.', 'SANDBOX_PORTS_INVALID');
-  return {
-    publishedPorts: Object.fromEntries(Object.entries(allocated).map(([key, value]) => [key.split('/')[0], value])),
-    apiUrl: `http://127.0.0.1:${api}`,
-    desktopUrl: `http://127.0.0.1:${desktop}/`,
-  };
-}
+// Whether Docker reports a binding, requested or in effect, for any port. Exposed but unpublished ports have none.
+const bindsPorts = (ports: DockerPorts | null | undefined) => Object.values(ports || {})
+  .some(bindings => bindings != null && (!Array.isArray(bindings) || bindings.length > 0));
 
 function validateContainer(container: DockerContainer, record: SandboxRecord) {
   const config: NonNullable<DockerContainer['HostConfig']> = container.HostConfig || {};
@@ -356,13 +342,10 @@ function validateContainer(container: DockerContainer, record: SandboxRecord) {
     || config.Memory !== limits.memoryMiB * 1024 * 1024 || config.PidsLimit !== limits.pids) {
     throw new SandboxError('Sandbox isolation or resource settings have changed.', 'SANDBOX_CONFIG_CHANGED');
   }
-  const bindings: DockerPorts = config.PortBindings || {};
-  if (config.PublishAllPorts || Object.keys(bindings).length !== PUBLISHED_PORTS.length || PUBLISHED_PORTS.some(port => {
-    const values = bindings[port];
-    return !Array.isArray(values) || values.length !== 1 || values[0]?.HostIp !== '127.0.0.1'
-      || (values[0].HostPort !== '' && (!/^\d{1,5}$/.test(values[0].HostPort || '')
-        || Number(values[0].HostPort) < 1 || Number(values[0].HostPort) > 65535));
-  })) throw new SandboxError('Sandbox ports must use the local-only configuration.', 'SANDBOX_PORTS_INVALID');
+  // computer-server and the Driver are reached through docker exec only, so a desktop publishes no port.
+  if (config.PublishAllPorts || bindsPorts(config.PortBindings) || bindsPorts(container.NetworkSettings?.Ports)) {
+    throw new SandboxError('The sandbox publishes host ports, as desktops from earlier versions did. Destroy it and create a new one.', 'SANDBOX_PORTS_INVALID');
+  }
 }
 
 function statusOf(container: DockerContainer) {
@@ -372,15 +355,20 @@ function statusOf(container: DockerContainer) {
   return 'stopped';
 }
 
-function apiReady(apiUrl: string) {
-  return new Promise<boolean>(resolveReady => {
-    const request = get(`${apiUrl}/status`, { agent: false, timeout: 3000 }, response => {
-      response.resume();
-      resolveReady(response.statusCode === 200);
-    });
-    request.on('timeout', () => request.destroy());
-    request.on('error', () => resolveReady(false));
-  });
+/** Whether computer-server answers /status, asked inside the guest through docker exec since no port is published. */
+async function apiReady(docker: LocalDocker, containerId: string) {
+  const relay = await readFile(RELAY, 'utf8');
+  try {
+    await docker.command(['exec', '--user', GUEST.user, containerId, GUEST.python, '-I', '-c', relay, String(GUEST.apiPort), 'GET', '/status', '3'],
+      'Checking the Cua computer-server', 15_000);
+    return true;
+  } catch (error) {
+    // docker exec exits 126 or 127 when the guest cannot run the relay: such an image never becomes ready. Any other
+    // failure may be a desktop still starting.
+    const { exitCode } = error as SandboxError;
+    if (exitCode === 126 || exitCode === 127) throw new SandboxError(`The sandbox image cannot run ${GUEST.python}, which reaches its computer-server.`, 'SANDBOX_INVALID_IMAGE');
+    return false;
+  }
 }
 
 async function waitUntilReady(docker: LocalDocker, record: SandboxRecord) {
@@ -389,16 +377,16 @@ async function waitUntilReady(docker: LocalDocker, record: SandboxRecord) {
     const container = await lookupContainer(docker, record);
     if (!container || statusOf(container) !== 'running') throw new SandboxError('The sandbox exited before its API was ready.', 'SANDBOX_START_FAILED');
     validateContainer(container, record);
-    const urls = exposedPorts(container);
-    if (await apiReady(urls.apiUrl)) return { container, urls };
+    if (await apiReady(docker, container.Id)) return container;
     await delay(1500);
   }
   throw new SandboxError('The Cua computer-server did not become ready.', 'SANDBOX_NOT_READY');
 }
 
-async function removeOwnedContainer(docker: LocalDocker, record: SandboxRecord) {
+async function removeOwnedContainer(docker: LocalDocker, record: SandboxRecord, found = () => {}) {
   const container = await lookupContainer(docker, record);
   if (!container) return;
+  found();
   try { await docker.command(['container', 'rm', '--force', '--volumes', container.Id], 'Deleting sandbox', 90_000); }
   catch (error) {
     // A racing external deletion can make rm fail; only a fresh inspection proves absence.
@@ -417,7 +405,7 @@ export async function createSandbox({ dataDir, image = DEFAULT_IMAGE, cpus = 2, 
   return withLock(store, id, async () => {
     let record = await saveRecord(store, {
       version: 1, id, ownerId: store.ownerId, name: containerName(id), status: 'creating',
-      image, imageId: null, containerId: null, apiUrl: null, desktopUrl: null, dockerHost: null,
+      image, imageId: null, containerId: null, dockerHost: null,
       resources, createdAt: new Date().toISOString(), persistence: 'manual',
     });
     let docker: LocalDocker | undefined;
@@ -432,8 +420,7 @@ export async function createSandbox({ dataDir, image = DEFAULT_IMAGE, cpus = 2, 
         'container', 'create', '--name', containerName(id),
         '--label', `${LABELS.managed}=true`, '--label', `${LABELS.owner}=${store.ownerId}`, '--label', `${LABELS.id}=${id}`,
         '--cpus', String(resources.cpus), '--memory', `${resources.memoryMiB}m`, '--memory-swap', `${resources.memoryMiB}m`,
-        '--pids-limit', String(resources.pids), '--shm-size', `${resources.shmMiB}m`, '--restart', 'no',
-        ...PUBLISHED_PORTS.flatMap(port => ['--publish', `127.0.0.1::${port}`]), imageId,
+        '--pids-limit', String(resources.pids), '--shm-size', `${resources.shmMiB}m`, '--restart', 'no', imageId,
       ], 'Creating sandbox', 120_000);
       if (!CONTAINER_ID.test(containerId)) throw new SandboxError('Docker did not return a valid sandbox ID.', 'DOCKER_INVALID_RESPONSE');
       record = await saveRecord(store, { ...record, containerId });
@@ -441,8 +428,8 @@ export async function createSandbox({ dataDir, image = DEFAULT_IMAGE, cpus = 2, 
       if (!created) throw new SandboxError('The created sandbox is missing.', 'SANDBOX_START_FAILED');
       validateContainer(created, record);
       await docker.command(['container', 'start', created.Id], 'Starting sandbox', 60_000);
-      const { container, urls } = await waitUntilReady(docker, record);
-      return await saveRecord(store, { ...record, ...urls, containerId: container.Id, status: 'running', readyAt: new Date().toISOString() });
+      const container = await waitUntilReady(docker, record);
+      return await saveRecord(store, { ...record, containerId: container.Id, status: 'running', readyAt: new Date().toISOString() });
     } catch (error) {
       let cleanupError: unknown;
       if (creationAttempted) {
@@ -451,7 +438,7 @@ export async function createSandbox({ dataDir, image = DEFAULT_IMAGE, cpus = 2, 
       }
       const failure = error instanceof SandboxError ? error : new SandboxError('Sandbox creation failed.', 'SANDBOX_CREATE_FAILED');
       record = await saveRecord(store, {
-        ...record, status: cleanupError ? 'cleanup_failed' : 'failed', apiUrl: null, desktopUrl: null,
+        ...record, status: cleanupError ? 'cleanup_failed' : 'failed',
         error: failure.message, errorCode: failure.code,
         ...(cleanupError ? { cleanupError: cleanupError instanceof SandboxError ? cleanupError.message : 'Sandbox cleanup failed.' } : { cleanedAt: new Date().toISOString() }),
       });
@@ -478,14 +465,13 @@ async function inspectedRecord(store: Store, record: SandboxRecord, { requireRun
   const container = await lookupContainer(docker, record);
   if (!container) {
     if (requireRunning) throw new SandboxError('The sandbox container is missing.', 'SANDBOX_NOT_RUNNING');
-    return saveRecord(store, { ...record, status: ['destroyed', 'failed'].includes(record.status) ? record.status : 'missing', apiUrl: null, desktopUrl: null });
+    return saveRecord(store, { ...record, status: ['destroyed', 'failed'].includes(record.status) ? record.status : 'missing' });
   }
   validateContainer(container, record);
   const status = statusOf(container);
   if (requireRunning && status !== 'running') throw new SandboxError('The sandbox is not running.', 'SANDBOX_NOT_RUNNING');
-  const urls = status === 'running' || status === 'paused' ? exposedPorts(container) : { apiUrl: null, desktopUrl: null };
-  if (requireRunning && !await apiReady(urls.apiUrl!)) throw new SandboxError('The Cua computer-server is not ready.', 'SANDBOX_NOT_READY');
-  return saveRecord(store, { ...record, ...urls, status, containerId: container.Id, inspectedAt: new Date().toISOString() });
+  if (requireRunning && !await apiReady(docker, container.Id)) throw new SandboxError('The Cua computer-server is not ready.', 'SANDBOX_NOT_READY');
+  return saveRecord(store, { ...record, status, containerId: container.Id, inspectedAt: new Date().toISOString() });
 }
 
 export async function inspectSandbox({ dataDir, id }: { dataDir?: unknown; id?: unknown } = {}): Promise<SandboxRecord> {
@@ -504,15 +490,20 @@ export async function destroySandbox({ dataDir, id }: { dataDir?: unknown; id?: 
   sandboxId(id);
   const store = await storeFor(dataDir);
   return withLock(store, id, async () => {
-    let record = await readRecord(store, id);
+    let record = await readRecord(store, id), found = false;
     try {
       const docker = await localDocker(record.dockerHost);
-      await removeOwnedContainer(docker, record);
+      await removeOwnedContainer(docker, record, () => { found = true; });
       const { error, errorCode, cleanupError, ...retained } = record;
-      return await saveRecord(store, { ...retained, status: 'destroyed', apiUrl: null, desktopUrl: null, destroyedAt: new Date().toISOString() });
+      return await saveRecord(store, { ...retained, status: 'destroyed', destroyedAt: new Date().toISOString() });
     } catch (error) {
       const failure = error instanceof SandboxError ? error : new SandboxError('Sandbox deletion failed.', 'SANDBOX_CLEANUP_FAILED');
-      record = await saveRecord(store, { ...record, status: 'cleanup_failed', apiUrl: null, desktopUrl: null, cleanupError: failure.message });
+      // A cleanup already confirmed through Docker stays confirmed unless this attempt found the owned container again;
+      // failing to consult the engine, however it fails, says nothing about the container.
+      const confirmed = record.status === 'destroyed' || (record.status === 'failed' && !!record.cleanedAt);
+      if (found || !confirmed) {
+        record = await saveRecord(store, { ...record, status: 'cleanup_failed', cleanupError: failure.message });
+      }
       failure.sandboxId = record.id;
       failure.record = record;
       throw failure;

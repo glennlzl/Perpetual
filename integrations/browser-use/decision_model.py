@@ -43,7 +43,8 @@ class DecisionChatOpenAI(ChatOpenAI):
                 return response
             message = choice.message
             calls = message.tool_calls or []
-            if choice.finish_reason != "tool_calls" or message.refusal or message.function_call is not None or (message.content and message.content.strip()) or len(calls) != 1:
+            # A forced named function finishes with "stop" on OpenAI's Chat Completions and "tool_calls" elsewhere.
+            if choice.finish_reason not in {"tool_calls", "stop"} or message.refusal or message.function_call is not None or (message.content and message.content.strip()) or len(calls) != 1:
                 raise DecisionProtocolError("The model must return one complete browser tool decision without additional text.")
             call = calls[0]
             function = getattr(call, "function", None)

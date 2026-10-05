@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import { localDockerEnvironment } from '../process.ts';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -23,12 +23,13 @@ export interface UploadResult {bytes: number}
 interface BridgeReply {ok?: unknown; error?: unknown; result?: unknown}
 
 function pythonEnvironment() {
-  // SDK credentials and proxy variables are unnecessary for a loopback guest.
+  // The bridge reaches the guest only through a docker CLI pinned to the local engine with --host, so it needs no SDK
+  // credentials or proxy variables, and the ambient Docker endpoint never applies.
   const env: Record<string, string | undefined> = {};
   for (const key of ['PATH', 'HOME', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  return {...env, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', NO_PROXY: '127.0.0.1,localhost'};
+  return localDockerEnvironment({...env, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1'});
 }
 
 const dockerEnvironment = () => localDockerEnvironment();
@@ -43,7 +44,8 @@ export async function sandboxAction({dataDir, id, action: input}: Target & {acti
   const sandbox = await requireRunningSandbox({dataDir, id});
   const python = process.env.PERPETUAL_CUA_PYTHON || join(integrationDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   if (!isAbsolute(python)) throw new Error('PERPETUAL_CUA_PYTHON must be an absolute interpreter path.');
-  const request = JSON.stringify({name: sandbox.name, apiUrl: sandbox.apiUrl, action, timeoutSeconds: timeoutSeconds + 20});
+  // The desktop publishes no port: the bridge reaches its computer-server through docker exec into this verified container.
+  const request = JSON.stringify({name: sandbox.name, dockerHost: sandbox.dockerHost, containerId: sandbox.containerId, action, timeoutSeconds: timeoutSeconds + 20});
   if (Buffer.byteLength(request) > 12 * 1024 * 1024) throw new Error('Sandbox request exceeds the 12 MiB limit.');
   // execFile's promisified wrapper cannot pass stdin. Keep stderr private:
   // upstream SDK logs may include guest data. Only bridge JSON is returned.
@@ -52,7 +54,7 @@ export async function sandboxAction({dataDir, id, action: input}: Target & {acti
       env: pythonEnvironment(), timeout: (timeoutSeconds + 25) * 1000,
       killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
     }, (error, stdout) => {
-      if (error?.code === 'ENOENT') return reject(new Error('Cua Python environment is missing. Run uv sync --project integrations/cua.'));
+      if (error?.code === 'ENOENT') return reject(new Error('Cua Python environment is missing. Run uv sync --project integrations/cua --frozen.'));
       if (error?.killed || error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
         return reject(new Error('Cua request exceeded its limit. Guest completion is unknown; inspect before retrying.'));
       }
@@ -110,12 +112,20 @@ export async function sandboxMcpCommand({dataDir, id, driverPath = '/usr/local/b
   // No host Driver and no user-supplied container identifiers are accepted.
   const args = ['--host', sandbox.dockerHost!, 'exec', '-i', '--user', user,
     '--env', 'CUA_DRIVER_PERMISSION_MODE=standard', sandbox.containerId!, driverPath];
+  const install = `Install Cua Driver ${CUA_VERSIONS.guestDriver} at the selected path inside the guest image. Host Driver fallback is disabled.`;
+  let version: string;
   try {
-    const {stdout} = await execute('docker', [...args, '--version'], {env: dockerEnvironment(), timeout: 15000, maxBuffer: 16384});
-    if (stdout.trim() !== `cua-driver ${CUA_VERSIONS.guestDriver}`) throw new Error('Version mismatch');
-  } catch {
-    throw new Error(`Install Cua Driver ${CUA_VERSIONS.guestDriver} at the selected path inside the guest image. Host Driver fallback is disabled.`);
+    ({stdout: version} = await execute('docker', [...args, '--version'], {env: dockerEnvironment(), timeout: 15000, maxBuffer: 16384}));
+  } catch (error) {
+    const failure = error as ExecFileException;
+    if (failure.killed) throw new Error('The guest Driver check timed out. Inspect the sandbox, then retry.');
+    if (/unable to find user|no matching entries in passwd/i.test(String(failure.stderr))) throw new Error(`The guest has no user ${user}. Choose --user with a guest username or UID.`);
+    // docker exec exits 126 or 127 when the guest cannot run the Driver path.
+    if (failure.code === 126 || failure.code === 127) throw new Error(install);
+    throw new Error('The guest Driver check failed. Inspect the sandbox, then retry.');
   }
+  version = version.trim();
+  if (version !== `cua-driver ${CUA_VERSIONS.guestDriver}`) throw new Error(/^cua-driver [\w.+-]{1,40}$/.test(version) ? `The guest has ${version}. ${install}` : install);
   return {command: 'docker', args: [...args, 'mcp']};
 }
 

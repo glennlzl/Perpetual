@@ -12,10 +12,48 @@ from urllib.parse import parse_qs
 from unittest.mock import patch
 
 import runner
-from run_credentials import validate_credentials
+from run_credentials import redact, validate_credentials
 
 runner.configure_private_runtime()
 ACCOUNT = {"username": "ephemeral-test@example.invalid", "password": "fixture-only-password-43"}
+
+
+class Redaction(unittest.TestCase):
+    def test_account_values_are_redacted_as_the_page_shows_them(self):
+        account = {"username": "Owner@Example.invalid ", "password": "  Zq7-" + "long-fixture-password-" * 6}
+        shown = account["password"].strip()
+        for text, expected in [
+            ("Signed in as Owner@Example.invalid.", "Signed in as [REDACTED]."),
+            ("Signed in as owner@example.invalid", "Signed in as [REDACTED]"),
+            # Browser Use strips a field's value and clips it to 100 characters.
+            (f"<input type=text id=password value={shown[:100]}...>", "<input type=text id=password value=[REDACTED]...>"),
+            (f"Rejected value: {account['password']}", "Rejected value: [REDACTED]"),
+        ]:
+            with self.subTest(text=text[:40]):
+                self.assertEqual(redact(text, account), expected)
+
+    def test_a_short_or_common_word_account_is_refused_before_discovery_starts(self):
+        # Redaction would hide such a value in the agent's own instructions, and in ordinary page text and proposals.
+        for change in [{"username": "admin"}, {"password": "password"}, {"username": "Account"}, {"password": "  ab12  "}]:
+            with self.subTest(change=change), self.assertRaises(runner.InputError) as caught:
+                runner.validate_payload({"mode": "discover", "targetUrl": "http://127.0.0.1:3010/", "credentials": {**ACCOUNT, **change}})
+            self.assertEqual(str(caught.exception), "Use a test username and password of at least 6 characters that are not common words, such as password or test.")
+
+    def test_a_proposal_that_repeats_the_account_is_left_out_and_the_others_kept_whole(self):
+        class Proposal:
+            def __init__(self, name, goal, step):
+                self.name = name
+                self.value = {"name": name, "goal": goal, "steps": [{"id": "sign-in", "title": "Sign in with email and password"}, {"id": step, "title": "Open the settings"}],
+                              "preconditions": ["A seeded user who signs in with email and password"], "expectedOutcomes": ["The saved settings are visible"], "assertions": [], "evidence": []}
+
+            def model_dump(self):
+                return json.loads(json.dumps(self.value))
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": "http://127.0.0.1:3010/", "credentials": ACCOUNT})
+        natural = Proposal("Admin updates workspace settings", "Sign in and update the workspace settings", "admin-settings")
+        repeating = Proposal("Reopen saved work", f"Sign in as {ACCOUNT['username'].upper()} and reopen saved work", "reopen")
+        cases, summary = runner.accepted_proposals(payload, [natural, repeating], f"Signed in as {ACCOUNT['username']}.")
+        self.assertEqual([{key: case[key] for key in natural.value} for case in cases], [natural.value])
+        self.assertEqual(summary, 'Signed in as [REDACTED].\nOmitted "Reopen saved work": It repeats the run-only test account.')
 
 
 class CredentialValidation(unittest.TestCase):
@@ -25,6 +63,19 @@ class CredentialValidation(unittest.TestCase):
         for value, mode in [(ACCOUNT, "preflight"), (ACCOUNT, "run"), ({**ACCOUNT, "url": "bad"}, "discover"), ({**ACCOUNT, "username": ""}, "discover"), ({**ACCOUNT, "password": "x" * 1025}, "discover")]:
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 validate_credentials(value, mode)
+
+
+class PlaceholderScope(unittest.TestCase):
+    def test_placeholders_are_scoped_to_the_application_host_including_ipv6_loopback(self):
+        from browser_use.utils import match_url_with_domain_pattern
+        for target, page, other in [("http://127.0.0.1:3010/", "http://127.0.0.1:3010/login", "http://127.0.0.2:3010/login"),
+                                    ("http://[::1]:3010/", "http://[::1]:3010/login", "http://127.0.0.1:3010/login"),
+                                    ("https://app.example.test/", "https://app.example.test/sign-in", "http://app.example.test/sign-in")]:
+            with self.subTest(target=target):
+                # Browser Use fills placeholders only on pages its own matcher places on this domain.
+                domain = runner.placeholder_domain(target)
+                self.assertTrue(match_url_with_domain_pattern(page, domain))
+                self.assertFalse(match_url_with_domain_pattern(other, domain))
 
 
 class CredentialGuards(unittest.IsolatedAsyncioTestCase):
@@ -96,7 +147,7 @@ class Application(BaseHTTPRequestHandler):
         values = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
         self.server.login_ok = values == {"email": [ACCOUNT["username"]], "password": [ACCOUNT["password"]]}
         if self.server.login_ok:
-            body = f'<!doctype html><html><body><h1>Workspace ready</h1><p>{ACCOUNT["username"]}</p><p>{ACCOUNT["password"]}</p></body></html>'.encode()
+            body = f'<!doctype html><html><body><h1>Workspace ready</h1><p>{ACCOUNT["username"]}</p><p>{ACCOUNT["username"].upper()}</p><p>{ACCOUNT["password"]}</p></body></html>'.encode()
         else:
             body = b"<h1>Login failed</h1>"
         self.respond(body)
@@ -164,9 +215,10 @@ class AuthenticatedDiscovery(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result["authenticated"], True)
             self.assertTrue(result["cases"][0]["needsReview"])
             self.assertFalse(result["cases"][0]["selected"])
-            # The page shows the account after signing in; the model never receives its values or a screenshot.
+            # The page shows the account after signing in, the username also in capitals; the model never receives its
+            # values or a screenshot.
             self.assertNotIn('"image_url"', json.dumps(model.requests))
-            for value in ACCOUNT.values():
+            for value in [*ACCOUNT.values(), ACCOUNT["username"].upper()]:
                 self.assertNotIn(value, json.dumps(model.requests))
             for request in model.requests:
                 self.assertIn(requirements, json.dumps(request["messages"]))

@@ -5,6 +5,7 @@ import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 import threading
 import unittest
 from unittest.mock import patch
@@ -43,6 +44,38 @@ change.onclick=()=>Promise.all([fetch('/rpc',{method:'POST',headers:{'Content-Ty
             if self.path.endswith('-redirect'):
                 html = html.replace(b"'/rpc'", b"'/rpc-redirect'")
             self.wfile.write(html)
+            return
+        if self.path.startswith("/socket?port="):
+            # Subscribes over a WebSocket on load and sends a change over it when the button is pressed.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'''<!doctype html><h1>Connecting</h1><button id=remove>Remove workspace</button><script>
+const socket=new WebSocket('ws://127.0.0.1:'+new URLSearchParams(location.search).get('port')+'/live');
+socket.onopen=()=>socket.send('subscribe');
+socket.onmessage=event=>{document.querySelector('h1').textContent=event.data;};
+remove.onclick=()=>{socket.send('remove');remove.textContent='Removal sent';};
+</script>''')
+            return
+        if self.path.startswith("/socket-replay?port="):
+            # As a DDP client does: a heartbeat keeps the socket alive, a write stays pending without an answer and is
+            # sent again after a reconnect. A second button opens a socket of its own for its write.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'''<!doctype html><h1>Connecting</h1><p></p><button id=remove>Remove workspace</button><button id=report>Create report</button><script>
+const address='ws://127.0.0.1:'+new URLSearchParams(location.search).get('port'),pending=[];let socket;
+function connect(){
+  socket=new WebSocket(address+'/live');
+  socket.onopen=()=>{socket.send('subscribe');for(const message of pending)socket.send(message);if(pending.length)document.querySelector('p').textContent='Resent '+pending.join(' ');};
+  socket.onmessage=event=>{document.querySelector('h1').textContent=event.data;};
+  socket.onclose=()=>setTimeout(connect,200);
+}
+connect();
+setInterval(()=>{if(socket.readyState===1)socket.send('ping');},300);
+remove.onclick=()=>{pending.push('remove');socket.send('remove');remove.textContent='Removal sent';};
+report.onclick=()=>{const once=new WebSocket(address+'/report');once.onopen=()=>{once.send('create-report');report.textContent='Report sent';};};
+</script>''')
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -92,6 +125,162 @@ class ProtocolModelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class DeadlineModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: with explore set, waits while other actions are offered; otherwise reports."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.requests.append(request)
+        if self.server.explore and '"wait"' in json.dumps(request["tools"]):
+            # Browser Use waits one second less than asked.
+            action = {"wait": {"seconds": 2}}
+        else:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class NavigateModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: navigates to each of the server's targets as written, then reports."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        self.server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        if len(self.server.requests) <= len(self.server.targets):
+            action = {"navigate": {"url": self.server.targets[len(self.server.requests) - 1]}}
+        else:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class SocketModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: once the page's subscription answered, press its button, then report."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        latest = next(message["content"] for message in reversed(request["messages"]) if "<browser_state>" in json.dumps(message["content"]))
+        observation = (latest if isinstance(latest, str) else "\n".join(part.get("text", "") for part in latest)).split("<browser_state>")[-1]
+        if "Removal sent" in observation:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "See the live workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        elif "Subscribed" in observation:
+            line = next(line for line in observation.splitlines() if "<button" in line)
+            found = re.search(r"(?:\[(\d+)\]|(\d+)\[:\])", line)
+            action = {"click": {"index": int(found.group(1) or found.group(2))}}
+        else:
+            action = {"wait": {"seconds": 1}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class SocketContracts(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from websockets.asyncio.server import serve
+        # With silence set, the server closes a connection that sends nothing for that many seconds, as a heartbeat
+        # timeout does.
+        self.received, self.silence = [], None
+
+        async def live(connection):
+            while True:
+                try:
+                    message = await asyncio.wait_for(connection.recv(), self.silence)
+                except TimeoutError:
+                    await connection.close()
+                    return
+                except Exception:
+                    return
+                self.received.append(message)
+                if message == "subscribe":
+                    await connection.send("Subscribed")
+        self.sockets = await serve(live, "127.0.0.1", 0)
+        self.application = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.application.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.application.server_port}"
+        self.target = f"{self.url}/socket?port={self.sockets.sockets[0].getsockname()[1]}"
+
+    async def asyncTearDown(self):
+        self.sockets.close()
+        await self.sockets.wait_closed()
+        self.application.shutdown()
+        self.application.server_close()
+
+    async def test_a_page_socket_reaches_its_server_while_the_agent_has_not_acted(self):
+        payload = {"mode": "discover", "targetUrl": self.target, "allowedOrigins": [self.url]}
+        async with runner.OwnedBrowser(payload, [].append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+            await page.get_by_role("button", name="Remove workspace", exact=True).click()
+            for _ in range(200):
+                if "remove" in self.received:
+                    break
+                await asyncio.sleep(0.05)
+        self.assertEqual(self.received, ["subscribe", "remove"])
+
+    async def test_a_page_the_agent_acted_on_sends_nothing_again_until_another_page_loads(self):
+        self.silence = 1.5
+        target = self.target.replace("/socket?", "/socket-replay?")
+        async with runner.OwnedBrowser({"mode": "discover", "targetUrl": target, "allowedOrigins": [self.url]}, [].append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+            # As planned() counts each of the agent's actions before it runs.
+            owned.agent_actions += 1
+            await page.get_by_role("button", name="Remove workspace", exact=True).click()
+            # Its heartbeat held, the connection falls silent: the server closes it, and the page reconnects, subscribes
+            # and sends its pending write again.
+            await page.get_by_text("Resent remove", exact=True).wait_for(timeout=15000)
+            owned.agent_actions += 1
+            await page.get_by_role("button", name="Create report", exact=True).click()
+            await page.get_by_role("button", name="Report sent", exact=True).wait_for(timeout=10000)
+            # A page that loads after the agent acted subscribes again.
+            owned.agent_actions += 1
+            await page.goto(target)
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+        self.assertEqual([message for message in self.received if message != "ping"], ["subscribe", "subscribe"])
+
+    async def test_what_a_page_sends_over_a_socket_after_the_agent_acts_never_reaches_its_server(self):
+        model = ThreadingHTTPServer(("127.0.0.1", 0), SocketModelHandler)
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": self.target, "allowedOrigins": [self.url], "maxSteps": 6, "timeoutSeconds": 40})
+        events = []
+        try:
+            with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}), patch.object(runner, "emit", events.append):
+                discovered = await asyncio.wait_for(runner.discover(payload), 45)
+        finally:
+            model.shutdown()
+            model.server_close()
+        self.assertEqual(discovered["type"], "discovery")
+        actions = [event["actions"] for event in events if event["type"] == "case" and event["actions"]][-1]
+        self.assertIn({"type": "click", "status": "passed"}, actions)
+        # The subscription sent on load reached the server; the change the agent's click sent did not.
+        self.assertEqual(self.received, ["subscribe"])
 
 
 class BrowserContracts(unittest.IsolatedAsyncioTestCase):
@@ -182,10 +371,12 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             profile = owned.profile.name
             self.assertIn("cases", runner.discovery_schema().model_json_schema()["properties"])
             with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}):
-                agent, _ = runner.create_agent({**payload, "timeoutSeconds": 30}, owned, "Inspect the fixture", runner.discovery_schema(), "discovery", [])
+                agent, _ = runner.create_agent({**payload, "timeoutSeconds": 900}, owned, "Inspect the fixture", runner.discovery_schema(), "discovery", [])
             self.assertLessEqual(set(agent.tools.registry.registry.actions), runner.SAFE_ACTIONS)
             # Discovery forces a final report after two consecutive failures and keeps the agent's reasoning fields.
             self.assertEqual((agent.settings.flash_mode, agent.settings.max_failures), (False, 2))
+            # Exploration ends in time for a step still in progress and then the final report's model call.
+            self.assertLessEqual(agent.settings.step_timeout + agent.settings.llm_timeout, runner.REPORT_SECONDS)
             page = await owned.active_page()
             await page.get_by_role("button", name="Save").click()
             agent_page = await owned.browser.get_current_page()
@@ -213,6 +404,86 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             page = await owned.active_page()
             self.assertEqual(page.url, url + "/credits")
             self.assertEqual(await page.get_by_text("Balance").count(), 1)
+        self.assertIn((self.server.server_port, "/credits"), REQUESTS)
+
+    async def test_an_unreachable_application_and_a_missing_report_are_named(self):
+        import socket
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        unreachable = f"http://127.0.0.1:{closed.getsockname()[1]}"
+        closed.close()
+        with self.assertRaises(runner.InputError) as caught:
+            async with runner.OwnedBrowser({"mode": "discover", "targetUrl": unreachable + "/", "allowedOrigins": [unreachable]}, [].append):
+                pass
+        self.assertEqual(runner.safe_error(caught.exception), "The application could not be opened: net::ERR_CONNECTION_REFUSED.")
+
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 2, "timeoutSeconds": 30})
+
+        async def ended_without_report(agent, **_):
+            # As when Browser Use cancels every model call at its own timeout: no report and no model error.
+            return agent.history
+        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}), patch.object(runner, "emit", [].append), patch("browser_use.Agent.run", ended_without_report):
+            with self.assertRaises(runner.InputError) as caught:
+                await runner.discover(payload)
+        self.assertEqual(runner.safe_error(caught.exception), "The agent did not produce a valid discovery result.")
+
+    def deadline_model(self, explore):
+        model = ThreadingHTTPServer(("127.0.0.1", 0), DeadlineModelHandler)
+        model.requests, model.explore = [], explore
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        self.addCleanup(model.server_close)
+        self.addCleanup(model.shutdown)
+        return {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}, model
+
+    async def test_exploration_ends_with_its_report_before_the_time_limit(self):
+        environment, model = self.deadline_model(explore=True)
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        # The agent would keep exploring for all 100 steps; the report must still arrive within 30 seconds.
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 100, "timeoutSeconds": 30})
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", [].append):
+            discovered = await asyncio.wait_for(runner.discover(payload), 60)
+        self.assertEqual(discovered["type"], "discovery")
+        self.assertEqual(discovered["cases"][0]["name"], "Open workspace")
+        self.assertTrue(discovered["diagnostics"]["forcedFinalization"])
+        self.assertGreater(len(model.requests), 2)
+        self.assertNotIn('"wait"', json.dumps(model.requests[-1]["tools"]))
+
+    async def test_a_finished_report_survives_a_time_limit_that_expires_during_cleanup(self):
+        environment, _ = self.deadline_model(explore=False)
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 8})
+        close, discover, started = runner.OwnedBrowser.close, runner.discover, []
+
+        async def timed(payload):
+            # Discovery's time limit starts with discover, after preflight.
+            started.append(asyncio.get_running_loop().time())
+            return await discover(payload)
+
+        async def slow_close(owned):
+            # Cleanup that lasts past the time limit, as a slow browser disconnect can.
+            await asyncio.sleep(max(0, started[0] + payload["timeoutSeconds"] + 1 - asyncio.get_running_loop().time()))
+            await close(owned)
+        events = []
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append), patch.object(runner, "discover", timed), patch.object(runner.OwnedBrowser, "close", slow_close):
+            await asyncio.wait_for(runner.execute(payload), 30)
+        self.assertEqual([event["type"] for event in events if event["type"] in {"discovery", "error"}], ["discovery"])
+
+    async def test_an_allowed_origin_is_reachable_however_the_agent_writes_it(self):
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        model = ThreadingHTTPServer(("127.0.0.1", 0), NavigateModelHandler)
+        # The origin exactly as the task lists it, without a trailing slash, and with a capitalized scheme.
+        model.requests, model.targets = [], [url, url.replace("http://", "HTTP://") + "/credits"]
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        self.addCleanup(model.server_close)
+        self.addCleanup(model.shutdown)
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url + "/", "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 30})
+        events = []
+        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}), patch.object(runner, "emit", events.append):
+            discovered = await asyncio.wait_for(runner.discover(payload), 35)
+        self.assertEqual(discovered["type"], "discovery")
+        actions = [event["actions"] for event in events if event["type"] == "case" and event["actions"]][-1]
+        self.assertEqual(actions, [{"type": "navigate", "status": "passed"}] * 2 + [{"type": "done", "status": "passed"}])
         self.assertIn((self.server.server_port, "/credits"), REQUESTS)
 
     async def test_tools_have_no_files_shell_or_evaluate(self):

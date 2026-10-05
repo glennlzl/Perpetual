@@ -10,7 +10,7 @@ from browser_use.llm.messages import UserMessage
 from pydantic import BaseModel, Field
 
 from decision_model import DecisionChatOpenAI
-from runner import model_failure_kind
+from runner import model_failure_kind, safe_error
 
 
 class Decision(BaseModel):
@@ -48,6 +48,26 @@ class DecisionProtocol(unittest.IsolatedAsyncioTestCase):
         function = request["tools"][0]["function"]
         self.assertTrue(function["strict"])
         self.assertEqual(function["parameters"]["properties"]["action"]["maxItems"], 1)
+
+    async def test_a_forced_decision_that_finishes_with_stop_is_one_complete_decision(self):
+        # OpenAI's Chat Completions ends a forced named function call with "stop" rather than "tool_calls".
+        reply = response()
+        reply["choices"][0]["finish_reason"] = "stop"
+        result, requests = await self.invoke(reply)
+        self.assertEqual(result.completion.action, ["observe"])
+        self.assertEqual((result.usage.prompt_tokens, result.usage.completion_tokens), (7, 3))
+        self.assertEqual(len(requests), 1)
+        for kind in ["mixed_content", "multiple_tools"]:
+            reply = response()
+            reply["choices"][0]["finish_reason"] = "stop"
+            message = reply["choices"][0]["message"]
+            if kind == "mixed_content":
+                message["content"] = "Another decision"
+            else:
+                message["tool_calls"].append(copy.deepcopy(message["tool_calls"][0]))
+            with self.subTest(kind=kind), self.assertRaises(ModelProviderError) as caught:
+                await self.invoke(reply)
+            self.assertEqual(model_failure_kind(caught.exception), "invalid_output")
 
     async def test_whole_argument_json_is_validated_without_slicing_or_truncating_actions(self):
         for arguments in ['{"action":["observe"]}\n{"action":["navigate"]}', '{"action":["observe","navigate"]}', '{"action": [']:
@@ -88,6 +108,19 @@ class DecisionProtocol(unittest.IsolatedAsyncioTestCase):
                     await self.invoke(reply)
                 self.assertEqual(model_failure_kind(caught.exception), "invalid_output")
                 self.assertNotIn("Another decision", str(caught.exception))
+                self.assertEqual(safe_error(caught.exception), "The model returned an invalid browser decision. Choose a model with reliable function calling.")
+
+    async def test_unreachable_and_slow_providers_reach_the_ui_as_their_cause(self):
+        for failure, message in [(httpx.ConnectError("connection refused"), "Could not connect to the model provider. Check the model endpoint and network."),
+                                 (httpx.ReadTimeout("read timed out"), "The model provider timed out. Retry or choose a faster model.")]:
+            def serve(request):
+                raise failure
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+                model = DecisionChatOpenAI(model="fixture", api_key="fixture-only-key", base_url="https://model.example.test/v1", http_client=client, max_retries=0, max_completion_tokens=8192)
+                with self.subTest(message=message), self.assertRaises(ModelProviderError) as caught:
+                    await model.ainvoke([UserMessage(content="Observe the actual page")], output_format=Decision)
+            self.assertEqual(safe_error(caught.exception), message)
 
     async def test_truncation_is_never_accepted_even_when_arguments_parse(self):
         reply = response()

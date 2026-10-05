@@ -226,6 +226,43 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("--host-resolver-rules=MAP host.docker.internal 127.0.0.1", launched["args"])
         self.assertIn("--remote-debugging-address=127.0.0.1", launched["args"])
 
+    def test_a_chromium_that_cannot_start_says_what_to_fix_and_keeps_its_sandbox(self):
+        import asyncio
+        from playwright.async_api import Error
+        launched = []
+
+        for logs, advice in [
+            # Playwright's report when the host refuses the sandbox, such as Ubuntu 23.10+ without unprivileged user namespaces.
+            ("Chromium sandboxing failed!\n================================\nTo avoid the sandboxing issue, do either of the following:", "allow unprivileged user namespaces"),
+            ("[pid=1][err] Running as root without --no-sandbox is not supported. See https://crbug.com/638180.", "other than root"),
+            ("/home/user/.cache/ms-playwright/chromium-1243/chrome-linux/chrome: error while loading shared libraries: libnss3.so", "install --with-deps chromium"),
+            # Missing libraries on a host whose paths name a sandbox, as Playwright's launch command line shows them.
+            ("<launching> /home/sandbox/.cache/ms-playwright/chromium-1243/chrome-linux/chrome --user-data-dir=/home/sandbox/tmp/perpetual-browser-x\n"
+             "/home/sandbox/.cache/ms-playwright/chromium-1243/chrome-linux/chrome: error while loading shared libraries: libnss3.so", "install --with-deps chromium"),
+        ]:
+            class Chromium:
+                async def launch_persistent_context(self, **options):
+                    launched.append(options)
+                    raise Error("BrowserType.launch_persistent_context: Failed to launch the browser process.\nBrowser logs:\n" + logs)
+
+            class Playwright:
+                chromium = Chromium()
+
+                async def stop(self):
+                    pass
+
+            class Starter:
+                async def start(self):
+                    return Playwright()
+
+            with self.subTest(advice=advice), patch("playwright.async_api.async_playwright", Starter), self.assertRaises(self.runner.InputError) as caught:
+                asyncio.run(self.runner.OwnedBrowser({"mode": "discover"}, emit_event=[].append).__aenter__())
+            message = self.runner.safe_error(caught.exception)
+            self.assertIn("Chromium could not start", message)
+            self.assertIn(advice, message)
+            self.assertNotIn("Browser logs", message)
+        self.assertTrue(launched and all(options["chromium_sandbox"] is True for options in launched))
+
     def test_one_invalid_proposal_does_not_discard_a_paid_discovery(self):
         class Proposal:
             def __init__(self, **value):
@@ -270,6 +307,19 @@ class RuntimeContractTests(unittest.TestCase):
         error = type("AuthenticationError", (Exception,), {})("Bearer sk-fixture-secret")
         self.assertEqual(self.runner.safe_error(error), "Model authentication failed. Check the configured model API key and access.")
 
+    def test_events_reach_the_controller_as_utf8_whatever_the_locale(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        event = {"type": "discovery", "summary": "Workspace 工作区 – ready"}
+        script = f"import sys; sys.path.insert(0, {str(HERE)!r}); import runner; runner.emit({event!r})"
+        for encoding in ["latin-1", "gbk"]:
+            with self.subTest(encoding=encoding):
+                completed = subprocess.run([sys.executable, "-c", script], env={**os.environ, "PYTHONIOENCODING": encoding, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, timeout=60)
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(json.loads(completed.stdout.decode("utf-8")), event)
+
     def test_failed_browser_cleanup_emits_structured_ownership_uncertainty(self):
         import asyncio
 
@@ -281,6 +331,46 @@ class RuntimeContractTests(unittest.TestCase):
         owned = self.runner.OwnedBrowser({}, emit_event=events.append)
         owned.browser = BrokenBrowser()
         asyncio.run(owned.close())
+        self.assertEqual(events, [{"type": "error", "error": "Cleanup incomplete: browser agent connection", "cleanupIncomplete": True}])
+
+    def test_a_stop_during_cleanup_still_runs_and_reports_every_step(self):
+        import asyncio
+        import os
+        import tempfile
+        calls, events = [], []
+
+        class SlowBrowser:
+            async def stop(self):
+                calls.append("browser agent connection")
+                await asyncio.sleep(30)
+
+        class Recorded:
+            def __init__(self, name):
+                self.name = name
+
+            async def close(self):
+                calls.append(self.name)
+
+            async def stop(self):
+                calls.append(self.name)
+
+        async def stopped_during_cleanup():
+            owned = self.runner.OwnedBrowser({}, emit_event=events.append)
+            owned.browser, owned.context, owned.playwright = SlowBrowser(), Recorded("owned Chromium"), Recorded("browser driver")
+            owned.profile = tempfile.TemporaryDirectory(prefix="perpetual-browser-")
+            cleanup = asyncio.create_task(owned.close())
+            for _ in range(1000):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            cleanup.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cleanup
+            return owned.profile.name
+
+        profile = asyncio.run(stopped_during_cleanup())
+        self.assertEqual(calls, ["browser agent connection", "owned Chromium", "browser driver"])
+        self.assertFalse(os.path.exists(profile))
         self.assertEqual(events, [{"type": "error", "error": "Cleanup incomplete: browser agent connection", "cleanupIncomplete": True}])
 
     def test_discovery_schema_rejects_invalid_evidence_and_oversized_candidates(self):
