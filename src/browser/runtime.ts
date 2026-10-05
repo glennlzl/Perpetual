@@ -99,7 +99,7 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
   const hidden=secrets.filter((value):value is string=>typeof value==='string'&&Boolean(value)),conceal=hide(hidden);
   // Error-only account values must be hidden before clipping without rewriting reviewed check evidence.
   const failure=(error:unknown)=>browserError(hide([...hidden,...errorSecrets])(String(messageOf(error)||error||'Browser operation failed.')),env);
-  let buffer='',eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
+  let buffer='',broken=false,eventBytes=0,terminalError:Error|null=null,settled=false,timer:NodeJS.Timeout|undefined,killTimer:NodeJS.Timeout|undefined,forcedAt=0,cleanupIncomplete=false,timedOut=false;
   function signal(name:NodeJS.Signals){lifecycle({name:'worker-signal',signal:name});try{if(process.platform!=='win32'&&child.pid)process.kill(-child.pid,name);else child.kill(name);}catch{}}
   function groupAlive(){if(process.platform==='win32'||!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code!=='ESRCH';}}
   function stop(message:string,reason:WorkerLifecycle['reason']='protocol'){
@@ -108,23 +108,26 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     // after up to 5 seconds finishing recordings. Give those cleanups time before killing the owned process group.
     killTimer=setTimeout(()=>{forcedAt=Date.now();cleanupIncomplete=true;terminalError=new Error(`${terminalError?.message||'Browser operation stopped.'} Cleanup incomplete after forced termination; an owned browser or temporary profile may remain.`);signal('SIGKILL');},cleanupGraceMs);killTimer.unref();
   }
+  // A stream that broke the protocol is drained, never buffered or parsed again: what follows may be part of what broke it.
+  function refuse(message:string){broken=true;buffer='';stop(message);}
   const promise=new Promise<void>((resolve,reject)=>{
     function done(error:unknown){if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);lifecycle({name:'worker-done',failed:Boolean(error),cleanupIncomplete,timedOut});error?reject(Object.assign(new Error(failure(error)),cleanupIncomplete?{cleanupIncomplete:true}:{},timedOut?{timedOut:true}:{})):resolve();}
     child.once('error',()=>done(new Error(unavailable)));
     child.stdout.setEncoding('utf8');
     if(onOutput){child.stderr.setEncoding('utf8');for(const stream of ['stdout','stderr'] as const)child[stream].on('data',(chunk:string)=>{try{onOutput(chunk,stream);}catch(error){stop(failure(error),'consumer');}});}
     else child.stdout.on('data',(chunk:string)=>{
-      buffer+=chunk;if(Buffer.byteLength(buffer)>3*1024*1024)return stop('Browser event exceeded its size limit.');
+      if(broken)return;
+      buffer+=chunk;if(Buffer.byteLength(buffer)>3*1024*1024)return refuse('Browser event exceeded its size limit.');
       let newline;
       while((newline=buffer.indexOf('\n'))!==-1){
         const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);if(!line.trim())continue;
-        let parsed:unknown;try{parsed=JSON.parse(line);}catch{return stop('Browser runtime returned an invalid event.');}
-        if(!isRecord(parsed))return stop('Browser runtime returned an invalid event.');
+        let parsed:unknown;try{parsed=JSON.parse(line);}catch{return refuse('Browser runtime returned an invalid event.');}
+        if(!isRecord(parsed))return refuse('Browser runtime returned an invalid event.');
         let event:WorkerEvent=parsed;
-        if(event.type!=='frame'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return stop('Browser event history exceeded its size limit.');}
+        if(event.type!=='frame'){eventBytes+=Buffer.byteLength(line);if(eventBytes>8*1024*1024)return refuse('Browser event history exceeded its size limit.');}
         if(event.type==='error'){cleanupIncomplete ||= event.cleanupIncomplete===true;terminalError=new Error(failure(event.error));continue;}
         // Nesting too deep to walk stops the run rather than throwing out of this listener.
-        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal) as WorkerEvent;}catch{return stop('Browser runtime returned an invalid event.');}
+        if(event.type!=='frame'&&hidden.length)try{event=hideText(event,conceal) as WorkerEvent;}catch{return refuse('Browser runtime returned an invalid event.');}
         // Without onOutput, the options carry onEvent.
         try{onEvent!(event);}catch(error){return stop(failure(error),'consumer');}
       }

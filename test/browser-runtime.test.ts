@@ -159,6 +159,48 @@ test('a short or common secret is hidden in free text without changing keys, num
   }
 });
 
+// A worker that runs script; its events are what the supervisor accepted.
+function supervise(script:string,{cleanupGraceMs=200}={}){
+  const events:WorkerEvent[]=[];
+  const job=superviseWorker({command:process.execPath,args:['-e',script],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs,onEvent:event=>{events.push(event);}});
+  return {promise:job.promise,events};
+}
+
+test('the worker protocol refuses malformed, incomplete and unfinished output',async()=>{
+  for(const [script,message] of [
+    ['console.log("not json")','Browser runtime returned an invalid event.'],
+    ['console.log("[]")','Browser runtime returned an invalid event.'],
+    ['process.stdout.write(JSON.stringify({type:"status"}))','Browser runtime returned an incomplete event.'],
+    ['console.log(JSON.stringify({type:"status"}));process.exitCode=1','Browser runtime exited before completing the operation.'],
+  ] as const)await assert.rejects(supervise(script).promise,{message},script);
+});
+
+test('after a protocol error the worker output is drained, never parsed or delivered again',async()=>{
+  // The worker ignores the stop signal and goes on writing a valid event.
+  const worker=supervise('process.on("SIGTERM",()=>{});console.log(JSON.stringify({type:"status",order:1}));console.log("not json");setTimeout(()=>{console.log(JSON.stringify({type:"status",order:2}));setTimeout(()=>process.exit(0),50);},100);',{cleanupGraceMs:10000});
+  await assert.rejects(worker.promise,{message:'Browser runtime returned an invalid event.'});
+  assert.deepEqual(worker.events,[{type:'status',order:1}]);
+  // An event over its size limit is dropped as it arrives, while the worker keeps writing until it is killed.
+  const flood=supervise('process.on("SIGTERM",()=>{});const chunk="x".repeat(65536);const write=()=>process.stdout.write(chunk,write);write();',{cleanupGraceMs:300});
+  await assert.rejects(flood.promise,(error:Error)=>error.message.startsWith('Browser event exceeded its size limit. Cleanup incomplete after forced termination'));
+  assert.deepEqual(flood.events,[]);
+});
+
+test('the event history of a worker is bounded',async()=>{
+  // About 9 MiB of other events stops the worker.
+  const padded=supervise('const pad="x".repeat(10240);for(let i=0;i<900;i++)console.log(JSON.stringify({type:"status",i,pad}));');
+  await assert.rejects(padded.promise,{message:'Browser event history exceeded its size limit.'});
+  assert.ok(padded.events.length<900);
+});
+
+test('cancelling a worker leaves none of its process running',async()=>{
+  let pid=0,ready!:()=>void;const started=new Promise<void>(resolve=>{ready=resolve;});
+  const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"status",pid:process.pid}));setInterval(()=>{},1000);'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:10000,onEvent:event=>{pid=event.pid as number;ready();}});
+  await started;job.cancel();
+  await assert.rejects(job.promise,{message:'Browser operation cancelled.'});
+  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
 test('error-only account values are masked before clipping without changing business evidence',async()=>{
   const username=`former-${'x'.repeat(900)}`,events:WorkerEvent[]=[];
   const job=superviseWorker({command:process.execPath,args:['-e','const username=process.argv[1]; console.log(JSON.stringify({type:"journey-step",checks:[{type:"text-visible",value:username,passed:true}]})); console.log(JSON.stringify({type:"error",error:"Missing control for "+username}));',username],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent:event=>{events.push(event);},errorSecrets:[username]});
