@@ -74,6 +74,10 @@ function application({persist=true}:{persist?:boolean}={}){
       // A landing page with no sign-in form, and a sign-in page whose form, shown at once, signs in over its socket.
       if(url.pathname==='/welcome')return send(page('Welcome','<h1>Welcome</h1>'));
       if(url.pathname==='/socket-sign-in')return send(page('Sign in',`<form><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0];form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';location.assign('/live');});</script>`));
+      if(url.pathname==='/socket-identifier')return send(page('Sign in','<form method=post action=/socket-identify><label>Email <input type=email name=email autocomplete=username></label><button>Continue</button></form>'));
+      if(url.pathname==='/socket-identify'&&req.method==='POST')return form.get('email')===account.username?redirect('/socket-password',{'set-cookie':'identified=1; Path=/; HttpOnly'}):redirect('/socket-identifier');
+      // A full navigation creates a new document and socket before the password is entered.
+      if(url.pathname==='/socket-password')return /identified=1/.test(req.headers.cookie||'')?send(page('Sign in',`<form><label>Email <input type=email name=email autocomplete=username value="${account.username}" readonly></label><label>Password <input type=password name=password autocomplete=current-password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0];form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';location.assign('/live');});</script>`)):redirect('/socket-identifier');
       if(!signedIn)return redirect('/login');
       if(url.pathname==='/live')return send(page('Notes',`<p></p><button>Add note</button><script>${SOCKET}socket.addEventListener('message',event=>{if(event.data.startsWith('Notes '))document.querySelector('p').textContent=event.data;});const via=new URLSearchParams(location.search).get('via'),port=via==='worker'?new Worker('/note-worker.js'):via==='shared'?new SharedWorker('/note-worker.js').port:null,added=()=>document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');if(port)port.onmessage=added;const writers={stream:async()=>{const writer=(await new WebSocketStream(SOCKET_URL).opened).writable.getWriter();for(const type of ['hello','add'])await writer.write(JSON.stringify({type}));},lazy:()=>new Promise(resolve=>{const lazy=new WebSocket(SOCKET_URL);lazy.onopen=()=>{for(const type of ['hello','add'])lazy.send(JSON.stringify({type}));resolve();};})};document.querySelector('button').onclick=()=>port?port.postMessage('add'):(writers[via]||(()=>say({type:'add'})))().then(added);</script>`));
       if(url.pathname==='/settings'&&req.method==='POST'){state.credits--;if(persist)state.name=form.get('name')!;return redirect('/settings?saved=1');}
@@ -327,6 +331,25 @@ test('Add a note', async ({ page, journey }) => {
   const events=await runSpec(target,code,{item:live,blockWrites:true,signInUrl:new URL('/socket-sign-in',target).href});
   assert.deepEqual(events.filter(event=>event.type==='journey-step'&&event.status!=='running').map(event=>`${event.stepId}:${event.status}`),['open-notes:completed','add-note:completed','reload:failed']);
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','sign-in','hello','hello']]);
+});
+
+test('identifier-first navigation permits password-step socket authentication, then the control catches the blocked note',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=new URL('/welcome',f.app.url).href;
+  const code=`import { test } from 'perpetual';
+test('Add a note', async ({ page, journey }) => {
+  await journey.milestone('open-notes', async () => { await journey.signIn(); });
+  await journey.milestone('add-note', async () => { await page.getByRole('button', { name: 'Add note' }).click(); });
+  await journey.milestone('reload', async () => { await page.reload(); });
+});`;
+  const options={item:live,signInUrl:new URL('/socket-identifier',target).href};
+  const saved=await runSpec(target,code,options);
+  const blocked=await runSpec(target,code,{...options,blockWrites:true});
+  const statuses=(events:RunEvent[])=>events.filter(event=>event.type==='journey-step'&&event.status!=='running').map(event=>`${event.stepId}:${event.status}`);
+  assert.deepEqual(statuses(saved),['open-notes:completed','add-note:completed','reload:completed'],JSON.stringify(saved.at(-1)));
+  assert.deepEqual(statuses(blocked),['open-notes:completed','add-note:completed','reload:failed'],JSON.stringify(blocked.at(-1)));
+  assert.deepEqual([f.app.state.notes,f.app.posts],[1,['POST /socket-identify','POST /socket-identify']]);
+  assert.deepEqual(f.app.received,['hello','sign-in','hello','add','hello','hello','sign-in','hello','hello']);
 });
 
 test('a control run that a write could get around cannot pass, so its verification is never missed',{timeout:180000},async t=>{
