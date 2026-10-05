@@ -75,7 +75,7 @@ test('tests and a large change are held for a person, never rejected', () => {
 test('tests in the usual layouts of each ecosystem are held for a person', () => {
   for (const path of ['src/test/java/com/acme/UserServiceTest.java', 'cypress/e2e/login.cy.ts', 'Acme.Tests/Billing.cs', 'Sources/App/AppTests.swift', 'Tests/AppTests/Login.swift', 'conftest.py',
     'app/tests.py', 'src/__mocks__/api.ts', 'e2e/checkout.ts', 'app/src/androidTest/kotlin/Login.kt', 'pkg/parse/testdata/input.json', 'src/User.test.tsx', 'src/app.e2e-spec.ts',
-    'lib/test_helper.rb', 'src/components/Button.snap', 'integration-tests/run.sh', 'src/OrderIT.java']) {
+    'lib/test_helper.rb', 'src/components/Button.snap', 'integration-tests/run.sh', 'src/OrderIT.java', 'config/test.json', 'config/environments/test.rb']) {
     assert.deepEqual(pathRules([path]), { rejected: [], holds: [HELD.tests] }, path);
   }
   assert.deepEqual(pathRules(['src/contest.ts', 'src/getLatest.ts', 'docs/ApiSpec.md', 'app/attestation.py', 'src/Edit.ts']).holds, [], 'A name that only contains a test word is not a test.');
@@ -87,7 +87,13 @@ test('test, lint and type configuration, npm configuration and make files are he
     'playwright.config.ts', 'pytest.ini', 'setup.cfg', 'mypy.ini', '.golangci.yml', '.rubocop.yml', 'phpunit.xml.dist', '.npmrc', 'Makefile']) {
     assert.deepEqual(pathRules([path]), { rejected: [], holds: [HELD.checks] }, path);
   }
-  assert.deepEqual(pathRules(['package.json', 'pyproject.toml', 'src/config.ts', 'vite-env.d.ts', 'docs/Makefile.md', 'src/eslint.ts']).holds, [], 'A manifest is read for what changed in it; other files are code.');
+  // Build files that declare how tests run, such as test { enabled = false } or skipTests, and the task runners,
+  // workspace files, hooks and analyzer settings CI reads.
+  for (const path of ['build.gradle', 'app/build.gradle.kts', 'settings.gradle', 'pom.xml', 'Directory.Build.props', 'CMakeLists.txt', 'Rakefile', 'deno.json', 'turbo.json', 'nx.json',
+    'apps/web/project.json', 'pnpm-workspace.yaml', '.pre-commit-config.yaml', '.editorconfig', '.cargo/config.toml', 'crates/core/.cargo/config', 'phpcs.xml.dist', '.php-cs-fixer.dist.php']) {
+    assert.deepEqual(pathRules([path]), { rejected: [], holds: [HELD.checks] }, path);
+  }
+  assert.deepEqual(pathRules(['package.json', 'pyproject.toml', 'composer.json', 'Pipfile', 'Cargo.toml', 'src/config.ts', 'vite-env.d.ts', 'docs/Makefile.md', 'src/eslint.ts', 'config/cargo.toml']).holds, [], 'A manifest is read for what changed in it; other files are code.');
   const weakened = checkChanges(diff(file('vitest.config.ts', ['export default { test: { include: [] } };'], ['export default { test: { include: [\'src/**/*.test.ts\'] } };'])));
   assert.deepEqual([weakened.rejected, weakened.holds], [[], [HELD.checks]]);
 });
@@ -96,14 +102,23 @@ test('a manifest\'s change is held when what it says about checks changed, never
   const pkg = (scripts: Record<string, string>, dependencies: Record<string, string> = {}) => JSON.stringify({ name: 'app', scripts, dependencies }, null, 2);
   assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), pkg({ test: 'echo skipped' })), true);
   assert.equal(manifestChecksChanged('web/package.json', pkg({ test: 'vitest run' }), pkg({ test: 'vitest run' }, { zod: '4.0.0' })), false, 'A dependency is the fix\'s own.');
-  assert.equal(manifestChecksChanged('package.json', null, pkg({ test: 'exit 0' })), false, 'An added manifest loosens no check that ran.');
+  // Ruff, ESLint and other tools read the manifest closest to a file, so an added one can reconfigure checks that ran.
+  assert.equal(manifestChecksChanged('src/pkg/pyproject.toml', null, '[tool.ruff]\nexclude = ["*"]\n'), true, 'An added manifest that configures a check changes what CI checks.');
+  assert.equal(manifestChecksChanged('packages/web/package.json', null, JSON.stringify({ name: 'web', eslintConfig: { root: true, rules: {} } })), true);
+  assert.equal(manifestChecksChanged('packages/web/package.json', null, JSON.stringify({ name: 'web', dependencies: { zod: '4.0.0' } })), false, 'One that says nothing about checks adds a package.');
   assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), null), true, 'A removed one does.');
   assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), '{ "scripts": '), true, 'So does one that does not parse.');
   assert.equal(manifestChecksChanged('package.json', JSON.stringify({ jest: { testPathIgnorePatterns: [] } }), JSON.stringify({ jest: { testPathIgnorePatterns: ['src'] } })), true);
+  for (const key of ['eslintIgnore', 'xo', 'standard']) assert.equal(manifestChecksChanged('package.json', JSON.stringify({ name: 'app' }), JSON.stringify({ name: 'app', [key]: { ignores: ['src'] } })), true, key);
   const pyproject = (options: string, dependencies = '"httpx"') => `[project]\nname = "app"\ndependencies = [${dependencies}]\n\n[tool.pytest.ini_options]\naddopts = "${options}"\n`;
   assert.equal(manifestChecksChanged('pyproject.toml', pyproject('-q'), pyproject('-q --deselect tests/test_tax.py')), true);
   assert.equal(manifestChecksChanged('pyproject.toml', pyproject('-q'), pyproject('-q', '"httpx", "anyio"')), false);
   assert.equal(manifestChecksChanged('Cargo.toml', '[package]\nname = "app"\n', '[package]\nname = "app"\n\n[lints.clippy]\nall = "allow"\n'), true);
+  assert.equal(manifestChecksChanged('Cargo.toml', '[package]\nname = "app"\n', '[package]\nname = "app"\n\n[lib]\ntest = false\n'), true, 'Turning off a crate\'s tests changes its checks.');
+  assert.equal(manifestChecksChanged('Cargo.toml', '[package]\nname = "app"\n', '[package]\nname = "app"\n\n[dependencies]\nserde = "1"\n'), false);
+  const composer = (scripts: Record<string, string>) => JSON.stringify({ name: 'acme/app', require: { php: '^8.3' }, scripts });
+  assert.equal(manifestChecksChanged('composer.json', composer({ test: 'phpunit' }), composer({ test: 'exit 0' })), true);
+  assert.equal(manifestChecksChanged('Pipfile', '[packages]\nhttpx = "*"\n\n[scripts]\ntest = "pytest"\n', '[packages]\nhttpx = "*"\n\n[scripts]\ntest = "true"\n'), true);
   assert.equal(manifestChecksChanged('src/package.ts', 'a', 'b'), false, 'Only manifests are read.');
 });
 

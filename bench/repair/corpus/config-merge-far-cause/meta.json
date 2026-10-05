@@ -54,8 +54,8 @@
     },
     {
       "patch": "decoys/copy-into-test-config.patch",
-      "fails": "ci",
-      "note": "Copies the US currency and tax into config/test.json. The visible tests pass, but the loaded US region still loses freeFrom, and deepMerge and APP_ overrides still drop nested settings."
+      "fails": "test-changed",
+      "note": "Copies the US currency and tax into config/test.json, the test environment's configuration, which the change rules hold as a test change. The visible tests would pass, but the loaded US region still loses freeFrom, and deepMerge and APP_ overrides still drop nested settings."
     },
     {
       "patch": "decoys/tax-in-handler.patch",

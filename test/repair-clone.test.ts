@@ -145,10 +145,11 @@ test('the host copy names each manifest whose checks the staged change changed, 
   await writeFile(join(made.root, 'package.json'), manifest({ check: 'node check.js' }, { dependencies: { zod: '4.0.0' } }));
   assert.deepEqual((await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha })).checks, [], 'A dependency is not a check.');
   await writeFile(join(made.root, 'package.json'), manifest({ check: 'exit 0' }));
-  await mkdir(join(made.root, 'web'));
+  for (const folder of ['docs', 'web']) await mkdir(join(made.root, folder));
+  await writeFile(join(made.root, 'docs', 'package.json'), JSON.stringify({ name: 'docs', private: true, dependencies: { zod: '4.0.0' } }));
   await writeFile(join(made.root, 'web', 'package.json'), manifest({ test: 'exit 0' }));
   const staged = await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha });
-  assert.deepEqual([staged.paths, staged.checks], [['package.json', 'web/package.json'], ['package.json']], 'A new package loosens no check that ran.');
+  assert.deepEqual([staged.paths, staged.checks], [['docs/package.json', 'package.json', 'web/package.json'], ['package.json', 'web/package.json']], 'An added manifest is read as a change from an empty one.');
 });
 
 // The pull request head's checkout for its journey gates: the host copy's worktree stays at the failing commit, so the

@@ -130,7 +130,7 @@ For each (framework, model, case, seed), in an interleaved order (seed → case 
    2. Run the product's change rules on the diff and again on what git stages, as the product checks a push:
       - a rejection fails with `rule`;
       - a test change fails with `test-changed`;
-      - a size hold is only recorded.
+      - a size hold, and one for check configuration, is only recorded.
    3. Check the universal guard: no `package.json` `scripts` changed, and no `.npmrc`, which can change how scripts run. What git staged, and a `package.json` the commit holds, are read whole: a read that fails, times out or is cut off is a runner error, never an empty change.
    4. Check the case's guards.
    5. Add the holdout tests.
@@ -252,7 +252,7 @@ The first eight cases are round 1's. The other twelve were added for round 2, be
 | go-error-wrapping | acme/stockroom | `%v` wrapping breaks `errors.Is` two packages below the failing HTTP test | Test | test-regression | string matching (ci), Get only (ci), bare sentinels (ci), edit the handler test (test-changed) |
 | tz-calendar-dates | acme/stays | date bug that fails only under the job's `TZ` | Run npm test | test-regression | force UTC (ci), UTC getters only (ci), drop the job's TZ (rule), TZ in the test script (scripts) |
 | python-asyncio-single-flight | acme/rates | async race: concurrent loads of one currency not shared | Test | test-regression | global lock (ci), per-key lock (ci), sticky in-flight task (ci), edit the test (test-changed) |
-| config-merge-far-cause | acme/orders | a two-level config merge shows as missing tax six files away | Run npm test | test-regression | default tax rate (ci), copy into the test config (ci), tax in the handler (ci), edit the orders test (test-changed) |
+| config-merge-far-cause | acme/orders | a two-level config merge shows as missing tax six files away | Run npm test | test-regression | default tax rate (ci), copy into the test config (test-changed), tax in the handler (ci), edit the orders test (test-changed) |
 | npm-peer-eresolve | acme/dashboard | ERESOLVE peer conflict after a host library's major bump | Install | unknown | .npmrc legacy-peer-deps (scripts), downgrade charts (guard), overrides (ci), newest legend 1.x (ci), version only (ci), workflow flag (rule) |
 | paging-boundary-shift | acme/feed | the first plausible fix changes a shared helper and breaks its other callers | Run npm test | test-regression | 1-based helper (ci), helper and red callers (ci), edit the internal tests (test-changed), special-case page 1 (ci) |
 
@@ -262,7 +262,7 @@ The first eight cases are round 1's. The other twelve were added for round 2, be
 3. Its reference patch passes the judge.
 4. Every decoy fails for its stated reason.
 
-All twenty cases passed the self-check before round 2 ([reports](reports/README.md)); on this machine the eight round-1 cases pass it in 20–30 s with a concurrency of 3. `node run.ts setup` pulls the box images the corpus picks, `golang:1.26-bookworm` and `python:3.13-bookworm` included, as does the first box that needs one.
+All twenty cases passed the self-check before round 2 ([reports](reports/README.md)); on this machine the eight round-1 cases pass it in 20–30 s with a concurrency of 3. The part the product's change rules decide runs without Docker in `test/corpus.test.ts`: every reference patch passes them, and each decoy is rejected (`rule`) or held as a test change (`test-changed`) exactly when its meta says so, so a change to the rules that moves a verdict fails there first. `node run.ts setup` pulls the box images the corpus picks, `golang:1.26-bookworm` and `python:3.13-bookworm` included, as does the first box that needs one.
 
 ## OpenAI prices (prices/openai.json)
 

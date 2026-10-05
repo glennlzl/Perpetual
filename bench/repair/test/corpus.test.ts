@@ -1,15 +1,18 @@
 // The corpus lint, without Docker: every meta.json is valid; every workflow is one job on one toolchain, Node 22 with
 // npm, Python 3.13 with unittest or Go 1.26, whose setup action picks the box image; no holdout, meta or
 // agent-instruction file sits in a snapshot; holdout tests live where the toolchain's test run finds them; the reference
-// patch and every decoy apply to the materialized snapshot; and materializing gives the same commit every time.
+// patch and every decoy apply to the materialized snapshot; materializing gives the same commit every time; and the
+// product's change rules decide each patch as its meta states.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { checkChanges } from '../../../src/repair/changes.ts';
 import { workflowJob } from '../ci.ts';
 import { applies, listFiles, loadCases, materialize, parseMeta } from '../corpus.ts';
+import { changeRules } from '../judge.ts';
 
 const cases = await loadCases();
 /** The setup actions a corpus workflow may use, and the version each must set up. */
@@ -92,5 +95,20 @@ test('reference patches and decoys apply to the materialized snapshot, whose com
     for (const decoy of c.meta.decoys) assert.ok(await applies(first, join(c.dir, decoy.patch)), `${c.name}'s ${decoy.patch} applies.`);
     const reference = await readFile(c.reference, 'utf8');
     for (const path of await listFiles(c.holdout)) assert.ok(!reference.includes(path), `${c.name}'s reference patch adds no holdout test.`);
+  }
+});
+
+// The judge applies the product's rules before anything runs, so a change to them can move a verdict the self-check in
+// Docker states: a reference patch must pass them, and only the decoys meta says fail at them may.
+test('the product\'s change rules pass every reference patch and fail each decoy at the rules exactly as its meta states', async () => {
+  const verdict = async (patch: string) => {
+    const diff = await readFile(patch, 'utf8'), rules = changeRules(diff, { paths: checkChanges(diff).paths, text: diff });
+    return rules.rejected.length ? 'rule' : rules.testChanged ? 'test-changed' : 'later';
+  };
+  for (const c of cases) {
+    assert.equal(await verdict(c.reference), 'later', `${c.name}'s reference patch passes the rules.`);
+    for (const decoy of c.meta.decoys) {
+      assert.equal(await verdict(join(c.dir, decoy.patch)), decoy.fails === 'rule' || decoy.fails === 'test-changed' ? decoy.fails : 'later', `${c.name}'s ${decoy.patch} fails as ${decoy.fails}.`);
+    }
   }
 });

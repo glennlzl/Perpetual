@@ -33,27 +33,36 @@ const TEST_FOLDER = /^(?:tests?|spec|__tests__|__snapshots__|__mocks__|__fixture
 const TEST_FILE = /[._-](?:tests?|specs?)\.[^/]+$|\.cy\.[^/]+$|\.snap$|^(?:tests?|conftest)\.[^/]+$|^test_[^/]+$/i;
 const TEST_NAME = /[a-z\d](?:Tests?|Specs?|IT)$/;
 // Configuration that decides how CI checks the code: test runners, linters, formatters, type checkers, coverage, npm's
-// own configuration (which can change how scripts run) and the make files CI commands call.
+// own configuration (which can change how scripts run), the build files that declare how tests run, and the make files,
+// task runners and workspace files CI commands call.
 const CHECK_FILES = new Set([
-  'pytest.ini', 'tox.ini', 'noxfile.py', 'setup.cfg', 'mypy.ini', '.mypy.ini', 'pyrightconfig.json', 'ruff.toml', '.ruff.toml', '.flake8', '.pylintrc', 'pylintrc', '.coveragerc',
-  '.golangci.yml', '.golangci.yaml', '.golangci.toml', '.golangci.json', '.rubocop.yml', '.rspec', 'phpunit.xml', 'phpunit.xml.dist', 'phpstan.neon', 'phpstan.neon.dist', 'psalm.xml',
+  'pytest.ini', 'tox.ini', 'noxfile.py', 'setup.cfg', 'mypy.ini', '.mypy.ini', 'pyrightconfig.json', 'ruff.toml', '.ruff.toml', '.flake8', '.pylintrc', 'pylintrc', '.coveragerc', '.pre-commit-config.yaml',
+  '.golangci.yml', '.golangci.yaml', '.golangci.toml', '.golangci.json', '.rubocop.yml', '.rspec', 'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'phpstan.neon', 'phpstan.neon.dist', 'psalm.xml',
+  'phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml', '.phpcs.xml.dist', '.php-cs-fixer.php', '.php-cs-fixer.dist.php', '.php_cs', '.php_cs.dist', '.editorconfig',
   'clippy.toml', '.clippy.toml', 'rustfmt.toml', '.rustfmt.toml', '.swiftlint.yml', 'biome.json', 'biome.jsonc', '.eslintignore', '.prettierignore', 'codecov.yml', '.codecov.yml',
-  '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', 'Makefile', 'makefile', 'GNUmakefile', 'justfile', 'Justfile', 'Taskfile.yml', 'Taskfile.yaml',
+  'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml', 'Directory.Build.props', 'Directory.Build.targets', 'CMakeLists.txt', 'deno.json', 'deno.jsonc',
+  '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', 'pnpm-workspace.yaml', 'turbo.json', 'nx.json', 'project.json', 'Makefile', 'makefile', 'GNUmakefile', 'justfile', 'Justfile',
+  'Taskfile.yml', 'Taskfile.yaml', 'Rakefile', 'rakefile', 'Rakefile.rb', 'rakefile.rb',
 ]);
-// The same with any extension, such as jest.config.ts, .eslintrc.cjs or tsconfig.build.json.
+// The same with any extension, such as jest.config.ts, .eslintrc.cjs or tsconfig.build.json, and Cargo's own
+// configuration, which sets the flags and aliases cargo test runs with.
 const CHECK_CONFIG = /^(?:(?:jest|vitest|vite|playwright|cypress|karma|ava|wdio|eslint|prettier|stylelint)\.config|vitest\.workspace|karma\.conf|[jt]sconfig|\.(?:eslintrc|prettierrc|stylelintrc|mocharc|nycrc|c8rc))(?:\.[\w-]+)*$/;
+const CHECK_PATH = /(?:^|\/)\.cargo\/config(?:\.toml)?$/;
 const isTest = (path: string) => {
   const parts = path.split('/'), name = parts.pop() ?? '';
   return parts.some(part => TEST_FOLDER.test(part) || TEST_NAME.test(part)) || TEST_FILE.test(name) || CODE.test(name) && TEST_NAME.test(name.replace(/\.[^.]*$/, ''));
 };
-const isCheckConfig = (path: string) => { const name = posix.basename(path); return CHECK_FILES.has(name) || CHECK_CONFIG.test(name); };
+const isCheckConfig = (path: string) => { const name = posix.basename(path); return CHECK_FILES.has(name) || CHECK_CONFIG.test(name) || CHECK_PATH.test(path); };
 // What a manifest says about how its package is checked, beside its dependencies: package.json's scripts, workspaces and
-// the check tools it configures, pyproject.toml's check tools and task runners, and Cargo.toml's lints.
-const PYTHON_TOOLS = [['pytest'], ['mypy'], ['pyright'], ['basedpyright'], ['ruff'], ['black'], ['isort'], ['pylint'], ['flake8'], ['coverage'], ['tox'], ['nox'], ['poe'], ['hatch', 'envs'], ['pdm', 'scripts']];
+// the check tools it configures, composer.json's and Pipfile's scripts, pyproject.toml's check tools and task runners,
+// and Cargo.toml's lints and test targets.
+const PYTHON_TOOLS = [['pytest'], ['mypy'], ['pyright'], ['basedpyright'], ['ruff'], ['black'], ['isort'], ['pylint'], ['flake8'], ['coverage'], ['tox'], ['nox'], ['poe'], ['taskipy'], ['hatch', 'envs'], ['pdm', 'scripts']];
 const MANIFEST_CHECKS = new Map<string, { parse(text: string): unknown; checks: string[][] }>([
-  ['package.json', { parse: JSON.parse, checks: [['scripts'], ['workspaces'], ['jest'], ['eslintConfig'], ['prettier'], ['stylelint'], ['ava'], ['mocha'], ['nyc'], ['c8']] }],
+  ['package.json', { parse: JSON.parse, checks: [['scripts'], ['workspaces'], ['jest'], ['eslintConfig'], ['eslintIgnore'], ['prettier'], ['stylelint'], ['xo'], ['standard'], ['ava'], ['mocha'], ['nyc'], ['c8']] }],
+  ['composer.json', { parse: JSON.parse, checks: [['scripts']] }],
   ['pyproject.toml', { parse: parseToml, checks: PYTHON_TOOLS.map(keys => ['tool', ...keys]) }],
-  ['Cargo.toml', { parse: parseToml, checks: [['lints'], ['workspace', 'lints']] }],
+  ['Pipfile', { parse: parseToml, checks: [['scripts']] }],
+  ['Cargo.toml', { parse: parseToml, checks: [['lints'], ['workspace', 'lints'], ['lib', 'test'], ['lib', 'doctest'], ['lib', 'harness'], ['test'], ['bin']] }],
 ]);
 /** The manifest names whose two versions manifestChecksChanged compares. */
 export const MANIFESTS: ReadonlySet<string> = new Set(MANIFEST_CHECKS.keys());
@@ -61,14 +70,15 @@ const valueAt = (value: unknown, keys: readonly string[]) => keys.reduce<unknown
 
 /**
  * Whether a change of a manifest changed how its package is checked, from its text at the failing commit and after the
- * change (null when absent there): a removed manifest did, an added one did not, and one that does not parse did.
+ * change (null when absent there): a removed manifest did, an added one did when it says anything about checks, since
+ * tools read the closest one, and one that does not parse did.
  */
 export function manifestChecksChanged(path: string, before: string | null, after: string | null) {
   const manifest = MANIFEST_CHECKS.get(posix.basename(path));
-  if (!manifest || before === null) return false;
+  if (!manifest || before === null && after === null) return false;
   if (after === null) return true;
   const read = (text: string): { value: unknown } | null => { try { return { value: manifest.parse(text) }; } catch { return null; } };
-  const old = read(before), now = read(after);
+  const old = before === null ? { value: {} } : read(before), now = read(after);
   return !old || !now || manifest.checks.some(keys => !isDeepStrictEqual(valueAt(old.value, keys), valueAt(now.value, keys)));
 }
 // Source code, where an unquoted value is an expression rather than a literal.
