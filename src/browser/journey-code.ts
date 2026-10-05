@@ -33,6 +33,8 @@ type Persistence={
 const now=()=>new Date().toISOString();
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
+// A case's entry in a record keyed by case ID; an ID such as constructor names no inherited member.
+const own=<T>(record:Readonly<Record<string,T>>|undefined,id:string):T|undefined=>record&&Object.hasOwn(record,id)?record[id]:undefined;
 const NO_CODE='Generate and approve code for this journey.',STALE_CODE='The approved code is for an earlier version of this journey.';
 const OLD_CODE='Reuse and verify the approved code again: its control evidence is out of date.';
 const UNREAD='The control did not check freshly read business data. Reload after the change, then check a run-unique value or a number against its earlier value.';
@@ -86,7 +88,7 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
     if(run.verification.attempt!==passes+1)return {status:'cancelled',passes:0,control:null};
     const result=run.results?.find(item=>item.caseId===caseId),failed=(error=result?.error||run.error||'The journey did not pass.'):VerificationState=>({status:'failed',passes,control:null,error});
     if(run.status==='cancelled'||result?.status==='cancelled'||result?.status==='skipped')return {status:'cancelled',passes,control:null};
-    if(run.specHashes?.[caseId]!==run.verification.hash)return failed();
+    if(own(run.specHashes,caseId)!==run.verification.hash)return failed();
     if(!run.verification.control){if(result?.status!=='passed')return failed();passes++;continue;}
     if(passes<3)return {status:'cancelled',passes,control:null};
     if(!result)return failed();
@@ -118,7 +120,7 @@ export function createJourneyCode(storage:Persistence){
   const clearFailure=(code:JourneyCodeState,caseId:string)=>({...code,generationFailures:Object.fromEntries(Object.entries(code.generationFailures).filter(([id])=>id!==caseId))});
   function changeSpec(scope:string,caseId:string,change:(current:JourneyCodeSnapshot,item:BrowserCase,specs:CaseSpecs)=>CaseSpecs){
     return storage.transact(scope,current=>{
-      const item=caseOf(current,caseId),next=change(current,item,current.code.specs[caseId]||{approved:null,draft:null}),code=clearFailure(current.code,caseId);
+      const item=caseOf(current,caseId),next=change(current,item,own(current.code.specs,caseId)||{approved:null,draft:null}),code=clearFailure(current.code,caseId);
       const specs={...code.specs};if(next.approved||next.draft)specs[caseId]=next;else delete specs[caseId];
       return {...code,specs};
     });
@@ -126,8 +128,8 @@ export function createJourneyCode(storage:Persistence){
   return {
     summary(scope:string){
       const current=storage.read(scope);
-      return Object.fromEntries(current.cases.filter(item=>current.code.specs[item.id]||current.generations.has(item.id)||current.code.generationFailures[item.id]).map((item):[string,SpecSummary]=>{
-        const {approved,draft}=current.code.specs[item.id]||{},storedFailure=current.code.generationFailures[item.id];
+      return Object.fromEntries(current.cases.filter(item=>own(current.code.specs,item.id)||current.generations.has(item.id)||own(current.code.generationFailures,item.id)).map((item):[string,SpecSummary]=>{
+        const {approved,draft}=own(current.code.specs,item.id)||{},storedFailure=own(current.code.generationFailures,item.id);
         const verification=draft&&verificationEvidence(current,item.id,draft)?.view;
         const generation=current.generations.get(item.id)||(storedFailure?{status:'failed' as const,...storedFailure}:undefined);
         const provenance=(spec:StoredSpec)=>spec.provenance?{provenance:structuredClone(spec.provenance)}:{};
@@ -139,11 +141,11 @@ export function createJourneyCode(storage:Persistence){
       }));
     },
     code(scope:string,caseId:unknown):SpecCodeReply{
-      const current=storage.read(scope),item=caseOf(current,caseId),{approved,draft}=current.code.specs[item.id]||{};
-      return {...(current.code.authoring?.[item.id]?.length?{authoring:structuredClone(current.code.authoring[item.id])}:{}),...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
+      const current=storage.read(scope),item=caseOf(current,caseId),{approved,draft}=own(current.code.specs,item.id)||{},authoring=own(current.code.authoring,item.id);
+      return {...(authoring?.length?{authoring:structuredClone(authoring)}:{}),...(draft?{draft:{hash:draft.hash,code:draft.code}}:{}),...(approved?{approved:{hash:approved.hash,code:approved.code}}:{})};
     },
     runnable(scope:string,item:BrowserCase,{manual=false,verification}:{manual?:boolean;verification?:Verification}={}):RunnableCode{
-      const snapshot=storage.read(scope),{approved,draft}=snapshot.code.specs[item.id]||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);
+      const snapshot=storage.read(scope),{approved,draft}=own(snapshot.code.specs,item.id)||{},current=(spec:StoredSpec|null|undefined)=>spec?.caseHash===caseHash(item);
       const approvedCurrent=current(approved)&&(approved?.checkVersion??1)===CHECK_VERSION&&policyMatches(snapshot,approved);
       const spec=verification?(draft?.hash===verification.hash&&draft.caseHash===verification.caseHash&&current(draft)&&policyMatches(snapshot,verification)?draft:null):approvedCurrent?approved:manual&&current(draft)?draft:null;
       if(!spec)return {missing:verification?CHANGED:approved&&!current(approved)?STALE_CODE:approved&&!approvedCurrent?OLD_CODE:NO_CODE};
@@ -155,7 +157,7 @@ export function createJourneyCode(storage:Persistence){
       return storage.transact(scope,current=>{
         const kept=clearFailure(current.code,item.id),specs={...kept.specs};
         // A removed case keeps no generated code; an edited one may retain the draft, explicitly stale.
-        if(current.cases.some(value=>value.id===item.id))specs[item.id]={approved:specs[item.id]?.approved??null,draft:drafted(item,code,provenance)};
+        if(current.cases.some(value=>value.id===item.id))specs[item.id]={approved:own(specs,item.id)?.approved??null,draft:drafted(item,code,provenance)};
         else delete specs[item.id];
         return {...kept,specs};
       });
@@ -183,7 +185,7 @@ export function createJourneyCode(storage:Persistence){
       return {approved,draft:drafted(item,code,approved.provenance)};
     });},
     verification(scope:string,caseId:string,hash:unknown){
-      const current=storage.read(scope),item=caseOf(current,caseId),draft=current.code.specs[item.id]?.draft;
+      const current=storage.read(scope),item=caseOf(current,caseId),draft=own(current.code.specs,item.id)?.draft;
       if(item.needsReview)throw new Error('Review this test before verifying its code.');
       if(!hasJourneyChecks(item))throw new Error('Add at least one milestone check or final assertion before verifying code.');
       if(!draft)throw Object.assign(new Error('Generate code for this test first.'),{statusCode:404});
@@ -194,34 +196,34 @@ export function createJourneyCode(storage:Persistence){
         identity,
         // Start before admitting an attempt, checkpoint after each, and finish before releasing the live activity.
         checkpoint(error?:string){return storage.transact(scope,current=>{
-          const draft=current.code.specs[caseId]?.draft;
+          const draft=own(current.code.specs,caseId)?.draft;
           if(draft?.hash!==identity.hash||draft.caseHash!==identity.caseHash)return current.code;
           const verification:StoredVerification={id:identity.id,checkVersion:identity.checkVersion,...(identity.readPolicy?{readPolicy:identity.readPolicy}:{}),...verificationState(current,caseId,identity.id,error),runIds:attemptsOf(current,identity.id).map(run=>run.id)};
-          return {...current.code,specs:{...current.code.specs,[caseId]:{...current.code.specs[caseId],draft:{...draft,verification}}}};
+          return {...current.code,specs:{...current.code.specs,[caseId]:{...own(current.code.specs,caseId)!,draft:{...draft,verification}}}};
         });},
       };
     },
     generationFeedback(scope:string,caseId:string){
-      const current=storage.read(scope),item=caseOf(current,caseId),draft=current.code.specs[caseId]?.draft;
+      const current=storage.read(scope),item=caseOf(current,caseId),draft=own(current.code.specs,caseId)?.draft;
       if(!draft||draft.caseHash!==caseHash(item))return undefined;
       const evidence=verificationEvidence(current,caseId,draft),verification=evidence?.view;
       if(verification?.status!=='failed'||!verification.error)return undefined;
       const failures=current.runs.filter(run=>{
         const identity=run.verification,result=run.results?.find(result=>result.caseId===caseId);
         return identity&&!identity.control&&identity.caseHash===draft.caseHash&&identity.checkVersion===CHECK_VERSION&&policyMatches(current,identity)
-          &&run.caseIds.includes(caseId)&&run.specHashes?.[caseId]===identity.hash&&['failed','needs_review','blocked'].includes(run.status)
-          &&result&&['failed','needs_review','blocked'].includes(result.status)&&run.codeFeedback?.[caseId];
+          &&run.caseIds.includes(caseId)&&own(run.specHashes,caseId)===identity.hash&&['failed','needs_review','blocked'].includes(run.status)
+          &&result&&['failed','needs_review','blocked'].includes(result.status)&&own(run.codeFeedback,caseId);
       });
       // Only terminal summaries scrubbed with the account of that run may reach a later model.
       // A current account cannot remove a former account's username from legacy raw diagnostics.
       const latest=failures.find(run=>evidence!.runIds.includes(run.id)&&run.verification?.hash===draft.hash);
-      const error=latest?.codeFeedback?.[caseId];
+      const error=own(latest?.codeFeedback,caseId);
       if(!error)return undefined;
       // A later replacement must not forget an earlier locator or navigation failure of this same contract.
       // Retain diagnostics only, never historical code or input literals, and never expected control failures.
       const previousErrors:string[]=[],seen=new Set([error]);
       for(const run of failures){
-        const error=run.codeFeedback?.[caseId];
+        const error=own(run.codeFeedback,caseId);
         if(!error||seen.has(error))continue;
         seen.add(error);previousErrors.push(error);
         if(previousErrors.length===3)break;
@@ -229,7 +231,7 @@ export function createJourneyCode(storage:Persistence){
       return {error,...(previousErrors.length?{previousErrors}:{})};
     },
     clearGenerationFailure(scope:string,caseId:string){
-      if(!storage.read(scope).code.generationFailures[caseId])return Promise.resolve();
+      if(!own(storage.read(scope).code.generationFailures,caseId))return Promise.resolve();
       return storage.transact(scope,current=>clearFailure(current.code,caseId));
     },
     generationFailed(scope:string,caseId:string,failure:GenerationFailure){return storage.transact(scope,current=>{

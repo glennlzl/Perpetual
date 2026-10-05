@@ -248,6 +248,18 @@ async function verified(f:Awaited<ReturnType<typeof fixture>>,hash:string){
   throw new Error('verification did not finish');
 }
 
+test('a case whose ID names an inherited object member has no phantom code or generation failure',async t=>{
+  const f=await fixture(t),items=['constructor','toString'].map(id=>({...journey,id}));
+  await f.manager.saveCases(f.context,items);
+  assert.deepEqual((await f.manager.view(f.context)).specs,{});
+  for(const {id} of items)assert.deepEqual(await f.manager.specCode(f.context,{caseId:id}),{},id);
+  // Its own code is kept and read like any other case's.
+  const code=spec();
+  await f.manager.saveSpec(f.context,{caseId:'constructor',code});
+  assert.deepEqual(Object.keys((await f.manager.view(f.context)).specs),['constructor']);
+  assert.equal((await f.manager.specCode(f.context,{caseId:'constructor'})).draft?.code,code);
+});
+
 test('code approved without a verification, as a stored single spec was, loads as a draft that a gate does not run',async t=>{
   const code=(label:string)=>spec(body().replace("'Go'",`'${label}'`)),saved=(item:typeof journey,label:string)=>({code:code(label),hash:specHash(code(label)),caseHash:caseHash(item),savedAt:'2026-09-24T08:00:00.000Z'});
   const legacy={...journey,id:'legacy'},migrated={...journey,id:'migrated'},replaced={...journey,id:'replaced'},pruned={...journey,id:'pruned'},verified={...journey,id:'verified'};
