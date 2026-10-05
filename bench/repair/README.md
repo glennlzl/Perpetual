@@ -73,7 +73,7 @@ node run.ts cleanup --out results/<run folder>     # only if a run was killed; r
 - Every file the bench writes is redacted with the product's `redact()` and then scrubbed of the key.
 - A key file whose `baseUrl` is not OpenRouter is refused.
 
-**Resuming.** Re-running with the same `--out` resumes: judged cells are skipped, and runner errors and budget-skipped cells are retried. A folder holds one provider's run; resuming it with the other provider is refused.
+**Resuming.** Re-running with the same `--out` resumes: judged cells are skipped, and runner errors and budget-skipped cells are retried. A folder holds one provider's run under one set of settings: resuming it with the other provider, or as a dry run of a paid one or the reverse, or with other limits, reasoning, `--provider-only` or prices of its models, is refused before any box or gateway starts.
 
 **Flags:**
 - `--provider openrouter|openai` (default openrouter)

@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { TOO_LARGE } from '../../src/repair/box.ts';
 import { writeStateFile } from '../../src/store.ts';
 import { checkChanges } from '../../src/repair/changes.ts';
@@ -118,6 +118,16 @@ export async function runBench(options: RunOptions) {
   const earlier: unknown = await readFile(paths.run, 'utf8').then(text => JSON.parse(text) as unknown).catch(() => null);
   const before = isRecord(earlier) ? earlier.provider ?? 'openrouter' : provider;
   if (before !== provider) throw new Error(`${out} holds a ${String(before)} run; name another --out for ${provider}.`);
+  const prices = provider === 'openai' ? options.prices ?? await loadPrices() : undefined;
+  // A resumed folder keeps the settings its judged attempts ran under, so a dry run, other limits, another reasoning
+  // policy, route or prices never pass for the same run in its report.
+  if (isRecord(earlier)) {
+    const settings: Record<string, unknown> = JSON.parse(JSON.stringify({ dryRun: options.dryRun, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null }));
+    const changed = Object.keys(settings).filter(name => name in earlier && !isDeepStrictEqual(earlier[name], settings[name]));
+    const rates = isRecord(earlier.prices) && isRecord(earlier.prices.models) ? earlier.prices.models : {};
+    if (prices && options.models.some(id => id in rates && !isDeepStrictEqual(rates[id], JSON.parse(JSON.stringify(priceFor(prices, id)))))) changed.push('prices');
+    if (changed.length) throw new Error(`${out} holds a run with other ${changed.join(', ')}; resume it with the same settings, or name another --out.`);
+  }
   await useBenchDocker();
   const unavailable = await dockerAvailable();
   if (unavailable) throw new Error(unavailable);
@@ -125,7 +135,6 @@ export async function runBench(options: RunOptions) {
   // Read before the gateway starts, which only the run's finally stops; each write replaces the file whole.
   const scopes = new Set(await readScopes(paths.boxes));
   const cases = await loadCases(options.cases);
-  const prices = provider === 'openai' ? options.prices ?? await loadPrices() : undefined;
   const script = options.dryRun ? solver(await corpusSolutions(cases)) : null;
   const fake = !script ? null : provider === 'openai' ? await createFakeOpenAI({ script }) : await createFakeUpstream({ script });
   const upstream = fake?.url ?? options.upstream ?? UPSTREAMS[provider];
