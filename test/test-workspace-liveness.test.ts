@@ -62,6 +62,16 @@ test('progress is keyed on its revision while case states still update', async t
   assert.equal(workspace.getSnapshot().browserTests.beta.runs[0].progress?.cases?.[0].frameUpdatedAt, '2026-09-23T10:00:05.000Z');
 });
 
+test('recordings the controller pruned leave the progress even when its revision is unchanged', async t => {
+  let value = progress(7, 'passed', { videos: ['page@1.webm'] });
+  const { workspace } = fixture(t, () => summary([run('a', { status: 'passed', progress: value })]));
+  await workspace.refreshSource();
+  assert.deepEqual(workspace.getSnapshot().browserTests.beta.runs[0].progress?.cases?.[0].videos, ['page@1.webm']);
+  value = progress(7, 'passed');
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().browserTests.beta.runs[0].progress?.cases?.[0].videos, undefined, 'A pruned recording is no longer offered for playback.');
+});
+
 test('an unchanged environment health poll keeps identity and a new heartbeat replaces it', async t => {
   let checkedAt = '2026-09-23T10:00:00.000Z';
   const environment = () => [{ id: 'env', stageId: 'beta', status: 'ready', updatedAt: '2026-09-23T09:00:00.000Z', health: { checkedAt, ok: true, consecutiveFailures: 0 } }];

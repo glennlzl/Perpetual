@@ -80,11 +80,12 @@ const active = (entry: StageEntry) => entry.view.environment.environments.some(i
   || entry.view.browser.runs.some(run => ['queued', 'running'].includes(run.status))
   || Object.values(entry.view.browser.specs || {}).some(spec => spec?.generation?.status === 'running' || spec?.draft?.verification?.status === 'running');
 // Browser progress with an unchanged revision and case states is reused whole;
-// scheduler states and frame times stay part of the key.
+// scheduler states, frame times and recordings stay part of the key, since pruning a
+// run's recordings leaves its revision unchanged.
 const progressKey = (value: unknown) => {
   // share calls this only for the controller's progress field; old saved progress could also carry status.
   const progress = value as (RunProgress & { status?: string }) | null | undefined;
-  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined)])]) : null;
+  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined), item.videos])]) : null;
 };
 // Structural sharing: unchanged records keep their identity across polls.
 // A record reused in place of next has next's fields and values, so it stands for next's type.
