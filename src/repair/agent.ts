@@ -287,11 +287,14 @@ export function createRepairAgent(options: RepairAgentOptions) {
       try { diff = await box.diff(repair.sha); }
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
       if (!diff.toString('utf8').trim()) {
-        await fail('The attempt changed no file.');
         // Done without a change is how the instructions have the model say the code cannot fix the failure, such as one
-        // whose cause is in CI configuration: a person reads why, rather than the next attempts paying to agree.
-        if (result.summary && !result.verified) return await finish({ status: 'needs-person', reason: `The model changed no file: ${result.summary}` });
-        continue;
+        // whose cause is in CI configuration: a person reads why, rather than the next attempts paying to agree. A
+        // Settings model's verdict is first put to a distinct escalation model, once.
+        const verdict = Boolean(result.summary) && !result.verified;
+        await fail('The attempt changed no file.', verdict ? `The attempt changed no file and called done: ${result.summary}` : 'The attempt changed no file.');
+        if (!verdict) continue;
+        if (number <= budget.escalateAfter && models.escalationModel && models.escalationModel !== models.model) { number = budget.escalateAfter; continue; }
+        return await finish({ status: 'needs-person', reason: `The model changed no file: ${result.summary}` });
       }
       const first = checkChanges(diff.toString('utf8'), { deployFiles });
       if (first.rejected.length) { await fail(refusal(first.rejected, first.credentials)); continue; }

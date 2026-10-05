@@ -213,18 +213,25 @@ test('two attempts that end without a fix escalate to the escalation model', asy
   assert.match(h.prompts[2][0], /The model stopped without calling done\./, 'Why the previous attempt failed is the next one\'s input.');
 });
 
-// The instructions have the model call done and say why when the code cannot fix the failure.
-test('an attempt that calls done without changing a file ends the repair with the model\'s explanation for a person', async t => {
+// The instructions have the model call done and say why when the code cannot fix the failure. A weaker Settings model
+// may give up where the escalation model would not, so its verdict is put to that model once.
+test('an attempt that calls done without changing a file ends the repair with the model\'s explanation once the escalation model agrees', async t => {
   const explain: ScriptedStep[] = [
     { calls: [{ tool: 'run', input: { command: 'node check.js' } }] },
     { calls: [{ tool: 'done', input: { summary: 'The workflow pins a Node version the code does not support; the fix is in .github/workflows/ci.yml, which a repair may not change.' } }] },
   ];
-  const h = await harness(t, { scripts: [explain, FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
+  const h = await harness(t, { scripts: [explain, explain, FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
   await h.fail();
   await until(() => h.repair()?.status === 'needs-person');
   await h.manager.idle();
   assert.equal(h.repair()?.reason, 'The model changed no file: The workflow pins a Node version the code does not support; the fix is in .github/workflows/ci.yml, which a repair may not change.');
-  assert.deepEqual([h.models.length, h.pushes, (await h.saved()).attempts?.map(attempt => attempt.failure)], [1, [], ['The attempt changed no file.']], 'No later attempt pays to agree.');
+  assert.deepEqual([h.models, h.pushes, (await h.saved()).attempts?.map(attempt => [attempt.number, attempt.failure])], [[MODELS.model, MODELS.escalationModel], [], [[1, 'The attempt changed no file.'], [3, 'The attempt changed no file.']]], 'No later attempt pays to agree.');
+  assert.match(h.prompts[1][0], /The attempt changed no file and called done: The workflow pins a Node version/, 'The escalation model reads the verdict it is asked about.');
+  const fixed = await harness(t, { scripts: [explain, FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
+  await fixed.fail();
+  await until(() => fixed.repair()?.status === 'ready');
+  await fixed.manager.idle();
+  assert.deepEqual([fixed.models, fixed.pushes.map(push => push.files)], [[MODELS.model, MODELS.escalationModel], ['add.js']], 'An escalation model that finds a fix makes it.');
 });
 
 test('a change the rules reject is never pushed, and its reason goes back to the agent', async t => {
