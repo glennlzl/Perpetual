@@ -183,6 +183,18 @@ test('changing the target at the same commit does not present a previous destina
   const restored=await f.manager.configure(target);assert.equal(restored.current?.id,deployed.current?.id);assert.equal(restored.canDeploy,false);
 });
 
+test('a commit whose earlier attempt later reports success shows deployed, and Deploy is not offered',async t=>{
+  const states:Record<string,'failed'|'deployed'>={};let created=0;
+  const f=await fixture(t,{create:async()=>({deploymentId:String(++created),status:'queued'}),read:async request=>({deploymentId:request.deploymentId!,status:states[request.deploymentId!]})});
+  await f.manager.configure(target);
+  await f.manager.deploy({sha:SHA,target});states['1']='failed';await f.manager.refresh();
+  await f.manager.deploy({sha:SHA,target});states['2']='failed';await f.manager.refresh();
+  states['1']='deployed'; // the first attempt's workflow is run again on GitHub
+  const view=await f.manager.refresh();
+  assert.deepEqual([view.current?.deploymentId,view.current?.status,view.canDeploy,view.blockedReason],['1','deployed',false,'This commit is already deployed to this target.']);
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);
+});
+
 test('current deployment can be older than the recent history display limit',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
   const first=(await f.manager.refresh()).current!;

@@ -76,7 +76,10 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   async function view(): Promise<ReleaseView> {
     const evidence=await getEvidence(),source=sourceValid(evidence.source)?evidence.source:null;
     const target=source?state.targets[scope(source)]??null:null,history=source?own(source):[],recent=history.slice(-20).reverse().map(entry=>publicRecord(entry.record));
-    const selected=target?history.findLast(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):undefined,current=selected?publicRecord(selected.record):null;
+    // A deployment of this commit to this target stays current over a later failed attempt, as deploy() refuses another
+    // while it stands.
+    const attempts=target?history.filter(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):[];
+    const selected=attempts.findLast(entry=>entry.record.status==='deployed'||active(entry.record))??attempts.at(-1),current=selected?publicRecord(selected.record):null;
     let blockedReason=evidenceReason(evidence);
     if(!blockedReason&&!target)blockedReason='Configure a deployment target.';
     if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason='A deployment is unresolved. Check its status before deploying again.';
