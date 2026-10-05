@@ -2,11 +2,13 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
+import { holdsResources } from '../src/environments/usage.ts';
 import type { EnvironmentManager, ManagedRuntime } from '../src/environments/manager.ts';
 
 type Saved = { environments: { id: string; status: string; cleanedAt?: string; services?: unknown[] }[] };
@@ -90,6 +92,23 @@ test('interrupted owned Browser use quarantines its environment without replayin
   manager = manage(await createEnvironmentManager({ dataDir }));
   assert.equal(manager.resolveTarget('http://localhost:50123/')?.status, 'cleanup_failed');
   await manager.close();
+});
+
+test('a creation interrupted before it owned a sandbox leaves no copied source behind', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-environment-crash-'));
+  let manager: EnvironmentManager | undefined;
+  t.after(async () => { await manager?.close(); await rm(dataDir, { recursive: true, force: true }); });
+  // The controller was killed while each was queued or copying the source, before the twin recorded its ownership.
+  const statuses = ['queued', 'creating', 'preparing'], ids = statuses.map(() => randomUUID());
+  await mkdir(join(dataDir, 'environments'), { mode: 0o700 });
+  for (const id of ids) { await mkdir(join(dataDir, 'environments', id, 'source'), { recursive: true }); await writeFile(join(dataDir, 'environments', id, 'source', 'app.mjs'), 'export {};\n'); }
+  await writeFile(join(dataDir, 'environments/state.json'), JSON.stringify({ version: 1, plans: {}, detected: {}, drafts: {}, environments: statuses.map((status, index) => ({
+    id: ids[index], scope: 'fixture-scope', pipelineKey: context.key, stageId: context.stageId, repoPath: context.scan.repo.path, sourceBranch: 'main', sourceRevision: 'fixture',
+    status, step: 'Copying source', services: [], apps: [], createdAt: new Date().toISOString() })) }));
+  const unexpected = async () => { throw new Error('Recovery must not replay twin operations'); };
+  manager = await createEnvironmentManager({ dataDir, runtime: only({ prepareEnvironment: unexpected, environmentHealth: unexpected, destroySandbox: unexpected }) });
+  assert.deepEqual(manager.summaries(context.key).map(item => [item.status, item.step, holdsResources(item)]), statuses.map(() => ['failed', 'Interrupted', false]));
+  for (const id of ids) await assert.rejects(access(join(dataDir, 'environments', id)), { code: 'ENOENT' }, id);
 });
 
 test('interrupted Browser IDs do not revive ownership for deleted or already-cleaned environments', { timeout: 10000 }, async t => {

@@ -188,7 +188,11 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   }
   const interrupted = new Set(interruptedEnvironmentIds);
   for (const item of state.environments) {
-    if (IN_PROGRESS.includes(item.status)) Object.assign(item, { status: item.sandboxId ? 'cleanup_failed' : 'failed', step: 'Interrupted', updatedAt: now(), error: 'The controller stopped during this operation. Delete the remaining sandbox before retrying.' });
+    if (!IN_PROGRESS.includes(item.status)) continue;
+    Object.assign(item, { status: item.sandboxId ? 'cleanup_failed' : 'failed', step: 'Interrupted', updatedAt: now(), error: 'The controller stopped during this operation. Delete the remaining sandbox before retrying.' });
+    // Before it records a sandbox, an operation owns only its folder, such as the source it was copying: remove it, or keep
+    // the environment holding it until a deletion can.
+    if (!item.sandboxId) await removeSnapshot(item).catch(error => Object.assign(item, { status: 'cleanup_failed', cleanupError: failure(error) }));
   }
   // Controller death does not stop application work that an interrupted browser
   // run started. Keep ownership, and require cleanup before accepting reuse.
