@@ -54,8 +54,10 @@ const MANIFEST_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencie
 const APP_FRAMEWORK = /next|vite|express|fastify|hono/i;
 const LOCKFILES = [['pnpm-lock.yaml', 'pnpm', 'pnpm install --frozen-lockfile'], ['yarn.lock', 'yarn', 'yarn install'], ['package-lock.json', 'npm', 'npm ci']];
 const INSTALL: Record<string, string> = { pnpm: 'pnpm install', yarn: 'yarn install', npm: 'npm install' };
-// A script that reaches a cloud account or publishes is never an app command.
-const CLOUD_LAUNCHER = /\b(?:vercel|netlify)\s+(?:dev|env|deploy|link)|\brailway\s+(?:env|deploy|link|run)|\bsupabase\s+(?:env|deploy|link|db\s+push)|\b(?:deploy|release|publish)\b/i;
+// A script that reaches a cloud account or publishes is never an app command. A deploy, release or publish word is one,
+// but not as a flag (--release), as a folder (dist/release/) or in Prisma's `migrate deploy`, which applies migrations
+// to the twin's own database.
+const CLOUD_LAUNCHER = /\b(?:vercel|netlify)\s+(?:dev|env|deploy|link)|\brailway\s+(?:env|deploy|link|run)|\bsupabase\s+(?:env|deploy|link|db\s+push)|(?<!-|\bmigrate\s+)\b(?:deploy|release|publish)\b(?!\/)/i;
 // Servers that listen on loopback or ignore PORT unless told otherwise.
 const LISTEN: [RegExp, (port: number) => string][] = [[/^\s*(?:npx\s+)?vite\b/, port => `--host 0.0.0.0 --port ${port}`], [/^\s*(?:npx\s+)?next\b/, port => `--hostname 0.0.0.0 --port ${port}`]];
 /** Each app listens on this port in its own container; the twin publishes it on a host port of its own. */
