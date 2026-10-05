@@ -19,15 +19,18 @@ export interface ToolEvents { run?(command: string, exitCode: number): void; cha
 
 const refused = (error: string): Refusal => ({ ok: false, error });
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
-// The redaction marker stands in replies for text the tools hide, such as what follows a name like token or password;
-// copied into a file it would replace real code.
+// Replies read the workspace as source code: key blocks, token shapes and literals set to a name like token or password
+// are hidden, while the expressions and types around such names stay as written, so a line read can be edited.
+const scrub = (value: unknown) => redact(value, { code: true });
+// The redaction marker stands in replies for text the tools hide, such as a literal set to a name like token or
+// password; copied into a file it would replace real code.
 const markers = (text: string) => text.split(REDACTED).length - 1;
-const MARKED = `${REDACTED} stands for text the tools hide, such as what follows a name like token or password, and is never code`;
-const oneLine = (value: unknown, limit = 200) => clip(redact(value).replace(/\s+/g, ' ').trim(), limit);
+const MARKED = `${REDACTED} stands for text the tools hide, such as a literal set to a name like token or password, and is never code`;
+const oneLine = (value: unknown, limit = 200) => clip(scrub(value).replace(/\s+/g, ' ').trim(), limit);
 const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
 /** Model-facing text only; internal paths, file edits and change validation keep their original bytes. */
 function modelResult(result: Result): Result {
-  const strings = (value: unknown): unknown => typeof value === 'string' ? redact(value)
+  const strings = (value: unknown): unknown => typeof value === 'string' ? scrub(value)
     : Array.isArray(value) ? value.map(strings)
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, strings(item)])) : value;
   return strings(result) as Result;
@@ -77,7 +80,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.truncated) return unavailable(result);
     if (result.exitCode === 3) return refused(`${found.name} is not a folder; read it instead.`);
     if (result.exitCode !== 0) return refused(`${found.name} could not be listed.`);
-    const entries = redact(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
+    const entries = scrub(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
     return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
   }
   /** Redact the complete bounded file before selecting lines; a fragment may have lost its credential's context. */
@@ -88,7 +91,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.exitCode !== 0 || result.timedOut) return refused(`${found.name} could not be read completely.`);
     if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
     const lines = (text: string) => { const values = text.split('\n'); if (values.at(-1) === '') values.pop(); return values; };
-    const raw = lines(result.stdout), redacted = lines(redact(result.stdout));
+    const raw = lines(result.stdout), redacted = lines(scrub(result.stdout));
     if (raw.length !== redacted.length) return refused(`${found.name} cannot be shown with accurate line numbers after redaction.`);
     return { ok: true, raw, redacted };
   }
@@ -194,7 +197,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.output, keep: 'tail' });
     events.run?.(command, result.exitCode);
     if (result.truncated) return unavailable(result);
-    return { ok: true, exitCode: result.exitCode, output: redact(result.stdout + result.stderr), timedOut: result.timedOut, truncated: result.truncated };
+    return { ok: true, exitCode: result.exitCode, output: scrub(result.stdout + result.stderr), timedOut: result.timedOut, truncated: result.truncated };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.
   const guarded = (name: string, work: (input: unknown) => Promise<Result>) => async (input: unknown) => {

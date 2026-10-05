@@ -34,6 +34,7 @@ test('a long run of name characters is read once, so a log of hyphenated or base
   for (const run of ['a-'.repeat(30000), '-'.repeat(60000), 'Zm9v_-YmFy'.repeat(8000), Array.from({ length: 3000 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`).join('_')]) {
     const started = performance.now();
     assert.equal(redact(run), run);
+    assert.equal(redact(run, { code: true }), run);
     assert.equal(hasCredential(run), false);
     assert.equal(hasCredential(run, { code: true }), false);
     assert.ok(performance.now() - started < 2000, `${run.slice(0, 20)}… took ${Math.round(performance.now() - started)} ms`);
@@ -41,8 +42,52 @@ test('a long run of name characters is read once, so a log of hyphenated or base
   assert.equal(redact(`${'a-'.repeat(30000)} token=abc`), `${'a-'.repeat(30000)} token=${REDACTED}`, 'A name after the run is still found.');
   // A run of spaces after a credential name is read once too, where a type annotation could start.
   const spaced = `password:${' '.repeat(60000)}${'x'.repeat(60000)}`, started = performance.now();
-  hasCredential(spaced); hasCredential(spaced, { code: true });
+  hasCredential(spaced); hasCredential(spaced, { code: true }); redact(spaced, { code: true });
   assert.ok(performance.now() - started < 2000, `A run of spaces took ${Math.round(performance.now() - started)} ms`);
+  // Code reads every credential name once, even one after another or before a quote that never closes.
+  for (const text of ['token: '.repeat(20000), `token = "${'x'.repeat(200000)}`, '"token": "'.repeat(10000), `https://${'$a'.repeat(50000)}@host`]) {
+    const begun = performance.now();
+    redact(text, { code: true });
+    assert.ok(performance.now() - begun < 2000, `${text.slice(0, 20)}… took ${Math.round(performance.now() - begun)} ms`);
+  }
+});
+
+test('code keeps what follows a credential name when it is an expression, a type or a reference, and hides literals', () => {
+  for (const line of [
+    '  const token = getToken(username);', 'export interface Session { token: string; secret: string }', 'async function login(username: string, password: string): Promise<Session> {',
+    'def verify(password: str, hashed: str) -> bool:', 'secret := os.Getenv("SECRET")', 'const apiKey = process.env.OPENAI_API_KEY;', '  max_tokens: 4096,', 'token = get_token(username)',
+    "src/auth.ts(5,12): error TS2741: Property 'secret' is missing in type '{ token: string; }' but required in type 'Session'.", '    "jsonwebtoken": "^9.0.2",',
+    '  headers: { Authorization: `Bearer ${token}` },', "  headers: { Authorization: 'Bearer ' + token },", '  Authorization: token,', '// Uses Bearer authentication.',
+    'const url = `postgres://postgres:${password}@db:5432/app`;', 'git clone https://${GITHUB_TOKEN}@github.com/acme/app.git', 'const callback = `/callback?access_token=${token}`;',
+    'curl --token "$TOKEN" https://api.example.test', "const tokenType = 'Bearer';", "secretPath = '/run/secrets/db'", 'PASSWORD="${DB_PASSWORD}"',
+  ]) assert.equal(redact(line, { code: true }), line, line);
+  const cases: [string, string][] = [
+    ['const apiKey = "fixture-literal-1";', `const apiKey = ${REDACTED};`],
+    ['const password: string = \'fixture-literal-1\';', `const password: string = ${REDACTED};`],
+    ['const key = process.env.API_KEY || "fixture-literal-1";', `const key = process.env.API_KEY || ${REDACTED};`],
+    ['secret := "fixture-literal-1"', `secret := ${REDACTED}`],
+    ["'password' => 'fixture-literal-1',", `'password' => ${REDACTED},`],
+    ['request failed: {\\"password\\":\\"fixture-literal\\"}', `request failed: {\\"password\\":\\"${REDACTED}\\"}`],
+    ['export DB_PASSWORD="fixture literal value"', `export DB_PASSWORD=${REDACTED}`],
+    ['deploy --password "fixture-literal-1"', `deploy --password ${REDACTED}`],
+    ['GET /callback?access_token=fixture123&other=keep', `GET /callback?access_token=${REDACTED}&other=keep`],
+    ['curl -H "Authorization: token 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
+    ['headers.set("Authorization", "Basic Zml4dHVyZTpsaXRlcmFs");', `headers.set("Authorization", ${REDACTED});`],
+    ['request: Bearer abc123def456ghi', `request: Bearer ${REDACTED}`],
+    ['postgres://user:fixture-literal@db.example.test/app', `postgres://${REDACTED}@db.example.test/app`],
+    ['git clone https://0123456789abcdef@github.com/acme/app.git', `git clone https://${REDACTED}@github.com/acme/app.git`],
+    [`value ghp_${'a'.repeat(36)} end`, `value ${REDACTED} end`],
+    ['before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\nafter', `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`],
+    // A literal goes with its quotes, and one that spans lines whatever its length, so numbered lines redacted again
+    // come back the same.
+    ['before\nPASSWORD="first line\nsecond line"\nafter', `before\nPASSWORD=${REDACTED}\n${REDACTED}\nafter`],
+    ['password = "ab\ncd"', `password = ${REDACTED}\n${REDACTED}`],
+  ];
+  for (const [input, output] of cases) {
+    assert.equal(redact(input, { code: true }), output, input);
+    const numbered = output.split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n');
+    assert.equal(redact(numbered, { code: true }), numbered, `${input} numbered`);
+  }
 });
 
 test('an Authorization value of any scheme and every part of a named value or URL user info are hidden', () => {

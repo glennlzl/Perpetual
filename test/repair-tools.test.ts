@@ -70,16 +70,17 @@ test('edit replaces text that occurs once, write creates folders, and both repor
   assert.deepEqual(f.events.changes, ['add.js', 'docs/notes/fix.md']);
 });
 
-// Redaction hides what follows a credential-like name, so a reply can show the marker where an expression is.
+// Redaction hides a literal set to a credential-like name, so a reply can show the marker where a string was.
 test('edit and write explain the redaction marker, and never put it into a file in place of code', async t => {
   const f = await tools(t);
-  await writeFile(join(f.root, 'auth.js'), 'const token = getToken(user);\nmodule.exports = token;\n');
-  assert.match(String((await f.call('read', { path: 'auth.js' })).content), /const token = \[REDACTED\]/);
-  assert.match((await f.call('edit', { path: 'auth.js', old: 'const token = [REDACTED]', new: 'const token = await getToken(user)' })).error ?? '', /\[REDACTED\] stands for text the tools hide.*Anchor old on the text around it/);
+  const source = 'const token = process.env.TOKEN ?? "fixture-literal-1";\nmodule.exports = token;\n';
+  await writeFile(join(f.root, 'auth.js'), source);
+  assert.match(String((await f.call('read', { path: 'auth.js' })).content), /const token = process\.env\.TOKEN \?\? \[REDACTED\];/);
+  assert.match((await f.call('edit', { path: 'auth.js', old: 'process.env.TOKEN ?? [REDACTED]', new: 'process.env.TOKEN' })).error ?? '', /\[REDACTED\] stands for text the tools hide.*Anchor old on the text around it/);
   assert.match((await f.call('edit', { path: 'auth.js', old: 'module.exports = token;', new: 'module.exports = [REDACTED];' })).error ?? '', /new adds \[REDACTED\]/);
-  assert.match((await f.call('write', { path: 'auth.js', text: 'const token = [REDACTED];\nmodule.exports = token;\n' })).error ?? '', /text adds \[REDACTED\]/);
-  assert.equal(await readFile(join(f.root, 'auth.js'), 'utf8'), 'const token = getToken(user);\nmodule.exports = token;\n');
-  assert.equal((await f.call('edit', { path: 'auth.js', old: 'getToken(user)', new: 'await getToken(user)' })).ok, true, 'An edit anchored around the hidden text works.');
+  assert.match((await f.call('write', { path: 'auth.js', text: 'const token = process.env.TOKEN ?? [REDACTED];\nmodule.exports = token;\n' })).error ?? '', /text adds \[REDACTED\]/);
+  assert.equal(await readFile(join(f.root, 'auth.js'), 'utf8'), source);
+  assert.equal((await f.call('edit', { path: 'auth.js', old: 'const token = process.env.TOKEN', new: 'const token = process.env.AUTH_TOKEN' })).ok, true, 'An edit anchored around the hidden text works.');
   await writeFile(join(f.root, 'mask.js'), "module.exports = () => '[REDACTED]';\n");
   assert.equal((await f.call('write', { path: 'mask.js', text: "module.exports = value => value ? '[REDACTED]' : '';\n" })).ok, true, 'A marker the file already holds may stay.');
 });
@@ -121,16 +122,16 @@ test('grep redacts a credential before clipping its matched line', async t => {
 test('run redacts output while preserving the real exit and reproduction evidence', async t => {
   const f = await tools(t);
   const command = 'cat config.txt; exit 3';
-  await writeFile(join(f.root, 'config.txt'), 'API_KEY=synthetic-run-value\nordinary diagnostic\n');
+  await writeFile(join(f.root, 'config.txt'), `API_KEY="synthetic-run-value"\nGITHUB=ghp_${'a'.repeat(36)}\nordinary diagnostic\n`);
   const result = await f.call('run', { command });
-  assert.equal(result.output, 'API_KEY=[REDACTED]\nordinary diagnostic\n');
+  assert.equal(result.output, 'API_KEY=[REDACTED]\nGITHUB=[REDACTED]\nordinary diagnostic\n');
   assert.deepEqual([result.exitCode, result.timedOut, result.truncated], [3, false, false]);
   assert.deepEqual(f.events.runs, [[command, 3]]);
 });
 
 test('tool replies redact filenames and refused paths but internal file operations use their exact paths', async t => {
   const f = await tools(t), name = 'ghp_syntheticfilename0123456789.txt';
-  const contents = 'API_KEY=synthetic-file-value\n';
+  const contents = 'API_KEY="synthetic-file-value"\n';
   assert.equal((await f.call('write', { path: name, text: contents })).path, '[REDACTED].txt');
   assert.equal(await readFile(join(f.root, name), 'utf8'), contents, 'Writes keep the original bytes for later change validation.');
   const listed = await f.call('list', {});
@@ -183,6 +184,47 @@ test('multiline credential redaction preserves later read offsets and grep line 
     assert.ok(!JSON.stringify(result).includes('synthetic'));
   });
   assert.equal((await f.call('read', { path: 'config.txt', offset: 2, limit: 2 })).content, '2\tPASSWORD=[REDACTED]\n3\t[REDACTED]');
+});
+
+// An ordinary sign-in module, holding no credential: what follows token, secret or password there is an expression or
+// a type, which the agent reads, finds and changes as written.
+const AUTH = [
+  "import { getToken, sign } from './tokens';",
+  'export interface Session { token: string; secret: string }',
+  'export async function login(username: string, password: string): Promise<Session> {',
+  '  const token = getToken(username);',
+  '  return { token, secret: sign(token, password) };',
+  '}',
+  '',
+].join('\n');
+
+test('ordinary auth code reads, greps and runs as written, and a line read can be edited as shown', async t => {
+  const f = await tools(t);
+  await mkdir(join(f.root, 'src'));
+  await writeFile(join(f.root, 'src/auth.ts'), AUTH);
+  const read = await f.call('read', { path: 'src/auth.ts' });
+  assert.equal(read.content, AUTH.trimEnd().split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'));
+  assert.deepEqual((await f.call('grep', { pattern: 'getToken\\(username', include: '*.ts' })).matches, ['src/auth.ts:4:  const token = getToken(username);']);
+  assert.equal((await f.call('run', { command: 'cat src/auth.ts' })).output, AUTH);
+  const diagnostic = "src/auth.ts(5,12): error TS2741: Property 'secret' is missing in type '{ token: string; }' but required in type 'Session'.";
+  assert.equal((await f.call('run', { command: `printf '%s\\n' "${diagnostic}"; exit 2` })).output, `${diagnostic}\n`, 'A type checker\'s diagnostic reads as it printed it.');
+  const line = String((await f.call('read', { path: 'src/auth.ts', offset: 4, limit: 1 })).content).split('\t')[1];
+  assert.equal((await f.call('edit', { path: 'src/auth.ts', old: line, new: '  const token = await getToken(username);' })).ok, true);
+  assert.equal(await readFile(join(f.root, 'src/auth.ts'), 'utf8'), AUTH.replace('getToken(username)', 'await getToken(username)'));
+});
+
+test('tool replies still hide token shapes, key blocks, quoted literals and URL passwords in code', async t => {
+  const f = await tools(t);
+  const token = `ghp_${'b'.repeat(36)}`;
+  await writeFile(join(f.root, 'config.ts'), [
+    `export const apiKey = "fixture-literal-1";`, `export const github = '${token}';`, 'export const url = "postgres://app:fixture-literal@db.example.test/app";',
+    'export const pem = `-----BEGIN PRIVATE KEY-----', 'QUJDRA==', '-----END PRIVATE KEY-----`;', 'export const password = process.env.PASSWORD;', '',
+  ].join('\n'));
+  const read = await f.call('read', { path: 'config.ts' });
+  assert.equal(read.content, ['1\texport const apiKey = [REDACTED];', '2\texport const github = \'[REDACTED]\';', '3\texport const url = "postgres://[REDACTED]@db.example.test/app";',
+    '4\texport const pem = `[REDACTED]', '5\t[REDACTED]', '6\t[REDACTED]`;', '7\texport const password = process.env.PASSWORD;'].join('\n'));
+  const run = await f.call('run', { command: 'cat config.ts' });
+  for (const secret of ['fixture-literal', token, 'QUJDRA']) assert.ok(!JSON.stringify([read, run]).includes(secret), secret);
 });
 
 test('a small selected line does not bypass the complete-file observation limit', async t => {

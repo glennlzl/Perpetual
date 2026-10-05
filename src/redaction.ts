@@ -68,6 +68,29 @@ const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*(?::[ \
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
+// In source code (`code`) what follows a credential name is an expression, a type or a reference, so only a literal is
+// hidden: a quoted string of eight or more characters, or one that spans lines, that names no reference, template, path
+// or address, set to the name with = := => : || or ?? (`password = "…"`, `"api_key": "…"`), passed to a flag
+// (`--token "…"`), or given to Authorization (`headers.set("Authorization", "…")`); an Authorization header's scheme and
+// credential; a Bearer credential with a digit in it; a query parameter's value. URL user info is hidden unless its
+// password, or its user when it has none, is only references. A literal goes with its quotes, line by line, so text
+// redacted again, such as numbered lines, comes back the same.
+const LITERAL_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'|\`(?:\\\\.|[^\`\\\\])*\``;
+const NAMED_LITERAL = new RegExp(`((?<![\\w-])[\\w-]*(?:${SECRET_NAMES})[\\w-]*["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?::=|=>|[=:]|\\|\\|=?|\\?\\?=?)\\s*)(${LITERAL_VALUE})`, 'gi');
+const FLAG_LITERAL = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(${LITERAL_VALUE})`, 'gi');
+const AUTHORIZATION_LITERAL = new RegExp(`((?:\\(\\s*["']Authorization["']\\s*,|\\[\\s*["']Authorization["']\\s*\\]\\s*=)\\s*)(${LITERAL_VALUE})`, 'gi');
+const HEADER_LITERAL = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[A-Za-z][\w-]*[ \t]+[^\s"'`$]{8,}/gim;
+const BEARER_LITERAL = /\bBearer[ \t]+(?=[\w.~+/-]*\d)[\w.~+/-]{8,}=*/gi;
+const QUERY_LITERAL = new RegExp(`([?&](?:${SECRET_NAMES})=)(?![$<{%#(])[^&\\s"'<>\`]{8,}`, 'gi');
+const REFERENCE = /\$\{[^}]*\}|\$[A-Za-z_]\w*|\{\{[^}]*\}\}|#\{[^}]*\}|\{\w*\}|%(?:\(\w+\))?s/g;
+const literal = (value: string) => (value.length >= 8 || value.includes('\n')) && !/^(?:[$<{%/]|\w+:\/\/)|\$\{|\{\{|#\{/.test(value);
+const literalValue = (match: string, prefix: string, quoted: string) => literal(quoted.slice(1, -1)) ? prefix + redactedLines(quoted) : match;
+const literalMember = (match: string, quote: string, name: string, separator: string, open: string, value: string) =>
+  literal(value) ? `${quote}${name}${quote}${separator}${open}${REDACTED}${open}` : match;
+const literalUserInfo = (match: string, scheme: string) => {
+  const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':');
+  return (colon < 0 ? userinfo : userinfo.slice(colon + 1)).replace(REFERENCE, '') ? `${scheme}${REDACTED}@` : match;
+};
 
 /**
  * Text with every secret-shaped value replaced by the marker: ANSI colour removed; private key and
@@ -77,9 +100,12 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * (GitHub, GitLab, OpenAI and OpenRouter, Stripe, Supabase, Slack, npm, Google, AWS, JWT); and user info
  * in any URL, with or without a password. Ordinary text, however long, comes back unchanged. `names: false` leaves the
  * values after credential names and Authorization alone, for text formatted from values already redacted one
- * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced.
+ * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced. `code: true` reads
+ * the text as source code, where a value after a credential name is an expression or a type: key blocks, token shapes
+ * and literals stay hidden (a quoted literal set to a credential name, a Bearer or Authorization credential, a query
+ * value, URL user info that is not a reference), while `const token = getToken(user)` or `password: string` stays.
  */
-export function redact(input: unknown = '', { decodeUri = false, names = true, secrets = [] }: { decodeUri?: boolean; names?: boolean; secrets?: Iterable<unknown> } = {}): string {
+export function redact(input: unknown = '', { decodeUri = false, names = true, code = false, secrets = [] }: { decodeUri?: boolean; names?: boolean; code?: boolean; secrets?: Iterable<unknown> } = {}): string {
   // A shaped substring may be only part of a supplied credential. Hide that whole value first,
   // after optional URI decoding, so shape replacements cannot leave its prefix or suffix behind.
   const values = [...secrets], known = hide(decodeUri ? [...values, ...values.filter((value): value is string => typeof value === 'string').map(decodedUri)] : values);
@@ -87,6 +113,16 @@ export function redact(input: unknown = '', { decodeUri = false, names = true, s
   let text = (decodeUri ? known(decodedUri(supplied)) : supplied)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block));
+  if (code) {
+    if (names) text = text.replace(HEADER_LITERAL, `$1${REDACTED}`).replace(AUTHORIZATION_LITERAL, literalValue);
+    text = text.replace(BEARER_LITERAL, `Bearer ${REDACTED}`);
+    if (names) text = text
+      .replace(QUOTED_KEY, literalMember)
+      .replace(NAMED_LITERAL, literalValue)
+      .replace(FLAG_LITERAL, literalValue)
+      .replace(QUERY_LITERAL, `$1${REDACTED}`);
+    return text.replace(TOKEN_SHAPE, REDACTED).replace(USER_INFO, literalUserInfo);
+  }
   if (names) text = text.replace(AUTHORIZATION_HEADER, `$1${REDACTED}`).replace(AUTHORIZATION, `$1${REDACTED}`);
   text = text.replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`);
   if (names) text = text
