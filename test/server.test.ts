@@ -289,3 +289,13 @@ test('every change needs the session token, whatever its method', async t => {
   assert.equal(await readFile(join(f.dataDir, 'state.json'), 'utf8'), saved);
   assert.equal((await fetch(f.app.url + '/api/autopilot/mode', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': f.token }, body })).status, 404, 'Autopilot takes its changes as POST.');
 });
+
+test('the controller answers its own page and a person\'s visit, never another site on this host', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-same-origin-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  // A twin's app on another loopback port is the same site as the controller, but not the same origin.
+  for (const [site, status] of [['same-origin', 200], ['none', 200], ['same-site', 403], ['cross-site', 403]] as const) {
+    assert.equal((await fetch(app.url + '/api/state', { headers: { 'Sec-Fetch-Site': site } })).status, status, site);
+  }
+});

@@ -476,8 +476,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
-    const origin=req.headers.origin;
-    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || req.headers['sec-fetch-site']==='cross-site')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
+    const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
+    // A browser names where a request comes from: the page itself, or a person's own visit. Another site on this host,
+    // such as a twin's app on another port, is same-site, not same-origin.
+    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
     // Every change needs the page's session token, whatever its method: only a GET reads without it.
     if(req.method!=='GET'&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
     // A connection still open at shutdown, such as a polling page's, ends with this reply.
