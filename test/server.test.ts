@@ -333,17 +333,21 @@ test('a body over its limit is refused without stalling the next request on its 
   const agent = new Agent({ keepAlive: true, maxSockets: 1 });
   t.after(async () => { agent.destroy(); await app.close(); await rm(dir, { recursive: true, force: true }); });
   const { token } = await (await fetch(app.url + '/api/session')).json();
-  const send = (method: string, path: string, body?: string) => new Promise<{ status: number; connection?: string; ms: number }>((resolve, reject) => {
+  const send = (method: string, path: string, body?: string) => new Promise<{ status: number; connection?: string; reused: boolean; ms: number }>((resolve, reject) => {
     const started = Date.now();
     const req = request(app.url + path, { agent, method, headers: body ? { 'Content-Type': 'application/json', 'X-Perpetual-Token': token } : {} }, res => {
-      res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection, ms: Date.now() - started }));
+      res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection, reused: req.reusedSocket, ms: Date.now() - started }));
     });
     req.on('error', reject); req.end(body);
   });
-  assert.equal((await send('POST', '/api/pipeline/action', JSON.stringify({ name: 'x'.repeat(2 * 1024 * 1024) }))).status, 400);
-  const next = await send('GET', '/api/state');
-  assert.equal(next.status, 200);
-  assert.ok(next.ms < 3000, `The next request waited ${next.ms} ms.`);
+  // A body read to its end, over its limit or not JSON, is refused on a connection the next request reuses at once.
+  for (const body of [JSON.stringify({ name: 'x'.repeat(2 * 1024 * 1024) }), '{"name":']) {
+    const refused = await send('POST', '/api/pipeline/action', body);
+    assert.deepEqual([refused.status, refused.connection], [400, 'keep-alive']);
+    const next = await send('GET', '/api/state');
+    assert.deepEqual([next.status, next.reused], [200, true]);
+    assert.ok(next.ms < 3000, `The next request waited ${next.ms} ms.`);
+  }
   // A body far past its limit is cut off: its client may see the refusal or the closed connection, and the next request
   // goes through at once.
   const cut = await send('POST', '/api/pipeline/action', JSON.stringify({ name: 'x'.repeat(20 * 1024 * 1024) })).catch(() => null);
