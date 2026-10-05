@@ -11,7 +11,7 @@ What every framework shares:
 
 The bench is a dev-only package with its own `package.json`, lockfile, `tsconfig.json` and `node_modules`. The product's dependencies, build and root `npm test` are untouched. It imports product modules from `../../src/repair/*.ts`, and their bare imports (`ai`, `@openrouter/ai-sdk-provider`, `yaml`, `jsonc-parser`) resolve from the root `node_modules`, as the product runs them.
 
-Eight adapters are registered, as [adapters/README.md](adapters/README.md) defines them: on OpenRouter, the baseline `aisdk` and `pi`, `opencode`, `miniswe` and `openai-agents`; on the OpenAI track, `aisdk-openai`, `agents-openai` and `codex`. Every adapter ran three paid rounds on 2026-09-25 ([reports](reports/README.md)).
+Eight adapters are registered, as [adapters/README.md](adapters/README.md) defines them: on OpenRouter, the baseline `aisdk` and `pi`, `opencode`, `miniswe` and `openai-agents`; on the OpenAI track, `aisdk-openai`, `agents-openai` and `codex`. Every adapter ran the first two paid rounds on 2026-09-25, and the third re-ran the two arms that use the product loop, `aisdk` and `aisdk-openai` ([reports](reports/README.md)).
 
 A run has one provider. OpenRouter is the default, as in the product. The OpenAI track (`--provider openai`) runs bare OpenAI model ids against OpenAI's API through the same gateway, which prices each request from [prices/openai.json](prices/openai.json), since OpenAI reports no dollars. Each adapter declares the providers it runs against and the wire API it speaks to each, and a run refuses the others.
 
@@ -262,7 +262,7 @@ The first eight cases are round 1's. The other twelve were added for round 2, be
 3. Its reference patch passes the judge.
 4. Every decoy fails for its stated reason.
 
-On this machine the eight round-1 cases pass the self-check in 20–30 s with a concurrency of 3. The twelve round-2 cases have not been self-checked: their failing steps, logs, diagnoses and verdicts are reasoned from their design, not measured, until round 2's first self-check. `golang:1.26-bookworm` and `python:3.13-bookworm` are not pulled here yet; `node run.ts setup` pulls them, as does the first box that needs one.
+All twenty cases passed the self-check before round 2 ([reports](reports/README.md)); on this machine the eight round-1 cases pass it in 20–30 s with a concurrency of 3. `node run.ts setup` pulls the box images the corpus picks, `golang:1.26-bookworm` and `python:3.13-bookworm` included, as does the first box that needs one.
 
 ## OpenAI prices (prices/openai.json)
 
@@ -285,15 +285,15 @@ USD per 1M tokens at the Standard tier on the global endpoint, read from [the pr
 | Dependency | Version | License | Where |
 | --- | --- | --- | --- |
 | typescript | 7.0.2 | Apache-2.0 | bench devDependency (as the root) |
-| @types/node | 26.6.2 | MIT | bench devDependency (as the root) |
+| @types/node | 26.6.2 | MIT | bench devDependency; the root pins 24.19.0, so the bench type-checks the product modules against newer Node types |
 | yaml | 2.9.1 | ISC | bench dependency (as the root) |
 | jsonc-parser | 3.3.1 | MIT | bench dependency (as the root); reads JSONC tsconfig guards |
-| ai | 7.0.114 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline) |
+| ai | 7.0.114 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline), as the rounds ran it; the root now pins 7.0.116 |
 | @openrouter/ai-sdk-provider | 3.1.0 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline) |
 | typescript (corpus) | 5.9.3 | Apache-2.0 | installed inside boxes by the three TypeScript cases |
 | @biomejs/biome (corpus) | 2.5.14 | MIT OR Apache-2.0 | installed inside boxes by `lint-real-bugs`, with its platform packages |
 | node:22-bookworm / node:22-bookworm-slim | Node 22.23.3, npm 10.9.9 | Docker official images | box, proxy and relay images |
-| python:3.13-bookworm / golang:1.26-bookworm | not pulled here yet | Docker official images | the Python and Go cases' box images |
+| python:3.13-bookworm / golang:1.26-bookworm | Python 3.13, Go 1.26 | Docker official images | the Python and Go cases' box images |
 
 The OpenAI track adds no dependency: the gateway, the price table and the fake OpenAI use Node's standard library only.
 
@@ -315,7 +315,7 @@ Each run removes its own boxes, even on Ctrl-C. Then:
 
 - **The relay's own network.** The relay sits on its own labelled uplink network instead of Docker's default bridge. That way no other container can reach its listener, and it is removed with the box.
 - **Scrubbing.** The gateway's IPC `scrub` replaces the key only. The product's `redact()` is applied by the bench string by string inside JSON (`safe.ts`), because redacting serialized JSON can swallow its closing quotes.
-- **Diagnoses.** `dep-major-bump` and `esm-cjs-mismatch` are diagnosed `test-regression`, not `unknown`. That is the product's real reading of Node's TAP output (`# fail 1`), pinned by the self-check. Four round-2 cases should read as `unknown`, since no product rule matches go vet's finding (`go-vet-and-test`), unittest's ImportError (`python-circular-import`), Biome's findings (`lint-real-bugs`) or npm's ERESOLVE (`npm-peer-eresolve`); triage sends `unknown` to repair. Round 2's first self-check will pin them.
+- **Diagnoses.** `dep-major-bump` and `esm-cjs-mismatch` are diagnosed `test-regression`, not `unknown`. That is the product's real reading of Node's TAP output (`# fail 1`), pinned by the self-check. Four round-2 cases read as `unknown`, since no product rule matches go vet's finding (`go-vet-and-test`), unittest's ImportError (`python-circular-import`), Biome's findings (`lint-real-bugs`) or npm's ERESOLVE (`npm-peer-eresolve`); triage sends `unknown` to repair. The self-check pins them.
 - **Node's diff output.** Node 22.23.3 prints a failed strict-equal of strings longer than 12 characters as a stacked `+ actual` / `- expected` diff, not `'a' !== 'b'`, so `workspace-money-units` and `tz-calendar-dates` match the diff's two lines rather than their designed pattern.
 - **Login shells keep the image's PATH.** Debian's `/etc/profile` resets `PATH` in a login shell, so `bash -l` finds no `go` in `golang:1.26-bookworm`. ci.ts and the product's run tool use a non-login bash, but miniswe's box command and codex's shell run `bash -lc`. So every bench box writes the image's own `PATH` to `/etc/profile.d/00-image-path.sh` when it starts (box.ts), and a login shell finds the same toolchain CI does, in every image.
 - **Stricter decoys.** The dependency revert in `lock-drift` fails a guard before CI. There are extra decoys: `esm-import-path` drops the alias, and `esm-cjs-mismatch` reads relative to the working directory.
