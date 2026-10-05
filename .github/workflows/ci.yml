@@ -84,6 +84,8 @@ jobs:
       # model, then the runtime tests that skip without the worker, which must not skip here.
       - run: node scripts/browser-agent-contract.ts
       - name: Runtime tests with the real worker
+        # Naming bash adds pipefail, so a failing test fails the step through tee; the default shell runs without it.
+        shell: bash
         run: |
           node --test --test-reporter=tap test/browser-runtime.test.ts | tee "$RUNNER_TEMP/browser-runtime.tap"
           grep -qx '# skipped 0' "$RUNNER_TEMP/browser-runtime.tap"
