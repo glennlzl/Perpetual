@@ -2,8 +2,10 @@
 // failure classifier, for every module that reaches GitHub through gh (workflow runs, deployments,
 // the gate's branch head and commit status, source selection, device sign-in, provider status).
 // A caller keeps its own timeouts and its own words for a failure; what a failure *is* is decided
-// here, from the exit alone: raw output is read to classify and never returned.
+// here, from the exit alone: raw output is read to classify and never returned. So is what GitHub
+// unreachable is, and how work waits it out.
 import { execFile, spawn, type ExecFileException } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -107,4 +109,27 @@ export const GITHUB_MESSAGES = {
   missing: 'GitHub CLI is unavailable. Install gh, then run gh auth login --hostname github.com.',
   'rate-limit': 'GitHub has temporarily limited requests. Wait before trying again.',
   unauthenticated: 'Sign in with gh auth login --hostname github.com, then reconnect GitHub.',
+  unreachable: 'GitHub is unreachable. Check your network connection.',
 } as const;
+
+/**
+ * GitHub did not answer the account check for now, such as on a timeout, a rate limit or a network failure: that says
+ * nothing about the account, so it is no disconnect. A refusal answers 502, and work that needs GitHub waits it out.
+ */
+export const githubUnreachable = (message?: string) => Object.assign(new Error(message || GITHUB_MESSAGES.unreachable), { statusCode: 502, unreachable: true as const });
+export const isUnreachable = (error: unknown) => Boolean(error) && typeof error === 'object' && (error as { unreachable?: unknown }).unreachable === true;
+/** How often work asks GitHub again while it is unreachable, and how long it waits before giving up. */
+export const OUTAGE = { pollMs: 30_000, waitMs: 15 * 60_000 };
+/**
+ * `read()`, asked again every `pollMs` while it fails because GitHub is unreachable, until it answers or `waitMs`
+ * passed, when that failure is thrown. Any other failure is thrown at once, and `signal` ends the wait with its reason.
+ */
+export async function untilReachable<T>(read: () => Promise<T>, { signal, pollMs = OUTAGE.pollMs, waitMs = OUTAGE.waitMs, clock = Date.now }: { signal?: AbortSignal; pollMs?: number; waitMs?: number; clock?: () => number } = {}): Promise<T> {
+  const started = clock();
+  for (;;) {
+    signal?.throwIfAborted();
+    try { return await read(); }
+    catch (error) { if (!isUnreachable(error) || clock() - started >= waitMs) throw error; }
+    await delay(pollMs, undefined, { signal }).catch((error: unknown) => { throw signal?.aborted ? signal.reason : error; });
+  }
+}

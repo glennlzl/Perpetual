@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { APICallError, RetryError, generateText, hasToolCall, stepCountIs, type LanguageModel, type StepResult, type ToolSet } from 'ai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { openrouterRefusal } from '../agents/opencode.ts';
+import { untilReachable } from '../github-cli.ts';
 import { redact } from '../redaction.ts';
 import type { WorkflowRun } from '../github-runs.ts';
 import type { RepairBox, RepairBoxes } from './box.ts';
@@ -31,7 +32,7 @@ import { fallbackImages, reproduces } from './workflow.ts';
 export const BUDGET = { attempts: 4, escalateAfter: 2, steps: 100, attemptMs: 15 * 60_000, cost: 2 };
 /**
  * How often the pull request's runs are read, how long without any run means none will come, the longest wait, and how
- * long GitHub may stay unreadable before the wait ends.
+ * long GitHub may stay unreadable, or unreachable before a write, before the wait ends.
  */
 export const CI = { pollMs: 30_000, noRunMs: 10 * 60_000, waitMs: 6 * 60 * 60_000, outageMs: 15 * 60_000 };
 export const LABEL = 'perpetual-repair';
@@ -53,7 +54,10 @@ export type ModelFactory = (id: string, apiKey: string) => LanguageModel;
 /** The App Settings model and escalation model with the stored OpenRouter key; null without one. */
 export interface RepairModels { apiKey: string; model: string; escalationModel: string }
 export interface RepairAgentGitHub {
-  /** The connected, verified account; every write checks it is still the one that saw the failure. */
+  /**
+   * The connected, verified account; every write checks it is still the one that saw the failure. It throws as
+   * unreachable while GitHub cannot verify it.
+   */
   connection(): Promise<{ login: string; repository: string } | null>;
   runs(input: { repository: string; sha: string; login: string }): Promise<{ runs: WorkflowRun[] }>;
   failure(input: { repository: string; runId: string }): Promise<GitHubFailure>;
@@ -184,8 +188,10 @@ export function createRepairAgent(options: RepairAgentOptions) {
     provider: result => `The model provider returned an error: ${result.error ?? 'unknown'}`,
   };
   const another = (repair: Repair, connection: { login: string; repository: string }) => connection.login !== repair.login || connection.repository !== repair.repository;
-  async function connected(repair: Repair) {
-    const connection = await github.connection();
+  // Before a step of the repair (signal), GitHub unreachable is waited out, for up to the outage limit, so model work
+  // already paid for is not lost to a blip; a single read without one fails at once, and its caller tries it again.
+  async function connected(repair: Repair, signal?: AbortSignal) {
+    const connection = signal ? await untilReachable(() => github.connection(), { signal, pollMs: ci.pollMs, waitMs: ci.outageMs, clock }) : await github.connection();
     if (!connection) throw new Error(DISCONNECTED);
     if (another(repair, connection)) throw new Error(CHANGED);
   }
@@ -193,17 +199,17 @@ export function createRepairAgent(options: RepairAgentOptions) {
   // whose failure the repair fixes passed among them, any failure fails, and runs that end otherwise, such as cancelled,
   // are neither. No run at all within noRunMs means none will come, and a failed workflow with no passing run by then did
   // not run for the pull request, so nothing judged the fix by it. A read that fails, or a connection that cannot be
-  // read, is tried again at the next poll: another account ends the wait at once, and GitHub unreadable for outageMs
-  // ends it with the last error.
+  // read, such as GitHub unreachable, is tried again at the next poll: another account ends the wait at once, and GitHub
+  // unreadable for outageMs ends it with the last error.
   async function verify(repair: Repair, sha: string, signal: AbortSignal, seen: (ids: string[]) => Promise<void>) {
     const started = clock(), known = new Set<string>();
     let read = started, missed: unknown = null;
     for (;;) {
       await pause(ci.pollMs, signal);
-      const connection = await github.connection().catch(() => null);
+      const connection = await github.connection().catch((error: unknown) => { missed = error; return undefined; });
       if (connection && another(repair, connection)) throw new Error(CHANGED);
       const runs = connection ? await github.runs({ repository: repair.repository, sha, login: repair.login }).then(result => result.runs, error => { missed = error; return null; }) : null;
-      if (!connection) missed = new Error(DISCONNECTED);
+      if (connection === null) missed = new Error(DISCONNECTED);
       signal.throwIfAborted();
       if (!runs) {
         if (clock() - read >= ci.outageMs) throw missed;
@@ -308,7 +314,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       const { paths } = staged, rules = pathRules(paths, deployFiles), checked = checkChanges(staged.text, { deployFiles });
       const refused = [...new Set([...rules.rejected, ...checked.rejected])];
       if (refused.length) { await fail(refusal(refused, checked.credentials)); continue; }
-      await connected(repair);
+      await connected(repair, signal);
       const account = await pulls.account();
       if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);
       const sha = await host.commit({ directory: clone, parent: pushed ?? repair.sha, message: commitMessage(title, summary), author: { name: account.login, email: `${account.id}+${account.login}@users.noreply.github.com` } });
@@ -341,7 +347,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       const verdict = await verify(repair, sha, signal, record);
       if (verdict.status === 'passed') {
         // A pull request GitHub refuses to mark ready still goes through the gates, and the merge step marks it ready.
-        const number = pullRequest.number, readied = await connected(repair).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
+        const number = pullRequest.number, readied = await connected(repair, signal).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
         if (readied) { pullRequest = { ...pullRequest, draft: false }; await context.report({ pullRequest }); }
         // Without a merge step, CI is all that verifies the head.
         if (!options.merge) { await context.report({ verified: sha }); return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY }); }

@@ -126,6 +126,8 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const scanRepo = scan?.repo?.name ? scan.repo : null;
   const rootError = rootDirectoryError(rootDirectory);
   const connected = Boolean(connection?.connected);
+  // A connection GitHub could not verify for now is neither connected nor disconnected; reading it again may verify it.
+  const unreachable = Boolean(connection?.unreachable);
   const loading = connectionLoading || Boolean(connectionAction) || repositoriesLoading || branchesLoading;
   const source = connection?.source || null;
   const local = Boolean(connection && scanRepo) && readsLocalCheckout(source, scanRepo!.path);
@@ -307,15 +309,15 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           <img src="/assets/providers/github.svg" className="provider-logo shrink-0" data-monochrome="true" width={24} height={24} alt="GitHub" />
           <div className="min-w-0 flex-1 space-y-1">
             <p className="text-sm font-medium">GitHub</p>
-            <p className="truncate text-sm text-muted-foreground">{connectionLoading ? 'Checking…' : connected ? connection!.account?.login ? `${connection!.account.login} · Connected` : 'Connected' : 'Not connected'}</p>
+            <p className="truncate text-sm text-muted-foreground">{connectionLoading ? 'Checking…' : connected ? connection!.account?.login ? `${connection!.account.login} · Connected` : 'Connected' : unreachable ? 'Unreachable' : 'Not connected'}</p>
           </div>
-          <Button ref={connectionButton} type="button" variant="outline" disabled={busy || connectionLoading || Boolean(connectionAction)} onClick={() => connected ? setConfirmDisconnect(true) : setConnectOpen(true)}>
+          <Button ref={connectionButton} type="button" variant="outline" disabled={busy || connectionLoading || Boolean(connectionAction)} onClick={() => connected || unreachable ? setConfirmDisconnect(true) : setConnectOpen(true)}>
             {connectionAction && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}
-            {connectionAction ? connectionAction === 'connect' ? 'Connecting…' : 'Disconnecting…' : connected ? 'Disconnect' : 'Connect'}
+            {connectionAction ? connectionAction === 'connect' ? 'Connecting…' : 'Disconnecting…' : connected || unreachable ? 'Disconnect' : 'Connect'}
           </Button>
         </CardContent>
       </Card>
-      <SourceReadError error={connectionError} label="Try again" disabled={busy || connectionLoading} onRetry={!connection ? readConnection : undefined} focusTarget={() => connectionButton.current} />
+      <SourceReadError error={connectionError || (unreachable ? connection!.message || 'GitHub is unreachable.' : '')} label="Try again" disabled={busy || connectionLoading} onRetry={!connection || unreachable ? readConnection : undefined} focusTarget={() => connectionButton.current} />
     </Section>
 
     <Section>

@@ -147,6 +147,39 @@ test('a failed Load more branches keeps the branch chosen from a later page, and
   assert.deepEqual(pageErrors, []);
 });
 
+test('GitHub unreachable is neither connected nor disconnected: the branch list and Source say why and read it again', { timeout: 60000 }, async t => {
+  const source = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: repoPath };
+  const timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  let reachable = false;
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { source }) };
+    if (path === '/api/github/connection') return { json: reachable
+      ? { available: true, authenticated: true, connected: true, account: { login: 'acme', name: null }, source, localCheckout: null }
+      : { available: true, authenticated: false, account: null, connected: false, unreachable: true, message: timedOut, source, localCheckout: null } };
+    if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
+    if (path === '/api/github/branches') return { json: { branches: [{ name: 'main' }, { name: 'feature/a' }], nextPage: null, defaultBranch: 'main' } };
+  });
+  await open();
+  // The branch list names why with Try again, and never offers to connect an account that is still connected.
+  const list = page.getByRole('listbox');
+  await page.getByRole('combobox', { name: 'Switch branch: main', exact: true }).click();
+  await expect(list.getByRole('group', { name: timedOut, exact: true }).getByRole('option', { name: 'Try again', exact: true })).toBeVisible();
+  await expect(list.getByRole('option', { name: 'Connect GitHub…', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  // Source opens without the Connect GitHub dialog, and reads the connection again on Try again.
+  await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+  const inspector = page.locator('.pipeline-inspector');
+  await expect(inspector.getByText('Unreachable', { exact: true })).toBeVisible();
+  await expect(inspector.getByRole('alert')).toHaveText(timedOut);
+  await expect(inspector.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toHaveCount(0);
+  reachable = true;
+  await inspector.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(inspector.getByText('acme · Connected', { exact: true })).toBeVisible();
+  await expect(inspector.getByRole('alert')).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a changed gate verdict reads the release at once, so Deploy follows it between slow reads', { timeout: 60000 }, async t => {
   const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
   const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };

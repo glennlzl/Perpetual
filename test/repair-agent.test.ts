@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { githubUnreachable } from '../src/github-cli.ts';
 import { diagnoseFailure } from '../src/providers.ts';
 import { NO_CI, createRepairAgent } from '../src/repair/agent.ts';
 import { HELD, REJECTED } from '../src/repair/changes.ts';
@@ -18,6 +19,7 @@ import { scriptedModel, type ModelCall, type ScriptedStep } from './fixtures/scr
 
 const A = 'a'.repeat(40), C = 'c'.repeat(40);
 const KEY = 'sk-or-v1-fedcba9876543210fedcba9876543210';
+const TIMED_OUT = 'Reading GitHub timed out. Check your connection and try again.';
 const MODELS = { apiKey: KEY, model: 'openai/gpt-6-luna', escalationModel: 'anthropic/claude-sonnet-5' };
 const exec = promisify(execFile) as CommandRunner;
 const FIX: ScriptedStep[] = [
@@ -39,9 +41,9 @@ async function until(check: () => unknown, attempts = 2000) {
  * A manager with the real agent step: a managed source copy on disk, host boxes, a scripted model per attempt, and a
  * fake GitHub whose pull request writes and pushes are recorded. `ci(n)` answers the nth pushed commit's runs, and `logs`
  * a failed run's log by its id. GitHub keeps the repair branch's head (`remote`, the last push), its open pull request
- * and that pull request's state; while `blips` is above zero the agent's connection reads fail, while `labelErrors` is,
- * labelling the pull request does, while `closeErrors` is, closing it does, as a network error, and while `readyErrors`
- * is, GitHub refuses to mark it ready.
+ * and that pull request's state; while `blips` is above zero the agent's connection reads fail, while `outages` is, they
+ * find GitHub unreachable, while `labelErrors` is, labelling the pull request does, while `closeErrors` is, closing it
+ * does, as a network error, and while `readyErrors` is, GitHub refuses to mark it ready.
  */
 async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outageMs, beforePush, logs = {}, merge }: { scripts: ScriptedStep[][]; ci: (push: number, sha: string) => WorkflowRun[]; budget?: { cost?: number }; noRunMs?: number; outageMs?: number; beforePush?: () => Promise<void>; logs?: Record<string, string>; merge?: Pick<RepairMerge, 'merge'> }) {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-agent-'));
@@ -49,7 +51,7 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   const current: RepairSource = { key: 'github:owner/app:/', branch: 'main', repository: 'owner/app', checkoutPath, rootDirectory: '/' };
   const pull: PullRequestRef = { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true };
   const github = { head: A, connection: { login: 'developer', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
-    remote: null as string | null, openPull: null as PullRequestRef | null, pullState: 'open' as 'open' | 'closed' | 'merged', blips: 0, labelErrors: 0, closeErrors: 0, readyErrors: 0 };
+    remote: null as string | null, openPull: null as PullRequestRef | null, pullState: 'open' as 'open' | 'closed' | 'merged', blips: 0, outages: 0, labelErrors: 0, closeErrors: 0, readyErrors: 0 };
   const pushes: { sha: string; lease: string; branch: string; author: string; files: string }[] = [], remoteReads: (AbortSignal | undefined)[] = [];
   const runner: CommandRunner = async (file, args, options) => {
     const directory = args[args.indexOf('-C') + 1];
@@ -91,7 +93,11 @@ async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outa
   const agent = createRepairAgent({
     models: async () => MODELS, boxes: boxes.boxes, host: createRepairHost({ dataDir, run: runner }), budget, ci: { pollMs: 2, noRunMs, waitMs: 20_000, ...(outageMs === undefined ? {} : { outageMs }) }, merge,
     github: {
-      connection: async () => { if (github.blips > 0) { github.blips -= 1; return null; } return github.connection; },
+      connection: async () => {
+        if (github.outages > 0) { github.outages -= 1; throw githubUnreachable(TIMED_OUT); }
+        if (github.blips > 0) { github.blips -= 1; return null; }
+        return github.connection;
+      },
       runs: async ({ sha }) => { const push = pushes.findIndex(item => item.sha === sha); return { runs: push >= 0 ? ci(push, sha) : [] }; },
       failure: async ({ runId }) => failure(runId, 'Error: lint found 1 problem in add.js'),
       pullRequests,
@@ -342,6 +348,36 @@ test('GitHub unreadable for longer than the outage limit while CI runs needs a p
   await until(() => h.repair()?.status === 'needs-person');
   await h.manager.idle();
   assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready, h.pushes.length], ['Connect GitHub to repair builds.', true, [], 1]);
+});
+
+test('GitHub unreachable after a paid attempt is waited out: the change is pushed once GitHub answers', async t => {
+  const h = await harness(t, { scripts: [FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
+  // The agent's first connection read is the one before its push.
+  h.github.outages = 3;
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual([h.repair()?.reason, h.models.length, h.pushes.length, h.records.ready, h.github.outages], [undefined, 1, 1, [7], 0]);
+});
+
+test('GitHub unreachable for longer than the outage limit needs a person with why, never as a disconnect', async t => {
+  await t.test('before the push', async t => {
+    const h = await harness(t, { scripts: [FIX], outageMs: 40, ci: () => [] });
+    h.github.outages = Number.POSITIVE_INFINITY;
+    await h.fail();
+    await until(() => h.repair()?.status === 'needs-person');
+    h.github.outages = 0;
+    await h.manager.idle();
+    assert.deepEqual([h.repair()?.reason, h.pushes.length, h.records.created], [TIMED_OUT, 0, []]);
+  });
+  await t.test('while CI runs', async t => {
+    const h = await harness(t, { scripts: [FIX], outageMs: 40, ci: () => { h.github.outages = Number.POSITIVE_INFINITY; return []; } });
+    await h.fail();
+    await until(() => h.repair()?.status === 'needs-person');
+    h.github.outages = 0;
+    await h.manager.idle();
+    assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.pushes.length], [TIMED_OUT, true, 1]);
+  });
 });
 
 test('another connected account while CI runs ends the repair at once', async t => {

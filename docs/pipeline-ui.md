@@ -63,7 +63,7 @@ Each scan records a `discoveryVersion`. At startup the server attempts one read-
 
 ## Branch selector
 
-A shadcn branch Select sits at the upper left of the canvas. It shows the scanned branch and lists the repository's branches through the GitHub connection, with **Load more…** for further pages. Without a connection it offers **Connect GitHub…**, which opens Source settings.
+A shadcn branch Select sits at the upper left of the canvas. It shows the scanned branch and lists the repository's branches through the GitHub connection, with **Load more…** for further pages. Without a connection it offers **Connect GitHub…**, which opens Source settings. While GitHub is [unreachable](providers.md#github) it shows the reason with **Try again** instead, and **Configure source** opens Source settings, which shows the connection as **Unreachable**, without the Connect GitHub dialog.
 
 Choosing a branch uses the managed source checkout (see [Provider connections](providers.md#github)) and refreshes the graph. It does not change your working checkout or trigger a deployment, and a branch name never implies a deployment environment. Old `/?view=environments` links open this layout.
 

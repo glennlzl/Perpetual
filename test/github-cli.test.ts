@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, hasNextPage, isRepository, notModified, parseGitHubResponse, runGitHub } from '../src/github-cli.ts';
+import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, githubUnreachable, hasNextPage, isRepository, isUnreachable, notModified, parseGitHubResponse, runGitHub, untilReachable } from '../src/github-cli.ts';
 
 test('gh runs with its own configuration and none of the inherited git or debug settings', () => {
   const saved = { ...process.env };
@@ -84,6 +84,25 @@ test('a refusal\'s HTTP status is read from the command\'s output, never from it
   // execFile's message repeats the arguments, such as a pull request title that names a status.
   assert.equal(githubHttpStatus(Object.assign(new Error('Command failed: gh api repos/acme/app/pulls -f title=Answer HTTP 409 on a stale head'), { stderr: '' })), null);
   assert.equal(githubHttpStatus(new Error('HTTP 405: Method Not Allowed')), 405, 'An error that is not a command\'s has its message alone.');
+});
+
+test('GitHub unreachable is a refusal of its own, which work waits out, and nothing else is', async () => {
+  const unreachable = githubUnreachable('Reading GitHub timed out. Check your connection and try again.');
+  assert.deepEqual([unreachable.message, unreachable.statusCode, isUnreachable(unreachable)], ['Reading GitHub timed out. Check your connection and try again.', 502, true]);
+  assert.deepEqual([githubUnreachable().message, githubUnreachable('').message], [GITHUB_MESSAGES.unreachable, GITHUB_MESSAGES.unreachable]);
+  assert.deepEqual([new Error('Connect GitHub to repair builds.'), Object.assign(new Error('x'), { statusCode: 502 }), null, 'unreachable'].map(isUnreachable), [false, false, false, false]);
+  let reads = 0;
+  assert.equal(await untilReachable(async () => { reads += 1; if (reads < 3) throw unreachable; return 'answered'; }, { pollMs: 1 }), 'answered');
+  assert.equal(reads, 3, 'GitHub is asked again until it answers.');
+  reads = 0;
+  await assert.rejects(untilReachable(async () => { reads += 1; throw new Error('Connect GitHub to repair builds.'); }, { pollMs: 1 }), /Connect GitHub/);
+  assert.equal(reads, 1, 'Any other failure is thrown at once.');
+  let now = 0;
+  await assert.rejects(untilReachable(async () => { now += 10; throw unreachable; }, { pollMs: 1, waitMs: 25, clock: () => now }), error => error === unreachable, 'Past the wait, the last failure is thrown.');
+  const stop = new AbortController(), stopped = new Error('The repair stopped.');
+  const waiting = untilReachable(async () => { throw unreachable; }, { signal: stop.signal, pollMs: 60_000 });
+  stop.abort(stopped);
+  await assert.rejects(waiting, error => error === stopped, 'A signal ends the wait with its reason.');
 });
 
 test('runGitHub passes gh, the arguments, the environment and the limits to the runner it is given', async () => {

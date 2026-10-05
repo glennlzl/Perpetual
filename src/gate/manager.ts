@@ -2,6 +2,7 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { failureText } from '../redaction.ts';
+import { isUnreachable } from '../github-cli.ts';
 import { isEnvironmentBusy } from '../environments/usage.ts';
 import type { GateView, ReleaseEvidence, StageGate } from '../../contract/gate.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from './github.ts';
@@ -212,7 +213,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (await stopped()) return true;
       // A newer commit may have superseded it meanwhile.
       if (!PENDING.includes(gate.status)) return true;
-      if ((error as { statusCode?: unknown }).statusCode === 409) return false;
+      // A stage that cannot start now, or GitHub unreachable while the source moves, leaves the gate queued to retry.
+      if ((error as { statusCode?: unknown }).statusCode === 409 || isUnreachable(error)) return false;
       await settle(gate, 'needs-release', text(error));
       return true;
     }
@@ -313,8 +315,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         const due = state.gates.filter(gate => gate.key === current.key && commitStatus(gate) && !sameStatus(commitStatus(gate), gate.posted))
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, REPORTED);
         if (!due.length) continue;
-        let connection: GateConnection | null = null;
-        try { connection = await github.connection(); } catch { connection = null; }
+        // A connection that cannot be read, such as GitHub unreachable, is no disconnect: the report says why, and is
+        // tried again at the next poll.
+        let connection: GateConnection | null = null, unread = '';
+        try { connection = await github.connection(); } catch (error) { unread = text(error); }
         for (const gate of due) {
           // Account verification and every preceding post may outlive a source switch. Leave these reports pending
           // for their own source instead of applying a newly connected repository to the old commits.
@@ -323,7 +327,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
           const status = commitStatus(gate);
           // A gate queued again while the connection was read reports nothing.
           if (!status) continue;
-          if (!connection) { gate.statusError = 'Connect GitHub to report commit status.'; continue; }
+          if (!connection) { gate.statusError = unread || 'Connect GitHub to report commit status.'; continue; }
           try { await github.post({ repository: connection.repository, sha: gate.sha, ...status }); gate.posted = status; delete gate.statusError; }
           catch (error) { gate.statusError = text(error); }
         }

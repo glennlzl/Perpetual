@@ -1,4 +1,4 @@
-import { SHA, isRepository } from '../github-cli.ts';
+import { GITHUB_MESSAGES, SHA, isRepository } from '../github-cli.ts';
 import { githubRequest, normalizeWorkflowRuns, type GitHubResponse, type WorkflowRun } from '../github-runs.ts';
 import { getGitHubSession, type GitHubSession } from '../github-source.ts';
 import { branchRuns, completedRuns } from '../repair/triage.ts';
@@ -18,8 +18,14 @@ const INCOMPLETE = 'GitHub did not return complete Build evidence. Waiting to ch
 export async function readBuild(input: BuildInput, { request = githubRequest, session = getGitHubSession }: { request?: Request; session?: () => Promise<GitHubSession> } = {}): Promise<BuildVerdict> {
   const { repository, branch, sha, login } = input;
   if (!isRepository(repository) || typeof branch !== 'string' || !branch || !SHA.test(sha) || typeof login !== 'string' || !login) return waiting('Connect a GitHub branch to verify Build.');
-  const connected = async () => { const value = await session(); return value.authenticated && value.account.login.toLowerCase() === login.toLowerCase(); };
-  if (!(await connected())) return waiting('Reconnect the GitHub account to verify Build.');
+  // Why the account does not verify Build now, or null: GitHub not answering is waited out with its own reason.
+  const unverified = async (reason: string) => {
+    const value = await session();
+    if (value.unreachable) return value.message || GITHUB_MESSAGES.unreachable;
+    return value.authenticated && value.account.login.toLowerCase() === login.toLowerCase() ? null : reason;
+  };
+  const before = await unverified('Reconnect the GitHub account to verify Build.');
+  if (before) return waiting(before);
   const latest = new Map<number, WorkflowRun>();
   let total: number | undefined, received = 0;
   for (let page = 1; page <= 10; page++) {
@@ -43,7 +49,8 @@ export async function readBuild(input: BuildInput, { request = githubRequest, se
     if (received >= total) break;
     if (rows.length < 100) return waiting(INCOMPLETE);
   }
-  if (!(await connected())) return waiting('The GitHub account changed while verifying Build.');
+  const after = await unverified('The GitHub account changed while verifying Build.');
+  if (after) return waiting(after);
   if (total === undefined || received < total) return waiting(INCOMPLETE);
   const runs = [...latest.values()], result = completedRuns(runs, branch);
   if (!runs.length) return waiting('Waiting for GitHub Actions to build this branch commit.');

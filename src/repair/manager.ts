@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { failureText, redact } from '../redaction.ts';
+import { OUTAGE, untilReachable } from '../github-cli.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 import { SHA, short } from '../gate/rules.ts';
 import type { BranchHead, BranchHeadInput } from '../gate/github.ts';
@@ -54,7 +55,7 @@ export interface Repair {
 /** The active pipeline; repository, checkoutPath and rootDirectory are set only for a managed GitHub source, the only one repaired. */
 export interface RepairSource { key: string; branch: string | null; repository?: string | null; checkoutPath?: string | null; rootDirectory?: string | null }
 export interface RepairGitHub {
-  /** The connected, verified account, or null. */
+  /** The connected, verified account, or null; it throws as unreachable while GitHub cannot verify it. */
   connection(): Promise<{ login: string; repository: string } | null>;
   head(input: BranchHeadInput): Promise<BranchHead>;
   runs(input: { repository: string; sha: string; login: string }): Promise<{ runs: WorkflowRun[] }>;
@@ -95,7 +96,8 @@ export interface RepairSteps {
   /** Confirms old controller resources are gone, before any new repair starts. */
   recover?(): Promise<void>;
 }
-export interface RepairManagerOptions { dataDir: string; source: () => RepairSource | null; github: RepairGitHub; steps?: RepairSteps; now?: () => string; pollInterval?: number }
+/** outage: how often a repair asks GitHub again while it is unreachable, and how long it waits before needing a person. */
+export interface RepairManagerOptions { dataDir: string; source: () => RepairSource | null; github: RepairGitHub; steps?: RepairSteps; now?: () => string; pollInterval?: number; outage?: Partial<typeof OUTAGE> }
 /** A workflow run as Build shows it. */
 export type PublicRun = Pick<RepairRun, 'id' | 'name' | 'path' | 'url'>;
 /**
@@ -209,7 +211,8 @@ const publicRepair = ({ id, branch, sha, status, reason, cleanup, trigger, categ
  *   rerun({ repository, runId }).
  * steps: unavailable() -> reason, repair(context, signal) -> outcome, close(repair), state(repair), cleanup({ repair, directory }), recover(): see RepairSteps.
  */
-export async function createRepairManager({ dataDir, source, github, steps = {}, now = () => new Date().toISOString(), pollInterval = 60_000 }: RepairManagerOptions) {
+export async function createRepairManager({ dataDir, source, github, steps = {}, now = () => new Date().toISOString(), pollInterval = 60_000, outage = {} }: RepairManagerOptions) {
+  const unreachable = { ...OUTAGE, ...outage };
   const root = await privateDirectory(resolve(dataDir, 'repairs'), 'Repair storage must not be a symbolic link.');
   const file = join(root, 'state.json');
   let state: RepairState = { version: 1, repairs: [] };
@@ -442,9 +445,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   async function execute(repair: Repair, signal: AbortSignal) {
     const live = () => !closed && !signal.aborted && ACTIVE.includes(repair.status);
     // GitHub is read and written only as the account that opened the repair, for its repository: a disconnect, another
-    // signed-in account or another source ends the repair before the next call.
+    // signed-in account or another source ends the repair before the next call. GitHub unreachable is waited out first,
+    // and needs a person only once it outlasts the outage window.
     const connected = async () => {
-      const connection = await github.connection();
+      const connection = await untilReachable(() => github.connection(), { signal, pollMs: unreachable.pollMs, waitMs: unreachable.waitMs });
       if (!live()) return false;
       if (connection?.login === repair.login && connection.repository === repair.repository) return true;
       await settle(repair, 'needs-person', connection ? 'The GitHub connection changed. Start the repair again.' : 'Connect GitHub to repair builds.');

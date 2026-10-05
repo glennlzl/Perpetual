@@ -41,3 +41,28 @@ test('release API scopes requests to the current managed repository and requires
   assert.equal((await post('/api/releases/configure', { repoPath: dir, target: { environment: 'preview' } })).status, 400);
   assert.equal((await fetch(`${app.url}/api/releases?repoPath=other`)).status, 409);
 });
+
+test('GitHub unreachable answers the release with why, never as a missing source, until GitHub answers', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-release-api-')), dataDir = join(dir, 'data'), timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  await mkdir(dataDir);
+  const source = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha: SHA, connectedAccount: 'tester', savedAt: time };
+  const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: time };
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, source, pipelines: {}, githubConnection: { login: 'tester', connectedAt: time } } }));
+  let reachable = false;
+  const app = await startServer({ port: 0, repo: dir, dataDir, github: {
+    auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
+    runs: {
+      async session() { return reachable ? { available: true, authenticated: true as const, account: { login: 'tester', name: null } } : { available: true, authenticated: false as const, account: null, message: timedOut, unreachable: true as const }; },
+      async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; },
+    },
+    async head() { return { status: 200 as const, sha: SHA, etag: null }; },
+    async build() { return { status: 'waiting' as const, reason: 'CI pending.' }; },
+    async status() {},
+  } });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const view = async () => { const response = await fetch(`${app.url}/api/releases?${new URLSearchParams({ repoPath: dir })}`); return { status: response.status, body: await response.json() }; };
+  assert.deepEqual(await view(), { status: 502, body: { error: timedOut } });
+  reachable = true;
+  const answered = await view();
+  assert.deepEqual([answered.status, answered.body.sha, answered.body.blockedReason], [200, SHA, 'Every Sandbox gate must pass or be explicitly released and reported for this commit.']);
+});

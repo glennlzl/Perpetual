@@ -40,8 +40,9 @@ async function start(t: TestContext, { connection = { login: 'developer', connec
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
   const post = async (path: string, input: unknown): Promise<{ status: number; body: GateResponse }> => { const response = await fetch(`${app.url}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify(input) }); return { status: response.status, body: await response.json() }; };
   const view = async (): Promise<GateResponse> => (await fetch(`${app.url}/api/gate`)).json();
+  // CI runs test files concurrently, so a wait allows ten seconds.
   async function until(check: (view: GateResponse) => unknown) {
-    for (let attempt = 0; attempt < 400; attempt++) { const current = await view(); if (check(current)) return current; await new Promise(done => setTimeout(done, 10)); }
+    for (let attempt = 0; attempt < 1000; attempt++) { const current = await view(); if (check(current)) return current; await new Promise(done => setTimeout(done, 10)); }
     throw new Error('The gate did not settle.');
   }
   return { dir, dataDir, post, view, until, calls: seams.calls };
@@ -108,6 +109,24 @@ test('gate writes refuse another source, a non-Sandbox stage and a release witho
   assert.deepEqual(f.calls.statuses, [], 'A disconnected account reports nothing.');
   const release = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
   assert.deepEqual([release.status, release.body.error], [400, 'Connect GitHub to release.']);
+});
+
+test('GitHub unreachable keeps a gate\'s report pending with why and refuses a release as unreachable, never as a disconnect', async t => {
+  const seams = github(), timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  let reachable = false;
+  seams.runs.session = async () => reachable ? session('developer') : { available: true, authenticated: false, account: null, message: timedOut, unreachable: true };
+  const f = await start(t, { seams });
+  assert.equal((await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' })).status, 202);
+  const settled = await f.until(view => view.stages.beta?.status === 'needs-release' && view.stages.beta.statusError);
+  assert.equal(settled.stages.beta.statusError, timedOut);
+  assert.deepEqual(f.calls.statuses, []);
+  const refused = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
+  assert.deepEqual([refused.status, refused.body.error], [502, timedOut]);
+  reachable = true;
+  const released = await f.post('/api/gate/release', { repoPath: f.dir, stageId: 'beta', sha: SHA });
+  assert.deepEqual([released.status, released.body.stages.beta.status], [200, 'released']);
+  await f.until(view => f.calls.statuses.length > 0 && !view.stages.beta.statusError);
+  assert.deepEqual(f.calls.statuses.at(-1), { repository: 'owner/app', sha: SHA, state: 'success', context: 'perpetual/Beta', description: 'Released by developer' });
 });
 
 test('release refuses a source change while verifying the account, before releasing any gate', async t => {

@@ -1,15 +1,21 @@
 // Public GitHub source, connection and evidence replies. Private CLI output and credentials never join these types.
 
 export interface GitHubAccount { login: string; name: string | null }
-/** A verified CLI account is present exactly when the session is authenticated. */
-export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined }
-  | { available: boolean; authenticated: false; account: null; message?: string };
+/**
+ * A verified CLI account is present exactly when the session is authenticated. An unreachable session is one GitHub did
+ * not answer for now, which says nothing about the account; its message names why.
+ */
+export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined; unreachable?: undefined }
+  | { available: boolean; authenticated: false; account: null; message?: string; unreachable?: true };
 /** A saved source or a local checkout's detected remote; older/local projections omit managed-copy fields. */
 export interface GitHubSource {
   repository: string; branch?: string | null; rootDirectory?: string | null; scanPath?: string | null;
   checkoutPath?: string; sha?: string | null; connectedAccount?: string; savedAt?: string;
 }
-/** GET /api/github/connection and POST connect/disconnect. Only GET includes the original local checkout. */
+/**
+ * GET /api/github/connection and POST connect/disconnect. Only GET includes the original local checkout. unreachable
+ * marks a connection this instance holds that GitHub could not verify for now: not connected, and not disconnected.
+ */
 export type GitHubConnection = (
   | (Extract<GitHubSession, { authenticated: true }> & { connected: true })
   | (GitHubSession & { connected: false })

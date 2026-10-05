@@ -12,6 +12,7 @@ import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
 import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, discardGitHubSource, ensureGitHubHistory, sourceRoot, updateGitHubSource } from './github-source.ts';
+import { githubUnreachable } from './github-cli.ts';
 import { readGitHubActions, readServiceConfig } from './service-config.ts';
 import type { ConfigFile } from '../contract/service-config.ts';
 import { withDeliveryGraph } from './delivery.ts';
@@ -285,11 +286,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       repository:detected,branch:state.scan!.repo.branch,rootDirectory:'/',
     } : null);
     // Connected only with the session's account, so a connected result always names it.
-    return connected ? {...session,connected:true as const,source} : {...session,connected:false as const,source};
+    if(connected)return {...session,connected:true as const,source};
+    // GitHub not answering says nothing about the account this instance connected or reuses: that connection is
+    // unreachable, not disconnected. A deliberate Disconnect, or an instance with no account to verify, is not connected.
+    const reply={...session,connected:false as const,source};
+    if(githubAuth.isPending()||!reuseLocalSession&&!state.githubConnection)delete reply.unreachable;
+    return reply;
   }
+  /** A connection GitHub could not verify for now refuses as unreachable, never as a disconnect, so waiting work tells them apart. */
+  function requireReachable(connection: GitHubConnection | null){if(connection?.unreachable)throw githubUnreachable(connection.message);}
   async function requireGitHub(session?: GitHubSession) {
     requireNoPendingSignIn();
     const connection=await githubConnection(session);
+    requireReachable(connection);
     if(!connection.connected)throw new Error(connection.message || 'Connect your GitHub account before selecting a repository.');
     return connection;
   }
@@ -344,13 +353,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   }
   // Only the connected account reads heads, runs and failed logs and reports statuses, as for workflow runs. A source
   // move during the session read, such as a gate moving the managed copy, is not a disconnect: the account is read once
-  // more for the moved source.
+  // more for the moved source. Nor is GitHub not answering: that throws as unreachable, and the gates, repairs and
+  // releases that asked wait it out and ask again.
   async function connectedAccount(){
     for(let attempt=0;attempt<2;attempt+=1){
       if(state.githubConnection===null||githubAuth.isPending())return null;
       const scan=state.scan,source=state.source;
       const connection=await githubConnection(await githubRuns.session());
       if(state.scan!==scan||state.source!==source)continue;
+      requireReachable(connection);
       return connection.connected&&connection.source?.repository?{login:connection.account.login,repository:connection.source.repository}:null;
     }
     return null;
@@ -594,6 +605,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             const connection=state.githubConnection===null?null:await githubConnection(await githubRuns.session());
             requireSourceIdle();
             if(state.scan!==current)throw conflict(SOURCE_CHANGED);
+            requireReachable(connection);
             if(!connection?.connected)throw new Error('Connect GitHub to release.');
             return {repoPath:current.repo.path,sha:current.repo.sha||null,...await gates.release({stageId:input.stageId,sha:input.sha,login:connection.account.login})};
           }));
@@ -811,6 +823,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return withActiveScan(requestUrl.searchParams.get('repoPath'),async scan=>{
           if(state.githubConnection===null)throw new Error(`Connect your GitHub account to read ${subject}.`);
           const connection=await githubConnection(await reader.session());
+          requireReachable(connection);
           if(!connection.connected)throw new Error(connection.message||`Connect your GitHub account to read ${subject}.`);
           return reader.read({repository:connection.source?.repository,sha:scan.repo.sha,login:connection.account?.login});
         });
@@ -825,6 +838,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(record===null)throw new Error('Connect your GitHub account to read Build.');
           const session=await githubRuns.session();unchanged();
           const connection=await githubConnection(session);unchanged();
+          requireReachable(connection);
           if(!connection.connected||!connection.source?.repository)throw new Error(connection.message||'Connect your GitHub account to read Build.');
           const repository=connection.source.repository,login=connection.account.login;
           const watched=()=>gates.watchedHead({key,repository,branch,login});
@@ -832,6 +846,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           const sameHead=()=>{unchanged();if(JSON.stringify(watched())!==JSON.stringify(head))throw conflict('The branch head changed while reading Build. Refresh its status.');};
           const result=await githubRuns.read({repository,sha,login});sameHead();
           const verified=await githubRuns.session();sameHead();
+          if(verified.unreachable)throw githubUnreachable(verified.message);
           if(!verified.authenticated||verified.account.login.toLowerCase()!==login.toLowerCase())throw conflict('The GitHub account changed while reading Build. Reconnect it.');
           if(result.repository.toLowerCase()!==repository.toLowerCase()||result.sha!==sha)throw Object.assign(new Error('GitHub returned Build evidence for another source.'),{statusCode:502});
           const runs=latestBranchBuildRuns(result.runs,sha,branch);

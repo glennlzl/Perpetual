@@ -64,6 +64,16 @@ test('an account switch while Actions is read invalidates the returned success',
   assert.notEqual(result.status, 'passed');
 });
 
+test('GitHub unreachable leaves Build waiting with why, never asking to reconnect, and never passes a read it cut short', async () => {
+  const unreachable: GitHubSession = { available: true, authenticated: false, account: null, message: 'Reading GitHub timed out. Check your connection and try again.', unreachable: true };
+  const runs = async () => ({ status: 200, data: { total_count: 1, workflow_runs: [run(1)] } });
+  let requests = 0;
+  assert.deepEqual(await readBuild(input, { session: async () => unreachable, request: async () => { requests++; return runs(); } }), { status: 'waiting', reason: unreachable.message });
+  assert.equal(requests, 0);
+  let reads = 0;
+  assert.deepEqual(await readBuild(input, { session: async () => ++reads === 1 ? session() : unreachable, request: runs }), { status: 'waiting', reason: unreachable.message });
+});
+
 test('another signed-in account cannot supply CI evidence for the connected account', async () => {
   let requests = 0;
   const result = await readBuild(input, { session: async () => ({ available: true, authenticated: true, account: { name: null, login: 'someone-else' } }), request: async () => { requests++; return { status: 200, data: { total_count: 1, workflow_runs: [run(1)] } }; } });

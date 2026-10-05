@@ -52,8 +52,10 @@ function commandFailure(error: ExecFileException | GitHubSourceError, executable
   if (kind === 'unauthenticated') return new GitHubSourceError(GITHUB_MESSAGES.unauthenticated, 'GITHUB_AUTH_REQUIRED');
   if (kind === 'not-found') return new GitHubSourceError('The repository or branch is unavailable to your GitHub account. Check the selection and repository access.', 'GITHUB_NOT_FOUND');
   if (kind === 'denied') return new GitHubSourceError('GitHub denied access. Check repository permissions and any organization SSO authorization for GitHub CLI.', 'GITHUB_FORBIDDEN');
-  return new GitHubSourceError(`${operation} failed. Check your network connection and GitHub CLI account, then try again.`);
+  return new GitHubSourceError(`${operation} failed. Check your network connection and GitHub CLI account, then try again.`, kind === 'other' ? 'GITHUB_UNREACHABLE' : undefined);
 }
+// A read GitHub did not answer for now: a timeout, a rate limit, or a network or server failure.
+const UNANSWERED = new Set(['GITHUB_TIMEOUT', 'GITHUB_RATE_LIMIT', 'GITHUB_UNREACHABLE']);
 
 async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string) {
   try {
@@ -114,14 +116,19 @@ async function githubApi(endpoint: string): Promise<{ data: unknown; hasNext: bo
   return { data: response.data, hasNext: hasNextPage(response) };
 }
 
+/**
+ * The CLI's account, as GitHub answers for it. A check GitHub did not answer says nothing about the account: that session
+ * is unreachable, never signed out.
+ */
 export async function getGitHubSession(): Promise<GitHubSession> {
   try {
     const data = record((await githubApi('user')).data);
     if (!data || typeof data.login !== 'string') throw new GitHubSourceError('GitHub did not return an account. Sign in again with gh auth login --hostname github.com.');
     return { available: true, authenticated: true, account: { login: data.login, name: typeof data.name === 'string' ? data.name : null } };
   } catch (caught) {
-    const error = caught as GitHubSourceError;
-    return { available: error.code !== 'GH_NOT_FOUND', authenticated: false, account: null, message: failureText(error, 500) };
+    const error = caught as GitHubSourceError, message = failureText(error, 500);
+    if (UNANSWERED.has(error.code)) return { available: true, authenticated: false, account: null, message, unreachable: true };
+    return { available: error.code !== 'GH_NOT_FOUND', authenticated: false, account: null, message };
   }
 }
 

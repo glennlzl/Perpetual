@@ -8,6 +8,7 @@ import type { CheckRun, CommitChecks, PullRequestState, StatusCheck } from '../s
 import type { Repair, RepairProgress } from '../src/repair/manager.ts';
 import { AUTO_MERGE_OFF, HEAD_CHANGED, UNREADY, checksVerdict, createRepairMerge, type CiVerdict, type MERGE, type MergeGitHub } from '../src/repair/merge.ts';
 import { HELD } from '../src/repair/changes.ts';
+import { githubUnreachable } from '../src/github-cli.ts';
 
 // The merge step through its interface: a fake GitHub (pull request, checks, statuses, target head, comparison, branch
 // update and merge), fake repair gates and a host double that makes each checkout a folder. Nothing reaches GitHub,
@@ -195,6 +196,19 @@ test('auto-merge turned off while the connection is read before a write prevents
     assert.deepEqual(await h.run(), { status: 'ready', reason: AUTO_MERGE_OFF });
     assert.deepEqual([h.calls.merges, h.calls.updates], [[], []], behind.length ? 'No branch update.' : 'No merge.');
   }
+});
+
+test('GitHub unreachable just before the merge is waited out, and the pull request and target branch are read again before it merges', async t => {
+  const timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  let h: Awaited<ReturnType<typeof harness>> | undefined, outage = 2;
+  h = await harness(t, { connectionRead: () => { if (h?.calls.compares.length === 1 && outage > 0) { outage -= 1; throw githubUnreachable(timedOut); } } });
+  assert.deepEqual(await h.run(), { status: 'merged', merged: M });
+  assert.equal(outage, 0, 'The connection was read again until GitHub answered.');
+  assert.deepEqual(h.calls.order.slice(-7), ['pull', 'head', 'compare', 'pull', 'head', 'compare', 'merge'], 'Nothing read before the wait is trusted after it.');
+  let past: Awaited<ReturnType<typeof harness>> | undefined;
+  past = await harness(t, { timing: { outageMs: 5 }, connectionRead: () => { if (past?.calls.compares.length) throw githubUnreachable(timedOut); } });
+  assert.deepEqual(await past.run(), { status: 'ready', reason: timedOut }, 'Past the outage limit the fix waits for a person, with why.');
+  assert.deepEqual([past.calls.merges, past.calls.updates], [[], []]);
 });
 
 test('every check on the head must succeed: a failed or cancelled run, a failed or missing gate status and checks that stay pending never merge', async t => {
