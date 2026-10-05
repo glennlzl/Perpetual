@@ -12,17 +12,17 @@ Throughout:
 
 ## The controller API
 
-The interface's own API, at the URL `serve` prints (`http://127.0.0.1:4317` by default). Every POST carries the header `x-perpetual-token` with the `token` from `GET /api/session`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do.
+The interface's own API, at the address of the link `serve` prints (`http://127.0.0.1:4317` by default). Every request carries the header `x-perpetual-secret` with the controller's launch secret, which you read from the clone's `.perpetual/launch-secret`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do.
 
 ## 1. Start the controller
 
-In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. Done when `GET /api/session` answers and you have the URL.
+In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. It prints a link, `http://127.0.0.1:4317/?secret=…`, that signs the person's browser in and opens the interface: whenever a step sends them to the interface, give them that link. Done when `GET /api/state` answers and you have the link.
 
 ## 2. The model key
 
 A model writes the twin config, drafts journeys and writes their code; runs use none.
 
-**Ask:** Perpetual needs an OpenRouter API key (https://openrouter.ai/keys). Open Settings at `<url>` and save the key there.
+**Ask:** Perpetual needs an OpenRouter API key (https://openrouter.ai/keys). Open `<link>`, then Settings, and save the key there.
 
 - Saved: continue.
 - Continue without a model: the twin is built from the detected config, and no journey is drafted until a key is saved.

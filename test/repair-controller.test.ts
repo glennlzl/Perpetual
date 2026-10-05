@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { startServer, type ServerOptions } from '../src/server.ts';
+import type { ServerOptions } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import { readBranchHead, type CommitStatusPost } from '../src/gate/github.ts';
 import { readBuild } from '../src/gate/build.ts';

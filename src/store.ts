@@ -15,13 +15,19 @@ export async function privateDirectory(path: string, message: string, { resolveA
   return root;
 }
 
-/** The parsed JSON of a state file, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
-export async function readStateFile(file: string, { limit, invalid }: { limit: number; invalid: string }): Promise<unknown> {
+/** The text of a file the controller keeps, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
+export async function readPrivateFile(file: string, { limit, invalid }: { limit: number; invalid: string }): Promise<string | undefined> {
   let stat;
   try { stat = await lstat(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > limit) throw new Error(invalid);
+  return await readFile(file, 'utf8');
+}
+
+/** The parsed JSON of a state file, or undefined when there is none; a link, a non-file or one over `limit` bytes throws `invalid`. */
+export async function readStateFile(file: string, options: { limit: number; invalid: string }): Promise<unknown> {
+  const text = await readPrivateFile(file, options);
   // The controller's own file; the caller decides whether what it holds is state it can load.
-  return JSON.parse(await readFile(file, 'utf8')) as unknown;
+  return text === undefined ? undefined : JSON.parse(text) as unknown;
 }
 
 /**

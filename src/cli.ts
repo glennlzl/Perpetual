@@ -30,7 +30,8 @@ async function main(){
     if(port!==undefined&&!(Number.isInteger(port)&&port>=0&&port<=65535))throw new Error('--port needs a whole number from 0 to 65535.');
     if(!(await stat(repo).catch(()=>null))?.isDirectory())throw new Error(`No repository directory at ${repo}.`);
     const app=await startServer({port,repo,dataDir});
-    console.log(`Perpetual is ready at ${app.url}\nRepository: ${repo}\nData: ${dataDir}`);
+    // The launch link carries the secret that signs a browser in; local tools read it from the data directory instead.
+    console.log(`Perpetual is ready at ${app.launchUrl}\nRepository: ${repo}\nData: ${dataDir}`);
     // Shutdown drains the controller's work, which can take a while; a second signal stops at once, with that work left.
     let stopping=false;
     for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{

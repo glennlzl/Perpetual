@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGateManager, type GateStage, type SourceHead } from '../src/gate/manager.ts';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import type { BranchHead, BranchHeadInput } from '../src/gate/github.ts';
 import type { GitHubSession } from '../src/github-source.ts';

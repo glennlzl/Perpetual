@@ -16,7 +16,7 @@ The report stays private between you and the maintainer until a fix is released.
 
 ## Scope
 
-- The controller (`perpetual serve`) listens on `127.0.0.1` only. It accepts same-origin requests with a loopback `Host` header, and changes need the page's session token. A way to reach or drive it from another origin or host is in scope.
+- The controller (`perpetual serve`) listens on `127.0.0.1` only and accepts same-origin requests with a loopback `Host` header. Every API request needs its launch secret, which the data directory keeps in a file only your user can read: the launch link `serve` prints exchanges it for an HttpOnly, SameSite=Strict cookie in your browser, and a local tool sends it in a header. Changes from the page also carry its session token. The interface's static files hold no secret and are public. A way to reach or drive the API without the secret, or from another origin or host, is in scope.
 - Twins publish their ports on `127.0.0.1` only. The exception is the `supabase` service: the Supabase CLI starts its own local stack and publishes its ports itself, and Perpetual does not limit them to loopback.
 - A way for an API key or GitHub token held by the controller to reach the interface, logs, recordings or a twin is in scope. One exception is deliberate: by default the `llm` twin service gives the twin's apps the App Settings OpenRouter key, so the twinned repository's code can use it; with `source: app` the service uses the app's own development values instead.
 - Perpetual runs the code of the repositories you twin, and approved journey code runs on your machine. Only twin repositories and approve journey code you trust; running untrusted code this way is not a vulnerability in Perpetual.

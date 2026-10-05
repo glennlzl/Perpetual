@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash, randomUUID} from 'node:crypto';
 import {request as httpRequest} from 'node:http';
-import {startServer} from '../src/server.ts';
+import {fetch, startServer} from './fixtures/controller.ts';
 import type {ManagedRuntime} from '../src/environments/manager.ts';
 import {createEnvironmentRuntime} from '../src/environments/runtime.ts';
 import {createTwinRuntime} from '../src/twin/runtime.ts';

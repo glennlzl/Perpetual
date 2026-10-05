@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import type { CommandOutput } from '../src/twin/registry.ts';
 
 // The fields these routes answer with.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,7 +35,7 @@ test('an option takes its value after a space or an equals sign, and a missing v
   assert.deepEqual([help.code, help.stdout.startsWith('Perpetual')], [0, true], 'Without a command the CLI prints its help.');
 });
 
-test('serve says it is stopping on the first signal and exits once shutdown finishes', async t => {
+test('serve prints its launch link, says it is stopping on the first signal and exits once shutdown finishes', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-cli-serve-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const child = spawn(process.execPath, [CLI, 'serve', '--repo', dir, `--data=${join(dir, 'data')}`, '--port=0'], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -46,6 +46,10 @@ test('serve says it is stopping on the first signal and exits once shutdown fini
     assert.ok(Date.now() < deadline && child.exitCode === null, `serve never became ready: ${stdout}`);
   }
   assert.match(stdout, new RegExp(`Data: ${join(dir, 'data').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  // The link carries the secret the data directory keeps, and the output holds it nowhere else.
+  const secret = await readFile(join(dir, 'data', 'launch-secret'), 'utf8');
+  assert.match(stdout, new RegExp(`^Perpetual is ready at http://127\\.0\\.0\\.1:\\d+/\\?secret=${secret}$`, 'm'));
+  assert.equal(stdout.split(secret).length, 2);
   const exited = once(child, 'exit');
   child.kill('SIGINT');
   assert.deepEqual(await exited, [0, null]);

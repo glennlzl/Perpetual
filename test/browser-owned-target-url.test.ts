@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import type { ManagedRuntime } from '../src/environments/manager.ts';
 
 test('browser API exposes an owned legacy target as a host-browser link after restart without rewriting saved config', async t => {

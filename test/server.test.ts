@@ -4,7 +4,8 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, stat, symlink } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent, request } from 'node:http';
-import { startServer, type Controller, type ServerOptions } from '../src/server.ts';
+import type { Controller, ServerOptions } from '../src/server.ts';
+import { fetch, sessionHeaders, startServer } from './fixtures/controller.ts';
 import { DISCOVERY_VERSION } from '../src/scanner.ts';
 import type { GitHubSession } from '../src/github-source.ts';
 
@@ -35,7 +36,7 @@ async function scanned(t: TestContext, { github = {}, managed, state = {} }: { g
 function halfSent(url: string, token: string, path: string, input: unknown) {
   const body = Buffer.from(JSON.stringify(input)), half = body.length >> 1;
   const reply = Promise.withResolvers<{ status: number; body: unknown }>();
-  const req = request(url + path, { method: 'POST', agent: false, headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Perpetual-Token': token } }, res => {
+  const req = request(url + path, { method: 'POST', agent: false, headers: { ...sessionHeaders(url), 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Perpetual-Token': token } }, res => {
     const chunks: Buffer[] = [];
     res.on('data', chunk => chunks.push(chunk));
     res.on('end', () => reply.resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
@@ -272,7 +273,7 @@ test('closing the controller ends a polling page\'s connection with 503, so shut
   const agent = new Agent({ keepAlive: true, maxSockets: 1 });
   t.after(() => agent.destroy());
   const get = (path: string) => new Promise<{ status: number; connection?: string }>((resolve, reject) => {
-    const req = request(f.app.url + path, { agent }, res => { res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection })); });
+    const req = request(f.app.url + path, { agent, headers: sessionHeaders(f.app.url) }, res => { res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection })); });
     req.on('error', reject); req.end();
   });
   const inFlight = get(`/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`);
@@ -338,7 +339,7 @@ test('a body over its limit is refused without stalling the next request on its 
   const { token } = await (await fetch(app.url + '/api/session')).json();
   const send = (method: string, path: string, body?: string) => new Promise<{ status: number; connection?: string; reused: boolean; ms: number }>((resolve, reject) => {
     const started = Date.now();
-    const req = request(app.url + path, { agent, method, headers: body ? { 'Content-Type': 'application/json', 'X-Perpetual-Token': token } : {} }, res => {
+    const req = request(app.url + path, { agent, method, headers: { ...sessionHeaders(app.url), ...body ? { 'Content-Type': 'application/json', 'X-Perpetual-Token': token } : {} } }, res => {
       res.resume(); res.on('end', () => resolve({ status: res.statusCode!, connection: res.headers.connection, reused: req.reusedSocket, ms: Date.now() - started }));
     });
     req.on('error', reject); req.end(body);

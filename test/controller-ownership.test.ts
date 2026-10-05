@@ -6,10 +6,11 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {startServer,type Controller} from '../src/server.ts';
+import type {Controller} from '../src/server.ts';
+import {fetch,signIn,startServer} from './fixtures/controller.ts';
 
 // What a child controller reports back over IPC.
-type Outcome={url?:string;error?:string;waiting?:true};
+type Outcome={url?:string;launchUrl?:string;error?:string;waiting?:true};
 
 function controllerChild(t: TestContext,dataDir: string,{barrier=false}={}){
   const script=`
@@ -17,7 +18,7 @@ function controllerChild(t: TestContext,dataDir: string,{barrier=false}={}){
     let app;
     process.on('message',async message=>{
       if(message==='start'){
-        try{app=await startServer({port:0,dataDir:process.argv[1]});process.send({url:app.url});}
+        try{app=await startServer({port:0,dataDir:process.argv[1]});process.send({url:app.url,launchUrl:app.launchUrl});}
         catch(error){process.send({error:error.code||error.message});}
       }
       if(message==='close'){await app?.close();process.exit(0);}
@@ -87,7 +88,8 @@ test('an abrupt owner exit permits recovery of its persisted pipeline',async t=>
   let restarted: Controller|undefined;
   t.after(async()=>{await restarted?.close();await rm(dir,{recursive:true,force:true});});
   await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');
-  const owner=controllerChild(t,dataDir),{url}=(await owner.ready)!;
+  const owner=controllerChild(t,dataDir),{url,launchUrl}=(await owner.ready)!;
+  await signIn(launchUrl!);
   const {token}=await (await fetch(url+'/api/session')).json();
   const post=(path: string,value: object)=>fetch(url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':token},body:JSON.stringify(value)});
   assert.equal((await post('/api/scan',{path:repo})).status,200);
