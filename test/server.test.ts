@@ -403,3 +403,11 @@ test('the connected account is read again when the source moves during its sessi
   assert.deepEqual([response.status, (await response.json()).tail], [200, 'acme/app']);
   assert.equal(move, undefined, 'The source moved during the first check.');
 });
+
+test('the state reply claims no model or browser readiness, which only the settings and browser views know', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-state-reply-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  // It once read the model from environment variables alone, so a key saved in Settings read as missing.
+  assert.equal('capabilities' in await (await fetch(app.url + '/api/state')).json(), false);
+});
