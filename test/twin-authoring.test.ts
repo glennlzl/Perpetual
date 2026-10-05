@@ -53,11 +53,13 @@ test('the author reads a redacted source copy and feedback while the application
 test('the author reads EVIDENCE.md as the controller formatted it, credential-named variables with the lines that read them', async t => {
   const f = await fixture(t);
   await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { start: 'node app.mjs' } }));
-  await writeFile(join(f.source, 'app.mjs'), 'const secret = process.env.SESSION_SECRET;\nconst key = process.env.INTERNAL_API_KEY;\n');
+  await writeFile(join(f.source, 'app.mjs'), 'const secret = process.env.SESSION_SECRET;\nconst key = process.env.INTERNAL_API_KEY;\nconst header = process.env.HTTP_AUTHORIZATION;\n');
   const draft = JSON.stringify({ apps: { web: { start: 'node app.mjs', port: 3000 } } });
   const evidence = evidenceText(await repositoryFacts({ source: f.source, draft }), draft);
   assert.match(evidence, /^- SESSION_SECRET: `app\.mjs:1`$/m);
   assert.match(evidence, /^- INTERNAL_API_KEY: runtime, `app\.mjs:2`$/m);
+  // A name ending in AUTHORIZATION labels its line too, rather than starting an Authorization header.
+  assert.match(evidence, /^- HTTP_AUTHORIZATION: runtime, `app\.mjs:3`$/m);
   let observed = '';
   const result = await authorTwinConfig({ ...f.options, draft, evidence, harness: ({ cwd }) => {
     observed = readFileSync(join(cwd, 'EVIDENCE.md'), 'utf8');

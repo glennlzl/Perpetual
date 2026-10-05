@@ -50,20 +50,21 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * named values in JSON, YAML, env and CLI form (`API_KEY=…`, `"token": "…"`, `--password …`,
  * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
  * and user info in any URL. Ordinary text, however long, comes back unchanged. `names: false` leaves the
- * values after credential names alone, for text formatted from values already redacted one by one, whose
- * `NAME: file:line` labels are not assignments; every other shape is still replaced.
+ * values after credential names and Authorization alone, for text formatted from values already redacted one
+ * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced.
  */
 export function redact(input: unknown = '', { decodeUri = false, names = true }: { decodeUri?: boolean; names?: boolean } = {}): string {
-  const text = (decodeUri ? decodedUri(String(input)) : String(input))
+  let text = (decodeUri ? decodedUri(String(input)) : String(input))
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
-    .replace(PEM, block => redactedLines(block))
-    .replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`)
-    .replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`);
-  return (names ? text
+    .replace(PEM, block => redactedLines(block));
+  if (names) text = text.replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`);
+  text = text.replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`);
+  if (names) text = text
     .replace(QUOTED_KEY, `$1$2$1$3$4${REDACTED}$4`)
     .replace(NAMED_VALUE, namedValue)
     .replace(FLAG_VALUE, namedValue)
-    .replace(QUERY_VALUE, `$1${REDACTED}`) : text)
+    .replace(QUERY_VALUE, `$1${REDACTED}`);
+  return text
     .replace(TOKEN_SHAPE, REDACTED)
     .replace(USER_INFO, `$1${REDACTED}@`);
 }
