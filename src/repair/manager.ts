@@ -131,6 +131,7 @@ const kept = (repair: Repair) => Boolean(repair.pullRequest) && KEPT.includes(re
 const mayOwn = (repair: Repair) => PROGRESS.has(repair.status) || Boolean(repair.cleanup || repair.attempts?.length || repair.pushed || repair.pullRequest || repair.merged);
 const MERGED = 'Merged on GitHub.';
 const NO_AGENT = 'Automatic repair is unavailable. Fix the failure in a pull request.';
+const CLEANUP_HOLD = 'Repair cleanup must finish before another repair can start.';
 const LIMIT = 100;
 /** Bytes of state a start reads back, and the bound each save keeps, well within it. */
 const READ_LIMIT = 16 * 1024 * 1024, SAVE_LIMIT = READ_LIMIT / 2;
@@ -263,9 +264,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const current = source();
     return current?.key && current.repository && current.branch && current.checkoutPath ? { ...current, repository: current.repository, branch: current.branch, checkoutPath: current.checkoutPath, rootDirectory: current.rootDirectory || '/' } : null;
   };
-  // One repair at a time: an active repair, or a stopped or superseded one whose aborted step has not settled yet.
+  // One repair at a time: an active repair, or a stopped or superseded one whose aborted step has not settled yet. A
+  // startup sweep still owed holds only agent work, which needs Docker as the sweep does; triage and reruns go ahead.
   const running = () => state.repairs.some(repair => ACTIVE.includes(repair.status));
-  const busy = () => running() || controllers.size > 0 || recovering || state.repairs.some(repair => repair.cleanup);
+  const busy = () => running() || controllers.size > 0 || state.repairs.some(repair => repair.cleanup);
+  const recoveryHold = () => `${CLEANUP_HOLD}${recoveryError ? ` ${recoveryError}` : ''}`;
   const scoped = (current: Managed) => state.repairs.filter(repair => repair.key === current.key && repair.branch === current.branch);
   // Why work of another branch or root directory of the managed source's repository stops: nothing watches, shows or
   // verifies it any more, while a check of the connection, which names only the repository, still passes for it. Work
@@ -453,8 +456,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
         for (const run of repair.runs) { if (!live() || !await connected()) return; await github.rerun({ repository: repair.repository, runId: run.id }); }
         return;
       }
-      // From here the failure is the agent step's, so a reason such as a missing key or Docker is the Change step's.
+      // From here the failure is the agent step's, so a reason such as a missing key or Docker is the Change step's. No
+      // agent starts before the startup sweep removed what an earlier controller's boxes left.
       repair.startedAt = now();
+      if (recovering) return await settle(repair, 'needs-person', recoveryHold());
       const agent = steps.repair, blocked = await steps.unavailable?.() || (agent ? null : NO_AGENT);
       if (!live()) return;
       if (blocked || !agent) return await settle(repair, 'needs-person', text(blocked || NO_AGENT));
@@ -601,9 +606,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function check() {
     if (closed) return Promise.resolve();
     checking ??= Promise.resolve().then(async () => {
-      // Cleanup can recover without a connected source; only it clears its earlier failure. A sweep that failed holds new
-      // repairs (busy), while heads, reruns and pull requests are still followed.
-      try { await cleanupOutstanding(); recoveryError = null; }
+      // Cleanup can recover without a connected source; only it clears its earlier failure, and a sweep it put off while
+      // a repair ran clears nothing. A sweep that failed holds agent work, while heads, triage, reruns and pull requests
+      // are still followed.
+      try { await cleanupOutstanding(); if (!recovering) recoveryError = null; }
       catch (error) { recoveryError = text(error); }
       if (closed) return;
       const current = managed();
@@ -637,7 +643,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const cleanup = state.repairs.find(repair => repair.cleanup?.status === 'failed')?.cleanup ?? state.repairs.find(repair => repair.cleanup)?.cleanup;
     const held = recovering || Boolean(cleanup);
     const cleanupReason = cleanup?.status === 'failed' ? cleanup.reason ? text(cleanup.reason) : 'Resource deletion could not be confirmed.' : recoveryError;
-    const cleanupError = cleanupReason ? `Repair cleanup must finish before another repair can start. ${cleanupReason}` : null;
+    const cleanupError = cleanupReason ? `${CLEANUP_HOLD} ${cleanupReason}` : null;
     const error = [cleanupError, watchError].filter(Boolean).join(' ');
     const failed = !held && head && read?.branch === head.branch && read.login === head.login && read.sha === head.sha ? read.runs.map(publicRun) : [];
     return { repairs, ...(head && head.branch === watched.branch ? { head: { sha: head.sha, branch: head.branch, failed } } : {}), ...(watched ? { autoMerge: autoMerge(watched.key) } : {}), ...(error ? { watchError: error } : {}) };
@@ -684,6 +690,8 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
           if (existing && ACTIVE.includes(existing.status)) return true;
           if (existing && !retryable(existing.status)) throw conflict('This commit already has a repair.');
           if (running()) throw conflict('Another repair is running.');
+          // A person's Repair is not offered while the startup sweep is owed, and says why.
+          if (recovering) throw conflict(recoveryHold());
           if (busy()) throw conflict('The previous repair is still ending. Try again.');
           return false;
         };

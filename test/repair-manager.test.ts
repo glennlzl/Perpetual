@@ -1542,10 +1542,38 @@ test('a startup sweep that fails holds new repairs, while heads and pull request
   await h.poll();
   assert.deepEqual([h.repair(B)?.status, h.repair(B)?.merged, h.calls.heads.length, h.manager.view().head?.failed], ['merged', C, 1, []], 'The head is read and a person\'s merge followed; no Repair is offered while the sweep holds.');
   assert.match(h.manager.view().watchError ?? '', /cleanup must finish before another repair can start\. Docker unavailable/);
-  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409);
+  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409 && error.message === 'Repair cleanup must finish before another repair can start. Docker unavailable', 'A person reads the sweep\'s reason.');
   failed = false;
   await h.poll();
   assert.deepEqual([h.manager.view().watchError, h.manager.view().head?.failed, a.contexts.length], [undefined, [shown('3')], 0]);
+});
+
+// A machine that once had Docker and no longer has it still triages and reruns its failures; only the agent needs Docker.
+test('while the startup sweep fails, triage and reruns go ahead, and a failure the agent would take needs a person with the sweep\'s reason', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'old', key: KEY, repository: 'owner/app', branch: 'main', sha: E, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'merged', merged: '9'.repeat(40), runs: [], createdAt: at, updatedAt: at }] }));
+  let failed = true;
+  const a = agent(undefined, { async recover() { if (failed) throw new Error('Docker unavailable'); }, async cleanup() {} });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category], ['needs-person', 'configuration'], 'Triage needs no Docker.');
+  h.github.logs['3'] = LOGS.availability;
+  await h.failHead([run('3', C, 'failure')], C);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(C)?.status, h.calls.reruns], ['rerunning', ['3']], 'Nor does a rerun.');
+  await h.failHead([run('4', D, 'failure')], D);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(D)?.status, h.repair(D)?.reason, h.repair(D)?.cleanup, a.contexts.length], ['needs-person', 'Repair cleanup must finish before another repair can start. Docker unavailable', undefined, 0], 'No agent starts before the sweep.');
+  failed = false;
+  await h.poll();
+  assert.deepEqual(h.manager.view().head?.failed, [shown('4')], 'Once the sweep succeeds, a person may repair it.');
+  await h.manager.repair({ runId: '4' });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(D)?.status, a.contexts.length], ['ready', 1]);
 });
 
 test('cleanup held by another source stays visible and withholds Repair until cleanup succeeds', async t => {
