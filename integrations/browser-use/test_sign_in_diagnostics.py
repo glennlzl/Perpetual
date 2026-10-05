@@ -21,6 +21,9 @@ class Element:
     async def owner_frame(self):
         return self.frame
 
+    async def is_visible(self):
+        return True
+
     async def fill(self, value, **_options):
         self.value = value
 
@@ -88,7 +91,7 @@ class SignInDiagnostics(unittest.IsolatedAsyncioTestCase):
         async def loaded(*_args, **_options):
             pass
 
-        page = SimpleNamespace(main_frame=frame, url="http://127.0.0.1:3010/sign-in", is_closed=lambda: False, wait_for_load_state=loaded)
+        page = SimpleNamespace(main_frame=frame, url="http://127.0.0.1:3010/sign-in", is_closed=lambda: False, wait_for_load_state=loaded, on=lambda *_: None, remove_listener=lambda *_: None)
         result = await sign_in.sign_in_on_page(page, account, lambda _url: True, lambda _url: True, seconds=0)
         self.assertEqual({name: frame.elements[name].value for name in account}, account, "The account itself is never normalized.")
         return result

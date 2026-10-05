@@ -569,7 +569,14 @@ class OwnedBrowser:
             return {"result": "error", "code": "credential_target_mismatch"}
         application, allowed = origin(self.payload["targetUrl"]), set(self.payload["allowedOrigins"])
         # Discovery's request guards still apply: only a configured sign-in endpoint accepts the POST.
+        exchanges = self.auth_exchanges
         outcome = await sign_in_on_page(page, self.payload["credentials"], lambda url: url != "about:blank" and navigation_allowed(url, {application}), lambda url: url != "about:blank" and navigation_allowed(url, allowed))
+        if outcome["result"] != "signed_in":
+            # An exchange the page did not sign in with, such as a rejection answered 200, is no authentication.
+            self.auth_exchanges = exchanges
+        elif self.auth_exchanges == exchanges:
+            # The form went away, but no configured sign-in exchange succeeded.
+            outcome = {"result": "error", "code": "browser_action_failed"}
         form_page = sign_in_page(outcome.pop("url", None), application)
         if form_page:
             self.emit_event({"type": "sign-in-page", "caseId": self.case_id, "url": form_page})

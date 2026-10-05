@@ -7,6 +7,7 @@ import asyncio
 import io
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -46,6 +47,18 @@ PAGES = {
     "/two": html('<form action="/search"><input name="q" placeholder="Search"></form><form method="POST" action="/signup"><input type="email" name="email"><input type="password" name="password"><input type="password" name="confirm"><button>Create account</button></form><form method="POST" action="/login"><input name="login" autocomplete="username"><input type="password" name="password" autocomplete="current-password"><button>Sign in</button></form>'),
     "/none": html('<h1>Welcome</h1><form action="/search"><input type="search" name="q"><input name="topic"></form>'),
     "/password-only": html('<form method="POST" action="/login"><input type="password" name="password"><button>Continue</button></form>'),
+    # No <form>, and an untyped show-password control before the sign-in button: pressing it only reveals the password.
+    "/toggle": html('<div><input type="email" id="email"><input type="password" id="password"><button id="show">Show</button><button id="go">Sign in</button></div>', "show.onclick = () => { password.type = password.type === 'password' ? 'text' : 'password'; };"),
+    # The form hides while the application waits for a rejection, then shows it again.
+    "/slow-reject": html('<div id="form"><input type="email" id="email"><input type="password" id="password"><button id="go">Sign in</button></div><p id="status" role="alert"></p>', """go.onclick = async () => {
+  form.style.display = 'none';
+  const response = await fetch('/api/slow-reject', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email.value, password: password.value})});
+  form.style.display = 'block';
+  if (!response.ok) document.getElementById('status').textContent = 'Sign-in failed';
+};"""),
+    # A rejection answered 200 with the same form, and one answered 401 on a page without a form.
+    "/email-again": html('<form method="POST" action="/login-again"><input type="email" name="email"><input type="password" name="password"><button>Sign in</button></form>'),
+    "/email-401": html('<form method="POST" action="/login-401"><input type="email" name="email"><input type="password" name="password"><button>Sign in</button></form>'),
 }
 
 
@@ -63,10 +76,14 @@ class Application(BaseHTTPRequestHandler):
         values = json.loads(body) if path.startswith("/api/") else {key: value[0] for key, value in parse_qs(body).items()}
         self.server.posts.append((path, values))
         accepted = sorted(values.values()) == sorted(ACCOUNT.values())
+        if path == "/api/slow-reject":
+            time.sleep(1.5)
         if path.startswith("/api/"):
             self.respond(b"{}", "application/json", 200 if path == "/api/login" and accepted else 401)
+        elif path == "/login-again":
+            self.respond(PAGES["/email-again"].replace(b"<form", b'<p role="alert">Wrong email or password</p><form'))
         else:
-            self.respond(html("<h1>Workspace ready</h1>" if path == "/login" and accepted else "<h1>Sign-in failed</h1>"))
+            self.respond(html("<h1>Workspace ready</h1>" if path == "/login" and accepted else "<h1>Sign-in failed</h1>"), status=401 if path == "/login-401" else 200)
 
     def respond(self, body, kind="text/html", status=200):
         self.send_response(status)
@@ -122,6 +139,27 @@ class SignInForms(unittest.IsolatedAsyncioTestCase):
             # Neither the other forms nor the search fields received the account.
             self.assertEqual(await page.input_value("#search"), "")
             self.assertNotIn("/search", self.app.gets)
+
+    async def test_a_sign_in_that_did_not_happen_is_never_reported_or_counted_as_signed_in(self):
+        endpoints = ("/login", "/login-again", "/login-401", "/api/login", "/api/slow-reject")
+        async with self.browser("/toggle", endpoints=endpoints) as owned:
+            page = await owned.active_page()
+            for path, expected, posted in [
+                # The show-password control is pressed as the submit control: the filled field turns into text and nothing is sent.
+                ("/toggle", {"result": "still_on_sign_in", "code": "browser_action_failed"}, []),
+                ("/slow-reject", {"result": "still_on_sign_in", "code": "browser_action_failed", "message": "Sign-in failed"}, ["/api/slow-reject"]),
+                ("/email-again", {"result": "still_on_sign_in", "code": "browser_action_failed", "message": "Wrong email or password"}, ["/login-again"]),
+                # The form is gone, but the sign-in endpoint refused the account.
+                ("/email-401", {"result": "error", "code": "browser_action_failed"}, ["/login-401"]),
+            ]:
+                with self.subTest(path=path):
+                    self.app.posts.clear()
+                    await page.goto(self.url + path)
+                    with patch.object(sign_in, "SIGN_IN_SECONDS", 4):
+                        self.assertEqual(await owned.sign_in(), expected)
+                    self.assertEqual([posted_path for posted_path, _ in self.app.posts], posted)
+                    # Discovery reports authenticated only after a sign-in exchange the page signed in with.
+                    self.assertEqual(owned.auth_exchanges, 0)
 
     async def test_pages_without_a_sign_in_form_are_left_untouched(self):
         async with self.browser("/none") as owned:
