@@ -330,7 +330,7 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
     if (args[0] === 'fixtures') await writeFile(join(ctx.dir, '.env'), 'STRIPE_PRICE_PRO_MONTHLY="price_month"\nSTRIPE_PRODUCT_PRO="prod_pro"\n');
     return args.includes('--print-secret') ? 'whsec_abc123\n' : '';
   };
-  ctx = await context<StripeContext>({ respond, inputs: { secretKey: 'sk_test_key' }, options: { fixtures: 'billing/stripe.json', webhook: 'http://host.docker.internal:43150/stripe/webhook' } });
+  ctx = await context<StripeContext>({ respond, inputs: { secretKey: 'sk_test_key', publishableKey: 'pk_test_pub' }, options: { fixtures: 'billing/stripe.json', webhook: 'http://host.docker.internal:43150/stripe/webhook' } });
   await mkdir(join(ctx.source, 'billing'), { recursive: true }); await mkdir(ctx.dir, { recursive: true });
   await writeFile(join(ctx.source, 'billing/stripe.json'), '{"_meta":{"template_version":0},"fixtures":[]}');
   ctx.outputs = await stripe.setup(ctx);
@@ -345,10 +345,67 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
   assert.equal(await readFile(join(dir, 'fixtures.json'), 'utf8'), '{"_meta":{"template_version":0},"fixtures":[]}');
   assert.equal(await mode(join(dir, '.env')), 0o600);
   assert.deepEqual(stripe.env(ctx), {
-    STRIPE_PRICE_PRO_MONTHLY: 'price_month', STRIPE_PRODUCT_PRO: 'prod_pro', STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_WEBHOOK_SECRET: 'whsec_abc123',
+    STRIPE_PRICE_PRO_MONTHLY: 'price_month', STRIPE_PRODUCT_PRO: 'prod_pro', STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_WEBHOOK_SECRET: 'whsec_abc123', STRIPE_PUBLISHABLE_KEY: 'pk_test_pub',
   });
-  ctx.inputs.publishableKey = 'pk_test_pub';
-  assert.equal(stripe.env(ctx).STRIPE_PUBLISHABLE_KEY, 'pk_test_pub');
+});
+
+test('Stripe fixtures run once per sandbox and fixtures document, and later twins reuse the ids that run exported', async t => {
+  const shared = await mkdtemp(join(tmpdir(), 'twin-stripe-shared-')), record = join(shared, 'stripe', 'fixtures.json');
+  t.after(() => rm(shared, { recursive: true, force: true }));
+  let runs = 0, failing = false;
+  // One twin's Stripe setup: each run of the CLI creates the price again, under a new id.
+  const setup = async (inputs: Record<string, string>, fixtures: Json, file?: string) => {
+    let ctx: Fake<StripeContext>;
+    const respond: Respond = async ({ args }) => {
+      if (args[0] !== 'fixtures') return '';
+      if (failing) throw new Error('resource_already_exists');
+      runs += 1;
+      await writeFile(join(ctx.dir, '.env'), `STRIPE_PRICE_PRO="price_${runs}"\n`);
+      return '';
+    };
+    ctx = await context<StripeContext>({ respond, inputs, options: { fixtures }, shared: join(shared, 'stripe') });
+    await mkdir(join(ctx.source, 'billing'), { recursive: true }); await mkdir(ctx.dir, { recursive: true });
+    if (file !== undefined) await writeFile(join(ctx.source, 'billing/stripe.json'), file);
+    ctx.outputs = await stripe.setup(ctx);
+    return { calls: ctx.calls.length, price: (stripe.env(ctx) as Record<string, string | undefined>).STRIPE_PRICE_PRO };
+  };
+  const document: JsonObject = { fixtures: [{ name: 'pro', path: '/v1/prices', method: 'post', params: { lookup_key: 'pro_monthly', currency: 'usd', unit_amount: 2000 } }], env: { STRIPE_PRICE_PRO: '${pro:id}' } };
+  const sandbox = { secretKey: 'rkcs_test_fixture_sandbox_1', publishableKey: 'pk_test_fixture_sandbox_1' };
+  assert.deepEqual(await setup(sandbox, document), { calls: 1, price: 'price_1' });
+  // A rebuild, another stage's twin and the claimed sandbox's full secret key reuse that run, so the price exists once.
+  for (const inputs of [sandbox, sandbox, { ...sandbox, secretKey: 'sk_test_fixture_claimed_1' }]) assert.deepEqual(await setup(inputs, document), { calls: 0, price: 'price_1' });
+  // A changed document, or another sandbox, runs them again.
+  assert.deepEqual(await setup(sandbox, { ...document, env: { STRIPE_PRICE_PRO: '${pro:id}', STRIPE_PRICE_PRO_AGAIN: '${pro:id}' } }), { calls: 1, price: 'price_2' });
+  const other = { secretKey: 'rkcs_test_fixture_sandbox_2', publishableKey: 'pk_test_fixture_sandbox_2' };
+  assert.deepEqual(await setup(other, document), { calls: 1, price: 'price_3' });
+  assert.deepEqual(await setup(other, document), { calls: 0, price: 'price_3' });
+  // A repository file counts by its contents, not its path.
+  const file = JSON.stringify(document);
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', file), { calls: 1, price: 'price_4' });
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', file), { calls: 0, price: 'price_4' });
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', `${file}\n`), { calls: 1, price: 'price_5' });
+  // Twins prepared at the same time run them once.
+  const third = { secretKey: 'rkcs_test_fixture_sandbox_3', publishableKey: 'pk_test_fixture_sandbox_3' };
+  const together = await Promise.all([setup(third, document), setup(third, document)]);
+  assert.deepEqual([together[0].calls + together[1].calls, together[0].price, together[1].price], [1, 'price_6', 'price_6']);
+  // A failed run keeps nothing, so the next twin runs them again.
+  const fourth = { secretKey: 'rkcs_test_fixture_sandbox_4', publishableKey: 'pk_test_fixture_sandbox_4' };
+  failing = true;
+  await assert.rejects(setup(fourth, document), /resource_already_exists/);
+  failing = false;
+  assert.deepEqual(await setup(fourth, document), { calls: 1, price: 'price_7' });
+  // The record is private and holds what the runs exported, never a key.
+  assert.equal(await mode(record), 0o600);
+  assert.equal(await mode(join(shared, 'stripe')), 0o700);
+  const text = await readFile(record, 'utf8');
+  assert.ok(!/(?:sk|rk|rkcs|pk)_test_/.test(text), text);
+  assert.ok(text.includes('"STRIPE_PRICE_PRO": "price_1"'));
+  // A record Perpetual cannot read stops setup before the CLI runs, rather than running the fixtures again.
+  await writeFile(record, '{"0": {"env": "price_1"}}');
+  const ctx = await context<StripeContext>({ inputs: sandbox, options: { fixtures: document }, shared: join(shared, 'stripe') });
+  await mkdir(ctx.dir, { recursive: true });
+  await assert.rejects(stripe.setup(ctx), { message: 'The Stripe fixtures record (twin-services/stripe/fixtures.json in Perpetual\'s data directory) is invalid; remove it to run the fixtures again.' });
+  assert.deepEqual(ctx.calls, []);
 });
 
 test('Stripe names a fixtures file the repository does not have before running its CLI', async () => {

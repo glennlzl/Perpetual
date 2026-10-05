@@ -62,7 +62,7 @@ export default {
 | `llm` | Actual. The App Settings OpenRouter key and model by default, or the app's own development values with `source: app`. |
 | `secrets` | Actual. Internal secrets that several apps share, generated per twin. |
 | `supabase` | Official local mode through the Supabase CLI, an exact dependency that `package-lock.json` locks with its whole tree. The CLI fixes the local database password to `postgres` and binds its own ports; this is accepted because the CLI is the official local mode. |
-| `stripe` | Official sandbox: a test key, the user's own or from a sandbox Perpetual creates for them (below), `stripe listen` and `stripe fixtures`. |
+| `stripe` | Official sandbox: test keys, the user's own or from a sandbox Perpetual creates for them (below), `stripe listen` and `stripe fixtures`, which run once per sandbox and fixtures document and whose exported ids later twins reuse. |
 | `trigger-dev` | Official local mode. One shared self-hosted instance per machine; each twin gets a project and a dev worker. `version` is an exact CLI version, built once into a local image; the worker signs in from a 0600 profile file, never from its environment. |
 | `emulate` | Only for services with no official simulation: Google and GitHub OAuth sign-in, AWS, Linear, the Vercel API and Apple. |
 

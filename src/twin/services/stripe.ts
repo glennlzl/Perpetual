@@ -1,5 +1,7 @@
-import { copyFile, readFile, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../../store.ts';
 import type { Json } from '../config.ts';
 import { optionText } from '../options.ts';
 import { relative } from '../paths.ts';
@@ -70,19 +72,55 @@ const OWN = ['STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY', 'STRIPE_WEBHOOK_SECR
 /** The variables an inline fixtures document provides: its env names. A repository file's are known only at setup. */
 const fixtureNames = (value: Json | undefined) => plain(value) && plain(value.env) ? Object.keys(value.env).filter(name => !OWN.includes(name)) : [];
 
+/**
+ * Every twin of every stage uses the one stored sandbox, which outlives its twins, so fixtures run once per sandbox and
+ * fixtures document: running them again would create each object again, or fail on one the document gives a fixed id or
+ * lookup key. What a run exported is kept in the service's machine-wide directory, by a digest of the sandbox's
+ * publishable key and the document, and later twins reuse it; another sandbox or a changed document runs them again.
+ */
+const RUNS = 'fixtures.json';
+const RUNS_LIMIT = 1024 * 1024, RUNS_KEPT = 32;
+const INVALID_RUNS = 'The Stripe fixtures record (twin-services/stripe/fixtures.json in Perpetual\'s data directory) is invalid; remove it to run the fixtures again.';
+type FixtureRun = { env: Record<string, string>; ranAt: string };
+const fixtureRun = (value: unknown): value is FixtureRun => plain(value) && typeof value.ranAt === 'string' && plain(value.env)
+  && Object.entries(value.env).every(([name, item]) => ENV_NAME.test(name) && typeof item === 'string');
+// Twins prepared at the same time share the sandbox, so its fixtures run one at a time and the later twin reuses the run.
+const runs = createSaveQueue();
+
 // `stripe fixtures` exports ids only through the file's top-level `env` map, which it merges into an
 // existing ./.env in its working directory (ctx.run works in ctx.dir).
 async function fixtures(ctx: Context) {
   const env = join(ctx.dir, '.env'), value = ctx.options.fixtures;
-  if (plain(value)) await writeFile(join(ctx.dir, FIXTURES), JSON.stringify(inlineFixtures(value)), { mode: 0o600 });
+  let document: Buffer;
+  if (plain(value)) document = Buffer.from(JSON.stringify(inlineFixtures(value)));
   else {
     const file = relative(value, 'stripe fixtures');
     if (!await stat(join(ctx.source, file)).then(item => item.isFile(), () => false)) fail(`stripe.fixtures ${file} is not a file in the repository.`);
-    await copyFile(join(ctx.source, file), join(ctx.dir, FIXTURES));
+    document = await readFile(join(ctx.source, file));
   }
-  await writeFile(env, '', { mode: 0o600 });
-  await ctx.run(CLI, ['fixtures', FIXTURES], { env: cliEnv(ctx) });
-  return parseEnv(await readFile(env, 'utf8'));
+  // The publishable key names the sandbox's account, whichever secret key reaches it, as a claimed sandbox's full key does.
+  const key = createHash('sha256').update(`${ctx.inputs.publishableKey}\0`).update(document).digest('hex');
+  return runs.run(async () => {
+    const record = join(await privateDirectory(ctx.shared, 'Stripe fixtures storage must not be a symbolic link.'), RUNS);
+    const read = async () => {
+      const saved = await readStateFile(record, { limit: RUNS_LIMIT, invalid: INVALID_RUNS }).catch(() => fail(INVALID_RUNS));
+      if (saved !== undefined && (!plain(saved) || !Object.values(saved).every(fixtureRun))) fail(INVALID_RUNS);
+      return (saved ?? {}) as Record<string, FixtureRun>;
+    };
+    const ran = (await read())[key];
+    if (ran) return { ...ran.env };
+    await writeFile(join(ctx.dir, FIXTURES), document, { mode: 0o600 });
+    await writeFile(env, '', { mode: 0o600 });
+    await ctx.run(CLI, ['fixtures', FIXTURES], { env: cliEnv(ctx) });
+    const exported = parseEnv(await readFile(env, 'utf8'));
+    // The most recent runs are kept within the record's limit; a sandbox and document whose run was dropped run again.
+    const kept = Object.entries({ ...await read(), [key]: { env: exported, ranAt: new Date().toISOString() } })
+      .sort(([, a], [, b]) => b.ranAt.localeCompare(a.ranAt)).slice(0, RUNS_KEPT);
+    let text = '';
+    while (kept.length && Buffer.byteLength(text = `${JSON.stringify(Object.fromEntries(kept), null, 2)}\n`) > RUNS_LIMIT) kept.pop();
+    if (kept.length) await writeStateFile(record, text, { prefix: '.fixtures-' });
+    return exported;
+  });
 }
 
 /** The first JSON object in a CLI's output, or null. */
