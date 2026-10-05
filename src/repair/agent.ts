@@ -121,10 +121,11 @@ export const openrouterModels = ({ fetch }: { fetch?: typeof globalThis.fetch } 
  * OpenRouter refusal it maps to, if any. `failing` holds the failing steps' run scripts: the attempt reproduced the
  * failure when it ran one of their commands and saw it fail before changing a file. A model that stops calling tools
  * after changing files without calling done still ends done when every failing step (`checks`, by default `failing` in
- * the workspace) then passes in the box: weaker models often finish with a message instead of the done call.
+ * the workspace) then passes in the box: weaker models often finish with a message instead of the done call. Files a
+ * command changed, such as a lockfile an install rewrote, count once the box's diff against `base` shows them.
  */
-export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost }: {
-  model: LanguageModel; box: RepairBox; instructions?: string; prompt: string; signal: AbortSignal; failing?: readonly string[]; checks?: readonly FailingCheck[]; steps?: number; timeoutMs?: number; budget?: number;
+export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), base, steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost }: {
+  model: LanguageModel; box: RepairBox; instructions?: string; prompt: string; signal: AbortSignal; failing?: readonly string[]; checks?: readonly FailingCheck[]; base?: string; steps?: number; timeoutMs?: number; budget?: number;
 }): Promise<AttemptResult> {
   const timeout = AbortSignal.timeout(timeoutMs), stop = AbortSignal.any([signal, timeout, ...(box.signal ? [box.signal] : [])]), seen: StepResult<ToolSet>[] = [];
   let changed = false, reproduced = false;
@@ -151,6 +152,7 @@ export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prom
   }
   if (box.signal?.aborted) throw box.signal.reason;
   const end = seen.some(step => step.toolCalls.some(call => call.toolName === 'done')) ? 'done' : spentBy(seen) >= budget ? 'cost' : seen.length >= limit ? 'steps' : 'idle';
+  if (end === 'idle' && !changed && base && checks.length) changed = await box.diff(base).then(diff => diff.length > 0, () => true);
   if (end === 'idle' && changed && checks.length && await passes(box, checks, stop)) return result('done', { summary: VERIFIED, verified: true });
   if (box.signal?.aborted) throw box.signal.reason;
   return result(end);
@@ -272,7 +274,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       await context.report({ status: 'repairing', attempts });
       const result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
         signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
-        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
+        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), base: repair.sha, steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
       spent += result.cost;
       Object.assign(attempt, { completedAt: now(), reproduced: result.reproduced, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost });
       const fail = async (reason: string, next = reason) => { attempt.failure = reason; feedback = next; await context.report({ attempts }); };

@@ -56,6 +56,18 @@ test('an attempt reproduced the failure only when the failing step\'s own comman
   assert.equal(unknown.reproduced, false, 'Without the failing step\'s command nothing can be compared.');
 });
 
+// Weaker models often finish with a message instead of calling done, and fixes made by a command count as well.
+test('a model that stops without calling done ends done once its change, made through run, passes the failing step in the box', async t => {
+  const f = await workspace(t);
+  const signal = new AbortController().signal, failing = ['node check.js'];
+  const viaRun = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'run', input: { command: 'sed -i.bak "s/a - b/a + b/" add.js && rm add.js.bak' } }] }, { text: 'Fixed.' }]), box: f.box, prompt: 'x', signal, failing, base: f.sha });
+  assert.deepEqual([viaRun.end, viaRun.verified, (await f.box.diff(f.sha)).toString('utf8').includes('+module.exports = (a, b) => a + b;')], ['done', true, true]);
+  const unchanged = await hostBox(f.source);
+  t.after(() => unchanged.box.remove());
+  const idle = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'run', input: { command: 'node check.js' } }] }, { text: 'It fails.' }]), box: unchanged.box, prompt: 'x', signal, failing, base: f.sha });
+  assert.deepEqual([idle.end, idle.verified], ['idle', undefined], 'Without a change nothing is verified.');
+});
+
 test('every request routes with data collection denied and usage accounting on', async t => {
   const f = await workspace(t);
   const calls: ModelCall[] = [];
