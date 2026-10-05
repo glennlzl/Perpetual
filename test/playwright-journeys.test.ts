@@ -1,7 +1,7 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp,rm,mkdir,stat} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,readFile,readdir,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
@@ -657,6 +657,24 @@ test('a number is read after its label standing on its own, never after a longer
   const balance={...cart,steps:[{...cart.steps[0],checks:[{type:'read-number' as const,label:'Balance',name:'balance'}]}]};
   const failed=(await runSpec(target,code,{item:balance})).find(event=>event.type==='journey-step'&&event.status!=='running') as RunEvent&{checks?:{passed:boolean;error?:string}[]};
   assert.deepEqual([failed?.status,failed?.checks?.map(check=>[check.passed,check.error])],['failed',[[false,'The number after this label is in an unsupported format.']]]);
+});
+
+test('a journey given no recording folder records no video',{timeout:120000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const root=await mkdtemp(join(tmpdir(),'perpetual-unrecorded-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const item={...journey,id:'unrecorded',steps:[{id:'other',title:'Open another page',checks:[{type:'url-contains' as const,value:'/other'}]}],assertions:[]};
+  const code="import { test } from 'perpetual';\ntest('Unrecorded', async ({ page, journey }) => {\n  await journey.milestone('other', async () => {\n    await page.goto('/other');\n    await page.waitForTimeout(2000);\n  });\n});\n";
+  validateJourneySpec(code,item);
+  // The journey's private workspace is created under this test's temporary folder, where its config can be read.
+  const previous=process.env.TMPDIR;process.env.TMPDIR=root;
+  let job;try{job=createPlaywrightRuntime({checkTimeoutMs:3000}).start({mode:'run',targetUrl:target,allowedOrigins:[new URL(target).origin],timeoutSeconds:30,case:item,spec:{code,hash:specHash(code)}},()=>{});}
+  finally{if(previous===undefined)delete process.env.TMPDIR;else process.env.TMPDIR=previous;}
+  let config='';
+  for(const deadline=Date.now()+10000;!config&&Date.now()<deadline;await new Promise(resolve=>setTimeout(resolve,50))){
+    const [workspace]=await readdir(root);config=workspace?await readFile(join(root,workspace,'playwright.config.mjs'),'utf8').catch(()=>''):'';
+  }
+  await job.promise;
+  assert.equal(JSON.parse(config.replace(/^export default /,'').replace(/;\s*$/,'')).use.video,'off');
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{

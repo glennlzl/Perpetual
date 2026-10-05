@@ -116,7 +116,8 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       const promise = (async () => {
         const workspace = await mkdtemp(join(tmpdir(), 'perpetual-playwright-'));
         try {
-          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds });
+          // A journey records video only into a recording folder; without one, as for a generation's seed, nothing would keep it.
+          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds, video: Boolean(input.videoDir) });
           await writeFile(join(workspace, 'journey.spec.mjs'), input.spec.code);
           const childEnv = journeyEnvironment(values, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, readOnlyRequests: input.readOnlyRequests, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion, diagnostics: diagnostic.enabled });
           if (cancelled) throw new Error('Browser operation cancelled.');
