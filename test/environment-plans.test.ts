@@ -257,8 +257,10 @@ test('source snapshot excludes credentials, caches, databases and links while pr
     'src/app.mjs': original, 'package.json': '{}', '.env': 'SECRET=do-not-copy', '.env.test': 'SECRET=do-not-copy',
     '.npmrc': '//registry/:_authToken=do-not-copy', '.ssh/id_rsa': 'private', '.aws/credentials': 'private',
     '.vercel/project.json': 'private', 'state.sqlite': 'private', 'cert.pem': 'private', 'secret.json': 'private',
-    'node_modules/dependency/index.js': 'cache', 'dist/app.js': 'cache', '.git/config': 'private',
+    'node_modules/dependency/index.js': 'cache', 'dist/app.js': 'cache',
   });
+  // Its git metadata is never copied either.
+  await git(repoPath, 'init', '--quiet');
   await writeFile(path.join(root, 'outside.txt'), 'outside-credential');
   await symlink(path.join(root, 'outside.txt'), path.join(repoPath, 'linked.txt'));
   await symlink(path.join(repoPath, 'src'), path.join(repoPath, 'linked-directory'));
@@ -300,6 +302,25 @@ test('a git checkout’s snapshot leaves out the local files git ignores, whatev
   await rm(path.join(repoPath, '.git'), { recursive: true });
   await snapshotSource(repoPath, path.join(root, 'walked'));
   assert.deepEqual(await filesIn(path.join(root, 'walked')), ['.dev.vars', '.envrc', '.gitignore', 'local-dump/customers.csv', 'package.json', 'src/app.mjs', 'src/debug.log', 'src/draft.mjs', 'terraform.tfstate']);
+});
+
+test('the snapshot leaves out what each repository inside the checkout ignores, and stops when git cannot list it', async t => {
+  const { root, repoPath } = await fixture(t, {
+    'package.json': '{}',
+    'vendor/lib/.gitignore': '.envrc\nout/\n', 'vendor/lib/.envrc': 'export TWILIO_AUTH=fixture-local-value\n', 'vendor/lib/out/report.txt': 'local output\n', 'vendor/lib/index.js': 'export {};\n',
+    'vendor/linked/.gitignore': '.dev.vars\n', 'vendor/linked/.dev.vars': 'SENDGRID_KEY=fixture-local-value\n', 'vendor/linked/index.js': 'export {};\n',
+  });
+  await git(repoPath, 'init', '--quiet');
+  // A nested repository keeps its metadata in a .git folder; a submodule, like a repository whose metadata is elsewhere, in a .git file.
+  await git(path.join(repoPath, 'vendor/lib'), 'init', '--quiet');
+  await git(path.join(repoPath, 'vendor/linked'), 'init', '--quiet', '--separate-git-dir', path.join(root, 'linked.git'));
+  await snapshotSource(repoPath, path.join(root, 'snapshot'));
+  assert.deepEqual(await filesIn(path.join(root, 'snapshot')), ['package.json', 'vendor/lib/.gitignore', 'vendor/lib/index.js', 'vendor/linked/.gitignore', 'vendor/linked/index.js']);
+  // Git that cannot list them, for a repository moved away from its metadata or a broken index, would copy every file it ignores.
+  await writeFile(path.join(repoPath, 'vendor/linked/.git'), `gitdir: ${path.join(root, 'moved.git')}\n`);
+  await assert.rejects(snapshotSource(repoPath, path.join(root, 'moved')), /^Error: Git could not list the ignored files in the source folder vendor\/linked: it exited with status 128\. Check that git status works there\.$/);
+  await writeFile(path.join(repoPath, '.git', 'index'), 'not an index');
+  await assert.rejects(snapshotSource(repoPath, path.join(root, 'broken')), /^Error: Git could not list the ignored files in the source folder \.: it exited with status 128\. Check that git status works there\.$/);
 });
 
 test('source snapshot excludes local agent configuration and instructions at every depth', async t => {

@@ -238,19 +238,28 @@ async function repositoryNode(root: string) {
 }
 
 /**
- * The untracked paths git ignores in the checkout at `root`, a folder's with a trailing slash, from its .gitignore files
- * and the user's excludes; none when git cannot list them, as outside a git checkout.
+ * The untracked paths git ignores in the checkout at `folder` of `root`, by its .gitignore files and the user's excludes,
+ * relative to root and a folder's with a trailing slash. None outside a git checkout; when git fails in a folder with git
+ * metadata, the snapshot is refused, since it would otherwise copy every file git ignores.
  */
-async function ignoredPaths(root: string) {
+async function ignoredPaths(root: string, folder = '') {
+  const at = join(root, folder), shown = folder.split(sep).join('/');
   try {
-    const { stdout } = await gitReadOnly(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
-    return new Set(stdout.split('\0').filter(Boolean));
-  } catch { return new Set<string>(); }
+    const { stdout } = await gitReadOnly(at, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+    return stdout.split('\0').filter(Boolean).map(path => shown ? `${shown}/${path}` : path);
+  } catch (error) {
+    if (!await lstat(join(at, '.git')).then(() => true, () => false)) return [];
+    const { code, killed } = error as { code?: unknown; killed?: boolean };
+    const cause = code === 'ENOENT' ? 'git is not installed' : code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'its list is over 64 MB'
+      : killed ? 'it took over 20 seconds' : typeof code === 'number' ? `it exited with status ${code}` : 'it failed';
+    throw new Error(`Git could not list the ignored files in the source folder ${shown || '.'}: ${cause}. Check that git status works there.`);
+  }
 }
 
 /**
  * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
- * git ignores stay out whatever their names, since local files such as credentials are never committed.
+ * git ignores stay out whatever their names, since local files such as credentials are never committed; so do those a
+ * repository or submodule inside it ignores.
  */
 export async function snapshotSource(repoPath: string, destination: string) {
   const root = await realpath(repoPath), target = resolve(destination);
@@ -270,7 +279,7 @@ export async function snapshotSource(repoPath: string, destination: string) {
   await mkdir(target, { recursive: true, mode: 0o700 });
   if ((await lstat(target)).isSymbolicLink() || await realpath(target) !== target) throw new Error('The snapshot destination changed during creation.');
   let count = 0, bytes = 0;
-  const hash = createHash('sha256'), ignored = await ignoredPaths(root);
+  const hash = createHash('sha256'), ignored = new Set(await ignoredPaths(root));
   async function walk(directory: string) {
     const folder = join(root, directory);
     if ((await lstat(folder)).isSymbolicLink() || await realpath(folder) !== folder) throw new Error('Source directories changed during snapshot creation.');
@@ -278,6 +287,8 @@ export async function snapshotSource(repoPath: string, destination: string) {
       if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
       throw new Error(`The source folder ${directory.split(sep).join('/') || '.'} cannot be read. Make it readable, or move it out of the checkout or have git ignore it.`);
     })).sort((a, b) => a.name.localeCompare(b.name));
+    // The checkout's git lists nothing inside a repository or submodule of its own, which ignores files by its own rules.
+    if (directory && entries.some(entry => entry.name === '.git')) for (const path of await ignoredPaths(root, directory)) ignored.add(path);
     for (const entry of entries) {
       const name = join(directory, entry.name), path = name.split(sep).join('/');
       if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink() || ignored.has(entry.isDirectory() ? `${path}/` : path)
