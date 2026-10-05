@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { parse, stringify } from 'yaml';
 import trigger, { BOT_EMAIL, CREDENTIALS, PROJECT, VERSION, cliImage, stack } from '../src/twin/services/trigger-dev.ts';
+import { detectTwinConfig } from '../src/twin/detect.ts';
 
 const HOST = 'host.docker.internal';
 const SOCKET = /docker\.sock/;
@@ -254,6 +255,13 @@ test('Trigger.dev stops before the instance when its CLI image cannot be built o
     assert.deepEqual(ctx.calls, []);
   }
   assert.deepEqual(server.requests, []);
+});
+
+test('Trigger.dev is detected from its config file, which gives the worker its directory', () => {
+  const sdk = { packages: ['@trigger.dev/sdk'] };
+  assert.deepEqual(detectTwinConfig({ ...sdk, files: ['apps/jobs/package.json', 'apps/jobs/trigger.config.ts', 'apps/web/package.json'] }).services, { 'trigger-dev': { directory: 'apps/jobs' } });
+  assert.deepEqual(detectTwinConfig({ files: ['trigger.config.mjs'] }).services, { 'trigger-dev': { directory: '.' } });
+  assert.deepEqual(detectTwinConfig({ ...sdk, files: ['src/trigger.config.json.bak'] }).services, { 'trigger-dev': {} });
 });
 
 test('Trigger.dev runs a per-twin dev worker from the pinned CLI image, with the bot token only in its login profile', async t => {

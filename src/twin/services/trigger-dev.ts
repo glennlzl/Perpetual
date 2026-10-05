@@ -225,7 +225,8 @@ const findProject = async (ctx: Pick<Context, 'project'>, call: Api, org: string
 
 export default {
   id: 'trigger-dev', title: 'Trigger.dev', fidelity: 'official-sandbox',
-  detect: { packages: ['@trigger.dev/sdk', 'trigger.dev'], env: [/^TRIGGER_/] },
+  // The config file gives the worker its directory, as in a monorepo that keeps its tasks in their own package.
+  detect: { files: [/(?:^|\/)trigger\.config\.(?:ts|mts|js|mjs)$/], packages: ['@trigger.dev/sdk', 'trigger.dev'], env: [/^TRIGGER_/] },
   describe: {
     summary: 'Self-hosted Trigger.dev, one instance per machine: each twin gets its own project and a `trigger dev` worker running the repository\'s tasks.',
     options: {
