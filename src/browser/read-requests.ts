@@ -5,7 +5,7 @@ import type { ReadOnlyRequest, BlockedRequest } from '../../contract/browser.ts'
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** A person reviews one complete request and its body mode, never an endpoint prefix or an agent's assertion of safety. */
 export function validateReadRequests(value: unknown, targetUrl: string): ReadOnlyRequest[] {
-  if (!Array.isArray(value) || value.length > 10) throw new Error('Add at most 10 read-only POST requests.');
+  if (!Array.isArray(value) || value.length > 32) throw new Error('Add at most 32 read-only POST requests.');
   const found: ReadOnlyRequest[] = [];
   for (const item of value) {
     if (!record(item) || Object.keys(item).some(key => !['url', 'body'].includes(key))) throw new Error('Provide the URL and reviewed body mode of each read-only POST request.');
@@ -46,12 +46,21 @@ export function readPolicyHash(rules: readonly ReadOnlyRequest[] = [], applicati
   return rules.length ? createHash('sha256').update(JSON.stringify(requests.sort((a, b) => a.url < b.url ? -1 : a.url > b.url ? 1 : a.body === b.body ? 0 : a.body === null ? -1 : b.body === null ? 1 : a.body < b.body ? -1 : 1))).digest('hex') : '';
 }
 
-/** Evidence excludes queries, fragments, userinfo and bodies, then passes through the shared redactor. */
-export function blockedRequest(method: unknown, value: unknown, sanitize = (value: string) => redact(value, { decodeUri: true })): BlockedRequest | null {
-  if (typeof method !== 'string' || !/^(POST|PUT|PATCH|DELETE|CONNECT|TRACE)$/.test(method) || typeof value !== 'string' || value.length > 8192) return null;
+/** HTTP method tokens are case-sensitive; only the guard's GET/HEAD/OPTIONS are admitted reads. */
+export const blockedHttpMethod = (method: unknown): method is string => typeof method === 'string' && /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$/.test(method) && !['GET', 'HEAD', 'OPTIONS'].includes(method);
+
+/** Evidence excludes queries, fragments and userinfo, then passes through the shared redactor. */
+export function blockedRequestUrl(value: unknown, sanitize = (value: string) => redact(value, { decodeUri: true })): string | null {
+  if (typeof value !== 'string' || value.length > 8192) return null;
   let url: URL;
   try { url = new URL(value); } catch { return null; }
   if (!['http:', 'https:'].includes(url.protocol)) return null;
   const path = url.pathname.split('/').map(segment => segment.split(';')[0]).join('/');
-  return { method, url: sanitize(`${url.origin}${path}`).slice(0, 512) };
+  return sanitize(`${url.origin}${path}`).slice(0, 512);
+}
+
+export function blockedRequest(method: unknown, value: unknown, sanitize?: (value: string) => string): BlockedRequest | null {
+  if (typeof method !== 'string' || !/^(POST|PUT|PATCH|DELETE|CONNECT|TRACE)$/.test(method)) return null;
+  const url = blockedRequestUrl(value, sanitize);
+  return url === null ? null : { method, url };
 }
