@@ -85,10 +85,11 @@ Then:
 
 ## 6. Create Beta
 
-`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is `ready` or `failed`, reporting its `step` as it changes:
+`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is no longer `queued`, `creating` or `preparing`, reporting its `step` as it changes:
 
 - `ready`: report the `apps` with their `url` and each service's `status`. A `blocked` service lists its `missing` inputs: point them to **Services → Connect** in the stage card, as they chose in step 5.
 - `failed`: give them the `error` and the `step` it failed at.
+- `cleanup_failed`: give them the `error` and the `cleanupError`. Its processes could not be confirmed stopped, so the environment stays until it is deleted.
 
 ## 7. Hand over
 
