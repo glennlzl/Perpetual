@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, rm, symlink, writeFile, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, realpath, rm, symlink, writeFile, stat} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
@@ -112,6 +113,19 @@ test('simultaneous processes admit at most one controller and release rejected c
   for(const outcome of outcomes)if(!outcome.url)assert.equal(outcome.error,'CONTROLLER_ALREADY_RUNNING');
   await Promise.all(contenders.map(async({child})=>{const exited=once(child,'exit');child.send('close');await exited;}));
   const app=await startServer({port:0,dataDir:dir});await app.close();
+});
+
+test('a hidden file beside the records is ignored, and a refusal names the record to remove when no controller runs',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'perpetual-controller-records-')),owners=join(dir,'.controller-owners');
+  let app: Controller|undefined;
+  t.after(async()=>{await app?.close();await rm(dir,{recursive:true,force:true});});
+  await mkdir(owners);await writeFile(join(owners,'.DS_Store'),'');
+  app=await startServer({port:0,dataDir:dir});
+  await app.close();app=undefined;
+  // A record whose process is alive, here this test's own, as a reused id after a reboot would be.
+  const record=join(await realpath(owners),`${process.pid}-${randomUUID()}.lock`);
+  await writeFile(record,'');
+  await assert.rejects(startServer({port:0,dataDir:dir}),(error: Error&{code?: string})=>error.code==='CONTROLLER_ALREADY_RUNNING'&&error.message.includes(`process ${process.pid}`)&&error.message.includes(record));
 });
 
 test('failed startup releases ownership so a different port can retry',async t=>{
