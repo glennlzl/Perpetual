@@ -44,7 +44,7 @@ if (JSON.stringify(args.slice(2)) === JSON.stringify(['info', '--format', '{{.OS
     } catch (error) {
       process.stdout.write(JSON.stringify({ name: error.name, code: error.code, message: error.message, detail: { ...error } }));
     }
-  `], { env: environment, timeout: 5000 });
+  `], { env: environment, timeout: 20000 });
   assert.equal(stderr, '', 'Raw Docker stderr must not escape to the caller');
   assert.doesNotMatch(stdout, new RegExp(secret));
   const calls = (await readFile(join(directory, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));

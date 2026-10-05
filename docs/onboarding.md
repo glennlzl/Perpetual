@@ -27,7 +27,7 @@ A model writes the twin config, drafts journeys and writes their code; runs use 
 - Saved: continue.
 - Continue without a model: the twin is built from the detected config, and no journey is drafted until a key is saved.
 
-Done when `GET /api/settings/model` reports `capabilities.modelConfigured: true`, or they chose to continue without.
+Done when `GET /api/settings/model` reports `capabilities.provider: "openrouter"` and `modelConfigured: true` (a model from another provider writes no twin config, draft or code), or they chose to continue without.
 
 ## 3. Connect GitHub
 
@@ -36,7 +36,7 @@ Read `GET /api/github/connection`. With `connected: true`, go to step 4.
 **Ask:** Connect your GitHub account to Perpetual? It reads the repository through the account and reports a commit status on each push to the branch it gates.
 
 - Use `<account>`, signed in with the GitHub CLI on this machine (offered when `authenticated: true`): `POST /api/github/connect` with `{}`.
-- Sign in in the browser: `POST /api/github/auth/start` with `{}`, give them the `userCode` and `verificationUrl`, read `POST /api/github/auth/status` with `{ "id": … }` until `status` is `complete`, then `POST /api/github/connect`.
+- Sign in in the browser: `POST /api/github/auth/start` with `{}`, then read `POST /api/github/auth/status` with its `{ "id": … }`. Once `status` is `pending`, give them its `userCode` and `verificationUrl`, and read on until it is `complete`, then `POST /api/github/connect`. On `error` or `expired`, give them its `error`; on `cancelled`, which carries none, tell them the sign-in was cancelled; then ask again.
 - Not now: stop here, since every later step needs the connection, and tell them the interface's **Connect GitHub** does the same.
 
 Done when `GET /api/github/connection` says `connected: true` and names the `account`.
@@ -85,11 +85,11 @@ Then:
 
 ## 6. Create Beta
 
-`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is no longer `queued`, `creating` or `preparing`, reporting its `step` as it changes:
+`GET /api/pipeline`: use its Sandbox stage (`kind: "sandbox"`), or add one with `POST /api/pipeline/action` and `{ "repoPath": …, "action": "add-stage", "name": "Beta" }`. Then `POST /api/environments/create` with `{ "repoPath": …, "stageId": … }`, which returns the `environment` and its `id`. Read `GET /api/environments?repoPath=…&stageId=…` until that environment's `status` is `ready`, `failed` or `cleanup_failed`, reporting its `step` as it changes:
 
 - `ready`: report the `apps` with their `url` and each service's `status`. A `blocked` service lists its `missing` inputs: point them to **Services → Connect** in the stage card, as they chose in step 5.
 - `failed`: give them the `error` and the `step` it failed at.
-- `cleanup_failed`: give them the `error` and the `cleanupError`. Its processes could not be confirmed stopped, so the environment stays until it is deleted.
+- `cleanup_failed`: give them the `error`, the `step` and the `cleanupError`. Its processes could not be confirmed stopped, so the environment stays until it is deleted.
 
 ## 7. Hand over
 

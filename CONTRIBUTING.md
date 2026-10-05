@@ -12,7 +12,7 @@ Thanks for helping. Issues, bug reports and pull requests are welcome. Everyone 
 ## Before you open a pull request
 
 1. For anything larger than a small fix, open an issue first so we can agree on the approach.
-2. Read [AGENTS.md](AGENTS.md). It holds the product rules every change follows, for people and coding agents alike: minimal interface copy with native shadcn components, no product-specific code, and journeys that are complete business flows.
+2. Read [AGENTS.md](AGENTS.md). It holds the product rules every change follows, for people and coding agents alike: minimal interface copy with native shadcn components, no product-specific code, and journeys that are complete business flows. Add a shadcn component with `npx shadcn@4.21.0 add <component>`; the CLI is not a project dependency.
 3. Write TypeScript in strict mode. The controller, scripts and tests (`src`, `scripts`, `test`) run directly on Node.js 24.12 or later, which strips their types, so they use erasable syntax only (no `enum`, `namespace` or parameter properties) and relative imports that name their `.ts` file. There is no compile step: `tsc` only checks types, and Vite bundles the client in `client/src`. Validate untrusted input (HTTP bodies, files, worker events, model output, environment) as `unknown`.
 4. Run the checks:
 

@@ -3,8 +3,8 @@
 // It runs before node_modules exists, so it imports only Node's own modules; the OpenCode pin is read once the
 // dependencies are installed. It never touches the repository Perpetual will test.
 import { execFile, spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -53,6 +53,8 @@ async function tools(notes: string[]): Promise<Tool[]> {
 }
 
 type Step = { title: string; command: string; args: string[] };
+/** npm ci leaves out devDependencies where NODE_ENV is production, and the interface build needs them. */
+export const INSTALL: Step = { title: 'Install dependencies', command: 'npm', args: ['ci', '--include=dev'] };
 
 /** Runs one install step in the repository root with its output shown, and fails with the step's title. */
 function run({ title, command, args }: Step): Promise<void> {
@@ -81,7 +83,7 @@ async function main() {
   if (!nodeSatisfies(process.version, engines.node)) throw new Error(`Perpetual needs Node.js ${engines.node.replace(/^\D+/, '')} or later; this is ${process.version}. https://nodejs.org/en/download`);
   const installed: string[] = [], notes: string[] = [];
   const found = await tools(notes);
-  await run({ title: 'Install dependencies', command: 'npm', args: ['ci'] });
+  await run(INSTALL);
   installed.push('dependencies');
   await run({ title: 'Build the interface', command: 'npm', args: ['run', 'build'] });
   installed.push('the interface');
@@ -102,4 +104,9 @@ async function main() {
   if (found.some(tool => !tool.ready)) process.exitCode = 1;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((error: Error) => { console.error(error.message); process.exitCode = 1; });
+/** Whether this process runs setup itself, named through a link or not; Node gives the module its real path. */
+export function isEntryPoint(entry = process.argv[1]) {
+  try { return Boolean(entry) && realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+}
+
+if (isEntryPoint()) main().catch((error: Error) => { console.error(error.message); process.exitCode = 1; });
