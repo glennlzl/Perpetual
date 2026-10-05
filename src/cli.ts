@@ -19,7 +19,7 @@ const output=(data: unknown)=>console.log(JSON.stringify(data,null,2));
 async function main(){
   if(command==='serve') {
     const app=await startServer({port:number('port'),repo,dataDir});
-    console.log(`Perpetual is ready at ${app.url}\nRepository: ${repo}`);
+    console.log(`Perpetual is ready at ${app.url}\nRepository: ${repo}\nData: ${dataDir}`);
     for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{await app.close();process.exit(0);});return;
   }
   if(command==='scan')return output(await scanRepository(repo));

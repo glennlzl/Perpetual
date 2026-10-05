@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile, readdir, realpath } from 'node:fs/promises';
+import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
@@ -177,7 +177,9 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   const release=await acquireControllerOwnership(dataDir),cleanup: (() => unknown)[]=[];
   try {
     // Secure the owned directory without changing the configured path that existing runtime resource labels use.
-    await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
+    const root=await privateDirectory(await realpath(dataDir),'Controller storage must not be a symbolic link.');
+    // Its files hold keys and test credentials: a repository the directory sits in never commits them.
+    await writeFile(join(root,'.gitignore'),'*\n',{flag:'wx',mode:0o600}).catch((error: NodeJS.ErrnoException)=>{if(error.code!=='EEXIST')throw error;});
     const app=await createController({...options,dataDir},dispose=>cleanup.push(dispose));
     let closing;
     return {...app,close(){return closing??=(async()=>{await app.close();await release();})();}};

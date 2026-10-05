@@ -30,6 +30,23 @@ test('controller state keeps an existing data directory private', async t => {
   assert.equal((await stat(dataDir)).mode & 0o777, 0o700);
 });
 
+test('a data directory inside a repository is ignored by it, and a person\'s own ignore file is kept', async t => {
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-ignored-data-')), dataDir = join(dir, '.perpetual');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  const git = (...args: string[]) => promisify(execFile)('git', ['-C', dir, ...args]);
+  await git('init', '-q');
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  await writeFile(join(dataDir, 'browser-model.json'), '{}');
+  assert.equal(await readFile(join(dataDir, '.gitignore'), 'utf8'), '*\n');
+  assert.equal((await git('status', '--porcelain', '--untracked-files=all')).stdout, '', 'Nothing in the data directory is offered to the repository.');
+  await app.close();
+  await writeFile(join(dataDir, '.gitignore'), 'state.json\n');
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.equal(await readFile(join(dataDir, '.gitignore'), 'utf8'), 'state.json\n');
+});
+
 test('controller state refuses an oversized JSON snapshot without overwriting it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-large-state-')), dataDir = join(dir, 'data');
   let app: Controller | undefined;
