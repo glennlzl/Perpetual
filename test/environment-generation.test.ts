@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
+import { generateTwinConfig } from '../src/environments/generation.ts';
 import { createBrowserModelSettings } from '../src/browser/model.ts';
 import { detectEnvironmentConfig } from '../src/environments/plans.ts';
 import { AUTHOR_HARNESSES, AUTHOR_PERMISSION, LOOP, OUT_OF_TIME, TIME_LIMIT_MS, UNWRITTEN, authorTwinConfig, authoringPrompt, opencodeHarness, twinInstructions } from '../src/twin/authoring.ts';
@@ -276,6 +277,21 @@ test('an invalid config is the next attempt’s feedback, which starts from what
   const { logs } = await f.manager.logs(f.context, environment.id);
   assert.match(logs, /^Writing twin config \(attempt 1 of 4\): Failed at valid\.\n# Attempt 1 of 4: twin\.json is not a valid twin config\n/);
   assert.match(logs, /Writing twin config \(attempt 3 of 4\): Failed at valid\.\n# Attempt 3 of 4: [\s\S]*auth\.users must be a list\./);
+});
+
+test('a Stop during the app check ends generation without a failed attempt or a draft', async () => {
+  // Stopping aborts the check of a slow app, which comes back as an app that did not answer.
+  let stopped = false;
+  const outcomes: unknown[] = [], drafts: unknown[] = [], torn: unknown[] = [];
+  const generation = generateTwinConfig({
+    draft: JSON.stringify(detected), services, hide: text => text, cancelled: () => stopped, step: async () => {},
+    author: async () => ({ text: JSON.stringify(good) }), prepare: async () => ({}),
+    verify: async () => { stopped = true; return { stage: 'answers', subject: WEB, app: 'web', error: 'apps.web did not answer at http://127.0.0.1:43100/: Environment creation cancelled.' }; },
+    diagnose: async () => assert.fail('Nothing failed to prepare.'), logs: async () => 'web | still starting',
+    failed: async outcome => { outcomes.push(outcome); }, checkpoint: async draft => { drafts.push(draft); }, teardown: async config => { torn.push(config); },
+  });
+  await assert.rejects(generation, /^Error: Environment creation cancelled\.$/);
+  assert.deepEqual({ outcomes, drafts, torn }, { outcomes: [], drafts: [], torn: [] });
 });
 
 test('deleting a generated twin removes its generation log with the rest of its evidence', async t => {

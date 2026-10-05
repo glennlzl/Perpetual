@@ -148,6 +148,8 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
           const result = await prepare(built);
           const problem = await verify(built, result);
           if (problem === null) return { config: built, result, attempts: attempt, logs: output.join('\n\n') };
+          // A Stop or shutdown aborts the check itself: the config did not fail.
+          if (cancelled()) throw withLogs(new Error('Environment creation cancelled.'));
           const { app, ...found } = problem;
           failure = { ...found, heading: 'the twin started, but does not count as ready', logs: await logs(app) };
         } catch (error) {
