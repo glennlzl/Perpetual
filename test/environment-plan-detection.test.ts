@@ -34,6 +34,26 @@ test('a detected plan follows each new scan until the user saves one, which is n
   assert.deepEqual((await manager.view(context('4'))).plan.services, { stripe: {} });
 });
 
+test('a detected plan without an app says how an agent can write the config', async t => {
+  const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-plan-detection-'))), repoPath = join(dataDir, 'repo');
+  await mkdir(repoPath);
+  // A package with no start script, which detection proposes no app for.
+  await writeFile(join(repoPath, 'package.json'), JSON.stringify({ name: 'site', scripts: { dev: 'nuxt dev', build: 'nuxt build' } }));
+  let model: { apiKey: string; model: string } | null = null;
+  const manager = await createEnvironmentManager({ dataDir, runtime, authoringModel: async () => model });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const context = { key: 'local:fixture', stageId: 'beta', scan: { repo: { path: repoPath, sha: 'a'.repeat(40), branch: 'main' }, scannedAt: '1', services: [{ id: 'service:.', path: '.' }] } };
+  // Without an OpenRouter model, a person's Create builds the detected plan as it is.
+  await assert.rejects(manager.create(context, { generate: true }), /^Error: No app was detected\. Add an OpenRouter API key in Settings so Perpetual can write the twin config\.$/);
+  // A gate never generates; with a model, a person's Create writes the config.
+  model = { apiKey: 'sk-or-v1-fixture', model: 'fixture/model' };
+  await assert.rejects(manager.create(context), /^Error: No app was detected\. Create the environment so Perpetual can write the twin config\.$/);
+  // A person's saved config is theirs to fix.
+  await manager.savePlan(context, { services: {}, apps: {} });
+  await assert.rejects(manager.create(context, { generate: true }), /^Error: Add an app before creating this environment\.$/);
+  assert.deepEqual(manager.summaries(context.key), []);
+});
+
 test('a plan saved while a new scan is being detected is kept', async t => {
   const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-plan-detection-'))), repoPath = join(dataDir, 'repo');
   await mkdir(repoPath);

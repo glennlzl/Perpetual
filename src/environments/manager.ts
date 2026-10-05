@@ -355,7 +355,10 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         const plan = generation ? undefined : validateTwinConfig(stored);
         // A generated config built as it is, whose failure would become the stage's draft.
         const builtGenerated: GeneratedPlan | undefined = owns && !generation && generated ? { packages } : undefined;
-        if (plan && !Object.keys(plan.apps).length) throw new Error('Add an app before creating this environment.');
+        // A person's saved config is theirs to fix. When detection found no app, an agent writes the config on a person's
+        // Create with an OpenRouter model, which is what the person can do.
+        if (plan && !Object.keys(plan.apps).length) throw new Error(selectionReviewed ? 'Add an app before creating this environment.'
+          : `No app was detected. ${generate || !await authoringModel() ? 'Add an OpenRouter API key in Settings' : 'Create the environment'} so Perpetual can write the twin config.`);
         // Generating a twin config, or building a generated one, reads the checkout while it prepares, for its evidence
         // and its failure's draft, so a gate does not move the source meanwhile. A repair gate reads its own checkout.
         environment = { id, scope, pipelineKey: context.key, stageId: context.stageId, repoPath: context.scan.repo.path, sourceBranch: context.scan.repo.branch || null, sourceRevision: context.scan.repo.sha || null, ...(context.repair ? { repair: context.repair } : {}), ...(plan ? { plan } : {}), status: 'queued', step: 'Queued', services: [], apps: [], createdAt: now(), ...(generation || builtGenerated ? { readsCheckout: true } : {}) };
