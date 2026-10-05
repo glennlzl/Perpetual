@@ -39,8 +39,12 @@ test('the gate documents name every gate Badge the pipeline shows, Build admissi
 });
 
 test('no current document says Perpetual renews a provisioned sandbox: only a person provisions one again', async () => {
-  for (const file of ['CHANGELOG.md', 'README.md', ...await documents('docs')]) {
-    assert.doesNotMatch(await readFile(join(root, file), 'utf8'), /(?<!never )\brenews\b/, file);
+  // In each paragraph or top-level list item about a provision or a Stripe sandbox, every clause that renews or
+  // recreates one says it never does. Elsewhere the words are free.
+  for (const file of ['CHANGELOG.md', 'README.md', 'CONTEXT.md', ...await documents('docs')]) {
+    const blocks = (await readFile(join(root, file), 'utf8')).split(/\n(?=(?:[-*]|\d+\.) )|\n\s*\n/).filter(block => /provision|Stripe sandbox/i.test(block));
+    const affirmed = blocks.flatMap(block => block.split(/[.,;:]\s|\n/)).filter(clause => /renew|recreat/i.test(clause) && !/\b(?:never|not|without)\b.*(?:renew|recreat)/i.test(clause));
+    assert.deepEqual(affirmed, [], file);
   }
 });
 
