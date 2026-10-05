@@ -140,7 +140,8 @@ function externalOrigins(value:unknown,context:{controllerOrigin?:string}){
   if(!Array.isArray(value)||value.length>10)throw new Error('Add at most 10 external origins.');
   return [...new Set(value.map(item=>{
     let url=null;try{url=new URL(item);validateBrowserTarget(item,context);}catch{url=null;}
-    if(typeof item!=='string'||!url||url.protocol!=='https:'||url.username||url.password||url.pathname!=='/'||/[?#]/.test(item))throw new Error('External origins must be HTTPS origins without credentials, paths or queries.');
+    // validateBrowserTarget applies the same local HTTP, internal-address and controller exclusion rules as the app.
+    if(typeof item!=='string'||!url||url.username||url.password||url.pathname!=='/'||/[?#]/.test(item))throw new Error('External origins must use HTTPS or a local application host, without credentials, paths or queries.');
     return url.origin;
   }))];
 }

@@ -11,6 +11,12 @@ test('test settings save normalized HTTPS provider origins', () => {
   assert.equal(valid, true);
   assert.deepEqual(values, { targetUrl:'http://127.0.0.1:55887/login', signInUrl:'', externalOrigins:['https://checkout.stripe.com', 'https://billing.stripe.com'], authEndpoints:[], journeyTimeoutSeconds:900 });
 });
+test('test settings accept explicit local HTTP dependencies and refuse remote HTTP lookalikes', () => {
+  const checked = settings({ externalOrigins:['http://localhost:55888/', 'http://127.0.0.1:55889', 'http://[::1]:55890', 'http://host.docker.internal:55891', 'http://ui.localhost:55892'] });
+  assert.equal(checked.valid, true);
+  assert.deepEqual(checked.values.externalOrigins, ['http://localhost:55888', 'http://127.0.0.1:55889', 'http://[::1]:55890', 'http://host.docker.internal:55891', 'http://ui.localhost:55892']);
+  for (const origin of ['http://localhost.example.com:55888', 'http://127.example.com:55888', 'http://10.0.0.1:55888', 'http://169.254.169.254', 'http://gateway.docker.internal:55888']) assert.equal(settings({externalOrigins:[origin]}).valid, false, origin);
+});
 test('the optional sign-in page stays on the target URL’s origin and keeps a hash route', () => {
   assert.deepEqual([settings({}).valid, settings({ signInUrl:'  ' }).values.signInUrl], [true, '']);
   const { valid, values } = settings({ signInUrl:' http://127.0.0.1:55887/account/sign-in?next=%2F ' });

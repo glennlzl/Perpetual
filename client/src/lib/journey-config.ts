@@ -1,5 +1,6 @@
 import type { BrowserCase } from './browser-test-ui.ts';
 import type { ScanNode } from '../../../contract/scanner.ts';
+import { localBrowserHost } from '../../../src/browser/local-host.ts';
 
 export const MAX_CASES = 60;
 // The controller keeps at most MAX_CASES and discovery returns up to four journeys.
@@ -72,7 +73,8 @@ export const journeyTimeoutMinutes = (config: { journeyTimeoutSeconds?: number }
 function originError(value: string) {
   const url = parse(value);
   if (!url) return 'Enter an HTTPS origin.';
-  if (url.protocol !== 'https:') return 'Use HTTPS.';
+  // Match the application target's local hosts; the controller also refuses its own port and internal addresses.
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && localBrowserHost(url.hostname))) return 'Use HTTPS.';
   if (url.username || url.password) return 'Remove the credentials.';
   return url.pathname !== '/' || url.search || url.hash || /[?#]/.test(value) ? 'Remove the path and query.' : '';
 }
