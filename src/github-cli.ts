@@ -77,13 +77,16 @@ export type GitHubFailureKind = 'missing' | 'timeout' | 'rate-limit' | 'unauthen
 /** Why a gh or git command failed, from its exit and its output; the output itself never leaves this function. */
 export function githubFailureKind(error: unknown): GitHubFailureKind {
   const failure = error as (ExecFileException & { stderr?: unknown }) | null | undefined;
-  const detail = String(failure?.stderr || failure?.message || '').toLowerCase();
+  // A command's own output, never execFile's message, which repeats the command line: its repository, branch and paths
+  // are names, not GitHub's reply. Each family below is read as gh, git and GitHub print it, never as a bare word a
+  // name or a local path can hold.
+  const detail = String((typeof failure?.stderr === 'string' ? failure.stderr : failure?.message) || '').toLowerCase();
   if (failure?.code === 'ENOENT') return 'missing';
   if (failure?.killed || failure?.code === 'ETIMEDOUT') return 'timeout';
-  if (/rate limit|secondary rate/.test(detail)) return 'rate-limit';
-  if (/http 401|bad credentials|authentication failed|gh auth login|not logged|could not read username|could not read password/.test(detail)) return 'unauthenticated';
+  if (/rate limit|secondary rate|returned error: 429\b/.test(detail)) return 'rate-limit';
+  if (/http 401|bad credentials|authentication failed|gh auth login|not logged|could not read username|could not read password|returned error: 401\b/.test(detail)) return 'unauthenticated';
   if (/http 404|repository not found|couldn.t find remote ref|remote branch.*not found/.test(detail)) return 'not-found';
-  if (/http 403|permission denied|access denied|saml|sso|resource not accessible/.test(detail)) return 'denied';
+  if (/http 403|returned error: 403\b|permission to \S+ denied to|write access to repository not granted|resource not accessible by|saml (?:sso|enforcement)|permission denied \(publickey|access denied/.test(detail)) return 'denied';
   return 'other';
 }
 

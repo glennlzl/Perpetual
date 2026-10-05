@@ -47,11 +47,35 @@ test('a failure is classified from its exit and output, which never leave', () =
     [{ stderr: 'API rate limit exceeded' }, 'rate-limit'], [{ stderr: 'gh: Bad credentials (HTTP 401) token gho_secret' }, 'unauthenticated'],
     [{ stderr: 'fatal: could not read Username for https://github.com' }, 'unauthenticated'],
     [{ stderr: 'HTTP 404: Not Found' }, 'not-found'], [{ stderr: "fatal: couldn't find remote ref main" }, 'not-found'],
-    [{ stderr: 'HTTP 403: Resource not accessible by integration' }, 'denied'], [{ message: 'remote: Permission denied' }, 'denied'],
+    [{ stderr: 'HTTP 403: Resource not accessible by integration' }, 'denied'],
     [{ stderr: 'something else' }, 'other'], [null, 'other'],
   ];
   for (const [error, kind] of cases) assert.equal(githubFailureKind(error), kind, JSON.stringify(error));
   assert.match(GITHUB_MESSAGES.unauthenticated, /gh auth login --hostname github\.com/);
+});
+
+test('GitHub refusing a push or a request is denied, as git and gh print it', () => {
+  const refused = (line: string) => `${line}\nfatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 403`;
+  for (const [stderr, kind] of [
+    [refused('remote: Permission to acme/app.git denied to octocat.'), 'denied'],
+    [refused('remote: Write access to repository not granted.'), 'denied'],
+    [refused("remote: The 'acme' organization has enabled or enforced SAML SSO."), 'denied'],
+    ['GraphQL: Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization. (createPullRequest)', 'denied'],
+    ["fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 401", 'unauthenticated'],
+    ["fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 429", 'rate-limit'],
+  ]) assert.equal(githubFailureKind(Object.assign(new Error('Command failed: git push'), { stderr })), kind, stderr);
+});
+
+test('a name or a local path that holds a refusal word never makes a failure GitHub\'s refusal', () => {
+  for (const error of [
+    { stderr: "Cloning into '/data/sources/github-1/payment-processor'...\nfatal: unable to access 'https://github.com/acme/payment-processor.git/': Could not resolve host: github.com" },
+    { stderr: 'Get "https://api.github.com/repos/acme/lessons/actions/runs?per_page=50": net/http: TLS handshake timeout' },
+    { stderr: 'Patch "https://api.github.com/repos/acme/app/branches/feature%2Fsso-login": unexpected EOF' },
+    { stderr: 'Get "https://api.github.com/repos/acme/saml-toolkit/branches": unexpected EOF' },
+    { stderr: 'error: could not lock config file /Users/rosso/.perpetual/sources/github-1/app/.git/config: Permission denied' },
+    // execFile's message repeats the command line; with no output there is no reply to read.
+    Object.assign(new Error('Command failed: gh api repos/acme/sso-portal/pulls/7 --method PATCH'), { stderr: '' }),
+  ]) assert.equal(githubFailureKind(error), 'other', JSON.stringify(error));
 });
 
 test('runGitHub passes gh, the arguments, the environment and the limits to the runner it is given', async () => {
