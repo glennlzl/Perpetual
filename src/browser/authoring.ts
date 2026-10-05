@@ -14,8 +14,14 @@ const identifier = (value: unknown, hide: (value: unknown) => string, pattern: R
   const safe = redact(hide(value));
   return safe.length <= 160 && !safe.includes('://') && pattern.test(safe) ? safe : 'unknown';
 };
+// A pinned harness or generator version is one fixed form, matched as stored: hiding an account value there could only
+// turn it into unknown.
+const version = (value: unknown, pattern: RegExp): string => typeof value === 'string' && pattern.test(value) ? value : 'unknown';
 
-/** Rebuild the allowlisted shape from unknown state; never spread an untrusted object into a reply. */
+/**
+ * Rebuild the allowlisted shape from unknown state; never spread an untrusted object into a reply. Fields with fixed
+ * values are matched before hiding; only the model, a free identifier, passes through hide and redact.
+ */
 export function restoreAuthoringRecord(value: unknown, hide: (value: unknown) => string): AuthoringRecord {
   const record = object(value), provenance = object(record?.provenance);
   if (!record || !provenance || typeof record.id !== 'string' || !/^[a-f0-9-]{36}$/.test(record.id) || !timestamp(record.startedAt) || !timestamp(record.completedAt) || !number(record.durationMs) || !hash(record.caseHash)
@@ -29,21 +35,21 @@ export function restoreAuthoringRecord(value: unknown, hide: (value: unknown) =>
     const events = attempt.events.map(value => {
       const event = object(value);
       if (!event || !['completed','error'].includes(String(event.outcome))) return bad();
-      return { tool: toolName(redact(hide(event.tool))), outcome: event.outcome as 'completed' | 'error' };
+      return { tool: toolName(event.tool), outcome: event.outcome as 'completed' | 'error' };
     });
     const error = object(attempt.lastToolError);
     if (attempt.lastToolError !== undefined && !error) return bad();
-    const lastToolError = error ? { tool: toolName(redact(hide(error.tool))), kind: toolErrorKind(redact(hide(error.kind))) } : undefined;
-    const reportedBlocker = authoringBlocker(attempt.reportedBlocker, hide);
-    if (attempt.reportedBlocker !== undefined && (!reportedBlocker || attempt.outcome !== 'completed' || finishReason(redact(hide(attempt.reportedFinishReason))) !== 'stop')) return bad();
+    const lastToolError = error ? { tool: toolName(error.tool), kind: toolErrorKind(error.kind) } : undefined;
+    const reportedBlocker = authoringBlocker(attempt.reportedBlocker);
+    if (attempt.reportedBlocker !== undefined && (!reportedBlocker || attempt.outcome !== 'completed' || finishReason(attempt.reportedFinishReason) !== 'stop')) return bad();
     return { phase: attempt.phase as 'generation' | 'grammar-repair', startedAt: attempt.startedAt, completedAt: attempt.completedAt, durationMs: attempt.durationMs,
       outcome: attempt.outcome as HarnessEvidence['outcome'], outputHash: attempt.outputHash, outputBytes: attempt.outputBytes, eventsTruncated: attempt.eventsTruncated, events,
-      reportedFinishReason: finishReason(redact(hide(attempt.reportedFinishReason))), usage: authoringUsage(attempt.usage), codeHash: attempt.codeHash as string | null,
+      reportedFinishReason: finishReason(attempt.reportedFinishReason), usage: authoringUsage(attempt.usage), codeHash: attempt.codeHash as string | null,
       ...(lastToolError ? { lastToolError } : {}), ...(reportedBlocker ? { reportedBlocker } : {}), ...(attempt.cleanupIncomplete ? { cleanupIncomplete: true } : {}) };
   });
   const safe: AuthoringRecord = { id: record.id, startedAt: record.startedAt, completedAt: record.completedAt, durationMs: record.durationMs, caseHash: record.caseHash,
     outcome: record.outcome as AuthoringRecord['outcome'], outputHash: record.outputHash as string | null, attempts, cleanup: record.cleanup as AuthoringRecord['cleanup'],
-    provenance: { harness: identifier(provenance.harness, hide, /^opencode@\d+\.\d+\.\d+$/), generator: identifier(provenance.generator, hide, /^playwright-test-generator@\d+\.\d+\.\d+$/), model: identifier(provenance.model, hide, /^openrouter\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:+\/-]+$/) } };
+    provenance: { harness: version(provenance.harness, /^opencode@\d+\.\d+\.\d+$/), generator: version(provenance.generator, /^playwright-test-generator@\d+\.\d+\.\d+$/), model: identifier(provenance.model, hide, /^openrouter\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:+\/-]+$/) } };
   if (Buffer.byteLength(JSON.stringify(safe)) > AUTHORING_RECORD_BYTES) return bad();
   return safe;
 }

@@ -14,7 +14,7 @@ import type { ControlReadReason, ControlBlockedTransport } from '../../../contra
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
-import type { RunCredentials } from '../../browser/run-credentials.ts';
+import { accountSecrets, type RunCredentials } from '../../browser/run-credentials.ts';
 
 /** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
 export type JourneyFixture = { readonly run: string; milestone(id: string, actions: () => Promise<void>): Promise<void>; signIn(): Promise<void> };
@@ -360,7 +360,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     const controlFailures: (() => boolean)[] = [];
     const controlReasons: { reason: () => ControlReadReason | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
     let controlCheckFailed = false;
-    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, Object.values(account ?? {})) : undefined;
+    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, accountSecrets(account)) : undefined;
     const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
       write.call(process.stdout, `${env.PERPETUAL_EVENT_CHANNEL}${JSON.stringify({ type: 'lifecycle', caseId: approved.id, lifecycle })}\n`);
     }) : undefined;
@@ -458,7 +458,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         catch (error) {
           const target = current();
           if (target && !signingIn && env.PERPETUAL_EVENT_CHANNEL) {
-            const feedback = await actionFeedback(target, [account?.username, account?.password]);
+            const feedback = await actionFeedback(target, accountSecrets(account));
             if (feedback) emit({ type: 'action-feedback', feedback });
           }
           throw error;

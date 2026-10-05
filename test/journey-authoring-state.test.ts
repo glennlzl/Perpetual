@@ -27,6 +27,18 @@ test('a reported blocker survives restart with no arbitrary text and older recor
   for(const terminal of [{outcome:'failed'},{reportedFinishReason:'unknown'}])assert.throws(()=>restoreAuthoringRecord({...saved,attempts:[{...saved.attempts[0],...terminal}]},hide([])),/Unsupported journey authoring state/);
 });
 
+test('fixed authoring fields are matched before an ordinary-word account value is hidden',()=>{
+  const saved={...record,attempts:[{...record.attempts[0],lastToolError:{tool:'browser_click',kind:'timeout'},reportedFinishReason:'stop',reportedBlocker:{milestone:2,kind:'request-unobserved'}}]};
+  const restored=restoreAuthoringRecord(saved,hide(['test','browser_click','timeout','stop','request-unobserved','opencode','1.63.0']));
+  assert.deepEqual(restored.provenance,record.provenance);
+  assert.deepEqual(restored.attempts[0].events,[{tool:'browser_click',outcome:'completed'}]);
+  assert.deepEqual(restored.attempts[0].lastToolError,{tool:'browser_click',kind:'timeout'});
+  assert.equal(restored.attempts[0].reportedFinishReason,'stop');
+  assert.deepEqual(restored.attempts[0].reportedBlocker,{milestone:2,kind:'request-unobserved'});
+  // The model is a free identifier: an account value in it is still hidden, which leaves it unknown.
+  assert.equal(restoreAuthoringRecord(saved,hide(['example'])).provenance.model,'unknown');
+});
+
 test('authoring retention bounds all sources together and removes deleted cases',()=>{
   const cases=Object.fromEntries(Array.from({length:110},(_,i)=>[`source-${i}`,[{id:'journey'}]]));
   const history=Object.fromEntries(Object.keys(cases).map((scope,i)=>[scope,{journey:[{...record,completedAt:new Date(now-i*1000).toISOString()}]}]));

@@ -24,6 +24,18 @@ test('reporter masks origin account errors before clipping while preserving revi
   }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
 });
 
+test('reporter keeps a username shorter than four characters readable and still hides the password',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const file=join(directory,'case.json');await writeFile(file,JSON.stringify({id:'case',name:'Save workspace',goal:'Save and reopen my workspace',steps:[],assertions:[]}));
+  const keys=['PERPETUAL_CASE','PERPETUAL_ACCOUNT_USERNAME','PERPETUAL_ACCOUNT_PASSWORD'],previous=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  try{
+    Object.assign(process.env,{PERPETUAL_CASE:file,PERPETUAL_ACCOUNT_USERNAME:'qa',PERPETUAL_ACCOUNT_PASSWORD:'private-pass-91'});
+    assert.equal(new JourneyReporter().safe("Missing the 'qa' queue link; typed private-pass-91"),"Missing the 'qa' queue link; typed [REDACTED]");
+    process.env.PERPETUAL_ACCOUNT_USERNAME='test';
+    assert.equal(new JourneyReporter().safe("Missing the 'test' queue link"),"Missing the '[REDACTED]' queue link");
+  }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
+});
+
 test('reporter lists every action the journey grammar allows and counts them all',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
   const file=join(directory,'case.json'),previous=process.env.PERPETUAL_CASE;

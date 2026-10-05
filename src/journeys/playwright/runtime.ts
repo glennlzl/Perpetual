@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { superviseWorker, workerTimeoutMs, type BrowserWorkerInput, type WorkerEvent, type WorkerJob, type WorkerStartOptions } from '../../browser/runtime.ts';
-import { validateRunCredentials, type RunCredentials } from '../../browser/run-credentials.ts';
+import { accountSecrets, validateRunCredentials, type RunCredentials } from '../../browser/run-credentials.ts';
 import { HOST as TWIN_HOST } from '../../twin/compose.ts';
 import { CHECK_VERSION, sameOrigin, type ApprovedCase } from './checks.ts';
 import { createLifecycleRecorder, lifecycleEvent, lifecycleError } from './diagnostics.ts';
@@ -123,7 +123,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       const signInUrl: unknown = input.signInUrl;
       if (signInUrl !== undefined && (typeof signInUrl !== 'string' || !sameOrigin(signInUrl, input.targetUrl))) throw new Error('A Playwright journey’s sign-in page must be on its application URL’s origin.');
       const values = typeof env === 'function' ? env() : env;
-      const diagnostic = createLifecycleRecorder({ directory: diagnosticsDir ?? values.PERPETUAL_PLAYWRIGHT_DIAGNOSTICS_DIR, blockWrites: input.blockWrites === true, secrets: credentials ? [credentials.username, credentials.password] : [] });
+      const diagnostic = createLifecycleRecorder({ directory: diagnosticsDir ?? values.PERPETUAL_PLAYWRIGHT_DIAGNOSTICS_DIR, blockWrites: input.blockWrites === true, secrets: accountSecrets(credentials) });
       let job: WorkerJob | null = null, cancelled = false, failed = false;
       const promise = (async () => {
         const workspace = await mkdtemp(join(tmpdir(), 'perpetual-playwright-'));
@@ -143,7 +143,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
               if (facts.stopCause === 'action' || facts.stopCause === 'deadline' || Array.isArray(facts.assertions) && facts.assertions.some(value => value && typeof value === 'object' && value.passed === false)) failed = true;
             }
             onEvent(event);
-          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], errorSecrets: [credentials?.username], unavailable: 'Playwright is unavailable. Run npm install.',
+          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], errorSecrets: accountSecrets(credentials), unavailable: 'Playwright is unavailable. Run npm install.',
             ...(diagnostic.enabled ? {
               onLifecycle: event => diagnostic.record({ ...event, source: 'supervisor' }),
               onDiagnostic: value => {

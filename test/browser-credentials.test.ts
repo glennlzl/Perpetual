@@ -9,7 +9,7 @@ import { createBrowserManager } from '../src/browser/manager.ts';
 import { createBrowserRuntime } from '../src/browser/runtime.ts';
 import { draftCode, manual } from './fixtures/journey-code.ts';
 import type { WorkerEvent } from '../src/browser/runtime.ts';
-import type { RunCredentials } from '../src/browser/run-credentials.ts';
+import { accountSecrets, type RunCredentials } from '../src/browser/run-credentials.ts';
 import type { JourneyRunInput } from '../src/journeys/playwright/runtime.ts';
 
 // What the fake worker receives: the run-only account, if any.
@@ -104,6 +104,16 @@ test('a failed account-backed worker keeps its reason with account values and be
   const report = await f.terminal(run.id);
   assert.equal(report.run.status, 'failed');
   assert.equal(report.results[0].error, 'Rejected [REDACTED] with Bearer [REDACTED]');
+});
+
+test('a password is always hidden and a username only from four characters, so a short one stays readable', async t => {
+  assert.deepEqual(accountSecrets({ username: 'qa', password: 'p' }), ['p']);
+  assert.deepEqual(accountSecrets({ username: 'test', password: 'private-pass-91' }), ['private-pass-91', 'test']);
+  assert.deepEqual(accountSecrets(null), []);
+  const f = await fixture(t);
+  f.runtime.start = input => ({ promise: Promise.reject(new Error(`Rejected ${input.credentials!.username} in the qa queue with ${input.credentials!.password}`)), cancel() {} });
+  const { run } = await f.manager.run(f.context, { credentials: { username: 'qa', password: 'private-pass-91' } }, manual);
+  assert.equal((await f.terminal(run.id)).results[0].error, 'Rejected qa in the qa queue with [REDACTED]');
 });
 
 test('worker protocol keeps test account values but scrubs the model key from events and terminal errors', async t => {

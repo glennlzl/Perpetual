@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOpencodeRunner, openrouterRefusal, type RunFailure } from '../src/agents/opencode.ts';
 import { captureAuthoringEvidence } from '../src/agents/authoring-evidence.ts';
-import { hide } from '../src/redaction.ts';
 
 const refusal = 'This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.';
 const advice = 'Wait for active OpenRouter requests to finish or add credits, then try again.';
@@ -200,31 +199,40 @@ test('model stop reports reject prose, unknown values and incomplete or excess f
     '{"perpetual_blocker":{"milestone":2,"kind":"request-unobserved","detail":"Private page"}}',
     '{"perpetual_blocker":{"milestone":2,"kind":"request-unobserved"},"account":"private"}',
   ]){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonText(text)+jsonFinish,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(jsonText(text)+jsonFinish,'stdout');
     assert.equal(evidence.finish('completed').reportedBlocker,undefined,text);
   }
-  const hidden=captureAuthoringEvidence(hide(['request-unobserved']));hidden.write(jsonText(blockerText)+jsonFinish,'stdout');
-  assert.equal(hidden.finish('completed').reportedBlocker,undefined,'Supplied values are hidden before projecting the report.');
+});
+
+test('an account value that is an ordinary word never turns a fixed tool, category, reason or report into unknown',async t=>{
+  // Each fixed value is matched as the harness wrote it; only fixed values leave the projection, so nothing else is kept.
+  const failure=JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_click',state:{status:'error',error:'TimeoutError: waiting for the private test account row'}}})+'\n';
+  const result=await capture(t,[jsonTool(),failure,jsonText(blockerText),jsonFinish],{structuredOutput:true,secrets:['test','browser_click','TimeoutError','request-unobserved','stop']});
+  assert.deepEqual(result.evidence.events,[{tool:'browser_click',outcome:'completed'},{tool:'browser_click',outcome:'error'}]);
+  assert.deepEqual(result.evidence.lastToolError,{tool:'browser_click',kind:'timeout'});
+  assert.equal(result.evidence.reportedFinishReason,'stop');
+  assert.deepEqual(result.evidence.reportedBlocker,{milestone:2,kind:'request-unobserved'});
+  assert.ok(!JSON.stringify(result.evidence).includes('private'));
 });
 
 test('a model report is not terminal after more activity, partial metadata or a stopped process',()=>{
   const report=jsonText(blockerText);
   for(const after of [jsonTool(),JSON.stringify({type:'step_start',part:{type:'step-start'}})+'\n',jsonText('Continuing exploration'),jsonText('x'.repeat(70000)),jsonText('x'.repeat(1100000))]){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(report+after+jsonFinish,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(report+after+jsonFinish,'stdout');
     assert.equal(evidence.finish('completed').reportedBlocker,undefined);
   }
   for(const outcome of ['failed','cancelled','timed-out'] as const){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(report+jsonFinish,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(report+jsonFinish,'stdout');
     assert.equal(evidence.finish(outcome).reportedBlocker,undefined);
   }
   for(const text of [report,report+jsonFinish+'{"type":"text"',JSON.stringify({type:'text',part:{type:'text',text:blockerText}})+'\n'+jsonFinish,JSON.stringify({type:'text',part:{type:'text',text:blockerText,time:{end:0}}})+'\n'+jsonFinish]){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(text,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(text,'stdout');
     assert.equal(evidence.finish('completed').reportedBlocker,undefined);
   }
 });
 
 test('a final blocker needs stop metadata after its own report, never a previous step',()=>{
-  const evidence=captureAuthoringEvidence(hide([]));
+  const evidence=captureAuthoringEvidence();
   evidence.write(jsonFinish+JSON.stringify({type:'step_start',part:{type:'step-start'}})+'\n'+jsonText(blockerText),'stdout');
   const result=evidence.finish('completed');
   assert.equal(result.reportedBlocker,undefined);
@@ -233,20 +241,20 @@ test('a final blocker needs stop metadata after its own report, never a previous
 
 test('a blocker cannot survive malformed output or an earlier gap in the scanned stream',()=>{
   for(const output of [jsonText(blockerText)+jsonFinish+'{"type":"text"\n',jsonText('x'.repeat(70000))+jsonText(blockerText)+jsonFinish]){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(output,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(output,'stdout');
     assert.equal(evidence.finish('completed').reportedBlocker,undefined);
   }
 });
 
 test('later incomplete or non-stop step metadata disqualifies an earlier report',()=>{
   for(const finish of [{type:'step_finish'},{type:'step_finish',part:{type:'wrong'}},{type:'step_finish',part:{type:'step-finish',reason:'length'}}]){
-    const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonText(blockerText)+jsonFinish+JSON.stringify(finish)+'\n'+jsonFinish,'stdout');
+    const evidence=captureAuthoringEvidence();evidence.write(jsonText(blockerText)+jsonFinish+JSON.stringify(finish)+'\n'+jsonFinish,'stdout');
     assert.equal(evidence.finish('completed').reportedBlocker,undefined);
   }
 });
 
 test('the tool-event retention limit does not discard a fully scanned final report',()=>{
-  const evidence=captureAuthoringEvidence(hide([]));evidence.write(jsonTool().repeat(65)+jsonText(blockerText)+jsonFinish,'stdout');
+  const evidence=captureAuthoringEvidence();evidence.write(jsonTool().repeat(65)+jsonText(blockerText)+jsonFinish,'stdout');
   const result=evidence.finish('completed');
   assert.equal(result.eventsTruncated,true);assert.equal(result.events.length,64);
   assert.deepEqual(result.reportedBlocker,{milestone:2,kind:'request-unobserved'});
@@ -261,13 +269,13 @@ test('a JSON tool failure retains its safe category after the event limit, never
   for(const privateText of ['Private account','personal-password','No dialog visible'])assert.ok(!JSON.stringify(result).includes(privateText));
 });
 
-test('tool failures allowlist categories and hide supplied values before classifying',async t=>{
+test('tool failures keep only fixed categories, classified before supplied values are hidden',async t=>{
   for(const [text,kind,secrets] of [
     ['Ref e12 not found in the current page snapshot. Private page','stale-reference',[]],
     ['locator.click: strict mode violation: private account','ambiguous-locator',[]],
     ['TimeoutError: private request','timeout',[]],
     ['Unknown private request failure','unknown',[]],
-    ['TimeoutError: private request','unknown',['TimeoutError']],
+    ['TimeoutError: private request','timeout',['TimeoutError']],
   ] as const)await t.test(kind,async t=>{
     const event=JSON.stringify({type:'tool_use',part:{type:'tool',tool:'playwright-test_browser_click',state:{status:'error',error:text}}})+'\n';
     const result=await capture(t,[event],{structuredOutput:true,secrets:[...secrets]});
@@ -296,11 +304,11 @@ test('unstructured comments, unknown tool names and terminal prose never become 
   assert.ok(!JSON.stringify(result.evidence).includes('private account'));
 });
 
-test('structured output split across chunks hides supplied values before projection and bounds oversized events',async t=>{
+test('structured output split across chunks keeps only fixed tool names and bounds oversized events',async t=>{
   const event=jsonTool('playwright-test_browser_click');
   const result=await capture(t,[event.slice(0,event.indexOf('browser_click')+8),event.slice(event.indexOf('browser_click')+8),JSON.stringify({type:'text',part:{text:'sk-fixture-secret-value-'+ 'a'.repeat(300000)}})+'\n',jsonFinish],{secrets:['browser_click']}) as unknown as {evidence:{events:unknown[];eventsTruncated:boolean;reportedFinishReason:string;outputBytes:number}};
   assert.ok(result.evidence);
-  assert.deepEqual(result.evidence.events,[{tool:'unknown',outcome:'completed'}],'A supplied secret must never survive even as a tool identifier.');
+  assert.deepEqual(result.evidence.events,[{tool:'browser_click',outcome:'completed'}],'A fixed tool name is matched before supplied values are hidden.');
   assert.equal(result.evidence.eventsTruncated,true);
   assert.equal(result.evidence.reportedFinishReason,'stop');
   assert.ok(!JSON.stringify(result.evidence).includes('fixture-secret'));
@@ -337,7 +345,7 @@ test('a provider refusal keeps its guidance after a megabyte of tool output and 
     });
   });
   // Past the bound, only error envelopes are read: the scanned facts stay limited.
-  const evidence=captureAuthoringEvidence(hide([]));evidence.write(snapshot.repeat(60)+jsonText(blockerText)+jsonFinish,'stdout');
+  const evidence=captureAuthoringEvidence();evidence.write(snapshot.repeat(60)+jsonText(blockerText)+jsonFinish,'stdout');
   const result=evidence.finish('completed');
   assert.equal(result.eventsTruncated,true);assert.equal(result.reportedBlocker,undefined);assert.ok(result.events.length<=64);
 });

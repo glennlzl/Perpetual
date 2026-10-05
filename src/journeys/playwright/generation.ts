@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { OPENCODE, createOpencodeRunner, fingerprint, opencodeEnvironment, opencodeRun, opencodeSettings, setupCommand, setupEnvironment, type Harness, type OpencodeRunner } from '../../agents/opencode.ts';
 import type { WorkerEvent, WorkerJob } from '../../browser/runtime.ts';
-import type { RunCredentials } from '../../browser/run-credentials.ts';
+import { accountSecrets, type RunCredentials } from '../../browser/run-credentials.ts';
 import { RUN, SIGN_IN_ACTION, checkTemplate, readsRunData, type ApprovedCase, type Check, type JourneyStep } from './checks.ts';
 import { PLAYWRIGHT_CLI, PLAYWRIGHT_VERSION, createPlaywrightRuntime, journeyEnvironment, writeJourneyWorkspace, type JourneyRunInput } from './runtime.ts';
 import { caseHash, specHash, validateJourneySpec } from './specs.ts';
@@ -298,7 +298,7 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
  * validation error. Missing output stops: another exploration cannot grammar-repair code that was never written.
  */
 export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins, timeoutSeconds, credentials, signInUrl, apiKey, model, reasoning, feedback, harness = opencodeHarness, playwright = createPlaywrightRuntime(), env = process.env, timeoutMs = 10 * 60 * 1000, cleanupGraceMs = 15000, onStep = () => {} }: GenerationOptions): WorkerJob<GeneratedSpec> {
-  const abort = new AbortController(), secrets = [apiKey, credentials?.password, credentials?.username];
+  const abort = new AbortController(), secrets = [apiKey, ...accountSecrets(credentials)];
   const started = Date.now(), attempts: AuthoringRecord['attempts'] = [];
   const provenance = { harness: OPENCODE, generator: `${GENERATOR_AGENT}@${PLAYWRIGHT_VERSION}`, model: redact(hide(secrets)(`openrouter/${model}`)) };
   const evidence = (outcome: AuthoringRecord['outcome'], outputHash: string | null = null, cleanupIncomplete = false): AuthoringRecord => ({

@@ -847,6 +847,35 @@ test('successful authoring survives workspace removal and restart as private sco
   assert.equal((await lines(f.log)).length,1,'Reading diagnostics and restarting perform no paid work.');
 });
 
+test('an ordinary-word test account keeps authoring tool names and provenance while its values stay hidden',async t=>{
+  const f=await setup(t,{mode:'trace-valid'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id,credentials:{username:'test',password}});
+  const spec=await settled(f),reply=await f.manager.specCode(f.context,{caseId:journey.id});
+  const provenance={harness:'opencode@1.18.32',generator:'playwright-test-generator@1.63.0',model:'openrouter/openai/gpt-4.1-mini'};
+  assert.deepEqual(spec?.draft?.provenance,provenance);
+  const [record]=reply.authoring!;
+  assert.deepEqual(record.provenance,provenance);
+  assert.deepEqual(record.attempts[0].events,[{tool:'generator_setup_page',outcome:'completed'},{tool:'browser_click',outcome:'completed'}]);
+  assert.ok(secretFree(reply));
+});
+
+test('generation feedback keeps a username shorter than four characters readable and still hides the password',async t=>{
+  const workspace=await mkdtemp(join(tmpdir(),'perpetual-generation-account-'));
+  t.after(()=>rm(workspace,{recursive:true,force:true}));
+  const log=join(workspace,'harness.jsonl');
+  const playwright:JourneyRuntime={capabilities:async()=>({browserInstalled:true}),start(input,onEvent){
+    return {promise:Promise.resolve().then(()=>{onEvent({type:'result',result:{caseId:input.case.id,stopCause:'none',assertions:[]}});}),cancel(){}};
+  }};
+  for(const [username,readable] of [['qa',true],['test',false]] as const){
+    const attempt=join(workspace,username);await mkdir(attempt);
+    await generateJourneySpec({workspace:attempt,item:journey,targetUrl:'http://localhost:3000/',timeoutSeconds:60,apiKey:key,model,credentials:{username,password},playwright,
+      feedback:{error:`Missing the ${username} queue link; typed ${password}`},harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,'valid',log,prompt,requested]})}).promise;
+    const plan=(await lines(log)).at(-1)!.plan;
+    assert.equal(plan.includes(`Missing the ${username} queue link`),readable,username);
+    assert.ok(!plan.includes(password));
+  }
+});
+
 for(const mode of ['trace-blocked','trace-blocked-code'])test(`a generator-reported blocker rejects code without a paid retry and survives restart: ${mode}`,async t=>{
   const f=await setup(t,{mode});await f.manager.saveSpec(f.context,{caseId:journey.id,code:codeFor(journey)});
   const before=(await f.manager.specCode(f.context,{caseId:journey.id})).draft;
