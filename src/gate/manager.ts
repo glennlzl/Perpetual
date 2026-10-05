@@ -476,7 +476,9 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       const stage = current && sandboxes(current).find(item => item.id === stageId);
       if (!current || !stage || sourceIdentity(current) !== identity) throw conflict('The active source changed. Reload the pipeline.');
       if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error('Scan a repository with a commit first.');
-      enqueue(current, stage, sha.toLowerCase(), now());
+      const gate = enqueue(current, stage, sha.toLowerCase(), now());
+      // A person's run sends a report GitHub refused again, even for a gate still pending, such as one whose Build failed.
+      delete gate.refused;
       await persist();
       kick();
       void sync();

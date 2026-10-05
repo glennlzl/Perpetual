@@ -128,6 +128,27 @@ test('Run now gives a commit without a Build run another wait, and a run that ap
   assert.deepEqual(h.work, [`prepare ${A}`, `rebuild ${A}`, `run ${A}`]);
 });
 
+test('Run now sends a report GitHub refused again, even for a gate whose Build failed and still waits', async t => {
+  const h = await harness(t);
+  h.state.build = { status: 'blocked', reason: 'CI failed.' };
+  let refusing = true, attempts = 0;
+  h.github.post = async input => {
+    attempts++;
+    if (refusing) throw Object.assign(new Error('GitHub denied the commit status. Check write access to this repository, then run the gate again.'), { refused: true });
+    h.posts.push(input);
+  };
+  await h.manager.run({ stageId: 'beta' });
+  await until(() => attempts === 1);
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'build-failed');
+  assert.match(h.manager.view().stages.beta.statusError ?? '', /denied the commit status/);
+  refusing = false;
+  await h.manager.run({ stageId: 'beta' }); // the gate still waits for a successful rerun, and is not queued again
+  await until(() => h.posts.some(post => post.sha === A && post.description === 'Build did not pass'));
+  await h.manager.idle();
+  assert.deepEqual([attempts, h.manager.view().stages.beta.statusError], [2, undefined]);
+});
+
 test('a GitHub read error remains waiting and cannot become a releasable journey verdict', async t => {
   const h = await harness(t);
   h.state.read = async () => { throw new Error('GitHub is unavailable.'); };
