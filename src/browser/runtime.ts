@@ -59,7 +59,8 @@ export function validateBrowserTarget(value:string,{controllerOrigin}:{controlle
 export function browserError(error:unknown,env:NodeJS.ProcessEnv=process.env,limit=800):string {
   let text=String(messageOf(error)||error||'Browser operation failed.');
   text=hide([env.PERPETUAL_MODEL_API_KEY,env.OPENROUTER_API_KEY])(text);
-  return redact(text).replace(/(https?:\/\/[^\s?#]+)[?#][^\s]*/g,'$1').slice(0,limit);
+  // Each address is scanned once: its query and fragment are cut after it is found, never searched for from every start.
+  return redact(text).replace(/https?:\/\/\S+/g,url=>url.replace(/[?#][\s\S]*$/,'')).slice(0,limit);
 }
 
 /**

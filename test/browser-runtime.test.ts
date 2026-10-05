@@ -4,7 +4,7 @@ import {access,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {validateBrowserTarget,createBrowserRuntime,superviseWorker} from '../src/browser/runtime.ts';
+import {validateBrowserTarget,createBrowserRuntime,superviseWorker,browserError} from '../src/browser/runtime.ts';
 import {createBrowserModelSettings} from '../src/browser/model.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 
@@ -199,6 +199,14 @@ test('cancelling a worker leaves none of its process running',async()=>{
   await started;job.cancel();
   await assert.rejects(job.promise,{message:'Browser operation cancelled.'});
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
+test('error text drops URL queries and fragments in time linear in its length',{timeout:20000},()=>{
+  assert.equal(browserError('Open https://app.example/a?token=1#top and http://app.example/b, then https://app.example/c#x',{}),'Open https://app.example/a and http://app.example/b, then https://app.example/c');
+  // About 400 KB of addresses without spaces, queries or fragments, as a minified output tail holds them.
+  const text='"https://a.example/c",'.repeat(18000),started=performance.now();
+  assert.equal(browserError(text,{},Infinity),text);
+  assert.ok(performance.now()-started<1000,'Each address is scanned once.');
 });
 
 test('error-only account values are masked before clipping without changing business evidence',async()=>{
