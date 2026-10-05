@@ -200,8 +200,8 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
       };
       try {
         // The box's network has no route out; the proxy alone joins it from the default bridge, as `proxy`. Its bridge
-        // gets no address either, since Docker otherwise gives an internal network's bridge one, through which the box
-        // would reach every service of the engine's host listening on all addresses.
+        // gets no IPv4 address either, since Docker otherwise gives an internal network's bridge one, through which the
+        // box would reach every service of the engine's host listening on all addresses. The network asks for no IPv6.
         await step(['network', 'create', '--internal', '-o', 'com.docker.network.bridge.inhibit_ipv4=true', ...labels, network], 'Could not create the repair box network', 60_000);
         await step(['create', '--name', proxy, ...labels, '--init', '--read-only', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', EGRESS.user, ...PROXY_LIMITS,
           '--network', 'bridge', '--pull', 'missing', EGRESS.image, 'node', '-e', EGRESS_SCRIPT, String(EGRESS.port)], `Could not create the repair box proxy from ${EGRESS.image}`, 15 * 60_000);
