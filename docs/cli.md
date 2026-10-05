@@ -47,7 +47,9 @@ node src/cli.ts init-ci --repo /path/to/project --output /tmp/proposed-ci.yml
 - `workflows`: workflow names that must be detected.
 - `deployments`: the minimum number of deployment targets per provider.
 - `keepsExistingCi`: no starter workflow may be proposed.
-- `copiedTests`: repository files copied into a temporary directory, and the `node --test` files run there, for configuration-contract tests.
+- `copiedTests`: repository files copied into a temporary directory, and the `node --test` files run there, for configuration-contract tests. At least one copied test must pass.
+
+Any other key, or a file that asserts nothing, is refused.
 
 It does not install or start the application or run its full test suite. The report is printed and written to `artifacts/<expectations name>-validation.json`.
 
