@@ -7,8 +7,8 @@ import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
-/** owner/name as GitHub accepts it. */
-export const REPOSITORY = /^[a-z\d][a-z\d-]{0,38}\/[a-z\d._-]{1,100}$/i;
+/** owner/name as GitHub accepts it; an Enterprise Managed User's login, handle_shortcode, owns repositories too. */
+export const REPOSITORY = /^[a-z\d][a-z\d_-]{0,38}\/[a-z\d._-]{1,100}$/i;
 /** A full 40-hex commit id. */
 export const SHA = /^[a-f\d]{40}$/i;
 const ENTITY_TAG = /^(?:W\/)?"[\x21\x23-\x7e]{1,200}"$/;

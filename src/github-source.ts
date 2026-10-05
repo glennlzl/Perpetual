@@ -83,12 +83,17 @@ function repositoryName(value: unknown) {
 }
 
 function branchName(value: unknown) {
-  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@'
+  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@' || value.endsWith('.')
     || /[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) || value.includes('..') || value.includes('@{')
-    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) {
+    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) {
     throw new GitHubSourceError('Choose a valid Git branch name from the repository.');
   }
   return value;
+}
+
+/** What `parse` makes of a value GitHub lists, or null when it refuses it: one such row never fails its page. */
+function listed<T>(parse: (value: unknown) => T, value: unknown): T | null {
+  try { return parse(value); } catch { return null; }
 }
 
 // client/src/lib/source-selection.ts mirrors these rules for the Source sheet.
@@ -124,10 +129,10 @@ export async function listGitHubRepositories({ page = 1 }: { page?: unknown } = 
   const currentPage = pageNumber(page);
   const { data, hasNext } = await githubApi(`user/repos?per_page=${PAGE_SIZE}&page=${currentPage}&sort=updated&direction=desc&affiliation=owner,collaborator,organization_member`);
   if (!Array.isArray(data)) throw new GitHubSourceError('GitHub did not return a repository list. Try again.');
-  const repositories = data.map((entry: unknown) => {
-    const item = record(entry);
-    return { fullName: repositoryName(item?.full_name), name: typeof item?.name === 'string' ? item.name : null,
-      private: Boolean(item?.private), defaultBranch: typeof item?.default_branch === 'string' && item.default_branch ? item.default_branch : null };
+  const repositories = data.flatMap((entry: unknown) => {
+    const item = record(entry), fullName = listed(repositoryName, item?.full_name);
+    return fullName ? [{ fullName, name: typeof item?.name === 'string' ? item.name : null,
+      private: Boolean(item?.private), defaultBranch: typeof item?.default_branch === 'string' && item.default_branch ? item.default_branch : null }] : [];
   });
   return { repositories, nextPage: hasNext && currentPage < 10_000 ? currentPage + 1 : null };
 }
@@ -140,14 +145,14 @@ export async function listGitHubBranches({ repository, page = 1, preferredBranch
     githubApi(`repos/${selected}/branches?per_page=${PAGE_SIZE}&page=${currentPage}`),
   ]);
   if (!Array.isArray(response.data)) throw new GitHubSourceError('GitHub did not return a branch list. Try again.');
-  const listed = record(metadata.data), defaultBranch = listed?.default_branch ? branchName(listed.default_branch) : null;
-  const names = new Set(response.data.map((item: unknown) => branchName(record(item)?.name)));
+  const defaultBranch = listed(branchName, record(metadata.data)?.default_branch);
+  const names = new Set(response.data.map((item: unknown) => listed(branchName, record(item)?.name)).filter((name): name is string => name !== null));
   if (currentPage === 1) {
     const missing = [...new Set([defaultBranch, preferred].filter((name): name is string => Boolean(name)))].filter(name => !names.has(name));
     const additional = await Promise.all(missing.map(async name => {
       try {
         const { data } = await githubApi(`repos/${selected}/branches/${encodeURIComponent(name)}`);
-        return branchName(record(data)?.name);
+        return listed(branchName, record(data)?.name);
       } catch (error) {
         if ((error as GitHubSourceError).code === 'GITHUB_NOT_FOUND') return null;
         throw error;

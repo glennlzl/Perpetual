@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { ensureGitHubHistory, prepareGitHubSource, updateGitHubSource } from '../src/github-source.ts';
+import { ensureGitHubHistory, listGitHubBranches, listGitHubRepositories, prepareGitHubSource, updateGitHubSource } from '../src/github-source.ts';
 import { readGitHistory } from '../src/git-history.ts';
 
 const exec = promisify(execFile);
@@ -54,6 +54,23 @@ async function github(t: TestContext, replies: Record<string, unknown> = {}) {
   };
   return { dir, dataDir: join(dir, 'data'), commit, answer };
 }
+
+test('a row GitHub lists that cannot be chosen is left out of its page instead of failing it', async t => {
+  await github(t, {
+    'user/repos?per_page=100&page=1&sort=updated&direction=desc&affiliation=owner,collaborator,organization_member': [
+      { full_name: 'acme/app', name: 'app', private: true, default_branch: 'main' },
+      { full_name: 'mona_acme/dotfiles', name: 'dotfiles', private: false, default_branch: 'main' },
+      { full_name: '../etc' }, { full_name: 42 }, null,
+    ],
+    'repos/acme/app': { default_branch: 'main' },
+    'repos/acme/app/branches?per_page=100&page=1': [{ name: 'main' }, { name: 'release./next' }, { name: 'bad..name' }, { name: 'a branch' }, {}],
+  });
+  assert.deepEqual(await listGitHubRepositories(), { nextPage: null, repositories: [
+    { fullName: 'acme/app', name: 'app', private: true, defaultBranch: 'main' },
+    { fullName: 'mona_acme/dotfiles', name: 'dotfiles', private: false, defaultBranch: 'main' },
+  ] }, 'An Enterprise Managed User\'s repository is listed beside the others.');
+  assert.deepEqual(await listGitHubBranches({ repository: 'acme/app' }), { branches: [{ name: 'main' }, { name: 'release./next' }], nextPage: null, defaultBranch: 'main' });
+});
 
 test('after the copy moves to a pushed commit, its branch graph reaches that commit without a refresh', async t => {
   const hub = await github(t, { 'repos/acme/app/branches/main': { name: 'main' } });

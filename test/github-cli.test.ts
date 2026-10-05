@@ -21,8 +21,8 @@ test('gh runs with its own configuration and none of the inherited git or debug 
 });
 
 test('a repository is owner/name, never a path', () => {
-  assert.deepEqual(['acme/app', 'acme/app.js', 'a-b/c_d.e'].map(isRepository), [true, true, true]);
-  assert.deepEqual(['acme', 'acme/', '/app', 'acme/.', 'acme/..', 'owner/repo/../../user', 'acme/app/x', 42, null].map(isRepository), [false, false, false, false, false, false, false, false, false]);
+  assert.deepEqual(['acme/app', 'acme/app.js', 'a-b/c_d.e', 'mona_acme/dotfiles'].map(isRepository), [true, true, true, true], 'An Enterprise Managed User owns repositories as handle_shortcode.');
+  assert.deepEqual(['acme', 'acme/', '/app', 'acme/.', 'acme/..', 'owner/repo/../../user', 'acme/app/x', '_acme/app', 42, null].map(isRepository), [false, false, false, false, false, false, false, false, false, false]);
 });
 
 test('a gh api reply parses to its status, tag, headers and body, and a 304 comes back bare', () => {
@@ -91,7 +91,7 @@ test('the repository pattern, the gh environment and the failure families are wr
   const files = (await readdir(new URL('../src/', import.meta.url), { recursive: true })).filter(file => file.endsWith('.ts') && file !== 'github-cli.ts');
   for (const file of files) {
     const text = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
-    assert.doesNotMatch(text, /\[a-z\\d\]\[a-z\\d-\]\{0,38\}/, `${file} spells the repository pattern`);
+    assert.doesNotMatch(text, /\[a-z\\d\]\[a-z\\d_?-\]\{0,38\}/, `${file} spells the repository pattern`);
     assert.doesNotMatch(text, /GH_PROMPT_DISABLED/, `${file} builds a gh environment of its own`);
     assert.doesNotMatch(text, /\/\^\[a-f\\d\]\{40\}\$\/i/, `${file} spells the commit id pattern`);
     assert.doesNotMatch(text, /rate limit\|secondary rate/, `${file} classifies gh failures itself`);
