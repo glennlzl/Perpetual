@@ -278,7 +278,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const repair: Repair = { id: randomUUID(), key: current.key, repository: current.repository, branch: current.branch, sha, login, checkoutPath: current.checkoutPath, rootDirectory: current.rootDirectory,
       trigger, status: 'triaging', runs: runs.slice(0, 20).map(runOf), ...(pushed ? { pushed } : {}), createdAt: time, updatedAt: time };
     state.repairs.unshift(repair);
-    state.repairs = state.repairs.filter((item, index) => index < LIMIT || ACTIVE.includes(item.status) || item.cleanup);
+    // The newest LIMIT repairs of each pipeline are kept, so one busy pipeline never drops another's merges and pushes.
+    const counts = new Map<string, number>();
+    state.repairs = state.repairs.filter(item => {
+      const count = (counts.get(item.key) ?? 0) + 1;
+      counts.set(item.key, count);
+      return count <= LIMIT || ACTIVE.includes(item.status) || item.cleanup;
+    });
     return repair;
   }
   async function transition(repair: Repair, status: RepairStatus, fields: Partial<Repair> = {}) {

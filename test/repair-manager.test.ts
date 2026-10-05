@@ -724,6 +724,22 @@ test('finished repairs keep their failures in brief, and the state file stays wi
   assert.deepEqual([kept.length < 40, kept[0].id], [true, 'r0'], 'The newest repairs stay.');
 });
 
+test('the newest hundred repairs of each pipeline are kept, so a busy pipeline never drops another\'s merge', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', OTHER = 'github:owner/other:/';
+  const record = (id: string, key: string, repository: string, sha: string, extra: object = {}) => ({ id, key, repository, branch: 'main', sha, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  const others = Array.from({ length: 100 }, (_, index) => record(`o${index}`, OTHER, 'owner/other', (index + 1).toString(16).padStart(40, '0')));
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [...others, record('merged', KEY, 'owner/app', B, { status: 'merged', merged: C, pullRequest: PULL })] }));
+  const h = await harness(t, { dataDir, steps: agent().steps });
+  Object.assign(h.current, { key: OTHER, repository: 'owner/other' });
+  h.github.connection = { login: 'developer', repository: 'owner/other' };
+  await h.failHead([run('2', D, 'failure')], D);
+  await h.manager.idle();
+  const saved = (await h.saved()).repairs;
+  assert.deepEqual([saved.filter(item => item.key === OTHER).length, saved.filter(item => item.key === OTHER).at(-1)?.id, saved.some(item => item.id === 'merged')], [100, 'o98', true]);
+});
+
 test('a saved repair that is not a complete record makes the state unsupported, never a later TypeError', async t => {
   const at = '2026-09-25T09:00:00.000Z';
   const valid = { id: 'r', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [], createdAt: at, updatedAt: at };

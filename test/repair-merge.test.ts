@@ -282,6 +282,16 @@ test('a gate budget that runs out while a gate is at work never merges without t
   assert.deepEqual(h.reports.find(report => report.gates)?.gates?.map(item => [item.stageId, item.status]), [['beta', 'passed'], ['gamma', 'superseded']]);
 });
 
+test('the journey gates have one budget for every head an update makes them verify', async t => {
+  // The first head's gates run until the budget runs out and pass; the updated head's then start with none left.
+  const h = await harness(t, { behind: [1], timing: { gatesMs: 200 }, gates: async (request, signal) => {
+    if (request.sha === P) await new Promise(done => signal?.aborted ? done(null) : signal?.addEventListener('abort', done, { once: true }));
+    return [gate('Beta', request.sha as string, request.sha === P || !signal?.aborted ? 'passed' : 'superseded')];
+  } });
+  assert.deepEqual(await h.run(), { status: 'ready', reason: 'The journey gates did not finish in 0 hours.' });
+  assert.deepEqual([h.calls.gates.map(item => item.sha), h.calls.merges], [[P, U], []]);
+});
+
 test('a repair that stops while its gates run rejects, and its checkout is removed', async t => {
   const controller = new AbortController();
   const h = await harness(t, { gates: async (request, signal) => { controller.abort(new Error('stopped')); assert.equal(signal?.aborted, true); return [gate('Beta', request.sha as string, 'superseded', { reason: 'The repair stopped.' })]; } });

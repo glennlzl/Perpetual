@@ -89,6 +89,8 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
     const { repair, pullRequest, holds } = input, { repository } = repair, number = pullRequest.number;
     const ready = (reason: string): RepairOutcome => ({ status: 'ready', reason });
     let sha = input.sha.toLowerCase(), updates = 0, recorded: RepairGate[] = [], draft = pullRequest.draft === true;
+    // The journey gates have gatesMs in all, however many heads an update makes them verify.
+    const budget = AbortSignal.timeout(bounds.gatesMs);
     // Each Sandbox gate at the head, over a checkout of it that is removed once the gates no longer read it. A pipeline
     // without a Sandbox stage needs no checkout, and one that is no longer active runs no gate.
     async function gatesAt(head: string) {
@@ -99,7 +101,7 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
       try {
         const snapshot = await host.checkout({ directory, clone: input.clone, repository, branch: pullRequest.branch, sha: head, rootDirectory: repair.rootDirectory });
         signal.throwIfAborted();
-        return (await gates.runRepair({ key: repair.key, repair: repair.id, branch: pullRequest.branch, sha: head, snapshot }, AbortSignal.any([signal, AbortSignal.timeout(bounds.gatesMs)]))).gates;
+        return (await gates.runRepair({ key: repair.key, repair: repair.id, branch: pullRequest.branch, sha: head, snapshot }, AbortSignal.any([signal, budget]))).gates;
       } finally { await rm(directory, { recursive: true, force: true }).catch(() => {}); }
     }
     // The head's checks, read until none is pending or checksMs passed.
