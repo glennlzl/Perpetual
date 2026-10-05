@@ -690,6 +690,27 @@ test('a controller start removes the directories of repairs that no longer run, 
   assert.equal((await h.saved()).repairs[0].status, 'needs-person');
 });
 
+// Six workflows failing together, with full logs, over a long history once outgrew what a start reads back.
+test('finished repairs keep their failures in brief, and the state file stays within what a start reads back', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', log = `${LOGS.build}\n`.repeat(400);
+  const failure = { runId: '2', jobs: [{ id: 'job-2', name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log, tail: log, diagnosis: diagnoseFailure(LOGS.build), observedAt: at };
+  const record = (index: number, extra: object) => ({ id: `r${index}`, key: KEY, repository: 'owner/app', branch: 'main', sha: index.toString(16).padStart(40, '0'), login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: Array.from({ length: 20 }, (_, index) => record(index, { failures: Array.from({ length: 6 }, () => failure) })) }));
+  const h = await harness(t, { dataDir });
+  const saved = await h.saved();
+  assert.ok((await stat(join(dataDir, 'repairs', 'state.json'))).size < 1024 * 1024);
+  assert.deepEqual([saved.repairs.length, saved.repairs[0].failures?.length, saved.repairs[0].failures?.[0].log.length, saved.repairs[0].failures?.[0].diagnosis.category], [20, 5, 2000, 'build']);
+  await h.manager.close();
+  // Whatever else a record holds, the oldest finished repairs give way before the file outgrows half the read limit.
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: Array.from({ length: 40 }, (_, index) => record(index, { reason: 'x'.repeat(300_000) })) }));
+  const bounded = await harness(t, { dataDir });
+  const kept = (await bounded.saved()).repairs;
+  assert.ok((await stat(join(dataDir, 'repairs', 'state.json'))).size <= 8 * 1024 * 1024);
+  assert.deepEqual([kept.length < 40, kept[0].id], [true, 'r0'], 'The newest repairs stay.');
+});
+
 test('a saved repair that is not a complete record makes the state unsupported, never a later TypeError', async t => {
   const at = '2026-09-25T09:00:00.000Z';
   const valid = { id: 'r', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [], createdAt: at, updatedAt: at };

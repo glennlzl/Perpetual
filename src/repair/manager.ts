@@ -127,6 +127,8 @@ const mayOwn = (repair: Repair) => PROGRESS.has(repair.status) || Boolean(repair
 const MERGED = 'Merged on GitHub.';
 const NO_AGENT = 'Automatic repair is unavailable. Fix the failure in a pull request.';
 const LIMIT = 100;
+/** Bytes of state a start reads back, and the bound each save keeps, well within it. */
+const READ_LIMIT = 16 * 1024 * 1024, SAVE_LIMIT = READ_LIMIT / 2;
 /** Checks a failing head waits for the loop guard to judge it before it needs a person. */
 const GUARD = 10;
 const RUN_ID = /^\d{1,20}$/;
@@ -175,6 +177,9 @@ function pullRead(value: unknown): { state: PullRequestRead['state']; merged?: s
 }
 // Stored logs are scrubbed again, whatever the reader did.
 const scrubbed = (failure: GitHubFailure): GitHubFailure => ({ ...failure, log: redact(failure.log), tail: redact(failure.tail), diagnosis: { ...failure.diagnosis } });
+// What a finished repair keeps of a failure, since only the agent step reads the whole of it: its first jobs and their
+// failed steps, its diagnosis, the start of its error lines and the end of its log.
+const brief = (failure: GitHubFailure): GitHubFailure => ({ ...failure, jobs: failure.jobs.slice(0, 5).map(job => ({ ...job, failedSteps: job.failedSteps.slice(0, 5) })), log: failure.log.slice(0, 2000), tail: failure.tail.slice(-2000) });
 const publicRepair = ({ id, branch, sha, status, reason, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
   id, branch, sha, status, ...(reason ? { reason: redact(reason) } : {}), trigger, ...(category ? { category } : {}), ...(merged ? { merged } : {}),
   ...(cleanup ? { cleanup: { status: cleanup.status, ...(cleanup.reason ? { reason: text(cleanup.reason) } : {}) } } : {}),
@@ -197,7 +202,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const root = await privateDirectory(resolve(dataDir, 'repairs'), 'Repair storage must not be a symbolic link.');
   const file = join(root, 'state.json');
   let state: RepairState = { version: 1, repairs: [] };
-  const saved = await readStateFile(file, { limit: 16 * 1024 * 1024, invalid: 'Unsupported repair state.' });
+  const saved = await readStateFile(file, { limit: READ_LIMIT, invalid: 'Unsupported repair state.' });
   if (saved !== undefined) {
     if (!isRecord(saved) || saved.version !== 1 || !Array.isArray(saved.repairs) || !saved.repairs.every(validRepair) || saved.autoMerge !== undefined && !validAutoMerge(saved.autoMerge)) throw new Error('Unsupported repair state.');
     state = { version: 1, repairs: saved.repairs, ...(saved.autoMerge ? { autoMerge: saved.autoMerge } : {}) };
@@ -230,7 +235,21 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const failing = new Map<string, { branch: string; login: string; sha: string; runs: RepairRun[] }>();
   const baselines = new Map<string, { branch: string; sha: string }>(), passing = new Map<string, string>();
   const followed = new Map<string, Followed>(), unjudged = new Set<string>(), inFlight = new Set<string>();
-  function persist() { return saves.run(() => writeStateFile(file, JSON.stringify(state))); }
+  // Each save keeps finished repairs' failures in brief and stays within SAVE_LIMIT, the oldest finished repairs that
+  // hold no cleanup giving way first, so a start always reads the file back.
+  function persist() {
+    return saves.run(() => {
+      for (const repair of state.repairs) if (repair.failures && !ACTIVE.includes(repair.status)) repair.failures = repair.failures.slice(0, 5).map(brief);
+      let content = JSON.stringify(state);
+      for (let index = state.repairs.length - 1; index >= 0 && Buffer.byteLength(content) > SAVE_LIMIT; index -= 1) {
+        const repair = state.repairs[index];
+        if (ACTIVE.includes(repair.status) || repair.cleanup) continue;
+        state.repairs.splice(index, 1);
+        content = JSON.stringify(state);
+      }
+      return writeStateFile(file, content);
+    });
+  }
   await persist();
 
   const managed = (): Managed | null => {
