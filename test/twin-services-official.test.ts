@@ -106,6 +106,15 @@ token = "env(GH_TOKEN)"
   assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
 });
 
+test('Supabase names its project directory before running the CLI when the repository has no project there', async () => {
+  for (const options of [{}, { directory: 'services/api/supabase' }]) {
+    const ctx = await context<SupabaseContext>({ options });
+    await mkdir(join(ctx.source, 'services/api/supabase'), { recursive: true }); // a folder without config.toml
+    await assert.rejects(supabase.setup(ctx), { message: `The repository has no Supabase project at ${options.directory ?? 'supabase'}: set supabase.directory to the folder that holds its config.toml.` });
+    assert.deepEqual(ctx.calls, []);
+  }
+});
+
 test('Supabase does not start its stack when the private mount is unavailable to Docker', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ image, args }) => {
     if (image) throw new Error('Private mount unavailable');
@@ -298,6 +307,13 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
   });
   ctx.inputs.publishableKey = 'pk_test_pub';
   assert.equal(stripe.env(ctx).STRIPE_PUBLISHABLE_KEY, 'pk_test_pub');
+});
+
+test('Stripe names a fixtures file the repository does not have before running its CLI', async () => {
+  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key' }, options: { fixtures: 'billing/stripe.json' } });
+  await mkdir(ctx.dir, { recursive: true });
+  await assert.rejects(stripe.setup(ctx), { message: 'stripe.fixtures billing/stripe.json is not a file in the repository.' });
+  assert.deepEqual(ctx.calls, []);
 });
 
 test('Stripe runs an inline fixtures document when the repository has none, and provides its env names', async () => {

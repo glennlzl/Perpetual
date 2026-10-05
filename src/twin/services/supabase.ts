@@ -111,6 +111,7 @@ const FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/; // the CLI's function name pattern
 const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STACK_VARIABLE = /^SUPABASE_/; // the local stack sets these itself, and the CLI drops them from the env file
 const isDirectory = (path: string) => stat(path).then(item => item.isDirectory(), () => false);
+const isFile = (path: string) => stat(path).then(item => item.isFile(), () => false);
 
 function functionOptions(input: unknown) {
   const where = 'supabase.functions';
@@ -258,9 +259,12 @@ export default {
   },
   setup: async ctx => {
     const target = join(workdir(ctx), 'supabase'), config = join(target, 'config.toml');
+    // Detection proposes Supabase from a package or variable name too, as for an app that uses a hosted project.
+    const directory = relative(ctx.options.directory ?? DIRECTORY, 'supabase directory');
+    if (!await isFile(join(ctx.source, directory, 'config.toml'))) throw new Error(`The repository has no Supabase project at ${directory}: set supabase.directory to the folder that holds its config.toml.`);
     await cli(ctx, ['stop', '--no-backup', '--project-id', projectId(ctx)]); // a rebuild starts from an empty database
     await rm(workdir(ctx), { recursive: true, force: true });
-    await cp(join(ctx.source, relative(ctx.options.directory ?? DIRECTORY, 'supabase directory')), target, { recursive: true, filter: path => !STATE.has(basename(path)) });
+    await cp(join(ctx.source, directory), target, { recursive: true, filter: path => !STATE.has(basename(path)) });
     const toml = twinConfig(await readFile(config, 'utf8'), ctx);
     const prepared = ctx.options.functions == null ? toml : await edgeFunctions(ctx, target, toml);
     await bridgeSupabaseImportMaps(target, prepared);
