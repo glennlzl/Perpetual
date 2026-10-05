@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepository, createPreviewPlan, DISCOVERY_VERSION } from './scanner.ts';
-import { getProviderStatus, parseGitHubRemote } from './providers.ts';
+import { parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
@@ -209,8 +209,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     }
   }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
-  // Retired repair reports, HTTP checks and their stage drafts; the next save omits them.
-  delete state.runs;delete state.checks;
+  // Retired repair reports, HTTP checks and their stage drafts; the next save omits them. Provider observations, once
+  // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
+  delete state.runs;delete state.checks;state.providers=[];
   for(const pipeline of Object.values(state.pipelines))if(Array.isArray(pipeline?.stages))for(const stage of pipeline.stages as SavedStage[])delete stage?.tests;
   const token=randomBytes(32).toString('hex');
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
@@ -767,12 +768,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
         });
         return reply(res,200,{pipeline});
-      }
-      if(req.method==='GET'&&path==='/api/providers') {
-        if(!state.scan)throw new Error('Scan a repository first.');
-        const scan=state.scan,providers=await getProviderStatus(scan);
-        if(state.scan===scan){state.providers=providers;await save();}
-        return reply(res,200,{providers});
       }
       // A current-commit GitHub read as the connected account: an explicit Disconnect refuses before any
       // session read, the session is verified once per request, and the reply never describes another source.

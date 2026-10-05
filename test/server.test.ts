@@ -47,6 +47,18 @@ test('a data directory inside a repository is ignored by it, and a person\'s own
   assert.equal(await readFile(join(dataDir, '.gitignore'), 'utf8'), 'state.json\n');
 });
 
+test('GitHub is never read with the ambient CLI session: no provider route, and older observations are dropped', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-providers-')), dataDir = join(dir, 'data');
+  let app: Controller | undefined;
+  t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
+  await mkdir(dataDir);
+  const providers = [{ provider: 'GitHub', status: 'connected', detail: 'acme/app', runs: [] }];
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan: null, providers, pipelines: {}, githubConnection: null } }));
+  app = await startServer({ port: 0, repo: dir, dataDir });
+  assert.deepEqual((await (await fetch(app.url + '/api/state')).json()).providers, []);
+  assert.equal((await fetch(app.url + '/api/providers')).status, 404);
+});
+
 test('controller state refuses an oversized JSON snapshot without overwriting it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-large-state-')), dataDir = join(dir, 'data');
   let app: Controller | undefined;
