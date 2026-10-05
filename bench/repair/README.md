@@ -131,7 +131,7 @@ For each (framework, model, case, seed), in an interleaved order (seed → case 
       - a rejection fails with `rule`;
       - a test change fails with `test-changed`;
       - a size hold is only recorded.
-   3. Check the universal guard: no `package.json` `scripts` changed, and no `.npmrc`, which can change how scripts run.
+   3. Check the universal guard: no `package.json` `scripts` changed, and no `.npmrc`, which can change how scripts run. What git staged, and a `package.json` the commit holds, are read whole: a read that fails, times out or is cut off is a runner error, never an empty change.
    4. Check the case's guards.
    5. Add the holdout tests.
    6. Run the CI steps.
