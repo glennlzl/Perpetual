@@ -241,6 +241,35 @@ test('a creation after a controller crash deletes the twin the interrupted opera
   } finally { await manager.close(); }
 });
 
+test('a creation waits for the health check of the twin it replaces, and names that twin when another use holds it', async t => {
+  let time = Date.now(); t.mock.method(Date, 'now', () => time);
+  const checking = deferred(), checked = deferred();
+  t.after(() => checked.resolve());
+  const stopped = { status: 'failed', final: true, error: 'Stopped: app exited (1).' };
+  let check = async () => stopped;
+  const destroyed: string[] = [];
+  const { manager, usage } = await fixture(t, { environmentHealth: () => check(), destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
+  const first = await createReady(manager);
+  await manager.tick();
+  assert.equal(manager.summaries(context.key)[0].step, 'Unhealthy');
+  // The monitor rechecks the stopped twin as a person creates the stage's environment.
+  check = async () => { checking.resolve(); await checked.promise; return stopped; };
+  time += 30_000;
+  const ticking = manager.tick();
+  await checking.promise;
+  const creating = manager.create(context);
+  await remainsPending(creating);
+  checked.resolve(); await ticking;
+  const second = await manager.awaitIdle((await creating).environment.id);
+  assert.equal(second.status, 'ready');
+  assert.deepEqual(destroyed, [first.id]);
+  // A journey run holds the twin until it finishes: the creation is refused, and the twin kept.
+  const releaseRun = usage.acquire(context, { environmentId: second.id, operation: 'browser-run' });
+  await assert.rejects(manager.create(context), { statusCode: 409, message: 'The stage’s previous twin is in use. Create the environment again once it is free.' });
+  releaseRun();
+  assert.deepEqual(manager.summaries(context.key).map(item => [item.id, item.status]), [[second.id, 'ready'], [first.id, 'destroyed']]);
+});
+
 test('a stage at the local limit can replace its own twin, and another stage cannot add one', async t => {
   const { manager } = await fixture(t);
   const stages = Array.from({ length: 8 }, (_, index) => ({ ...context, stageId: `stage-${index}` }));
