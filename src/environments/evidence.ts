@@ -15,6 +15,7 @@ import { hide, redact } from '../redaction.ts';
 import { join, posix } from 'node:path';
 import { lstat, realpath } from 'node:fs/promises';
 import { findNodeAtLocation, parseTree } from 'jsonc-parser';
+import { parse as parseToml } from 'smol-toml';
 import { envNames, services as registry } from '../twin/index.ts';
 import { PORT_VARIABLE } from '../twin/compose.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
@@ -154,6 +155,11 @@ const clip = (text: string) => { const line = oneLine(text); return line.length 
 const size = (limit: number) => limit % 1_048_576 === 0 ? `${limit / 1_048_576} MB` : `${Math.round(limit / 1024)} KB`;
 const WALK_LIMITS = `${EVIDENCE_WALK.depth} folders deep, ${EVIDENCE_WALK.entries.toLocaleString('en-US')} entries`;
 const isFile = (path: string) => lstat(path).then(info => info.isFile(), () => false);
+/** Whether a config.toml reads as Supabase's: a top-level project_id, or a table only Supabase's config has. */
+function supabaseLike(text: string | null) {
+  try { const config = fields(parseToml(text ?? '')); return typeof config?.project_id === 'string' || ['edge_runtime', 'inbucket', 'studio'].some(key => fields(config?.[key])); }
+  catch { return false; }
+}
 
 /**
  * The files git tracks in `directory`, in git's order, or why the evidence walks the folder instead: it has no git
@@ -303,9 +309,13 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     folders.set(posix.dirname(file), folder);
     for (let directory = posix.dirname(file); directory !== '.' && !ancestors.has(directory); directory = posix.dirname(directory)) ancestors.add(directory);
   }
-  // Supabase-style projects: a config.toml in a supabase folder, or beside migrations or functions.
-  const projects = sorted(relevant.filter(file => posix.basename(file) === 'config.toml' && !DOCS.test(file)).map(posix.dirname)
-    .filter(directory => posix.basename(directory) === 'supabase' || ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))));
+  // Supabase-style projects: a config.toml in a supabase folder, or beside migrations or functions when it reads as
+  // Supabase's, with a top-level project_id or a table only Supabase's has; any other config.toml, such as a site's, is not.
+  const projects: string[] = [];
+  for (const directory of sorted(relevant.filter(file => posix.basename(file) === 'config.toml' && !DOCS.test(file)).map(posix.dirname))) {
+    if (posix.basename(directory) === 'supabase') projects.push(directory);
+    else if ((ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))) && supabaseLike(await read(under(directory, 'config.toml'), SETUP_LIMITS.bytes))) projects.push(directory);
+  }
   // The function folder each file is in, if any, <project>/functions/<name>/, and each project's function folders.
   const projectSet = new Set(projects), functions = new Map<string, string>(), projectFunctions = new Map<string, Set<string>>();
   for (const file of files) {
