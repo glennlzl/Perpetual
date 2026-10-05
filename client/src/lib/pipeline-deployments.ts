@@ -13,6 +13,8 @@ const MARKS: Record<string, DeploymentMark> = { pending: 'queued', queued: 'queu
 
 export const deploymentMark = (deployment: Pick<GitHubDeployment, 'state'> | null | undefined): DeploymentMark | null => MARKS[String(deployment?.state)] || null;
 export const deploymentsActive = (result: GitHubDeployments | null | undefined) => (result?.deployments || []).some(item => ['queued', 'deploying'].includes(String(deploymentMark(item))));
+/** The repository's deployments on GitHub, when it holds older records for the commit than the reply carries; else null. */
+export const moreDeployments = (result: GitHubDeployments | null | undefined) => result?.more ? `https://github.com/${result.repository.split('/').map(encodeURIComponent).join('/')}/deployments` : null;
 
 /** A Production target as the delivery projection supplies it. */
 export type DiscoveredTarget = Pick<ScanNode, 'id'> & Partial<Pick<ScanNode, 'kind' | 'provider' | 'label'>>;

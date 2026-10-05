@@ -61,5 +61,8 @@ export interface DeploymentRecord extends DeploymentStatus {
   id: string; environment: string; provider: string; creator: string | null; production: boolean | null; transient: boolean | null;
   ref: string | null; task: string | null; createdAt: string | null; updatedAt: string | null;
 }
-/** GET /api/github/deployments: the deployments GitHub records for the scanned commit. */
-export interface CommitDeployments { repository: string; sha: string | null; deployments: DeploymentRecord[] }
+/**
+ * GET /api/github/deployments: the deployments GitHub records for the scanned commit, newest first. more: GitHub holds
+ * older records for the commit than the newest 1,000 read.
+ */
+export interface CommitDeployments { repository: string; sha: string | null; deployments: DeploymentRecord[]; more?: true }

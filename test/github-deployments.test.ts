@@ -95,7 +95,7 @@ test('statuses of many deployments are read a few at a time, and each is still r
   assert.ok(most > 1 && most <= 6, `${most} status reads at once`);
 });
 
-test('a commit\'s deployments are read page by page, up to 1,000 records', async () => {
+test('a commit\'s deployments are read page by page, up to 1,000 records, and a reply past them says older ones exist', async () => {
   const next = { link: `<https://api.github.com/repositories/1/deployments?sha=${SHA}&per_page=50&page=2>; rel="next", <https://api.github.com/repositories/1/deployments?sha=${SHA}&per_page=50&page=2>; rel="last"` };
   const { calls, request } = recorder([
     [/deployments\?.*&page=2$/, () => ({ status: 200, etag: null, data: [deployment(12, { environment: 'Preview – storefront', production_environment: false })] })],
@@ -105,11 +105,22 @@ test('a commit\'s deployments are read page by page, up to 1,000 records', async
   let time = 0;
   const reader = createGitHubDeploymentsReader({ request, ttl: 0, now: () => time++ });
   // The second read's first page is unchanged, and its 304 still has a page after it.
-  for (let read = 0; read < 2; read++) assert.deepEqual((await reader.read({ repository: REPO, sha: SHA, login: LOGIN })).deployments.map(record => [record.id, record.environment, record.state]), [['11', 'Production – storefront', 'success'], ['12', 'Preview – storefront', 'success']]);
+  for (let read = 0; read < 2; read++) {
+    const result = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+    assert.deepEqual(result.deployments.map(record => [record.id, record.environment, record.state]), [['11', 'Production – storefront', 'success'], ['12', 'Preview – storefront', 'success']]);
+    assert.equal('more' in result, false, 'Every record was read.');
+  }
   assert.deepEqual(calls.filter(call => call.endpoint.includes('?sha=')).map(call => call.endpoint.replace(`repos/${REPO}/deployments?sha=${SHA}&per_page=50`, '')), ['', '&page=2', '', '&page=2']);
-  // Past 1,000 records the read says so, instead of leaving the oldest out.
-  const endless = createGitHubDeploymentsReader({ request: async endpoint => ({ status: 200, headers: next, data: [deployment(Number(/&page=(\d+)/.exec(endpoint)?.[1] ?? 1))] }) });
-  await assert.rejects(endless.read({ repository: REPO, sha: SHA, login: LOGIN }), /1,000-record reading limit/);
+  // Past 1,000 records the newest are kept and the reply says older ones exist, rather than leaving them out unnoticed.
+  const pages: number[] = [];
+  const endless = createGitHubDeploymentsReader({ request: async endpoint => {
+    if (endpoint.includes('/statuses')) return { status: 200, data: [status('success')] };
+    const page = Number(/&page=(\d+)/.exec(endpoint)?.[1] ?? 1);
+    pages.push(page);
+    return { status: 200, headers: next, data: Array.from({ length: 50 }, (_, index) => deployment((page - 1) * 50 + index + 1)) };
+  } });
+  const capped = await endless.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.deepEqual([capped.more, capped.deployments.length, capped.deployments.at(-1)?.id, pages.at(-1)], [true, 1000, '1000', 20]);
 });
 
 test('each settled record of a long list is read once, however many pages it takes', async () => {

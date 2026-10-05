@@ -428,6 +428,28 @@ test('connecting GitHub reads Build, the recorded deployments and the release ag
   assert.deepEqual(pageErrors, []);
 });
 
+test('Production links to the commit\'s deployments on GitHub while it holds more records than were read', { timeout: 60000 }, async t => {
+  const record = { id: '11', environment: 'Production – app', provider: 'Vercel', creator: 'vercel[bot]', production: true, transient: false, ref: sha, task: 'deploy', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', state: 'success', stateAt: '2026-01-01T00:00:00Z', url: null, logUrl: null };
+  let more = true;
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } } } };
+    if (path === '/api/github/deployments') return { json: { repository: 'acme/app', sha, deployments: [record], ...(more ? { more: true } : {}) } };
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+  });
+  await open();
+  const production = page.getByRole('group', { name: 'Production', exact: true });
+  const link = production.getByRole('link', { name: 'More deployments on GitHub', exact: true });
+  await expect(link).toHaveAttribute('href', 'https://github.com/acme/app/deployments');
+  await expect(production.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
+  // Recorded deployments never change the stage Badge, whether or not every record was read.
+  await expect(production.getByRole('button', { name: 'Unverified', exact: true })).toBeVisible();
+  more = false;
+  await refresh('/api/github/deployments', '/build/src/lib/pipeline-deployments.ts', 'deploymentChanges');
+  await expect(link).toHaveCount(0);
+  await expect(production.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a GitHub sign-in that ends without connecting reads Build, the recorded deployments and the release again at once', { timeout: 60000 }, async t => {
   // The controller refuses these reads while a device sign-in is pending.
   const refused = { status: 409, json: { error: 'Finish or cancel GitHub sign-in first.' } };
