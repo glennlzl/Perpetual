@@ -57,6 +57,26 @@ socket.onmessage=event=>{document.querySelector('h1').textContent=event.data;};
 remove.onclick=()=>{socket.send('remove');remove.textContent='Removal sent';};
 </script>''')
             return
+        if self.path.startswith("/socket-replay?port="):
+            # As a DDP client does: a heartbeat keeps the socket alive, a write stays pending without an answer and is
+            # sent again after a reconnect. A second button opens a socket of its own for its write.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'''<!doctype html><h1>Connecting</h1><p></p><button id=remove>Remove workspace</button><button id=report>Create report</button><script>
+const address='ws://127.0.0.1:'+new URLSearchParams(location.search).get('port'),pending=[];let socket;
+function connect(){
+  socket=new WebSocket(address+'/live');
+  socket.onopen=()=>{socket.send('subscribe');for(const message of pending)socket.send(message);if(pending.length)document.querySelector('p').textContent='Resent '+pending.join(' ');};
+  socket.onmessage=event=>{document.querySelector('h1').textContent=event.data;};
+  socket.onclose=()=>setTimeout(connect,200);
+}
+connect();
+setInterval(()=>{if(socket.readyState===1)socket.send('ping');},300);
+remove.onclick=()=>{pending.push('remove');socket.send('remove');remove.textContent='Removal sent';};
+report.onclick=()=>{const once=new WebSocket(address+'/report');once.onopen=()=>{once.send('create-report');report.textContent='Report sent';};};
+</script>''')
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
@@ -184,10 +204,19 @@ class SocketModelHandler(BaseHTTPRequestHandler):
 class SocketContracts(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from websockets.asyncio.server import serve
-        self.received = []
+        # With silence set, the server closes a connection that sends nothing for that many seconds, as a heartbeat
+        # timeout does.
+        self.received, self.silence = [], None
 
         async def live(connection):
-            async for message in connection:
+            while True:
+                try:
+                    message = await asyncio.wait_for(connection.recv(), self.silence)
+                except TimeoutError:
+                    await connection.close()
+                    return
+                except Exception:
+                    return
                 self.received.append(message)
                 if message == "subscribe":
                     await connection.send("Subscribed")
@@ -214,6 +243,27 @@ class SocketContracts(unittest.IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0.05)
         self.assertEqual(self.received, ["subscribe", "remove"])
+
+    async def test_a_page_the_agent_acted_on_sends_nothing_again_until_another_page_loads(self):
+        self.silence = 1.5
+        target = self.target.replace("/socket?", "/socket-replay?")
+        async with runner.OwnedBrowser({"mode": "discover", "targetUrl": target, "allowedOrigins": [self.url]}, [].append) as owned:
+            page = await owned.active_page()
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+            # As planned() counts each of the agent's actions before it runs.
+            owned.agent_actions += 1
+            await page.get_by_role("button", name="Remove workspace", exact=True).click()
+            # Its heartbeat held, the connection falls silent: the server closes it, and the page reconnects, subscribes
+            # and sends its pending write again.
+            await page.get_by_text("Resent remove", exact=True).wait_for(timeout=15000)
+            owned.agent_actions += 1
+            await page.get_by_role("button", name="Create report", exact=True).click()
+            await page.get_by_role("button", name="Report sent", exact=True).wait_for(timeout=10000)
+            # A page that loads after the agent acted subscribes again.
+            owned.agent_actions += 1
+            await page.goto(target)
+            await page.get_by_role("heading", name="Subscribed", exact=True).wait_for(timeout=10000)
+        self.assertEqual([message for message in self.received if message != "ping"], ["subscribe", "subscribe"])
 
     async def test_what_a_page_sends_over_a_socket_after_the_agent_acts_never_reaches_its_server(self):
         model = ThreadingHTTPServer(("127.0.0.1", 0), SocketModelHandler)
