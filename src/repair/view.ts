@@ -29,14 +29,12 @@ type Names = (stageId: string) => string;
 const changeStatus = (repair: PublicRepair): ChangeStatus => ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' ? 'passed'
   : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
 
-// A ready repair that nothing verified waits at Verify: a journey gate did not pass, or its pull request is still a
-// draft no gate judged, as when no workflow, or not the one that failed, ran for it, or its runs were cancelled.
-const unverified = (repair: PublicRepair) => Boolean(repair.gates?.some(gate => gate.status !== 'passed') || repair.pullRequest?.draft && !repair.gates?.length);
-
-// The step a repair is at: the ones before it are done, it is active or how the repair ended, the rest are pending.
+// The step a repair is at: the ones before it are done, it is active or how the repair ended, the rest are pending. A
+// ready repair waits at Verify until the manager recorded its pull request's head verified, by CI and every journey
+// gate, and at Merge after that.
 function reached(repair: PublicRepair) {
   const { status } = repair;
-  if (status === 'ready') return unverified(repair) ? 3 : 4;
+  if (status === 'ready') return repair.verified ? 4 : 3;
   if (status === 'merged') return 4;
   if (status === 'verifying-ci' || status === 'verifying-gates') return 3;
   if (status === 'repairing') return 2;

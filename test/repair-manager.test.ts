@@ -1110,6 +1110,25 @@ test('the merge step records verifying-gates, the gates it ran and the merge com
   assert.deepEqual([empty.repair(B)?.status, empty.repair(B)?.reason], ['needs-person', 'The repair ended without a result.']);
 });
 
+test('a ready repair shows its head verified only while that head, as Perpetual last pushed it, is the one CI and the gates passed', async t => {
+  for (const [name, reports, shown] of [
+    ['verified', [{ pushed: C }, { verified: C }], true],
+    ['updated after', [{ pushed: C }, { verified: C }, { pushed: D }], undefined],
+    ['never verified', [{ pushed: C }], undefined],
+  ] as const) {
+    await t.test(name, async t => {
+      const h = await harness(t, { steps: agent(async context => { for (const progress of reports) await context.report(progress); return { status: 'ready', reason: 'Auto-merge is off.' }; }).steps });
+      await h.failHead([run('2', B, 'failure')]);
+      await h.manager.idle();
+      assert.deepEqual([h.repair(B)?.status, h.repair(B)?.verified], ['ready', shown]);
+    });
+  }
+  const h = await harness(t, { steps: agent(async context => { await context.report({ verified: 'main' }); return { status: 'ready' }; }).steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason], ['needs-person', 'Invalid repair progress.']);
+});
+
 test('a new head never supersedes a fix verifying its gates at once; a newer head that passes retires it and closes its pull request', async t => {
   let stopped = false;
   const closed: number[] = [];

@@ -166,10 +166,11 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
         const judged = await gatesAt(sha);
         signal.throwIfAborted();
         recorded = [...recorded, ...judged.map(({ id, stageId, sha: head, status }) => ({ gateId: id, stageId, sha: head, status }))].slice(-24);
-        await input.report({ gates: recorded });
-        const unready = await readied();
         // Only a pass merges: a gate that needs release, a released one and a stage without reviewed journeys wait for a person.
         const open = judged.find(gate => gate.status !== 'passed');
+        // CI and every gate passed at the head, which verifies it; whatever stops the merge from here is the merge's.
+        await input.report({ gates: recorded, ...(open ? {} : { verified: sha }) });
+        const unready = await readied();
         if (open) {
           const stage = open.context.replace(/^perpetual\//, '');
           if (open.status === 'superseded') return ready(`The journey gates did not finish in ${Math.round(bounds.gatesMs / 3_600_000)} hours.`);

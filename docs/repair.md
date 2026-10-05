@@ -88,7 +88,7 @@ How a repair reads as a change (`src/repair/view.ts`):
 | `triaging`, `rerunning`, `repairing`, `verifying-ci`, `verifying-gates` | `Running` | the step at work is active |
 | `merged` | `Merged` | every step done |
 | `flaky` | `Passed` | Read the failure and Diagnose done |
-| `ready` | `Needs review` | Verify waits, with the reason, when a journey gate did not pass or no gate judged a pull request CI left a draft (no workflow, or not the failed one, ran for it, or its runs were cancelled); otherwise Merge waits, with the reason |
+| `ready` | `Needs review` while its pull request is open, else `Not merged` | Verify waits, with the reason, until the agent or merge step recorded the pull request's head verified: CI passed there, the failed workflows among its runs, and so did every journey gate; then Merge waits, with the reason |
 | `failed` | `Not merged` | Change or Verify failed, with the reason |
 | `needs-person`, `cancelled`, `superseded` | `Needs review` with an open pull request, else `Not merged` | the step it stopped at waits, with the reason |
 

@@ -40,6 +40,8 @@ export interface Repair {
   pullRequest?: RepairPullRequest; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; closeError?: string;
   /** The last commit Perpetual pushed to this commit's repair branch; a person's next Repair of the commit leases it. */
   pushed?: string;
+  /** The pull request head that passed CI and every journey gate, as the agent and merge steps record it. */
+  verified?: string;
   /** Why a person must merge the pull request: change rules that hold it, such as a change to tests. */
   holds?: string[];
   /** The journey gates at the pull request head, and the merge commit once the pull request merged. */
@@ -60,7 +62,7 @@ export interface RepairGitHub {
   rerun(input: { repository: string; runId: string }): Promise<void>;
 }
 /** What the agent step may record while it works; each report is persisted before it resolves. */
-export interface RepairProgress { status?: 'repairing' | 'verifying-ci' | 'verifying-gates'; pullRequest?: RepairPullRequest; pushed?: string; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; holds?: string[]; gates?: RepairGate[]; merged?: string }
+export interface RepairProgress { status?: 'repairing' | 'verifying-ci' | 'verifying-gates'; pullRequest?: RepairPullRequest; pushed?: string; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; holds?: string[]; gates?: RepairGate[]; verified?: string; merged?: string }
 /** merged names the merge commit of a merged outcome. */
 export interface RepairOutcome { status: 'ready' | 'merged' | 'failed' | 'needs-person'; reason?: string; merged?: string }
 /**
@@ -96,9 +98,12 @@ export interface RepairSteps {
 export interface RepairManagerOptions { dataDir: string; source: () => RepairSource | null; github: RepairGitHub; steps?: RepairSteps; now?: () => string; pollInterval?: number }
 /** A workflow run as Build shows it. */
 export type PublicRun = Pick<RepairRun, 'id' | 'name' | 'path' | 'url'>;
-/** A repair as the pipeline's Autopilot shows it (src/repair/view.ts): its record without the logs, redacted. */
+/**
+ * A repair as the pipeline's Autopilot shows it (src/repair/view.ts): its record without the logs, redacted. verified:
+ * the pull request's head, as Perpetual last pushed it, passed CI and every journey gate.
+ */
 export type PublicRepair = Pick<Repair, 'id' | 'branch' | 'sha' | 'status' | 'reason' | 'trigger' | 'category' | 'merged' | 'holds' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'cleanup'>
-  & { runs: PublicRun[]; pullRequest?: Pick<RepairPullRequest, 'number' | 'url' | 'draft' | 'closed'>; attempts?: Pick<RepairAttempt, 'number' | 'model' | 'reproduced' | 'failure' | 'cost'>[]; gates?: Pick<RepairGate, 'stageId' | 'sha' | 'status'>[] };
+  & { runs: PublicRun[]; pullRequest?: Pick<RepairPullRequest, 'number' | 'url' | 'draft' | 'closed'>; attempts?: Pick<RepairAttempt, 'number' | 'model' | 'reproduced' | 'failure' | 'cost'>[]; gates?: Pick<RepairGate, 'stageId' | 'sha' | 'status'>[]; verified?: true };
 /**
  * head is the watched head of a connected, managed source's target branch, with the branch's own failed workflow runs
  * there as the connected account last read them; a person's Repair names one of them. Without a head no Repair can start.
@@ -165,7 +170,7 @@ const validRepair = (value: unknown): value is Repair => isRecord(value)
   && (value.pullRequest === undefined || validPullRequest(value.pullRequest))
   && (value.attempts === undefined || Array.isArray(value.attempts) && value.attempts.every(validAttempt))
   && (value.diffHash === undefined || validDiffHash(value.diffHash)) && (value.ciRuns === undefined || validCiRuns(value.ciRuns)) && (value.holds === undefined || validHolds(value.holds))
-  && (value.pushed === undefined || validSha(value.pushed)) && (value.merged === undefined || validSha(value.merged)) && (value.gates === undefined || validGates(value.gates));
+  && (value.pushed === undefined || validSha(value.pushed)) && (value.verified === undefined || validSha(value.verified)) && (value.merged === undefined || validSha(value.merged)) && (value.gates === undefined || validGates(value.gates));
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
 const text = (error: unknown, limit = 500) => failureText(error, limit);
 const runOf = ({ id, name, path, attempt, url }: WorkflowRun): RepairRun => ({ id, name, path, attempt, url });
@@ -180,8 +185,10 @@ const scrubbed = (failure: GitHubFailure): GitHubFailure => ({ ...failure, log: 
 // What a finished repair keeps of a failure, since only the agent step reads the whole of it: its first jobs and their
 // failed steps, its diagnosis, the start of its error lines and the end of its log.
 const brief = (failure: GitHubFailure): GitHubFailure => ({ ...failure, jobs: failure.jobs.slice(0, 5).map(job => ({ ...job, failedSteps: job.failedSteps.slice(0, 5) })), log: failure.log.slice(0, 2000), tail: failure.tail.slice(-2000) });
-const publicRepair = ({ id, branch, sha, status, reason, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
+const publicRepair = ({ id, branch, sha, status, reason, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, pushed, verified, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
   id, branch, sha, status, ...(reason ? { reason: redact(reason) } : {}), trigger, ...(category ? { category } : {}), ...(merged ? { merged } : {}),
+  // A head verified before GitHub's update of the branch is not the pull request's head any more.
+  ...(verified && verified === pushed ? { verified: true as const } : {}),
   ...(cleanup ? { cleanup: { status: cleanup.status, ...(cleanup.reason ? { reason: text(cleanup.reason) } : {}) } } : {}),
   runs: runs.map(publicRun),
   ...(pullRequest ? { pullRequest: { number: pullRequest.number, url: pullRequest.url, ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }), ...(pullRequest.closed ? { closed: true as const } : {}) } } : {}),
@@ -398,6 +405,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     if (progress.ciRuns !== undefined) { if (!validCiRuns(progress.ciRuns)) throw invalid(); fields.ciRuns = progress.ciRuns.slice(0, 100); }
     if (progress.holds !== undefined) { if (!validHolds(progress.holds)) throw invalid(); fields.holds = progress.holds.map(hold => text(hold, 300)); }
     if (progress.gates !== undefined) { if (!validGates(progress.gates)) throw invalid(); fields.gates = progress.gates.map(({ gateId, stageId, sha, status }) => ({ gateId, stageId, sha: sha.toLowerCase(), status })); }
+    if (progress.verified !== undefined) { if (!validSha(progress.verified)) throw invalid(); fields.verified = progress.verified.toLowerCase(); }
     if (progress.merged !== undefined) { if (!validSha(progress.merged)) throw invalid(); fields.merged = progress.merged.toLowerCase(); }
     const opened = fields.pullRequest && fields.pullRequest.url !== repair.pullRequest?.url ? fields.pullRequest : null;
     if (closed || signal.aborted || !ACTIVE.includes(repair.status)) {

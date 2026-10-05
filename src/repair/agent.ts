@@ -342,7 +342,8 @@ export function createRepairAgent(options: RepairAgentOptions) {
         // A pull request GitHub refuses to mark ready still goes through the gates, and the merge step marks it ready.
         const number = pullRequest.number, readied = await connected(repair).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
         if (readied) { pullRequest = { ...pullRequest, draft: false }; await context.report({ pullRequest }); }
-        if (!options.merge) return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY });
+        // Without a merge step, CI is all that verifies the head.
+        if (!options.merge) { await context.report({ verified: sha }); return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY }); }
         // The box has no more work; the gates rebuild twins meanwhile.
         await box.remove();
         return await finish(await options.merge.merge({ repair, pullRequest, sha, holds, directory: context.directory, clone, title,
