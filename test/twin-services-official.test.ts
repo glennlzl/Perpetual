@@ -86,7 +86,14 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   assert.deepEqual(supabase.containers(), []); // the CLI owns the stack's containers
 });
 
-test('Supabase starts its stack with every env() name of its config.toml unset, whatever the controller exports', async () => {
+test('Supabase starts its stack with every env() name of its config.toml and SUPABASE_ setting unset, whatever the controller exports', async t => {
+  // The controller's environment, as a developer's shell exports it: stack settings and a credential the CLI would take
+  // over the config, and the CLI's own image mirror and telemetry choice, which stay.
+  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1' };
+  const exported = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('SUPABASE_')));
+  for (const name of Object.keys(exported)) delete process.env[name];
+  Object.assign(process.env, host);
+  t.after(() => { for (const name of Object.keys(host)) delete process.env[name]; Object.assign(process.env, exported); });
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), `${CONFIG}
@@ -100,8 +107,8 @@ additional_redirect_urls = ["env(REDIRECT_URL)", "http://127.0.0.1:3000"]
 token = "env(GH_TOKEN)"
 `);
   await supabase.setup(ctx);
-  // The CLI reads an empty variable as unset, so the stack gets each reference as written.
-  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '' };
+  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written.
+  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '' };
   const cli = (name: string) => ctx.calls.find(call => call.command === 'npx' && call.args.includes(name));
   assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
 });

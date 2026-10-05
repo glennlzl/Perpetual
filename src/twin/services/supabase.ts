@@ -59,12 +59,16 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
 }
 const cli = (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir, env });
 const ENV_REFERENCE = /^env\((.*)\)$/; // a config.toml value the CLI fills from its own environment
+/** SUPABASE_ variables that set how the CLI itself runs, never what its stack holds: an image mirror, its home and telemetry. */
+const CLI_SETTINGS = new Set(['SUPABASE_INTERNAL_IMAGE_REGISTRY', 'SUPABASE_HOME', 'SUPABASE_TELEMETRY_DISABLED']);
 /**
- * The CLI fills each env(NAME) value of config.toml from its environment, which is the controller's: every name the
- * copied config references is set empty for it, which the CLI reads as unset, so no host variable reaches the stack.
+ * The CLI fills each env(NAME) value of config.toml from its environment, which is the controller's, and takes any
+ * SUPABASE_ variable there over the config, such as the project id, a port or a provider's secret: every name the copied
+ * config references, and every SUPABASE_ variable but the CLI's own settings, is set empty for it, which the CLI reads as
+ * unset, so no host variable reaches the stack.
  */
 function unsetReferences(toml: string) {
-  const names = new Set<string>();
+  const names = new Set(Object.keys(process.env).filter(name => STACK_VARIABLE.test(name) && !CLI_SETTINGS.has(name)));
   const visit = (value: unknown): void => {
     if (typeof value === 'string') { const name = ENV_REFERENCE.exec(value)?.[1]; if (name !== undefined && VARIABLE.test(name)) names.add(name); }
     else if (Array.isArray(value)) value.forEach(visit);
