@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Item, ItemActions, ItemContent, ItemTitle } from '@/components/ui/item';
-import { api } from '@/lib/api';
+import { api, sourceBusy } from '@/lib/api';
 import { inspectorTab } from '@/lib/browser-test-ui';
 import { targetSuggestions } from '@/lib/journey-config';
 import { latestEnvironment } from '@/lib/environment-view';
@@ -36,7 +36,7 @@ function EnvironmentProgress({ environment, repoPath, stageId, busy, onStop }: {
       try {
         const reply = await api<EnvironmentLogs>('/api/environments/logs', { repoPath, stageId, id: environment.id }, { signal: controller.signal });
         if (!controller.signal.aborted) { setLogs(reply.logs); setError(''); }
-      } catch (failure) { if (!controller.signal.aborted) setError((failure as Error).message); }
+      } catch (failure) { if (!controller.signal.aborted && !sourceBusy(failure)) setError((failure as Error).message); }
       if (creating && !controller.signal.aborted) timer = setTimeout(read, 2000);
     };
     void read();

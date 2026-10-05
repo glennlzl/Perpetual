@@ -90,3 +90,19 @@ test('a refresh raised by a published result is coalesced before the next timer'
   assert.deepEqual(results, [1, 2]);
   assert.equal(h.queue.size, 1);
 });
+
+test('a read refused while a source change saves publishes nothing, and the next read follows at the interval', async t => {
+  const h = harness(), results: PollResult<number>[] = [];
+  const busy = Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true });
+  let reads = 0;
+  const poller = createVisiblePoller({ ...h, read: async () => { if (++reads === 2) throw busy; return reads; },
+    onResult: result => results.push(result), interval: () => 2500,
+  });
+  t.after(() => poller.stop());
+  await flush();
+  await h.fire();
+  assert.deepEqual(results, [{ ok: true, value: 1 }], 'The caller keeps its last result.');
+  assert.equal(h.queue.values().next().value?.delay, 2500);
+  await h.fire();
+  assert.deepEqual(results, [{ ok: true, value: 1 }, { ok: true, value: 3 }]);
+});

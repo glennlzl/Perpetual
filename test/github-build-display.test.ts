@@ -79,6 +79,20 @@ test('Build polling clears a prior success on read failure and discards a comple
   assert.equal(reads.length, 2);
 });
 
+test('a Build read refused while a source change saves keeps the Build last read, without a read error', async t => {
+  const delays: number[] = [], reads: unknown[] = [];
+  let busy = false;
+  const poller = display.createGitHubBuildPoller({ repoPath: '/acme/app', branch: 'main', document: null,
+    controller: async () => { if (busy) throw Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true }); return reply([run({ status: 'in_progress', conclusion: null })]); },
+    onChange: value => reads.push(value), timers: { setTimeout(_callback, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} },
+  });
+  t.after(() => poller.stop());
+  await new Promise(resolve => setImmediate(resolve));
+  busy = true; poller.refresh(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 1, 'Build stays as last read rather than Unverified.');
+  assert.equal(delays.at(-1), 5000, 'The run in progress is read again soon.');
+});
+
 test('a refresh during an unfinished Build read rereads once before waiting for the idle interval', async t => {
   const pending: ((value: unknown) => void)[] = [], seen: display.BuildRead[] = [];
   const scheduled: (() => void)[] = [];

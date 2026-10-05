@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
-import { UNAVAILABLE, api, controllerFetch, replyError, type ApiError } from '@/lib/api';
+import { UNAVAILABLE, api, controllerFetch, replyFailure, sourceBusy, type ApiError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
 import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
@@ -36,8 +36,9 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   const returnFocus = useReturnFocus(focusFallback);
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [error, setError] = useState('');
-  // A run the stage does not have never appears by reading again. Any other failed read, such as one refused while a
-  // source change saves or one the stopped controller never answers, is read again.
+  // A run the stage does not have never appears by reading again. Any other failed read, such as one the stopped
+  // controller never answers, is read again; one refused while a source change saves keeps the run as last read, without
+  // an error.
   const [unavailable, setUnavailable] = useState(false);
   // Kept apart from read errors, so the next successful read does not clear why Cancel run failed.
   const [stopError, setStopError] = useState('');
@@ -64,7 +65,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         }, controller.signal);
         let reply: unknown;
         try { reply = await response.json(); } catch { throw new Error(UNAVAILABLE); }
-        if (!response.ok) throw Object.assign(new Error(replyError(reply) || 'Could not load this run.'), { statusCode: response.status });
+        if (!response.ok) throw replyFailure(reply, response.status, 'Could not load this run.');
         const next = reply as RunSnapshot; // the run route's reply, as the controller defines it
         if (cancelled) return;
         setSnapshot(next); setError('');
@@ -75,8 +76,10 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         }
       } catch (failure) {
         if (cancelled) return;
-        setError((failure as Error).message);
-        if ((failure as ApiError).statusCode === 404) { active.current = false; setUnavailable(true); return; }
+        if (!sourceBusy(failure)) {
+          setError((failure as Error).message);
+          if ((failure as ApiError).statusCode === 404) { active.current = false; setUnavailable(true); return; }
+        }
       }
       if (!cancelled) timer = setTimeout(poll, 500);
     }
@@ -93,7 +96,9 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId!)}/frame?${new URLSearchParams({ repoPath, stageId })}`, {
           headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
         }, controller.signal);
-        if (response.status !== 204) {
+        // A frame refused while a source change saves leaves the last frame, and its state, as they were.
+        const busy = response.status === 409 && sourceBusy(await response.json().catch(() => null));
+        if (response.status !== 204 && !busy) {
           if (!response.ok || !response.headers.get('content-type')?.startsWith('image/jpeg')) throw new Error('Browser stream unavailable.');
           const blob = await response.blob();
           if (cancelled) return;
@@ -103,7 +108,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
           if (previous) URL.revokeObjectURL(previous);
         }
         // A reply with no new frame still reached the controller, so an earlier failure no longer stands.
-        if (!cancelled) setFrameError('');
+        if (!cancelled && !busy) setFrameError('');
       } catch (failure) { if (cancelled) return; setFrameError((failure as Error).message); }
       if (!cancelled && active.current) timer = setTimeout(capture, 250);
     }

@@ -10,7 +10,7 @@ The first frame shows the pipeline from its first stage at a readable zoom. When
 
 Select Source, a service action or a gate to open its configuration in a non-modal Sheet on the right; there is no separate edit mode. On a wide window the Sheet narrows the canvas, and the selected stage is panned into view without zooming. Closing the Sheet restores your previous frame unless you moved the canvas meanwhile. Below 901px the Sheet covers the canvas.
 
-Stages, transition controls and collapse state persist separately for each repository. Open tabs receive saved graph changes through polling; a pending local edit is kept until its request settles.
+Stages, transition controls and collapse state persist separately for each repository. Open tabs receive saved graph changes through polling; a pending local edit is kept until its request settles. While the controller saves a source change, such as a gate moving the managed source to a pushed commit, it refuses reads of that source as busy: a card, inspector or viewer that polls one keeps what it last read, shows no error and reads again at its next poll.
 
 ## Stage cards
 

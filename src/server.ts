@@ -36,6 +36,7 @@ import { readBranchHead, postCommitStatus } from './gate/github.ts';
 import { readBuild } from './gate/build.ts';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub } from './releases/manager.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
+import type { ErrorReply } from '../contract/error.ts';
 import type { BuildReply, GitHubConnection, GitHubSource as PublicGitHubSource } from '../contract/github.ts';
 import type { PipelineStateReply, SourceReply } from '../contract/pipeline.ts';
 import type { GitHistory } from '../contract/git-history.ts';
@@ -93,7 +94,7 @@ export interface ServerOptions {
 }
 /** A running controller. `launchUrl` carries its browser secret: opening it signs a browser in, as `serve` prints it. */
 export interface Controller { url: string; launchUrl: string; server: ReturnType<typeof createServer>; close(): Promise<void> }
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; sourceBusy?: true };
 /** A request's JSON object or query parameters: every field is checked where it is used. */
 type RequestInput = { readonly [key: string]: unknown };
 type Transaction<R> = { state?: ControllerState; commit?(): void; result?: R };
@@ -252,9 +253,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // busy until it is saved, and only a Sandbox stage holds environments and tests.
   const conflict=(message: string)=>Object.assign(new Error(message),{statusCode:409});
   const SOURCE_BUSY='A source change is still being saved. Please wait.',SOURCE_CHANGED='The active repository changed. Reload its pipeline.';
+  // The refusal while a source change saves is marked in its reply, so a page's poll keeps what it last read.
+  const busy=():HttpError=>Object.assign(conflict(SOURCE_BUSY),{sourceBusy:true as const});
   function requireNoPendingSignIn(){if(githubAuth.isPending())throw conflict('Finish or cancel GitHub sign-in first.');}
   function requireSourceIdle() {
-    if(sourceBusy)throw conflict(SOURCE_BUSY);
+    if(sourceBusy)throw busy();
     requireNoPendingSignIn();
   }
   function requireSourceChangeIdle(){
@@ -683,7 +686,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='POST'&&path==='/api/github/auth/start') {
         await body(req);
-        if(sourceBusy)throw conflict(SOURCE_BUSY);
+        if(sourceBusy)throw busy();
         return reply(res,200,githubAuth.start());
       }
       if(req.method==='POST'&&path==='/api/github/auth/status') {
@@ -856,7 +859,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     } catch(error) {
       // The unread rest of a body cut off before its end would stall the connection's next request: close it instead.
       if(cutOff.has(req))res.shouldKeepAlive=false;
-      const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});
+      const statusCode=(error as HttpError).statusCode??400,marked=(error as HttpError).sourceBusy?{sourceBusy:true as const}:{};
+      return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000),...marked} satisfies ErrorReply);
     }
   });
   onCleanup(()=>server.listening?new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())):undefined);

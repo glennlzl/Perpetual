@@ -379,14 +379,19 @@ test('a change whose body finishes arriving after a source change began is refus
   // A rescan holds the source while its own body arrives.
   const rescan = halfSent(f.app.url, f.token, '/api/scan', { path: f.dir });
   try {
-    const held = () => fetch(`${f.app.url}/api/github-actions?${new URLSearchParams({ repoPath: f.dir })}`).then(response => response.status === 409);
-    for (const deadline = Date.now() + 10_000; !await held();) {
+    const read = (repoPath: string) => fetch(`${f.app.url}/api/github-actions?${new URLSearchParams({ repoPath })}`).then(async response => ({ status: response.status, body: await response.json() }));
+    let refused = await read(f.dir);
+    for (const deadline = Date.now() + 10_000; refused.status !== 409; refused = await read(f.dir)) {
       assert.ok(Date.now() < deadline, 'The rescan never held the source.');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    assert.deepEqual(await edit.finish(), { status: 409, body: { error: 'A source change is still being saved. Please wait.' } });
+    // A refusal only while the change saves is marked, so the page's polls keep what they last read.
+    const busy = { error: 'A source change is still being saved. Please wait.', sourceBusy: true };
+    assert.deepEqual(refused.body, busy);
+    assert.deepEqual(await edit.finish(), { status: 409, body: busy });
     assert.equal((await rescan.finish()).status, 200);
     assert.deepEqual(await names(), before);
+    assert.deepEqual(await read('/acme/other'), { status: 409, body: { error: 'The active repository changed. Reload its pipeline.' } }, 'Another conflict carries no mark.');
   } finally { edit.destroy(); rescan.destroy(); }
 });
 

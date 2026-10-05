@@ -1,6 +1,6 @@
 // GitHub Actions status for the watched Build commit, read through /api/github/build.
 // A run for another commit never verifies the current source.
-import type { Controller } from './api.ts';
+import { sourceBusy, type Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
 import { createVisiblePoller } from './visible-poller.ts';
 
@@ -135,7 +135,11 @@ export function createGitHubBuildPoller({ repoPath, branch, controller, ...optio
   return createGitHubPoller<BuildRead>({ ...options, path: `/api/github/build?${new URLSearchParams({ repoPath, ...(branch ? { branch } : {}) })}`,
     async controller(path) {
       try { return { view: await controller(path) as BuildReply, error: null }; }
-      catch (error) { return { view: null, error: error instanceof Error ? error.message : 'Could not read Build. Reconnect GitHub and try again.' }; }
+      catch (error) {
+        // Refused while a source change saves, which says nothing of Build: the poller keeps the Build it last read.
+        if (sourceBusy(error)) throw error;
+        return { view: null, error: error instanceof Error ? error.message : 'Could not read Build. Reconnect GitHub and try again.' };
+      }
     },
     active: read => ['running', 'queued'].includes(watchedBuildSummary(read?.view)?.status ?? ''),
   });

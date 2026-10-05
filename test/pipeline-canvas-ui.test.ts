@@ -7,6 +7,7 @@ import { chromium, expect as playwrightExpect, type Request } from '@playwright/
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
+import type { ErrorReply } from '../contract/error.ts';
 import type { BuildReply, CommitDeployments, DeploymentRecord } from '../contract/github.ts';
 import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
@@ -103,6 +104,51 @@ test('a deployment GitHub records for the commit joins Production without connec
   await expect(card.getByRole('button', { name: 'Railway projects', exact: true })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Unverified', exact: true })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Vercel projects', exact: true })).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('reads refused while a source change saves keep Build, Production and an open stage as last read, with no error', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
+  const build: BuildReply = { repoPath, repository: 'acme/app', branch: 'main', scannedSha: sha, sha, source: 'watched', runs: [{ id: '1', workflowId: '2', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success', attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] }] };
+  const recorded: DeploymentRecord = { id: '11', environment: 'Preview – app', provider: 'Vercel', creator: 'vercel[bot]', production: false, transient: false, ref: sha, task: 'deploy',
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', state: 'success', stateAt: '2026-01-01T00:00:00Z', url: 'https://preview.example.test', logUrl: null };
+  const view = { cases: [], runs: [], accounts: [], specs: {}, preparation: null, config: { targetUrl: '', scope: '', requirements: '', maxSteps: 60 }, capabilities: null };
+  const busy: Reply = { status: 409, json: { error: 'A source change is still being saved. Please wait.', sourceBusy: true } satisfies ErrorReply };
+  const refused: string[] = [];
+  let saving = false;
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(pipeline), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [actions], production: [] } } } };
+    if (saving && ['/api/releases', '/api/github/build', '/api/github/deployments', '/api/browser', '/api/environments'].includes(path)) { refused.push(path); return busy; }
+    if (path === '/api/releases') return { json: { ...release, target, current: { id: 'release-1', sha, ...target, status: 'deploying', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } } satisfies ReleaseReply };
+    if (path === '/api/github/build') return { json: build };
+    if (path === '/api/github/deployments') return { json: { repository: 'acme/app', sha, deployments: [recorded] } satisfies CommitDeployments };
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+    if (path === '/api/browser') return { json: view };
+    if (path === '/api/environments') return { json: { environments: [], plan: null } };
+  });
+  await open();
+  const buildCard = page.getByRole('group', { name: 'Build', exact: true }), production = page.getByRole('group', { name: 'Production', exact: true });
+  // Beta's open tests are polled with the cards.
+  await page.getByRole('group', { name: 'Beta', exact: true }).getByRole('button', { name: 'Integration tests, 0', exact: true }).click();
+  await expect(page.locator('.pipeline-inspector').getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
+  const shown = async () => {
+    await expect(buildCard.getByText('Passedaaaaaaa', { exact: true })).toBeVisible();
+    await expect(production.getByText('Deployingaaaaaaa', { exact: true })).toBeVisible();
+    await expect(production.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  };
+  await shown();
+  // A gate moves the managed source to a pushed commit; meanwhile the controller refuses reads of it as busy.
+  saving = true;
+  await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
+  await refresh('/api/github/build', '/build/src/lib/pipeline-github.ts', 'buildChanges');
+  await refresh('/api/github/deployments', '/build/src/lib/pipeline-deployments.ts', 'deploymentChanges');
+  await expect.poll(() => refused.filter(path => path === '/api/browser').length).toBeGreaterThan(1);
+  await expect.poll(() => refused.filter(path => path === '/api/environments').length).toBeGreaterThan(1);
+  await shown();
+  saving = false;
+  await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
+  await shown();
   assert.deepEqual(pageErrors, []);
 });
 
@@ -342,13 +388,13 @@ test('the Source sheet shows the GitHub mark only for a repository with a GitHub
 });
 
 test('deleting a stage asks first, follows the controller until it is removed, then refreshes the pipeline', { timeout: 60000 }, async t => {
-  let pipeline = withBeta(), status: StageRemoval['status'] | null = null;
+  let pipeline = withBeta(), status: StageRemoval['status'] | null = null, saving = false, reads = 0;
   const beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
   const removal = (): StageRemoval | null => status && { id: 'removal-1', stageId: beta, status, environmentIds: [], completedEnvironmentIds: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
   const { page, posts, pageErrors, open } = await openApp(t, path => {
     if (path === '/api/state') return { json: pipelineState(pipeline, { stageRemovals: status ? [removal()] : [] }) };
     if (path === '/api/stages/remove') { status = 'removing'; return { json: { removal: removal() } }; }
-    if (path === '/api/stages/removal') return { json: { removal: removal() } };
+    if (path === '/api/stages/removal') { reads++; return saving ? { status: 409, json: { error: 'A source change is still being saved. Please wait.', sourceBusy: true } satisfies ErrorReply } : { json: { removal: removal() } }; }
   });
   await open();
   await page.getByRole('button', { name: 'Delete Beta', exact: true }).click();
@@ -360,6 +406,13 @@ test('deleting a stage asks first, follows the controller until it is removed, t
   await dialog.getByRole('button', { name: 'Delete stage', exact: true }).click();
   await expect(dialog.getByRole('button', { name: 'Deleting stage…', exact: true })).toBeDisabled();
   assert.deepEqual(posts.filter(item => item.path === '/api/stages/remove').map(item => item.body), [{ repoPath, stageId: beta }]);
+  // Reads refused while a source change saves keep the removal as last read, without an error.
+  saving = true;
+  const before = reads;
+  await expect.poll(() => reads).toBeGreaterThan(before + 1);
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Deleting stage…', exact: true })).toBeDisabled();
+  saving = false;
   // The controller finishes removing the stage; the dialog closes and the pipeline no longer lists it.
   status = 'completed'; pipeline = defaultPipeline(repoPath);
   await expect(dialog).toHaveCount(0);

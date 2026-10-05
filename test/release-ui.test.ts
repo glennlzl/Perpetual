@@ -156,6 +156,25 @@ test('a failed release read keeps the cadence of the view before it', async t =>
   assert.equal(delays.at(-1), 3000, 'A deployment in progress is read again soon after one failed read.');
 });
 
+test('a release read refused while a source change saves keeps the view as last read and announces no error', async t => {
+  const delays: number[] = [], values: (ReleaseReply | null)[] = [], errors: (string | null)[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  let busy = false;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange: value => values.push(value), onError: error => errors.push(error), controller: async () => {
+    if (busy) throw Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true });
+    return { repoPath: '/sources/app', ...view({ current: record('deploying') }) };
+  } });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  busy = true; poller.refresh(); await tick();
+  assert.equal(values.length, 1, 'The Production card keeps the release it read.');
+  assert.deepEqual(errors, [null], 'No failure is announced.');
+  assert.equal(delays.at(-1), 3000, 'The deployment in progress is read again soon.');
+  busy = false; poller.refresh(); await tick();
+  assert.deepEqual([values.length, errors.length], [2, 2]);
+});
+
 test('the gates allow a release only when every stage passed or was released at the scanned commit without a report error', () => {
   const gate = (extra: Partial<StageGate> = {}): StageGate => ({ id: 'gate-1', stageId: 'beta', sha: SHA, status: 'passed', detectedAt: '2026-09-29T12:00:00.000Z', updatedAt: '2026-09-29T12:00:00.000Z', ...extra });
   const gates = (stages: Record<string, StageGate>, production: GateView['production'] = { sha: SHA, status: 'ready' }): GateView => ({ stages, production });
