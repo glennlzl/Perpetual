@@ -184,6 +184,9 @@ test('gh failures return fixed messages, never the CLI output', async () => {
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: failure('', 'ENOENT'), log: LOG }).run }), /GitHub CLI is unavailable/);
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: '{"message":', log: LOG }).run }), /unreadable job list/);
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: failure('HTTP 401: Bad credentials'), log: LOG }).run }), /gh auth login/);
+  // A failed-step log over the read limit is no network problem, however often the repair is tried again.
+  const huge = Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+  await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: JOBS, log: huge }).run }), (error: Error) => error.message === 'Reading the failed log returned more than Perpetual reads.');
 });
 
 test('a rerun posts rerun-failed-jobs for the run, and a refusal names the permission it needs', async () => {

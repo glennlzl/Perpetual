@@ -73,12 +73,13 @@ export function parseGitHubResponse(stdout: string, unreadable: (message: string
 /** Whether a failed conditional request was gh reporting 304: gh exits non-zero on it, with the status line in its output. */
 export const notModified = (error: unknown, etag: string | null) => Boolean(etag) && /^HTTP\/[\d.]+ 304\b/.test(String((error as { stdout?: unknown } | null | undefined)?.stdout || ''));
 
-export type GitHubFailureKind = 'missing' | 'timeout' | 'rate-limit' | 'unauthenticated' | 'not-found' | 'denied' | 'other';
+export type GitHubFailureKind = 'missing' | 'timeout' | 'too-large' | 'rate-limit' | 'unauthenticated' | 'not-found' | 'denied' | 'other';
 /** Why a gh or git command failed, from its exit and its output; the output itself never leaves this function. */
 export function githubFailureKind(error: unknown): GitHubFailureKind {
   const failure = error as (ExecFileException & { stderr?: unknown }) | null | undefined;
   const detail = String(failure?.stderr || failure?.message || '').toLowerCase();
   if (failure?.code === 'ENOENT') return 'missing';
+  if (failure?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'too-large';
   if (failure?.killed || failure?.code === 'ETIMEDOUT') return 'timeout';
   if (/rate limit|secondary rate/.test(detail)) return 'rate-limit';
   if (/http 401|bad credentials|authentication failed|gh auth login|not logged|could not read username|could not read password/.test(detail)) return 'unauthenticated';

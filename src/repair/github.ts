@@ -53,6 +53,7 @@ function commandFailure(error: unknown, operation: string, denied: string, refus
   const kind = githubFailureKind(error), status = githubHttpStatus(error) as keyof Refusals;
   if (kind === 'missing' || kind === 'rate-limit' || kind === 'unauthenticated') return new Error(GITHUB_MESSAGES[kind]);
   if (kind === 'timeout') return new Error(`${operation} timed out. Try again.`);
+  if (kind === 'too-large') return new Error(`${operation} returned more than Perpetual reads.`);
   if (refusals[status]) return Object.assign(new Error(refusals[status]), { refused: true, status });
   if (kind === 'not-found' || kind === 'denied') return Object.assign(new Error(denied), { refused: true });
   return new Error(`${operation} failed. Check your network connection and try again.`);
