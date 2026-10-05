@@ -11,14 +11,21 @@ import type { GitHubSession } from '../src/github-source.ts';
 const SIGNED_IN = (login: string): GitHubSession => ({ available: true, authenticated: true, account: { login, name: null } });
 const NO_SIGN_IN = { isPending: () => false, dispose() {}, start(): never { throw new Error('unused'); }, status(): never { throw new Error('unused'); }, cancel(): never { throw new Error('unused'); } };
 
-/** A controller over a scanned acme/app checkout with a Beta stage; GitHub is the seams given, so no gh runs. */
-async function scanned(t: TestContext, { github = {}, state = () => ({}) }: { github?: ServerOptions['github']; state?: (dir: string) => Record<string, unknown> } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'perpetual-scanned-')), dataDir = join(dir, 'data');
+/**
+ * A controller over a scanned acme/app checkout with a Beta stage; with `managed`, a managed source chosen by that account
+ * and no connection record. GitHub is the seams given, signed in as `developer` by default, so no gh runs.
+ */
+async function scanned(t: TestContext, { github = {}, managed, state = {} }: { github?: ServerOptions['github']; managed?: string; state?: Record<string, unknown> } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-scanned-')), dataDir = join(dir, 'data'), sha = 'a'.repeat(40);
   await mkdir(dataDir);
-  const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: 'a'.repeat(40), branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
+  const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha, branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
   const stages = [['source', 'Source'], ['build', 'Build'], ['beta', 'Beta'], ['production', 'Production']].map(([id, name]) => ({ id, name, kind: id === 'beta' ? 'sandbox' : id, collapsed: false }));
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [dir]: { repoPath: dir, stages } }, ...state(dir) } }));
-  const app = await startServer({ port: 0, repo: dir, dataDir, github: { auth: NO_SIGN_IN, ...github } });
+  const source = managed ? { source: { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha, connectedAccount: managed, savedAt: '2026-09-23T10:00:00.000Z' } } : {};
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [managed ? 'github:acme/app:/' : dir]: { repoPath: dir, stages } }, ...source, ...state } }));
+  const app = await startServer({ port: 0, repo: dir, dataDir, github: {
+    auth: NO_SIGN_IN, runs: { session: async () => SIGNED_IN('developer'), read: async input => ({ repository: String(input.repository), sha: String(input.sha), runs: [] }) },
+    head: async () => ({ status: 304 }), build: async () => ({ status: 'waiting', reason: 'No completed build.' }), status: async () => {}, ...github,
+  } });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
   return { dir, dataDir, app, token };
@@ -257,13 +264,28 @@ test('closing the controller ends a polling page\'s connection with 503, so shut
 
 test('a managed source chosen through the reused CLI session stays with the account that chose it', async t => {
   let login = 'alice';
-  const f = await scanned(t, {
-    github: { runs: { session: async () => SIGNED_IN(login), async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } } },
-    // No connection record: the session was reused, and the source was chosen as alice.
-    state: dir => ({ source: { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha: 'a'.repeat(40), connectedAccount: 'alice', savedAt: '2026-09-23T10:00:00.000Z' } }),
-  });
+  // No connection record: the session was reused, and the source was chosen as alice.
+  const f = await scanned(t, { managed: 'alice', github: { runs: { session: async () => SIGNED_IN(login), async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } } } });
   const runs = async () => { const response = await fetch(`${f.app.url}/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`); return { status: response.status, body: await response.json() }; };
   assert.deepEqual(await runs(), { status: 200, body: { repository: 'acme/app', sha: 'a'.repeat(40), runs: [] } });
   login = 'bob';
   assert.deepEqual(await runs(), { status: 400, body: { error: 'Connect your GitHub account to read workflow runs.' } }, 'Another CLI account is not the connected one.');
+});
+
+test('every change needs the session token, whatever its method', async t => {
+  const f = await scanned(t, { managed: 'developer', state: { githubConnection: { login: 'developer', connectedAt: '2026-09-23T09:00:00.000Z' } } });
+  const mode = async () => (await (await fetch(`${f.app.url}/api/autopilot?${new URLSearchParams({ repoPath: f.dir })}`)).json()).stages.build.mode;
+  const before = await mode(), saved = await readFile(join(f.dataDir, 'state.json'), 'utf8');
+  const body = JSON.stringify({ repoPath: f.dir, stageId: 'build', mode: before === 'merge' ? 'ask' : 'merge', runId: '1', id: 'x', action: 'add-stage', name: 'Gamma', path: f.dir, service: 'stripe', inputs: {} });
+  for (const path of ['/api/autopilot/mode', '/api/autopilot/repair', '/api/autopilot/stop', '/api/pipeline/action', '/api/scan', '/api/twin/inputs', '/api/gate/run', '/api/releases/deploy', '/api/environments/create', '/api/browser/config', '/api/github/disconnect']) {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      for (const token of [undefined, 'wrong-token']) {
+        const response = await fetch(f.app.url + path, { method, headers: { 'Content-Type': 'application/json', ...token ? { 'X-Perpetual-Token': token } : {} }, body });
+        assert.equal(response.status, 403, `${method} ${path}${token ? ' with a wrong token' : ''}`);
+      }
+    }
+  }
+  assert.equal(await mode(), before);
+  assert.equal(await readFile(join(f.dataDir, 'state.json'), 'utf8'), saved);
+  assert.equal((await fetch(f.app.url + '/api/autopilot/mode', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': f.token }, body })).status, 404, 'Autopilot takes its changes as POST.');
 });

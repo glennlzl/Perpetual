@@ -478,7 +478,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
     const origin=req.headers.origin;
     if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || req.headers['sec-fetch-site']==='cross-site')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
-    if(req.method==='POST'&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
+    // Every change needs the page's session token, whatever its method: only a GET reads without it.
+    if(req.method!=='GET'&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
     // A connection still open at shutdown, such as a polling page's, ends with this reply.
     if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
@@ -512,7 +513,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(path==='/api/twin/inputs') {
         if(req.method==='GET')return reply(res,200,{services:await twinInputs.view()} satisfies TwinInputsReply);
         if(req.method!=='PUT')return reply(res,404,{error:'Not found.'});
-        if(req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
         const input=await body(req,16384);
         return reply(res,200,{services:await twinInputs.set(String(input.service),input.inputs)} satisfies TwinInputsReply);
       }
@@ -577,7 +577,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(path==='/api/autopilot'||path.startsWith('/api/autopilot/')) {
         // GET reads the view; a mode, a person's Repair of a failed run at the watched head, and Stop are posted for the Build stage.
         const operation=path.slice('/api/autopilot'.length);
-        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation===''))return reply(res,404,{error:'Autopilot operation not found.'});
+        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/repair'?202:200,await withActiveScan(input.repoPath,async scan=>{
           if(operation==='/mode'){autopilotStage(input.stageId);await repairs.setAutoMerge({enabled:autopilotMode(input.mode)==='merge'});}
