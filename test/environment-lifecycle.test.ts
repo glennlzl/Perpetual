@@ -20,6 +20,8 @@ const unexpected = async () => { throw new Error('Unexpected runtime operation')
 // A runtime with only the calls a test expects; any other call fails as it would without it.
 const only = (calls: Partial<ManagedRuntime>) => calls as ManagedRuntime;
 
+// After-hooks run in the order they are registered, and the fixture's hook closes the manager, which waits for every
+// runtime call: a test registers the hook that ends a blocked call before calling fixture, so a failure cannot hang it.
 async function fixture(t: TestContext, overrides: Partial<ManagedRuntime> = {}, options: Partial<Parameters<typeof createEnvironmentManager>[0]> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-environment-lifecycle-'));
   const usage = createEnvironmentUsage();
@@ -369,12 +371,12 @@ test('owned-target resolution canonicalizes loopback aliases and retains stale o
 
 test('an origin resolves to the twin that holds it over a deleted twin that used the same ports', async t => {
   const release = deferred();
+  t.after(() => release.resolve());
   const { manager } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
     await onUpdate({ sandboxId: environment.id });
     if (environment.stageId === context.stageId) await release.promise;
     return structuredClone(ready);
   } });
-  t.after(() => release.resolve());
   const gamma = { ...context, stageId: 'gamma' };
   await manager.savePlan(gamma, plan);
   const { environment: older } = await manager.create(context);
@@ -461,6 +463,7 @@ test('loading replaces a pre-twin plan with detection and retires a Cua guest un
 
 test('a twin that still runs adds its live logs to the evidence an earlier attempt left, while it prepares and once it is unhealthy', async t => {
   const entered = deferred(), finish = deferred();
+  t.after(() => finish.resolve());
   let output = 'web | starting';
   const { manager } = await fixture(t, {
     prepareEnvironment: async ({ environment, onUpdate }) => {
@@ -472,7 +475,6 @@ test('a twin that still runs adds its live logs to the evidence an earlier attem
     environmentLogs: async () => output,
     environmentHealth: async () => ({ status: 'failed', final: true, error: 'Stopped: web exited (1).' }),
   });
-  t.after(() => finish.resolve());
   const { environment } = await manager.create(context);
   await entered.promise;
   assert.deepEqual(await manager.logs(context, environment.id), { logs: 'attempt 1 | web exited (1)\n\nweb | starting' });
