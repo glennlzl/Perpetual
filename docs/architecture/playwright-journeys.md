@@ -39,7 +39,7 @@ Replaying generated Playwright code removes the model from the run. Authoring th
 5. **Approve.** A person approves exactly the verified draft, seeing the code or its line diff against the approved code. The draft becomes the approved code, naming its four verification runs and check version. Version 3 makes earlier approvals stale while preserving their code and history; a person can reuse, verify and approve the code again without generation. A restart starts none of that work. Code approved without all four runs, as code was before verification existed, loads as a draft, so no gate runs it until it is verified and approved.
 6. **Run.** Gate runs execute approved code only; a person's run may try a current draft while no approved code is current. No model is needed. `journeyResult` still owns the verdict:
    - a reviewed check or final assertion fails → `failed`;
-   - code that signs in without a test account → `blocked` before launch; with a twin service blocked for missing inputs, a journey that does not pass → `blocked`;
+   - code that signs in without a test account → `blocked` before launch; a twin service blocked for missing inputs changes no verdict;
    - an action cannot complete, the deadline passes, the code or milestone coverage does not match its approval, or the journey has no current code → `needs_review`.
 
 ## Consequences

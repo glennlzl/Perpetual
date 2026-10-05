@@ -60,7 +60,7 @@ MilestoneCheck =
 - The process reports facts, never a status or verdict message. Its final event is `{type: 'result', result: {caseId, stopCause, assertions, error?}}`:
   - `stopCause`: `none` (the code ran to its end or to a failed check), `deadline` (the journey's time limit) or `action` (an action, the milestone order or the approved code could not be carried out, with its `error`). The controller adds `exception` for a process that failed.
   - `assertions` are the final assertions `{type, value, passed, resolved?}` checked on the page the journey ended on, or `[]` when that page was never checked.
-  - `blockers` are `[{stepId?, kind: 'account'|'fixture'|'integration'|'permission'|'environment', evidence}]`, at most 10, added by the controller for code that signs in without an account or a twin service blocked for missing inputs; a malformed list is discarded, and the case cannot pass.
+  - `blockers` are `[{stepId?, kind: 'account'|'fixture'|'integration'|'permission'|'environment', evidence}]`, at most 10, added by the controller for code that signs in without an account; a malformed list is discarded, and the case cannot pass.
   - Milestone states are not repeated; the controller has them from `journey-step` events.
 - A cancelled process reports no result. Stop, Skip and the kill timer are controller decisions, and `cancelled` and `skipped` come only from them.
 - One function, `journeyResult` in `src/browser/results.ts`, owns a journey's status and message. It validates the facts against the approved snapshot and combines them with the accepted milestone states. The manager calls it exactly once per journey: for a reported result, for a process its kill timer stopped (with the facts reported before, or `stopCause: 'deadline'`), for a process error (`stopCause: 'exception'`), for a journey settled without a browser (no current code, or code that signs in without an account) and for a journey interrupted by a controller restart.
@@ -70,7 +70,7 @@ MilestoneCheck =
   2. `blocked`: a milestone is `blocked` or a blocker was reported (*Blocked at milestone: title.*, or *Blocked: kind prerequisite unavailable.* without a milestone).
   3. `needs_review`: the stop cause is `deadline` (*Journey exceeded its time limit.*) or `action` (its error, such as *Generate and approve code for this journey.*), a milestone is incomplete, the final assertions were not evaluated, or the case has no reviewed check or final assertion.
   4. `passed`: every milestone completed, every approved final assertion was checked and passed, valid blockers, and at least one check or final assertion.
-- A run whose journey is blocked for a missing twin service and did not pass gets that service as an `integration` blocker, since nothing tells whether the missing service caused the failure.
+- A twin service blocked for missing inputs stays visible on the environment and adds no blocker: the journey keeps its own verdict, since nothing tells whether the missing service caused it.
 - Results carry `engine: 'playwright'`. Results of older agent runs still render, without their agent observations.
 - Error text is presentation, never a signal. Model API keys, `Bearer` tokens and URL queries are scrubbed from free text only; protocol fields (`type`, `status`, `stopCause`, ids, `kind`, `op`, approved assertion `value`) are never rewritten.
 - `blocked` is never counted as passed or failed.
