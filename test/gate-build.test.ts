@@ -19,12 +19,12 @@ async function harness(t: TestContext, { managed = true, dataDir: existing, retr
   const dataDir = existing ?? await mkdtemp(join(tmpdir(), 'perpetual-build-gate-'));
   const state = {
     source: { key: 'github:acme/app:/', branch: 'main', sha: A, repository: managed ? 'acme/app' : null, stages: [{ id: 'beta', name: 'Beta', kind: 'sandbox' }] } as GateSource,
-    head: A, build: { status: 'waiting', reason: 'CI is running.' } as Build, journeys: 1, failPost: false,
+    head: A, build: { status: 'waiting', reason: 'CI is running.' } as Build, journeys: 1, failPost: false, login: 'tester',
     read: null as null | (() => Promise<Build>),
   };
   const work: string[] = [], reads: { repository: string; branch: string | null; sha: string; login: string }[] = [], posts: CommitStatusPost[] = [];
   const github = {
-    connection: async () => ({ repository: state.source.repository || 'acme/app', login: 'tester' }),
+    connection: async () => ({ repository: state.source.repository || 'acme/app', login: state.login }),
     head: async () => ({ status: 200 as const, sha: state.head, etag: null }),
     post: async (input: CommitStatusPost) => { if (state.failPost) throw new Error('Status write unavailable.'); posts.push(input); },
     build: async (input: typeof reads[number]) => { reads.push(input); return state.read ? state.read() : state.build; },
@@ -99,7 +99,9 @@ test('a newer push supersedes a build wait even when the older build read return
   assert.equal(saved.gates.find((gate: { sha: string }) => gate.sha === A).status, 'superseded');
 });
 
-test('a baseline head supersedes an older gate still waiting at the first stage, so it never moves the source back', async t => {
+const saved = async (dataDir: string) => (JSON.parse(await readFile(join(dataDir, 'gates/state.json'), 'utf8')).gates as { sha: string; status: string }[]).map(gate => [gate.sha, gate.status]);
+
+test('a baseline head takes the place of an older gate still waiting at the first stage, so it never moves the source back', async t => {
   const h = await harness(t);
   await h.manager.watch(); // baseline A
   h.state.head = B;
@@ -109,15 +111,52 @@ test('a baseline head supersedes an older gate still waiting at the first stage,
   const main = h.state.source;
   h.state.source = { ...main, branch: 'release' };
   await h.manager.watch(); // the other branch's first head is a baseline
-  h.state.source = main;
+  h.state.source = { ...main, sha: C };
   h.state.head = C;
   h.state.build = { status: 'passed' };
   await h.manager.watch(); // back on main at C, a baseline again; B's Build has passed meanwhile
   await h.manager.idle();
-  assert.deepEqual(h.work, []);
-  const saved = JSON.parse(await readFile(join(h.dataDir, 'gates/state.json'), 'utf8'));
-  assert.deepEqual(saved.gates.map((gate: { sha: string; status: string }) => [gate.sha, gate.status]), [[B, 'superseded']]);
-  assert.equal(h.manager.view().stages.beta, undefined);
+  assert.deepEqual(h.work, [`prepare ${C}`, `rebuild ${C}`, `run ${C}`]);
+  assert.deepEqual(await saved(h.dataDir), [[C, 'passed'], [B, 'superseded']]);
+  assert.deepEqual(h.manager.view().production, { sha: C, status: 'ready' });
+});
+
+test('after a branch round trip a restarted controller runs no older gate before its first poll', async t => {
+  const first = await harness(t, { retryInterval: 60_000 });
+  await first.manager.watch(); // baseline A
+  first.state.head = B;
+  await first.manager.watch(); // push B while its Build runs
+  await first.manager.idle();
+  const main = first.state.source;
+  first.state.source = { ...main, branch: 'release' };
+  await first.manager.watch(); // the saved head is now the release branch's
+  await first.manager.close();
+  // Back on main, now at C, and B's Build has passed while the controller was stopped.
+  const second = await harness(t, { dataDir: first.dataDir });
+  Object.assign(second.state, { source: { ...main, sha: C }, head: C, build: { status: 'passed' } });
+  second.manager.start();
+  await second.manager.idle();
+  assert.deepEqual(second.work, [], 'The gate waits for the poll rather than move the source back to B.');
+  await second.manager.watch(); // the first poll: a baseline for main at C
+  await second.manager.idle();
+  assert.deepEqual(second.work, [`prepare ${C}`, `rebuild ${C}`, `run ${C}`]);
+  assert.deepEqual(await saved(first.dataDir), [[C, 'passed'], [B, 'superseded']]);
+});
+
+test('after the connected account changes, a retry before the next poll never runs an older gate', async t => {
+  const h = await harness(t);
+  await h.manager.watch(); // baseline A
+  h.state.head = B;
+  await h.manager.watch(); // push B while its Build runs: the gate is retried
+  await h.manager.idle();
+  // Another account connects, C is pushed and B's Build passes before the next poll.
+  Object.assign(h.state, { login: 'reviewer', head: C, build: { status: 'passed' } });
+  await until(() => h.reads.filter(read => read.sha === B && read.login === 'reviewer').length >= 2);
+  assert.deepEqual(h.work, [], 'The retries wait for the poll.');
+  await h.manager.watch(); // the new account's first head is a baseline
+  await h.manager.idle();
+  assert.deepEqual(h.work, [`prepare ${C}`, `rebuild ${C}`, `run ${C}`]);
+  assert.deepEqual(await saved(h.dataDir), [[C, 'passed'], [B, 'superseded']]);
 });
 
 test('a source switch during build evidence reading cannot prepare either source from stale evidence', async t => {

@@ -166,7 +166,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     executing = gate;
     try { return await work(gate); } finally { executing = null; abandoned.delete(gate.id); }
   }
-  async function readBuild(current: GateSource, gate: Gate): Promise<BuildVerdict> {
+  // A managed source's verdict names the account that read it.
+  async function readBuild(current: GateSource, gate: Gate): Promise<BuildVerdict & { login?: string }> {
     if (!current.repository || gate.repair) return { status: 'passed' };
     if (!github.build) return { status: 'waiting', reason: 'Build verification is unavailable.' };
     const identity = sourceIdentity(current);
@@ -174,7 +175,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       const connection = await github.connection();
       if (sourceIdentity(active()) !== identity) return { status: 'waiting', reason: CHANGED };
       if (!connection || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return { status: 'waiting', reason: 'Connect GitHub to verify Build.' };
-      return await github.build({ repository: current.repository, branch: gate.branch, sha: gate.sha, login: connection.login });
+      return { ...await github.build({ repository: current.repository, branch: gate.branch, sha: gate.sha, login: connection.login }), login: connection.login };
     } catch (error) { return { status: 'waiting', reason: text(error) }; }
   }
   async function admitBuild(gate: Gate): Promise<boolean> {
@@ -185,6 +186,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     // CI can finish after a source switch, stage removal or newer push. Its result belongs only to this queued commit.
     if (closed || sourceIdentity(active()) !== identity || !PENDING.includes(gate.status)
       || !sandboxes(active()!).some(stage => stage.id === gate.stageId)) return false;
+    // While the saved head is another branch's or another account's, the next poll is a baseline that decides whether
+    // this gate still belongs to the branch head, so the gate waits for it rather than move the source back first.
+    const head = state.heads[current.key];
+    if (build.login && head && (head.branch !== current.branch || head.login !== build.login)) return false;
     if (build.status !== 'passed') {
       const status = build.status === 'blocked' ? 'build-failed' : 'waiting-build';
       if (gate.status !== status || gate.reason !== build.reason) await transition(gate, status, { reason: build.reason });
@@ -348,9 +353,14 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         state.heads[current.key] = { repository: current.repository, branch: current.branch, login, sha: head.sha, etag: head.etag, checkedAt: now() };
         const first = sandboxes(current)[0];
         if (first && known && previous.sha !== head.sha) enqueue(current, first, head.sha, now());
-        // A baseline queues nothing, but a gate still pending at the first stage for another commit, such as one queued
-        // before a branch switch, no longer belongs to the branch head and would move the source back.
-        else if (first && !known) for (const gate of scoped(current)) if (gate.stageId === first.id && gate.sha !== head.sha && PENDING.includes(gate.status)) Object.assign(gate, { status: 'superseded', reason: `Superseded by ${short(head.sha)}.`, updatedAt: now() } satisfies Partial<Gate>);
+        // A baseline queues no gate of its own. A gate still pending at the first stage for another commit, such as one
+        // queued before a branch switch or by another account, no longer belongs to the branch head and would move the
+        // source back: it gives way to the head, which is queued in its place as after a push.
+        else if (first && !known) {
+          const older = scoped(current).filter(gate => gate.stageId === first.id && gate.sha !== head.sha && PENDING.includes(gate.status));
+          for (const gate of older) Object.assign(gate, { status: 'superseded', reason: `Superseded by ${short(head.sha)}.`, updatedAt: now() } satisfies Partial<Gate>);
+          if (older.length) enqueue(current, first, head.sha, now());
+        }
         await persist();
         kick();
       } else if (known && !previous.repository) {
