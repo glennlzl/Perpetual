@@ -147,7 +147,7 @@ Detection alone does not give a new user a working twin: it finds services and a
   - `passed` only when the run passed;
   - `failed` only when a journey failed;
   - everything else needs release, with its reason: blocked or needs-review journeys, skipped journeys, a cancelled run, a run that stopped without a failed journey, no reviewed journeys (nothing is rebuilt), a twin that could not be rebuilt, an application URL that is not the rebuilt twin, and a gate interrupted by a controller restart.
-- **Commit status** `perpetual/<stage>` through the GitHub API, posted only with the connected account, under the stage's current name, a commit run again after a rename included. Every gate whose status changed since it was reported is reported, wherever it is stored; the 50 most recently updated are retried after a failed report:
+- **Commit status** `perpetual/<stage>` through the GitHub API, posted only with the connected account, under the stage's current name, a commit run again after a rename included. Every gate whose status changed since it was reported is reported, wherever it is stored; the 50 most recently updated are retried after a failed report, except a refusal GitHub would repeat (HTTP 403, 404 or 422), which waits for **Run now**, the gate's next status or another connected account:
   - `pending` "Waiting for Build" while waiting for Build, and `failure` "Build did not pass" for a failed Build;
   - `pending` "Running" while rebuilding or running;
   - `success` for passed, `failure` for failed;

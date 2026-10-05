@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, githubFailureKind, isRepository, runGitHub, type GitHubRun } from '../github-cli.ts';
+import { GITHUB_MESSAGES, githubFailureKind, githubHttpStatus, isRepository, runGitHub, type GitHubRun } from '../github-cli.ts';
 import { githubRequest } from '../github-runs.ts';
 import { SHA, type CommitStatus } from './rules.ts';
 
@@ -27,16 +27,20 @@ export async function readBranchHead({ repository: name, branch, etag = null }: 
   return { status: 200, sha: sha.toLowerCase(), etag: response.etag || null };
 }
 
-// The failure's kind comes from github-cli; the words for it are the gate's, and never the raw output.
+// GitHub gives the same answer to the same account for the same commit, so the gate does not send the report again.
+const refused = (message: string) => Object.assign(new Error(message), { refused: true });
+// The failure's kind comes from github-cli; the words for it are the gate's, and never the raw output. A refusal
+// (HTTP 403, 404 or 422) that is not a rate limit is marked `refused`.
 function statusFailure(error: unknown) {
-  const kind = githubFailureKind(error);
+  const kind = githubFailureKind(error), status = githubHttpStatus(error);
   if (kind === 'missing' || kind === 'rate-limit' || kind === 'unauthenticated') return new Error(GITHUB_MESSAGES[kind]);
   if (kind === 'timeout') return new Error('Reporting the commit status timed out.');
-  if (kind === 'not-found' || kind === 'denied') return new Error('GitHub denied the commit status. Check write access to this repository.');
+  if (kind === 'not-found' || kind === 'denied' || status === 403 || status === 404) return refused('GitHub denied the commit status. Check write access to this repository, then run the gate again.');
+  if (status === 422) return refused('GitHub refused the commit status. Check that the commit is on GitHub, then run the gate again.');
   return new Error('Reporting the commit status failed.');
 }
 
-/** Sets a commit status through the signed-in GitHub CLI session. */
+/** Sets a commit status through the signed-in GitHub CLI session; a refusal GitHub would repeat rejects with `refused: true`. */
 export async function postCommitStatus({ repository: name, sha, state, context, description }: CommitStatusPost, { run }: { run?: GitHubRun } = {}) {
   if (typeof sha !== 'string' || !SHA.test(sha) || !STATES.has(state) || !TEXT.test(context || '') || !TEXT.test(description || '')) throw new Error('Invalid commit status.');
   const args = ['api', '--hostname', 'github.com', '--method', 'POST', '-H', 'Accept: application/vnd.github+json',

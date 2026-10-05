@@ -16,6 +16,7 @@ export type BuildVerdict = { status: 'passed' } | { status: 'waiting' | 'blocked
 export interface GateGitHub {
   connection(): Promise<GateConnection | null>;
   head(input: BranchHeadInput): Promise<BranchHead>;
+  /** A refusal GitHub would repeat for the same account and commit, such as HTTP 403, 404 or 422, rejects with `refused: true`. */
   post(status: CommitStatusPost): Promise<void>;
   /** Only Actions build evidence, never the journey's own commit statuses. Missing evidence fails closed. */
   build?(input: BuildInput): Promise<BuildVerdict>;
@@ -58,12 +59,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(v
 const isText = (value: unknown): value is string => typeof value === 'string';
 const optionalText = (value: unknown) => value === undefined || isText(value);
 const isPosted = (value: unknown): value is CommitStatus => isRecord(value) && isText(value.state) && Object.hasOwn(COMMIT_STATES, value.state) && isText(value.context) && isText(value.description);
+const isRefusal = (value: unknown) => isRecord(value) && isPosted(value) && isText(value.login) && isText(value.repository);
 /** A stored gate with every field its commit status and schedule read. */
 const validGate = (value: unknown): value is Gate => isRecord(value)
   && (['id', 'key', 'stageId', 'sha', 'context', 'createdAt', 'detectedAt', 'updatedAt'] as const).every(field => isText(value[field]))
   && (value.branch === null || isText(value.branch)) && isText(value.status) && Object.hasOwn(GATE_STATUSES, value.status)
   && (['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'supersededBy', 'statusError', 'repair', 'snapshot'] as const).every(field => optionalText(value[field]))
-  && (value.posted === undefined || isPosted(value.posted));
+  && (value.posted === undefined || isPosted(value.posted)) && (value.refused === undefined || isRefusal(value.refused));
 const validHead = (value: unknown): value is Head => isRecord(value) && (value.branch === null || isText(value.branch))
   && isText(value.login) && isText(value.sha) && (value.etag === null || isText(value.etag)) && optionalText(value.checkedAt) && optionalText(value.repository);
 const validHeads = (value: unknown): value is GateState['heads'] => isRecord(value) && Object.values(value).every(validHead);
@@ -134,7 +136,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     if (!gate) { gate = { id: randomUUID(), key: current.key, branch: current.branch, stageId: stage.id, sha, context: `perpetual/${stage.name}`, createdAt: time, status: 'queued', detectedAt, updatedAt: time }; state.gates.unshift(gate); }
     // A commit run again reports under the stage's current name, as branch protection names it now.
     gate.context = `perpetual/${stage.name}`;
-    for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'supersededBy'] as const) delete gate[field];
+    // Running a gate again also sends a report GitHub refused again.
+    for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt', 'supersededBy', 'refused'] as const) delete gate[field];
     Object.assign(gate, { status: newer ? 'superseded' : 'queued', detectedAt, updatedAt: time } satisfies Partial<Gate>, newer ? { reason: 'A newer commit reached this stage.', supersededBy: newer.sha } : {});
     if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && PENDING.includes(other.status)) supersede(other, sha, time);
     prune();
@@ -301,6 +304,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (signal?.aborted) stop();
     });
   }
+  // A report GitHub refused for good is not sent again while the gate would report the same status to the same account
+  // and repository, connected or not: another account, another status or a run again sends it.
+  const refusedFor = (gate: Gate, connection: GateConnection | null) => Boolean(gate.refused && sameStatus(gate.refused, commitStatus(gate))
+    && (!connection || gate.refused.login.toLowerCase() === connection.login.toLowerCase() && gate.refused.repository.toLowerCase() === connection.repository.toLowerCase()));
   // Commit statuses follow gate states; a failed report is recorded and retried, never blocking the gate.
   function sync() {
     if (syncing) { syncAgain = true; return syncing; }
@@ -312,11 +319,12 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         const identity = sourceIdentity(current);
         // Every gate whose status changed since it was reported, wherever it is stored: a commit run again or released
         // keeps its place. The most recently updated go first, and only the latest are retried after a failed report.
-        const due = state.gates.filter(gate => gate.key === current.key && commitStatus(gate) && !sameStatus(commitStatus(gate), gate.posted))
-          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, REPORTED);
-        if (!due.length) continue;
+        const changed = state.gates.filter(gate => gate.key === current.key && commitStatus(gate) && !sameStatus(commitStatus(gate), gate.posted));
+        if (!changed.length) continue;
         let connection: GateConnection | null = null;
         try { connection = await github.connection(); } catch { connection = null; }
+        const due = changed.filter(gate => !refusedFor(gate, connection)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, REPORTED);
+        if (!due.length) continue;
         for (const gate of due) {
           // Account verification and every preceding post may outlive a source switch. Leave these reports pending
           // for their own source instead of applying a newly connected repository to the old commits.
@@ -324,10 +332,14 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
           if (connection && current.repository && connection.repository.toLowerCase() !== current.repository.toLowerCase()) break;
           const status = commitStatus(gate);
           // A gate queued again while the connection was read reports nothing.
-          if (!status) continue;
+          if (!status || refusedFor(gate, connection)) continue;
           if (!connection) { gate.statusError = 'Connect GitHub to report commit status.'; continue; }
-          try { await github.post({ repository: connection.repository, sha: gate.sha, ...status }); gate.posted = status; delete gate.statusError; }
-          catch (error) { gate.statusError = text(error); }
+          try { await github.post({ repository: connection.repository, sha: gate.sha, ...status }); gate.posted = status; delete gate.statusError; delete gate.refused; }
+          catch (error) {
+            gate.statusError = text(error);
+            if ((error as { refused?: unknown } | null)?.refused === true) gate.refused = { ...status, login: connection.login, repository: connection.repository };
+            else delete gate.refused;
+          }
         }
         await persist();
       } while (syncAgain && !closed);

@@ -22,6 +22,8 @@ export interface Gate extends GateRef {
   /** The newer commit that superseded this gate, when a commit did. */
   supersededBy?: string;
   posted?: CommitStatus; statusError?: string;
+  /** A report GitHub refused for good, and the account and repository it refused it to. */
+  refused?: CommitStatus & { login: string; repository: string };
 }
 /** What a gate's verdict reads from a finished run's roll-up (src/browser/results.ts). */
 export interface RunRollup { id?: string; status?: string; error?: string | null; results?: readonly { caseId?: string; status?: string; error?: string | null }[] | null }
