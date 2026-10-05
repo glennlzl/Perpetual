@@ -15,6 +15,12 @@ test('missing credentials are classified as configuration, not a code failure',(
   assert.equal(diagnoseFailure('Error: VERCEL_TOKEN is required').category,'configuration');
   assert.equal(diagnoseFailure('ERR_PNPM_OUTDATED_LOCKFILE').category,'dependency');
 });
+test('a failed assertion about a 401 or 403 is the application\'s code, not the run\'s credentials',()=>{
+  for(const log of ["AssertionError: expected '401 Unauthorized' to equal '200 OK'",'FAIL src/auth.test.ts > signs in\n    Expected: "403 Forbidden"\n    Received: "200 OK"'])
+    assert.equal(diagnoseFailure(log).category,'test-regression',log);
+  assert.equal(diagnoseFailure('Error: HTTP 401').category,'configuration','A client refused outside an assertion still needs credentials.');
+  assert.equal(diagnoseFailure("AssertionError: expected 3 to equal 4\nremote: Permission to acme/app.git denied to github-actions[bot].").category,'configuration');
+});
 test('redacts common credential strings before persistence',()=>{
   const input='Authorization: Bearer abc123\nAPI_KEY=abcdef\nhttps://u:pass@example.com';
   const result=redact(input);assert.ok(!result.includes('abc123'));assert.ok(!result.includes('abcdef'));assert.ok(!result.includes('u:pass'));
