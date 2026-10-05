@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type Ref } from 'react';
-import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, RefreshCw } from 'lucide-react';
+import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -77,7 +77,7 @@ function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading
 }
 
 export default function AppSettings({ settings }: { settings: AppSettingsSession }) {
-  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, loading, modelsLoading, modelsError, saving, saved, readError, saveError } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
+  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, loading, modelsLoading, modelsError, saving, saved, readError, saveError, saveWarning } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
   const model = draft?.model ?? savedModel;
   const escalationModel = draft?.escalationModel ?? savedEscalation;
   const apiKey = draft?.apiKey ?? '';
@@ -139,6 +139,7 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
         <footer className="flex items-center justify-end gap-3 py-6">{dirty && <Button type="button" variant="ghost" disabled={saving} onClick={() => { rememberSettingsFocus(); settings.discard(); setShowKey(false); }}>Discard changes</Button>}{saved && <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Check className="size-4" />Saved</span>}{!capabilities ? <Button type="button" variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberSettingsFocus(); void settings.load(); } }}>{loading && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}Try again</Button> : <Button type="submit" disabled={saving || modelsLoading || !(dirty || suggested) || !validModel || (!apiKey.trim() && !hasSavedKey)}>{saving && <LoaderCircle className="motion-safe:animate-spin" />}{saving ? 'Saving…' : 'Save changes'}</Button>}</footer>
       </form>}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      {saveWarning && <p role="status" className="flex items-start gap-1.5 break-words text-sm text-muted-foreground"><TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />{saveWarning}</p>}
     </section>
   </main>;
 }

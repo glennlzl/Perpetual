@@ -92,3 +92,14 @@ test('catalog recovery never replaces an unsaved model or turns it into the save
   assert.equal(settings.getSnapshot().savedModel, 'example/b');
   assert.equal(settings.getSnapshot().modelsError, '');
 });
+
+test('a key saved without OpenRouter\'s answer carries its warning until the next edit', async () => {
+  const warning = 'OpenRouter could not be reached to check this key.';
+  const settings = createAppSettings({ controller: async (path, input) => input ? { ...reply('example/a'), warning } : path.endsWith('/models') ? catalog : reply('example/b') });
+  await settings.load();
+  settings.edit({ model: 'example/a', apiKey: 'fixture-key' });
+  assert.equal(await settings.save(), true);
+  assert.deepEqual([settings.getSnapshot().saved, settings.getSnapshot().saveWarning], [true, warning]);
+  settings.edit({ model: 'example/c' });
+  assert.equal(settings.getSnapshot().saveWarning, '');
+});

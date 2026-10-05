@@ -10,7 +10,7 @@ import {validateReadRequests,readPolicyHash,blockedRequest} from './read-request
 import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
-import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
+import {checkOpenRouterKey,createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
 import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
@@ -648,15 +648,23 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     modelSaving=true;
     try{await save();return await viewModel();}finally{modelSaving=false;resumePreparations();}
   }
-  async function saveModelSettings(input:unknown){
+  // A newly entered key is checked with OpenRouter, which spends nothing: one it refuses is not saved, and one it could
+  // not be asked about is saved with a warning.
+  async function saveModelSettings(input:unknown):Promise<ModelSettingsReply>{
     if(!isRecord(input)||Object.keys(input).some(key=>!['model','apiKey','escalationModel'].includes(key)))throw new Error('Provide an OpenRouter model and API key.');
     if(typeof input.model!=='string'||!input.model.trim())throw new Error('Choose an OpenRouter model.');
-    return updateModel(async()=>{
+    let warning='';
+    const reply=await updateModel(async()=>{
       const {models}=await listModels();
       if(!models.some(model=>model.id===input.model))throw new Error('Choose an available OpenRouter model from the list.');
       if(input.escalationModel!==undefined&&!models.some(model=>model.id===input.escalationModel))throw new Error('Choose an available OpenRouter escalation model from the list.');
-      await modelSettings.saveOpenRouter(input);
+      await modelSettings.saveOpenRouter(input,{async checkKey(apiKey){
+        const answer=await checkOpenRouterKey(apiKey);
+        if(answer==='rejected')throw new Error('OpenRouter did not accept this key.');
+        if(answer==='unknown')warning='OpenRouter could not be reached to check this key.';
+      }});
     });
+    return warning?{...reply,warning}:reply;
   }
   function withInput<T>(context:BrowserStageContext,work:(operation:{scope:string;configuration:BrowserModelConfiguration;signal:AbortSignal;assertCurrent:()=>void})=>Promise<T>,{signal,isCurrent=()=>true}:InputOptions={}):Promise<T>{
     requireIdle(context,{duringRun:true});const scope=scopeId(context),controller=new AbortController();

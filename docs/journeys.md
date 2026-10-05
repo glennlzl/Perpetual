@@ -34,7 +34,7 @@ export PERPETUAL_MODEL_BASE_URL='https://openrouter.ai/api/v1'  # optional
 node src/cli.ts serve --repo /absolute/path/to/your/repo
 ```
 
-`PERPETUAL_MODEL_API_KEY` with `PERPETUAL_MODEL` and `PERPETUAL_MODEL_BASE_URL` selects another OpenAI-compatible endpoint for discovery. Saved settings take precedence over the environment. They are stored in the controller's data directory with mode 0600, and no response returns the key. Settings saves a key only when one is entered: an exported key stays in the environment, so rotating it takes effect, and settings saved without a key use it only with the endpoint it is exported for.
+`PERPETUAL_MODEL_API_KEY` with `PERPETUAL_MODEL` and `PERPETUAL_MODEL_BASE_URL` selects another OpenAI-compatible endpoint for discovery. Saved settings take precedence over the environment. They are stored in the controller's data directory with mode 0600, and no response returns the key. Settings saves a key only when one is entered: an exported key stays in the environment, so rotating it takes effect, and settings saved without a key use it only with the endpoint it is exported for. Before saving an entered key, the controller asks OpenRouter's key endpoint, which spends no credits, whether it accepts the key: a key OpenRouter refuses is not saved (*OpenRouter did not accept this key.*), and a key saved while OpenRouter cannot be reached shows *OpenRouter could not be reached to check this key.*
 
 The model receives the task, bounded source excerpts, requirements and observed page content. Drafting a journey from a description, dictation and code generation need an OpenRouter key and model in Settings, and use OpenRouter credits. Writing code needs a more capable model than exploring; a small model can fail to write valid code.
 
@@ -294,7 +294,7 @@ The main routes are below. Every request is scoped to `repoPath` and a Sandbox `
 | `POST /api/browser/specs/reuse` | `caseId`: takes the stale approved code as the draft, when it still fits the journey. |
 | `POST /api/browser/specs/generate` | `caseId`; `POST /api/browser/specs/generate/cancel` stops it. |
 
-App-wide model settings are not scoped to a stage: `GET` and `POST /api/settings/model` read and save the OpenRouter model and key, and `GET /api/settings/models` lists the eligible models.
+App-wide model settings are not scoped to a stage: `GET` and `POST /api/settings/model` read and save the OpenRouter model and key, and `GET /api/settings/models` lists the eligible models. A `POST` that saved a new key OpenRouter could not be asked about carries a `warning`.
 
 ## Implementation
 

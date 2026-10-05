@@ -8,12 +8,14 @@ export interface SettingsSnapshot {
   savedModel: string; serverModel: string; savedEscalation: string; serverEscalation: string;
   loading: boolean; modelsLoading: boolean; saving: boolean; saved: boolean;
   readError: string; saveError: string; modelsError: string;
+  /** The last save's warning, such as a key saved without OpenRouter's answer, until the next edit or save. */
+  saveWarning: string;
 }
 const message = (failure: unknown) => failure instanceof Error ? failure.message : 'Could not load App Settings.';
 
 /** One Settings session owns confirmed values, edits and requests even while its page is closed. */
 export function createAppSettings({ controller }: { controller: Controller }) {
-  let state: SettingsSnapshot = { capabilities: null, models: [], draft: null, savedModel: '', serverModel: '', savedEscalation: '', serverEscalation: '', loading: true, modelsLoading: false, saving: false, saved: false, readError: '', saveError: '', modelsError: '' };
+  let state: SettingsSnapshot = { capabilities: null, models: [], draft: null, savedModel: '', serverModel: '', savedEscalation: '', serverEscalation: '', loading: true, modelsLoading: false, saving: false, saved: false, readError: '', saveError: '', modelsError: '', saveWarning: '' };
   let catalog: OpenRouterModelView | null = null, reading: Promise<void> | null = null, saving: Promise<boolean> | null = null, writeRevision = 0;
   const listeners = new Set<() => void>();
   const publish = (fields: Partial<SettingsSnapshot>) => { state = { ...state, ...fields }; listeners.forEach(listener => listener()); };
@@ -56,12 +58,12 @@ export function createAppSettings({ controller }: { controller: Controller }) {
     if (!state.capabilities || !state.models.some(item => item.id === model)) return Promise.resolve(false);
     const validEscalation = state.models.some(item => item.id === escalationModel);
     writeRevision++;
-    publish({ saving: true, loading: false, saveError: '', saved: false });
+    publish({ saving: true, loading: false, saveError: '', saveWarning: '', saved: false });
     saving = Promise.resolve().then(async () => {
       try {
-        const { capabilities } = await controller('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }) as ModelSettingsReply;
+        const { capabilities, warning } = await controller('/api/settings/model', { model, ...(validEscalation ? { escalationModel } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }) as ModelSettingsReply;
         const unchanged = state.draft === submitted;
-        publish({ capabilities, ...choices(capabilities), draft: unchanged ? null : state.draft, saved: unchanged });
+        publish({ capabilities, ...choices(capabilities), draft: unchanged ? null : state.draft, saved: unchanged, saveWarning: typeof warning === 'string' ? warning : '' });
         return true;
       } catch (failure) { publish({ saveError: message(failure) }); return false; }
       finally { saving = null; publish({ saving: false }); }
@@ -73,8 +75,8 @@ export function createAppSettings({ controller }: { controller: Controller }) {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     load: () => read(false),
     reloadModels: () => read(true),
-    edit(fields: Partial<SettingsDraft>) { publish({ draft: { ...values(), ...fields }, saved: false }); },
-    discard() { publish({ draft: null, saved: false, saveError: '' }); },
+    edit(fields: Partial<SettingsDraft>) { publish({ draft: { ...values(), ...fields }, saved: false, saveWarning: '' }); },
+    discard() { publish({ draft: null, saved: false, saveError: '', saveWarning: '' }); },
     save,
   };
 }

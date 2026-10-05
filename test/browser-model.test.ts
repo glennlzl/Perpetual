@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,stat,readFile,rm,writeFile} from 'node:fs/promises';
+import {access,mkdtemp,stat,readFile,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createBrowserModelSettings} from '../src/browser/model.ts';
-import {createOpenRouterModelCatalog} from '../src/browser/openrouter-models.ts';
+import {checkOpenRouterKey,createOpenRouterModelCatalog} from '../src/browser/openrouter-models.ts';
+import {createBrowserManager} from '../src/browser/manager.ts';
 
 test('OpenRouter key is persisted privately, omitted from view, and retained during model changes',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-model-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
@@ -171,4 +172,46 @@ test('journey code generation enables medium reasoning only when the catalog exp
   assert.equal(calls,1);
   t.mock.method(globalThis,'fetch',async()=>{throw new Error('Unavailable');});
   assert.equal(await createOpenRouterModelCatalog().generationReasoning('vendor/medium'),undefined);
+});
+
+test('OpenRouter answers whether it accepts a key, and anything else leaves it unknown',async t=>{
+  const requests:{url:string;authorization:string|null;redirect?:RequestRedirect}[]=[];
+  let reply:()=>Response|Promise<Response>=()=>Response.json({data:{label:'fixture'}});
+  t.mock.method(globalThis,'fetch',async(url:string|URL,options:RequestInit={})=>{requests.push({url:String(url),authorization:new Headers(options.headers).get('Authorization'),redirect:options.redirect});return reply();});
+  assert.equal(await checkOpenRouterKey('sk-or-v1-fixture-only'),'accepted');
+  // The key goes only to the key endpoint, which spends no credits, and never on through a redirect.
+  assert.deepEqual(requests,[{url:'https://openrouter.ai/api/v1/key',authorization:'Bearer sk-or-v1-fixture-only',redirect:'error'}]);
+  for(const status of [401,403]){reply=()=>Response.json({error:{message:'User not found.',code:status}},{status});assert.equal(await checkOpenRouterKey('sk-or-v1-fixture-only'),'rejected',String(status));}
+  for(const status of [404,429,500,503]){reply=()=>new Response('',{status});assert.equal(await checkOpenRouterKey('sk-or-v1-fixture-only'),'unknown',String(status));}
+  reply=()=>{throw new TypeError('fetch failed');};
+  assert.equal(await checkOpenRouterKey('sk-or-v1-fixture-only'),'unknown');
+});
+
+test('Settings refuses a new key OpenRouter does not accept, and saves one it could not check with a warning',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-openrouter-key-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  let answer:'accepted'|'rejected'|'offline'='rejected';const checked:string[]=[];
+  t.mock.method(globalThis,'fetch',async(url:string|URL,options:RequestInit={})=>{
+    if(String(url).endsWith('/models'))return Response.json({data:[{id:'openai/gpt-6-luna',name:'Luna',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]});
+    checked.push(new Headers(options.headers).get('Authorization')!);
+    if(answer==='offline')throw new TypeError('fetch failed');
+    return answer==='accepted'?Response.json({data:{label:'fixture'}}):Response.json({error:{message:'User not found.',code:401}},{status:401});
+  });
+  // A stub runtime: saving settings starts no worker.
+  const manager=await createBrowserManager({dataDir,runtime:{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('No worker starts.');}}});
+  t.after(()=>manager.close());
+  const saved=async()=>JSON.parse(await readFile(join(dataDir,'browser-model.json'),'utf8')).apiKey;
+  await assert.rejects(manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-refused-fixture'}),{message:'OpenRouter did not accept this key.'});
+  await assert.rejects(access(join(dataDir,'browser-model.json')),'A refused key is not saved.');
+  answer='offline';
+  const unchecked=await manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-unchecked-fixture'});
+  assert.deepEqual([unchecked.warning,unchecked.capabilities.keyConfigured,await saved()],['OpenRouter could not be reached to check this key.',true,'sk-or-v1-unchecked-fixture']);
+  answer='accepted';
+  const accepted=await manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-accepted-fixture'});
+  assert.equal(Object.hasOwn(accepted,'warning'),false);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
+  assert.deepEqual(checked,['Bearer sk-or-v1-refused-fixture','Bearer sk-or-v1-unchecked-fixture','Bearer sk-or-v1-accepted-fixture']);
+  // Choosing a model alone asks nothing; a refused key never replaces the saved one.
+  await manager.saveModelSettings({model:'openai/gpt-6-luna'});
+  answer='rejected';
+  await assert.rejects(manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-other-fixture'}),{message:'OpenRouter did not accept this key.'});
+  assert.equal(checked.length,4);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
 });
