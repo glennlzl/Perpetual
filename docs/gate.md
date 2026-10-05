@@ -94,7 +94,7 @@ A status appears in GitHub's list of checks only after it has been reported once
 
 ## Interface
 
-The Sandbox card's Badge shows the gate state (`Queued`, `Running`, `Passed`, `Failed`, `Needs release`, `Released`) with the short commit, and its tooltip gives the reason or a status report error. The card footer offers **Run now**, and **Release** opens a shadcn Alert Dialog for a gate that needs release. When a gate moves the managed source, the page reloads the scan and keeps the test workspace and its drafts.
+The Sandbox card's Badge shows the gate state (`Waiting for Build`, `Build failed`, `Queued`, `Running`, `Passed`, `Failed`, `Needs release`, `Released`) with the short commit, and its tooltip gives the reason or a status report error. The card footer offers **Run now**, and **Release** opens a shadcn Alert Dialog for a gate that needs release. When a gate moves the managed source, the page reloads the scan and keeps the test workspace and its drafts.
 
 ## API
 

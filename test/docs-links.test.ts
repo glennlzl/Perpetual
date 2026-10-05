@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, readdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GATE_LABELS } from '../client/src/lib/stage-gate.ts';
 
 // Current documentation names files the repository has. Dated plans and specs under docs/superpowers record history
 // and keep the paths of their day; a current document marks such a path as history in words, not as a live link.
@@ -28,4 +29,11 @@ test('current documents link only to files the repository has, and name no retir
   assert.deepEqual(missing, []);
   // The retired standalone icon helper is not described as kept.
   assert.doesNotMatch(await readFile(join(root, 'docs/ASSETS.md'), 'utf8'), /public\/icons\.js|\/icons\.js/);
+});
+
+test('the gate documents name every gate Badge the pipeline shows, Build admission included', async () => {
+  for (const file of ['docs/gate.md', 'docs/architecture/twins-and-gate.md', 'docs/pipeline-ui.md']) {
+    const text = await readFile(join(root, file), 'utf8');
+    assert.deepEqual([...new Set(Object.values(GATE_LABELS))].filter(label => !text.includes(`\`${label}\``)), [], file);
+  }
 });
