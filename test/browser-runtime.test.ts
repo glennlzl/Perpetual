@@ -46,6 +46,17 @@ test('runtime capability preflight detects missing browser and is cached without
   await writeFile(runner,'process.exit(1);');assert.equal((await runtime.capabilities()).runtimeInstalled,true);
 });
 
+test('the discovery worker finds Chromium where it was installed and reaches its model through the configured proxy, and nothing else',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-environment-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const runner=join(directory,'runner.mjs'),names=['PLAYWRIGHT_BROWSERS_PATH','HTTPS_PROXY','HTTP_PROXY','NO_PROXY','UNRELATED_SECRET'];
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>console.log(JSON.stringify({type:'status',runtimeInstalled:true,browserInstalled:Boolean(process.env.PLAYWRIGHT_BROWSERS_PATH),environment:Object.fromEntries(${JSON.stringify(names)}.map(name=>[name,process.env[name]??null]))})));`);
+  const env={PERPETUAL_MODEL_API_KEY:'fixture-only',PERPETUAL_MODEL:'fixture-chat',PLAYWRIGHT_BROWSERS_PATH:join(directory,'browsers'),HTTPS_PROXY:'http://proxy.example.test:3128',HTTP_PROXY:'http://proxy.example.test:3128',NO_PROXY:'localhost,127.0.0.1',UNRELATED_SECRET:'not-for-the-worker'};
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env}),events:WorkerEvent[]=[];
+  await runtime.start({mode:'preflight'},event=>events.push(event)).promise;
+  assert.deepEqual(events[0].environment,{PLAYWRIGHT_BROWSERS_PATH:env.PLAYWRIGHT_BROWSERS_PATH,HTTPS_PROXY:env.HTTPS_PROXY,HTTP_PROXY:env.HTTP_PROXY,NO_PROXY:env.NO_PROXY,UNRELATED_SECRET:null});
+  assert.equal((await runtime.capabilities()).browserInstalled,true,'The preflight looks where Chromium was installed.');
+});
+
 test('forced termination reports that browser cleanup could not be confirmed',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-force-stop-'));t.after(()=>rm(directory,{recursive:true,force:true}));
   const runner=join(directory,'runner.mjs');await writeFile(runner,`process.on('SIGTERM',()=>{});console.log(JSON.stringify({type:'status',status:'ready'}));setInterval(()=>{},1000);`);
