@@ -50,7 +50,7 @@ function validateState(state: unknown) {
 // This workflow is the owner of accepted deletion intent. Callers confirm a
 // Sandbox stage once; losing its browser page does not lose the cleanup work.
 export async function createStageRemovalManager({ dataDir, usage, environments, browser, removeStage }: {
-  dataDir: string; usage: EnvironmentUsage; environments: Pick<EnvironmentManager, 'summaries' | 'destroy' | 'awaitIdle'>;
+  dataDir: string; usage: EnvironmentUsage; environments: Pick<EnvironmentManager, 'summaries' | 'destroy' | 'awaitIdle' | 'forget'>;
   browser: { isActive(context: StageRef): boolean }; removeStage: (context: StageRef) => Promise<unknown>;
 }) {
   const root = await privateDirectory(resolve(dataDir, 'stage-removals'), 'Stage removal storage must not be a symbolic link.', { resolveAliases: false });
@@ -129,6 +129,8 @@ export async function createStageRemovalManager({ dataDir, usage, environments, 
         Object.assign(record, { status: 'completed', completedAt: now(), updatedAt: now() });
         await persist();
         release(record);
+        // The stage's twin config, the scan it was detected from and its draft go with it; the next start retries.
+        await environments.forget([record.context]).catch(() => {});
       } catch (error) {
         Object.assign(record, { status: 'failed', error: failure(error), updatedAt: now() });
         delete record.currentEnvironmentId;
@@ -202,6 +204,10 @@ export async function createStageRemovalManager({ dataDir, usage, environments, 
     catch (error) { Object.assign(record, { status: 'failed', error: failure(error), updatedAt: now() }); }
   }
   await persist();
+  // A removed stage keeps no twin config, scan or draft: this start drops any its completion could not, or an earlier
+  // version left.
+  const removed = state.removals.filter(record => record.status === 'completed').map(record => record.context);
+  if (removed.length) await environments.forget(removed).catch(() => {});
   for (const record of state.removals) if (['queued', 'removing'].includes(record.status)) launch(record);
   return manager;
 }

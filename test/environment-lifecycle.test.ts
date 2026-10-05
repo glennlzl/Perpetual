@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
-import { createEnvironmentUsage, holdsResources } from '../src/environments/usage.ts';
+import { createEnvironmentUsage, holdsResources, scopeId } from '../src/environments/usage.ts';
 import type { EnvironmentManager, EnvironmentRecord, ManagedRuntime } from '../src/environments/manager.ts';
 import type { EnvironmentUsage } from '../src/environments/usage.ts';
 
@@ -354,6 +354,55 @@ test('environments without twin ownership preserve their application URLs', asyn
   const { manager } = await fixture(t, { prepareEnvironment: async () => structuredClone(ready) });
   const environment = await createReady(manager);
   assert.equal(environment.apps[0].url, ready.apps[0].url);
+});
+
+test('a stage keeps the records of its newest ten twins that are gone, and one a stage removal still names', async t => {
+  let fail = false;
+  const { manager, usage, dataDir } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    if (fail) throw new Error('The app did not start.');
+    return structuredClone(ready);
+  } });
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const { environment: other } = await manager.create(gamma);
+  assert.equal((await manager.awaitIdle(other.id)).status, 'ready');
+  await manager.destroy(gamma, other.id);
+  assert.equal((await manager.awaitIdle(other.id)).status, 'destroyed');
+  // Each creation deletes the stage's twin before it: twelve leave eleven deleted twins, and the oldest record goes.
+  const ids: string[] = [];
+  for (let index = 0; index < 12; index += 1) ids.push((await createReady(manager)).id);
+  const beta = (records: { id: string; stageId: string }[]) => records.filter(item => item.stageId === 'beta').map(item => item.id).sort();
+  assert.deepEqual(beta(manager.summaries(context.key)), [...ids.slice(1)].sort());
+  const saved = async () => JSON.parse(await readFile(join(dataDir, 'environments/state.json'), 'utf8')).environments as { id: string; stageId: string }[];
+  assert.deepEqual(beta(await saved()), [...ids.slice(1)].sort());
+  assert.ok(manager.summaries(context.key).some(item => item.id === other.id), 'Another stage keeps its own.');
+  // A record a stage removal names stays while the removal holds it.
+  const token = usage.beginRemoval(context, [ids[11], ids[1]]);
+  await manager.destroy(context, ids[11], { removalToken: token });
+  assert.equal((await manager.awaitIdle(ids[11])).status, 'destroyed');
+  assert.deepEqual(beta(manager.summaries(context.key)), [...ids.slice(1)].sort());
+  usage.endRemoval(token);
+  // A failed creation's twin is gone too, once it is cleaned up: the two oldest go, and its record is the newest.
+  fail = true;
+  const { environment: failed } = await manager.create(context);
+  assert.equal((await manager.awaitIdle(failed.id)).status, 'failed');
+  assert.deepEqual(beta(await saved()), [...ids.slice(3), failed.id].sort());
+});
+
+test('a removed stage’s twin config, the scan it was detected from and its draft go, and other stages keep theirs', async t => {
+  const { manager, dataDir } = await fixture(t);
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  await manager.close();
+  // Beta's config is still detected, and its last generation failed.
+  const file = join(dataDir, 'environments/state.json'), state = JSON.parse(await readFile(file, 'utf8')), beta = scopeId(context);
+  Object.assign(state, { plans: { ...state.plans, [beta]: plan }, detected: { [beta]: 'scan' }, drafts: { [beta]: { text: '{}', feedback: '# Attempt 4 of 4' } } });
+  await writeFile(file, JSON.stringify(state));
+  const restarted = await createEnvironmentManager({ dataDir, runtime: only({}) });
+  try { await restarted.forget([context]); } finally { await restarted.close(); }
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual([Object.keys(saved.plans), saved.detected, saved.drafts], [[scopeId(gamma)], {}, {}]);
 });
 
 test('owned-target resolution canonicalizes loopback aliases and retains stale ownership after deletion', async t => {
