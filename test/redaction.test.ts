@@ -67,6 +67,15 @@ test('hide replaces known values longest first, honours a marker and a minimum l
   assert.equal(hide([])(12), '12');
 });
 
+test('URI diagnostics hide complete supplied credentials before redacting an embedded token shape',()=>{
+  const secret='private-prefix/ghp_fixtureToken/private-suffix';
+  for(const value of [secret,encodeURIComponent(secret),encodeURIComponent(encodeURIComponent(secret))])assert.equal(redact(`https://app.test/${value}`,{decodeUri:true,secrets:[secret]}),'https://app.test/[REDACTED]');
+});
+
+test('URI diagnostics also hide a supplied credential whose literal escapes decode differently',()=>{
+  for(const secret of ['private%21','private%2521','prefix%20ghp_fixtureToken'])for(const value of [secret,encodeURIComponent(secret),encodeURIComponent(encodeURIComponent(secret))])assert.equal(redact(`https://app.test/${value}`,{decodeUri:true,secrets:[secret]}),'https://app.test/[REDACTED]');
+});
+
 test('source observations can hide supplied multiline values without moving the following lines', () => {
   const key = 'fixture first line\nfixture second line\n';
   const source = `before\n${key}after\n`;

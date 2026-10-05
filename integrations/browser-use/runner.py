@@ -976,8 +976,10 @@ def main():
     configure_private_runtime()
     os.umask(0o077)
     try:
-        data = sys.stdin.buffer.read(512_001)
-        if len(data) > 512_000:
+        # A maximum reviewed policy and the bounded source context share this transport.
+        limit = 2 * 1024 * 1024
+        data = sys.stdin.buffer.read(limit + 1)
+        if len(data) > limit:
             raise InputError("Invalid request size.")
         payload = validate_payload(json.loads(data))
         asyncio.run(main_async(payload))

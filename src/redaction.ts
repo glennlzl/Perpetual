@@ -53,8 +53,12 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
  * values after credential names and Authorization alone, for text formatted from values already redacted one
  * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced.
  */
-export function redact(input: unknown = '', { decodeUri = false, names = true }: { decodeUri?: boolean; names?: boolean } = {}): string {
-  let text = (decodeUri ? decodedUri(String(input)) : String(input))
+export function redact(input: unknown = '', { decodeUri = false, names = true, secrets = [] }: { decodeUri?: boolean; names?: boolean; secrets?: Iterable<unknown> } = {}): string {
+  // A shaped substring may be only part of a supplied credential. Hide that whole value first,
+  // after optional URI decoding, so shape replacements cannot leave its prefix or suffix behind.
+  const values = [...secrets], known = hide(decodeUri ? [...values, ...values.filter((value): value is string => typeof value === 'string').map(decodedUri)] : values);
+  const supplied = known(input);
+  let text = (decodeUri ? known(decodedUri(supplied)) : supplied)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block));
   if (names) text = text.replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`);
@@ -71,6 +75,12 @@ export function redact(input: unknown = '', { decodeUri = false, names = true }:
 
 /** Whether text ends inside a private key or certificate block, which the next chunk of the same stream continues. */
 export const openBlock = (text: string) => [...String(text).matchAll(PEM)].some(([block]) => !block.includes('-----END '));
+
+/** Diagnostic URI text is opaque if bounded decoding leaves escapes another boundary could reveal. */
+export function redactUri(input: unknown, secrets: Iterable<unknown> = []): string {
+  const text = redact(input, { decodeUri: true, secrets });
+  return /%[a-f\d]{2}/i.test(text) ? REDACTED : text;
+}
 
 /**
  * Whether text holds a credential as a literal value: a known token shape, a URL with a password, or a credential
