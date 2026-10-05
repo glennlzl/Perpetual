@@ -160,7 +160,8 @@ function NewStageDialog({ dialog, pipeline, onAction, onClose, busy }: { dialog:
 function DialogForm({ dialog, scan, onClose, onSourceSave, busy, setPending }: { dialog: PipelineDialog; scan: Scan | null; onClose: () => void; onSourceSave?: (selection: SourceSelection) => Promise<unknown>; busy: boolean; setPending: (pending: boolean) => void }) {
   const node = scan?.nodes?.find(item => item.id === dialog.nodeId);
   const { type } = dialog;
-  const provider = type === 'source' ? 'GitHub' : node?.provider;
+  // Source shows the scanned repository's mark: GitHub only for a GitHub remote, else a plain repository.
+  const provider = type === 'source' ? scan?.nodes?.find(item => item.kind === 'repository')?.provider : node?.provider;
   const active = useRef(true);
   const sourceSettings = useRef<SourceSettingsHandle>(null);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);

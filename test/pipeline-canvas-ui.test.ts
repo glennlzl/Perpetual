@@ -266,3 +266,21 @@ test('a view that failed for one stage does not stand in for the next stage open
   await expect(sheet.getByRole('tab', { name: 'Integration tests', exact: true })).toBeVisible();
   await expect(sheet.getByText('Could not load this view.', { exact: true })).toHaveCount(0);
 });
+
+test('the Source sheet shows the GitHub mark only for a repository with a GitHub remote', { timeout: 60000 }, async t => {
+  let provider = 'Git';
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, nodes: [{ id: 'repository', label: 'app', kind: 'repository', provider }], delivery: { source: [], build: [], production: [] } } } };
+    if (path === '/api/github/connection') return { json: { available: true, authenticated: false, account: null, connected: false, source: null, localCheckout: null } };
+  });
+  for (const [scanned, mark] of [['Git', null], ['GitHub', 'GitHub']] as const) {
+    provider = scanned;
+    await open();
+    await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+    const header = page.locator('.pipeline-inspector [data-slot="sheet-header"]');
+    await expect(header.getByRole('heading', { name: 'app', exact: true })).toBeVisible();
+    if (mark) await expect(header.locator('img')).toHaveAttribute('alt', mark);
+    else await expect(header.locator('img')).toHaveCount(0);
+  }
+  assert.deepEqual(pageErrors, []);
+});
