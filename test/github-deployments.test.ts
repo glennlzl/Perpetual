@@ -81,6 +81,20 @@ test('reads current-commit deployments with each status, once per settled record
   assert.equal(settled.deployments[0].state, 'success');
 });
 
+test('statuses of many deployments are read a few at a time, and each is still read', async () => {
+  let running = 0, most = 0;
+  const reader = createGitHubDeploymentsReader({ request: async endpoint => {
+    if (!endpoint.includes('/statuses')) return { status: 200, data: Array.from({ length: 20 }, (_, index) => deployment(index + 1)) };
+    most = Math.max(most, ++running);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    running--;
+    return { status: 200, data: [status('in_progress')] };
+  } });
+  const result = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.equal(result.deployments.filter(record => record.state === 'in_progress').length, 20);
+  assert.ok(most > 1 && most <= 6, `${most} status reads at once`);
+});
+
 test('conditional requests reuse the cached body on 304', async () => {
   let version = 1;
   const { calls, request } = recorder([

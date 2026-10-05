@@ -57,6 +57,20 @@ test('matrix jobs are read completely for the exact run attempt', async () => {
   assert.ok(seen.some(endpoint => endpoint.includes('/attempts/2/jobs?')));
 });
 
+test('jobs of many runs are read a few at a time, and each is still read', async () => {
+  let running = 0, most = 0;
+  const reader = createGitHubRunsReader({ request: async endpoint => {
+    if (!endpoint.includes('/jobs')) return { status: 200, data: runsPage(Array.from({ length: 20 }, (_, index) => workflowRun(index + 1, { workflow_id: index + 1, status: 'in_progress', conclusion: null }))) };
+    most = Math.max(most, ++running);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    running--;
+    return { status: 200, data: jobsPage([workflowJob(Number(/runs\/(\d+)/.exec(endpoint)![1]) * 100, 1)]) };
+  } });
+  const result = await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.equal(result.runs.filter(run => run.jobs?.length === 1).length, 20);
+  assert.ok(most > 1 && most <= 6, `${most} job reads at once`);
+});
+
 test('an incomplete jobs response remains unavailable instead of an empty successful list', async () => {
   const reader = createGitHubRunsReader({ request: async endpoint => ({ status: 200, data: endpoint.includes('/jobs') ? { total_count: 2, jobs: [workflowJob(1, 11)] } : runsPage([workflowRun(11)]) }) });
   assert.equal((await reader.read({ repository: REPO, sha: SHA, login: LOGIN })).runs[0].jobs, null);

@@ -1,5 +1,5 @@
 import { SHA, isRepository } from './github-cli.ts';
-import { failure, githubRequest, remember, type GitHubResponse } from './github-runs.ts';
+import { eachBounded, failure, githubRequest, remember, type GitHubResponse } from './github-runs.ts';
 import { getGitHubSession, type GitHubSession } from './github-source.ts';
 
 // GitHub JSON is untrusted: every field is checked below before it enters a record.
@@ -74,7 +74,7 @@ export function createGitHubDeploymentsReader({ request = (endpoint, etag) => gi
   async function load(login: string, repository: string, sha: string): Promise<CommitDeployments> {
     const deployments = normalizeDeployments(await conditional(login, `repos/${repository}/deployments?sha=${sha}&per_page=50`), sha);
     // A pending deployment's status is re-read; a settled one is read once per update.
-    await Promise.all(deployments.map(async deployment => {
+    await eachBounded(deployments, async deployment => {
       const key = `${login}:${repository}:${deployment.id}:${deployment.updatedAt}`, known = settled.get(key);
       if (known) { Object.assign(deployment, known); return; }
       let status: DeploymentStatus;
@@ -82,7 +82,7 @@ export function createGitHubDeploymentsReader({ request = (endpoint, etag) => gi
       catch { return; }
       Object.assign(deployment, status);
       if (status.state && FINAL.has(status.state)) remember(settled, key, status);
-    }));
+    });
     return { repository, sha, deployments };
   }
   return {

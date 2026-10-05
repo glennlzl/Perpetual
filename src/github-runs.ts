@@ -25,6 +25,12 @@ const state = (item: GitHubJson): RunState => ({ status: known(STATUSES, item?.s
 /** A GitHub read that failed upstream, answered as 502; shared with the deployments reader. */
 export const failure = (message: string) => Object.assign(new Error(message), { statusCode: 502 });
 
+/** Runs `work` on each item, `limit` at a time: each read is its own gh process, and a commit can have dozens of runs. */
+export async function eachBounded<T>(items: readonly T[], work: (item: T) => Promise<void>, limit = 6) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => { while (next < items.length) await work(items[next++]); }));
+}
+
 /** Keeps the newest `limit` entries of a cache map, evicting the oldest. */
 export function remember<K, V>(map: Map<K, V>, key: K, value: V, limit = 200) {
   map.delete(key); map.set(key, value);
@@ -120,13 +126,13 @@ export function createGitHubRunsReader({ request = githubRequest, session = getG
     }
     const runs = normalizeWorkflowRuns({ workflow_runs: await pages(`repos/${repository}/actions/runs?head_sha=${sha}&per_page=50`, 'workflow_runs', 50) }, sha);
     // Jobs of queued or running runs are re-read; a completed attempt is read once.
-    await Promise.all(runs.map(async run => {
+    await eachBounded(runs, async run => {
       const key = `${login}:${repository}:${run.id}:${run.attempt}:${run.updatedAt}`;
       if (run.status === 'completed' && finished.has(key)) { run.jobs = finished.get(key)!; return; }
       try { run.jobs = (await pages(`repos/${repository}/actions/runs/${run.id}/attempts/${run.attempt}/jobs?per_page=100`, 'jobs', 100)).flatMap(job => normalizeWorkflowJobs({ jobs: [job] })); }
       catch { run.jobs = null; return; }
       if (run.status === 'completed') remember(finished, key, run.jobs);
-    }));
+    });
     return { repository, sha, runs };
   }
   return {
