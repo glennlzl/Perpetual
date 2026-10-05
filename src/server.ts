@@ -318,8 +318,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return await withSourceHeld(requireSourceChangeIdle,async()=>{
       // The account is verified through the reader the watcher and gates read GitHub with.
       await requireGitHub(await githubRuns.session());
-      await (github.update??updateGitHubSource)({source,dataDir,sha});
-      const scan=await scanRepository(source.scanPath),next={...source,sha:scan.repo.sha,savedAt:new Date().toISOString()};
+      const moved=await (github.update??updateGitHubSource)({source,dataDir,sha});
+      // Only a scan of the commit the copy moved to, on its branch, becomes the source: one whose git gave no answer never does.
+      const scan=await scanRepository(source.scanPath);
+      if(scan.repo.sha!==moved.sha||scan.repo.branch!==source.branch)throw new Error('Could not read the repository\'s branch and commit. Try again.');
+      const next={...source,sha:moved.sha,savedAt:new Date().toISOString()};
       await save(current=>({state:{...current,scan,source:next,providers:[]},commit(){state.scan=scan;state.source=next;state.providers=[];}}));
     });
   }
