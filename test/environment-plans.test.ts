@@ -84,6 +84,19 @@ test('detection proposes apps from the scan and services from paths, manifests a
   assert.deepEqual(validateTwinConfig(config).apps.service.env, {}, 'A detected config is a valid twin config.');
 });
 
+test('test, docs and tooling folders are not service evidence, so an example project never stands in for the product’s', async t => {
+  const { repoPath } = await fixture(t, {
+    'package.json': manifest('web', { next: '1.0.0', '@supabase/supabase-js': '2.0.0' }, { dev: 'next dev' }),
+    'supabase/config.toml': 'project_id = "acme"\n',
+    'examples/demo/supabase/config.toml': 'project_id = "demo"\n',
+    'examples/demo/.env.example': 'SMTP_HOST=mail.example\n',
+    'test/fixtures/sample/package.json': manifest('sample', { mongoose: '8.0.0', ioredis: '5.0.0', stripe: '17.0.0' }),
+    'docs/snippets/package.json': manifest('snippets', { nodemailer: '6.0.0' }),
+    'src/billing.test.ts': 'import Stripe from "npm:stripe@17";\n',
+  });
+  assert.deepEqual((await detect(repoPath)).services, { supabase: { directory: 'supabase' } });
+});
+
 test('Deno modules and import maps name their packages in specifiers, which detection reads like dependencies', async t => {
   const { repoPath } = await fixture(t, {
     'supabase/config.toml': 'project_id = "fixture"\n',

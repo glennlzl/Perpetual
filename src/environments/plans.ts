@@ -26,6 +26,13 @@ export function snapshotKeeps(path: string) {
   return keptFolders(path) && !SKIP.has(name) && !PRIVATE.test(name) && !(PRIVATE_NAME.test(name) && !SOURCE_MODULE.test(name));
 }
 
+// Tests read variables of their own; docs' code is never run.
+export const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
+export const DOCS = /(?:^|\/)docs\//i;
+// Tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/ holds
+// runtime code whatever its folders are called.
+export const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
+
 // Detection evidence: dependency manifests, and only the variable names of example env files.
 export const ENV_EXAMPLE = /^\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/i;
 export const REQUIREMENTS = /^requirements(?:[.-][\w.-]+)?\.txt$/i;
@@ -175,11 +182,19 @@ async function repositoryApps(root: string, scan: DetectionScan): Promise<{ apps
 /**
  * The repository's detection evidence, as detectTwinConfig reads it, and the twin config it proposes: apps from the
  * scanned web packages, and services from file paths, manifest dependency names, module import specifiers and the
- * variable names (never values) of example env files.
+ * variable names (never values) of example env files. Tests, docs and tooling such as examples and fixtures, as the
+ * evidence's roles class them (./evidence.ts), are not what the product runs, so their files are not evidence.
  */
 export async function repositoryDetection(scan: DetectionScan): Promise<{ evidence: DetectionEvidence; config: DetectedConfig }> {
-  const root = await realpath(scan.repo.path);
-  const { files } = await repositoryWalk(root), packages = new Set<string>(), env = new Set<string>();
+  const root = await realpath(scan.repo.path), scanned = new Set((scan.services ?? []).map(service => service.path));
+  const aside = (file: string) => {
+    if (TEST.test(file) || DOCS.test(file)) return true;
+    for (let directory = posix.dirname(file); ; directory = posix.dirname(directory)) {
+      if ((directory === '.' || scanned.has(directory)) && TOOLING.test(directory === '.' ? file : file.slice(directory.length + 1))) return true;
+      if (directory === '.') return false;
+    }
+  };
+  const files = (await repositoryWalk(root)).files.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
   let modules = 0;
   for (const file of files) {
     if (IMPORT_MAP.test(posix.basename(file)) || SCRIPT_MODULE.test(file) && ++modules <= MODULES.files) {

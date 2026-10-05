@@ -18,7 +18,7 @@ import { findNodeAtLocation, parseTree } from 'jsonc-parser';
 import { envNames, services as registry } from '../twin/index.ts';
 import { PORT_VARIABLE } from '../twin/compose.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
-import { ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, WALK, dependencyNames, keptFolders, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
+import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, TEST, TOOLING, WALK, dependencyNames, keptFolders, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
 import { SETUP_LIMITS, code as inlineCode, deployManifest, devcontainer, dockerfile, lineNumbers, oneLine, supabaseConfig, turbo, word as inlineWord, workflow, yamlValue } from './setup-configs.ts';
 import type { SetupEvidence } from './setup-configs.ts';
 import type { JsonObject } from '../twin/config.ts';
@@ -43,11 +43,8 @@ const ROLES: Role[] = ['runtime', 'script', 'test', 'tooling'];
 export interface VariableUse { name: string; file: string; line: number; role: Role }
 
 const SOURCE = /\.(?:[cm]?[jt]sx?|pyi?|vue|svelte|astro)$/i;
-// Tests read variables of their own; docs' code is never run.
-const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
-// Tooling and script folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/
-// holds runtime code whatever its folders are called. Seed files and folders are scripts anywhere.
-const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
+// Tests, docs and tooling folders are TEST, DOCS and TOOLING (./plans.ts), which detection shares. Script folders are,
+// like tooling folders, the first folder inside a package or the repository. Seed files and folders are scripts anywhere.
 const SCRIPT = /^(?:scripts?|migrations?|seeds?)\//i, SEED = /(?:^|\/)(?:seeds\/|seed\.[^/]+$)/i;
 /** A file's role, by its path inside each of `packages` that holds it and inside the repository. */
 function roleOf(file: string, packages: Set<string>): Role {
@@ -62,8 +59,7 @@ function roleOf(file: string, packages: Set<string>): Role {
     if (directory === '.') return script ? 'script' : 'runtime';
   }
 }
-const DOCS = /(?:^|\/)docs\//i;
-const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
+const MANIFEST =(name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
 const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
 const SETUP_DOC = /setup|develop|local|getting[-_ ]?started|contributing|install|quick[-_ ]?start|self[-_ ]?host/i;
 const COMPOSE = /^(?:docker-)?compose(?:[.-][\w.-]*)?\.ya?ml$/i;
