@@ -65,6 +65,8 @@ export interface StageHandle {
 interface StageEntry {
   id: string; generation: number; listeners: Set<() => void>; observers: Record<Resource, number>; revisions: Record<Resource, number>; reading: Record<Resource, number>;
   draftRevisions: Record<string, number>; view: StageView; handle?: StageHandle;
+  /** When the stage's action error and poll error appeared, by the workspace's error clock. */
+  errorAt: { action: number; poll: number };
 }
 export type TestWorkspace = ReturnType<typeof createTestWorkspace>;
 
@@ -102,7 +104,7 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 // source-scoped state; observing never starts discovery or test execution.
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
-  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [];
+  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], errorClock = 0;
   let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
   let pipelineChanges: { input: PipelineAction }[] = [], pipelineQueue: Promise<unknown> = Promise.resolve();
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
@@ -118,6 +120,14 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     listed = new Set(pipeline.stages.map(stage => stage?.id));
     pruneDrafts(source.path, [...listed]);
   }
+  // The latest stage error, so an older action's failure never hides a later failure or poll error of any stage.
+  function latestError() {
+    let error = '', at = 0;
+    for (const value of entries.values()) if (!gone(value)) {
+      for (const [text, time] of [[value.view.error, value.errorAt.action], [value.view.pollError, value.errorAt.poll]] as const) if (text && time > at) { error = text; at = time; }
+    }
+    return error;
+  }
   function publish(entry?: StageEntry) {
     if (disposed) return;
     const next: WorkspaceSnapshot = {
@@ -128,7 +138,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       busyStages: [...entries].filter(([, value]) => value.view.pending).map(([id]) => id),
       previews,
       branch: source?.branch || '',
-      error: sourceError || [...entries.values()].filter(value => !gone(value)).map(value => value.view.error || value.view.pollError).find(Boolean) || '',
+      error: sourceError || latestError(),
     };
     if (sameEntries(next.browserTests, snapshot.browserTests)) next.browserTests = snapshot.browserTests;
     const keep = <K extends 'environments' | 'busyStages'>(key: K) => { if (sameItems(next[key], snapshot[key])) next[key] = snapshot[key]; };
@@ -143,8 +153,11 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     const fields: Record<string, unknown> = patch, view: Record<string, unknown> = entry.view;
     for (const key of ['browser', 'environment', 'loading', 'pollErrors'] as const) if (patch[key]) fields[key] = share(entry.view[key], patch[key]);
     if (Object.keys(patch).every(key => view[key] === fields[key])) return;
+    const before = entry.view;
     entry.view = { ...entry.view, ...patch };
     entry.view.pollError = entry.view.pollErrors.browser || entry.view.pollErrors.environment;
+    if (entry.view.error && entry.view.error !== before.error) entry.errorAt.action = ++errorClock;
+    if (entry.view.pollError && entry.view.pollError !== before.pollError) entry.errorAt.poll = ++errorClock;
     publish(entry);
   }
   // Only saved definitions prune stage drafts. Pending preferences overlay that definition, in click order.
@@ -185,7 +198,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   }
   function ensure(id: string): StageEntry {
     if (!entries.has(id)) entries.set(id, {
-      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {},
+      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {}, errorAt: { action: 0, poll: 0 },
       view: { browser: browserView(), environment: environmentView(), drafts: {}, dirty: {}, loading: { browser: true, environment: true }, pending: '', error: '', pollErrors: { browser: '', environment: '' }, pollError: '' },
     });
     return entries.get(id)!;

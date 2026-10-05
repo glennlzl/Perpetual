@@ -14,6 +14,27 @@ test('a rejected graph skip reaches the graph error projection without an open i
   } finally { workspace.dispose(); }
 });
 
+test('the page shows the latest stage error, so an earlier action failure never hides a later one', async t => {
+  let readFails = false;
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
+    if (path.startsWith('/api/browser/run')) throw new Error('Beta could not start its run.');
+    if (path.startsWith('/api/browser/skip')) throw new Error('Journey no longer exists.');
+    if (readFails) throw new Error('Beta could not be read.');
+    return { cases: [], runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate({ path: '/repo', branch: 'main' }, { browserTests: { beta: { cases: [], runs: [] }, gamma: { cases: [], runs: [] } } });
+  const beta = workspace.stage('beta'), gamma = workspace.stage('gamma');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  assert.equal(workspace.getSnapshot().error, 'Beta could not start its run.');
+  await assert.rejects(gamma.perform('browser', 'skip', tx => tx.post('skip', { id: 'run', caseId: 'journey' })), /no longer exists/);
+  assert.equal(workspace.getSnapshot().error, 'Journey no longer exists.', 'A later failure on a following stage is shown.');
+  readFails = true; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Beta could not be read.', 'So is a later poll failure beside an older action error.');
+  readFails = false; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Journey no longer exists.');
+});
+
 const source = { path: '/project', branch: 'main' };
 const pipelineStages = (ids: string[]) => ids.map(id => ({ id, name: id, kind: id === 'source' ? 'source' : 'sandbox' }));
 
