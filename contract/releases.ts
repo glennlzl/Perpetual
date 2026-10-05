@@ -9,6 +9,10 @@ export interface ReleaseRecord {
 }
 export interface ReleaseView {
   sha: string | null; target: ReleaseTarget | null; canDeploy: boolean; blockedReason: string | null;
-  current: ReleaseRecord | null; recent: ReleaseRecord[];
+  /** The newest request for this commit and target: one still standing or deployed, else the latest attempt. */
+  current: ReleaseRecord | null;
+  /** An unresolved request of this repository and branch other than current, such as an earlier commit's: it blocks Deploy until it ends. */
+  unresolved: ReleaseRecord | null;
+  recent: ReleaseRecord[];
 }
 export interface ReleaseReply extends ReleaseView { repoPath: string }

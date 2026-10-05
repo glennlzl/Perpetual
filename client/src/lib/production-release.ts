@@ -34,8 +34,10 @@ export const releaseChanges = {
   notify() { listeners.forEach(listener => listener()); },
 };
 
-/** Whether the release a person requested is still being requested, queued, deployed or resolved. */
-export const releasePending = (view: ReleaseReply | null | undefined) => ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
+/** Whether a release a person requested, for this commit or an earlier one, is still being requested, queued, deployed or resolved. */
+export const releasePending = (view: ReleaseReply | null | undefined) => Boolean(view?.unresolved) || ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
+/** The release Production shows: an earlier commit's while it is unresolved, since it blocks Deploy, else this commit's. */
+export const shownRelease = (view: ReleaseView | null | undefined) => view?.unresolved ?? view?.current ?? null;
 
 /**
  * Whether the journey gates allow a release of the scanned commit as far as the page can read them: Production is Ready

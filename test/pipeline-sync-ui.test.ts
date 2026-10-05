@@ -123,7 +123,7 @@ test('a global repair cleanup failure is visible without changing Build or impor
     else if (path === '/api/github/deployments') result = { repository: 'acme/beta', sha, deployments: [] };
     else if (path === '/api/github-actions') result = { workflows: [] };
     else if (path === '/api/gate') result = { repoPath, sha, stages: {}, production: null };
-    else if (path === '/api/releases') result = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, recent: [] } satisfies ReleaseReply;
+    else if (path === '/api/releases') result = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, unresolved: null, recent: [] } satisfies ReleaseReply;
     else if (path === '/api/session') result = { token: 'fixture-token' };
     else if (path === '/api/pipeline/action') {
       if (++writes === 1) { status = 503; result = { error: 'Build preference could not be saved' }; }

@@ -100,12 +100,15 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
     // while it stands.
     const attempts=target?history.filter(entry=>entry.source.sha===source?.sha&&same(entry.target,target)):[];
     const selected=attempts.findLast(entry=>entry.record.status==='deployed'||active(entry.record))??attempts.at(-1),current=selected?publicRecord(selected.record):null;
+    // An unresolved request that is not current, such as an earlier commit's after the source moved on, still blocks
+    // Deploy, so the view names it until it ends.
+    const pending=history.findLast(entry=>active(entry.record)&&entry!==selected),unresolved=pending?publicRecord(pending.record):null;
     let blockedReason=evidenceReason(evidence);
     if(!blockedReason&&!target)blockedReason='Configure a deployment target.';
     if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason='A deployment is unresolved. Check its status before deploying again.';
     if(!blockedReason&&current?.status==='deployed'&&target&&same(target,{environment:current.environment,productionEnvironment:current.productionEnvironment,workflowPath:current.workflowPath}))blockedReason='This commit is already deployed to this target.';
     if(!blockedReason&&(busy||closed))blockedReason=closed?'The controller is shutting down.':'A release operation is in progress.';
-    return {sha:source?.sha??null,target:target?structuredClone(target):null,canDeploy:!blockedReason,blockedReason,current,recent};
+    return {sha:source?.sha??null,target:target?structuredClone(target):null,canDeploy:!blockedReason,blockedReason,current,unresolved,recent};
   }
   function exclusive<T>(work:()=>Promise<T>):Promise<T>{if(closed)return Promise.reject(conflict('The controller is shutting down.'));if(busy)return Promise.reject(conflict('A release operation is in progress.'));busy=true;
     const operation=work().finally(()=>{busy=false;if(inFlight===operation)inFlight=undefined;});inFlight=operation;return operation;}

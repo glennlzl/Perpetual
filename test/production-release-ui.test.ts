@@ -11,7 +11,7 @@ const expect = playwrightExpect.configure({ timeout: 10_000 });
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), repoPath = '/acme/app';
 const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
-const release = (extra: Partial<ReleaseReply> = {}): ReleaseReply => ({ repoPath, sha: A, target, canDeploy: true, blockedReason: null, current: null, recent: [], ...extra });
+const release = (extra: Partial<ReleaseReply> = {}): ReleaseReply => ({ repoPath, sha: A, target, canDeploy: true, blockedReason: null, current: null, unresolved: null, recent: [], ...extra });
 
 // Mount the Production controls and update only their public props, as the App's release poll does.
 test('Production asks for a target without explanatory copy and deploys only the confirmed commit and target', { timeout: 60000 }, async t => {

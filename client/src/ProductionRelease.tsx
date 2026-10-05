@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
-import { createReleasePoller, gatesReleasable, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import { createReleasePoller, gatesReleasable, releaseChanges, releaseForSource, releaseRequest, shownRelease, type ReleaseConfirmation } from '@/lib/production-release';
 import type { GateView } from '../../contract/gate.ts';
 import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
@@ -97,6 +97,8 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
   const [pending, setPending] = useState(''), [error, setError] = useState('');
   const current = view && view.repoPath === repoPath ? view : null;
   const target = current?.target;
+  // The release the stage Badge shows, an earlier commit's while it is unresolved, with its deployment and logs.
+  const shown = shownRelease(current);
   if (!repoPath) return null;
   async function act(operation: 'deploy' | 'refresh', input: Record<string, unknown> = {}) {
     if (pending) return false;
@@ -110,8 +112,8 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked || !current} onClick={() => { setError(''); setConfigure(true); }}><Settings2 />{target ? 'Deployment target' : 'Configure deployment'}</Button>
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked} onClick={() => act('refresh')}><RefreshCw />{pending === 'refresh' ? 'Checking…' : 'Check status'}</Button>
     {target && <Button className="text-xs" variant="outline" size="sm" disabled={locked || !current?.canDeploy || !current.sha} onClick={() => { if (current?.sha && current.target) { setError(''); setConfirmation({ sha: current.sha, target: { ...current.target } }); } }}><Rocket />Deploy</Button>}
-    {current?.current?.url && <Button asChild className="text-xs" variant="link" size="sm"><a href={current.current.url} target="_blank" rel="noopener noreferrer">Open deployment<ExternalLink /></a></Button>}
-    {current?.current?.logUrl && <Button asChild className="text-xs" variant="link" size="sm"><a href={current.current.logUrl} target="_blank" rel="noopener noreferrer">Logs<ExternalLink /></a></Button>}
+    {shown?.url && <Button asChild className="text-xs" variant="link" size="sm"><a href={shown.url} target="_blank" rel="noopener noreferrer">Open deployment<ExternalLink /></a></Button>}
+    {shown?.logUrl && <Button asChild className="text-xs" variant="link" size="sm"><a href={shown.logUrl} target="_blank" rel="noopener noreferrer">Logs<ExternalLink /></a></Button>}
     {!confirmation && error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
     {readError && <p role="alert" className="basis-full break-words text-xs text-destructive">{readError}</p>}
     {!readError && !current && <p role="status" className="basis-full text-xs text-muted-foreground">Loading release status…</p>}

@@ -268,3 +268,18 @@ test('beyond a thousand records the oldest finished ones go, keeping unresolved 
   saved=await ids();
   assert.deepEqual([saved.length,saved.slice(0,3),saved.slice(-2)],[1000,['release-1','release-2','release-5'],[first.id,second.id]]);
 });
+
+test('an earlier commit\'s unresolved release stays in the view, with its logs, until it ends',async t=>{
+  let status:'deploying'|'failed'='deploying';
+  const f=await fixture(t,{read:async()=>({deploymentId:'12',status,statusId:'41',logUrl:'https://ci.example.test/runs/7'})});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const deploying=await f.manager.refresh();
+  assert.deepEqual([deploying.current?.status,deploying.unresolved],['deploying',null],'This commit\'s release is current, never also unresolved.');
+  // A gate moved the source to a newer commit while the deployment runs.
+  const newer=evidence();newer.source!.sha=OTHER;newer.gates[0].sha=OTHER;f.setEvidence(newer);
+  const moved=await f.manager.view();
+  assert.deepEqual([moved.current,moved.unresolved?.sha,moved.unresolved?.status,moved.unresolved?.logUrl,moved.canDeploy],[null,SHA,'deploying','https://ci.example.test/runs/7',false]);
+  status='failed';
+  const ended=await f.manager.refresh();
+  assert.deepEqual([ended.unresolved,ended.canDeploy,ended.recent[0].status],[null,true,'failed']);
+});
