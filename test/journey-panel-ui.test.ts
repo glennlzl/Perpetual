@@ -165,3 +165,23 @@ test('the journey list, a focused journey and its recording tabs have the roles 
   await expect(panel).toHaveAttribute('role', 'tabpanel');
   await expect(panel.getByLabel('Save a workspace recording', { exact: true })).toHaveCount(1);
 });
+
+test('Discard draft asks first and discards exactly the draft it was chosen for', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  fixture.controller.view = browserView({ specs: { save: { draft: { hash, stale: false, verification: { status: 'passed', passes: 3, control: 'caught' } } } } });
+  const page = await fixture.open(t), confirm = page.getByRole('alertdialog', { name: 'Discard draft?', exact: true });
+  const discard = async () => {
+    await page.getByRole('button', { name: 'Actions for Save a workspace', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Discard draft', exact: true }).click();
+  };
+  await discard();
+  await expect(confirm.getByText('Save a workspace', { exact: true })).toBeVisible();
+  await confirm.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  assert.deepEqual(fixture.controller.requests, [], 'A verified draft is never discarded by the menu item alone.');
+  await discard();
+  await confirm.getByRole('button', { name: 'Discard draft', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  assert.deepEqual(fixture.controller.requests, [{ path: '/api/browser/specs/discard', input: { caseId: 'save', hash, repoPath: '/acme/app', stageId: 'beta' } }]);
+  assert.deepEqual(fixture.pageErrors, []);
+});

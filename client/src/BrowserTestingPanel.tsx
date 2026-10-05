@@ -441,20 +441,21 @@ function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusF
   </Dialog>;
 }
 
-function DeleteCaseDialog({ item, pending, disabled, onDelete, onClose, focusFallback }: { item: BrowserCase; pending: string; disabled: boolean; onDelete: () => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
+// Deleting a test, or discarding its generated and verified draft, cannot be undone, so each is confirmed.
+function ConfirmCaseDialog({ item, title = 'Delete test?', action = 'Delete test', working = 'Deleting…', pending, disabled, onConfirm, onClose, focusFallback }: { item: BrowserCase; title?: string; action?: string; working?: string; pending: string; disabled: boolean; onConfirm: () => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
   const returnFocus = useReturnFocus(focusFallback);
   const [error, setError] = useState('');
   return <AlertDialog open onOpenChange={open => { if (!open && !pending) onClose(); }}>
     <AlertDialogContent onCloseAutoFocus={returnFocus}>
-      <AlertDialogHeader><AlertDialogTitle>Delete test?</AlertDialogTitle><AlertDialogDescription className="break-words">{item.name}</AlertDialogDescription></AlertDialogHeader>
+      <AlertDialogHeader><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription className="break-words">{item.name}</AlertDialogDescription></AlertDialogHeader>
       <ErrorText>{error}</ErrorText>
       <AlertDialogFooter><AlertDialogCancel disabled={Boolean(pending)}>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={disabled} onClick={async event => {
         event.preventDefault();
         if (disabled) return;
         setError('');
-        try { await onDelete(); }
+        try { await onConfirm(); }
         catch (failure) { setError((failure as Error).message); }
-      }}>{pending ? 'Deleting…' : 'Delete test'}</AlertDialogAction></AlertDialogFooter>
+      }}>{pending ? working : action}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent>
   </AlertDialog>;
 }
@@ -477,6 +478,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const [editingCase, setEditingCase] = useState<BrowserCase | null>(null);
   const [caseFilter, setCaseFilter] = useState('all');
   const [deletingCase, setDeletingCase] = useState<BrowserCase | null>(null);
+  const [discarding, setDiscarding] = useState<{ item: BrowserCase; hash: string } | null>(null);
   const [approvingCase, setApprovingCase] = useState<BrowserCase | null>(null);
   const [authoringCase, setAuthoringCase] = useState<BrowserCase | null>(null);
   const [creatingCase, setCreatingCase] = useState(false);
@@ -671,7 +673,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
               {!item.needsReview && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
               {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => setCodeDialog({ action: 'generate', caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
                 onVerify={() => setCodeDialog({ action: 'verify', caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
-                onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
+                onApprove={() => setApprovingCase(item)} onDiscard={() => setDiscarding({ item, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
               <DropdownMenuItem onSelect={() => setAuthoringCase(item)}><ListChecks />Authoring diagnostics</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
             skipping={pending === 'skip'}
@@ -687,9 +689,13 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {loading && !data.runs.length && <TestListSkeleton label="Loading test runs" />}
       <ItemGroup className="test-run-list" aria-label="Test runs">{[...data.runs].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(run => <Item role="listitem" size="sm" variant="default" className="test-run-row" key={run.id}><ItemContent className="min-w-0"><Button variant="ghost" className="h-auto w-full items-start justify-between gap-3 whitespace-normal px-0 py-1" onClick={() => setWatching(watchedRun(run))}><span className="min-w-0 flex-1 space-y-1 text-left"><span className="flex flex-wrap items-center gap-1.5 break-words font-medium">{browserRunTitle(run)}{run.verification?.control && <Badge variant="outline">Control</Badge>}</span><span className="block text-xs font-normal tabular-nums text-muted-foreground">{dateLabel(run.createdAt)}</span></span><Badge className="shrink-0" variant={run.status === 'failed' ? 'destructive' : 'secondary'}>{browserRunLabel(run)}</Badge><Eye className="mt-0.5 shrink-0" /></Button></ItemContent></Item>)}</ItemGroup>
     </>}
-    {deletingCase && <DeleteCaseDialog key={deletingCase.id} item={deletingCase} pending={pending} disabled={disabled} focusFallback={sheet} onClose={() => setDeletingCase(null)} onDelete={async () => {
+    {deletingCase && <ConfirmCaseDialog key={deletingCase.id} item={deletingCase} pending={pending} disabled={disabled} focusFallback={sheet} onClose={() => setDeletingCase(null)} onConfirm={async () => {
       await stage.perform('browser', 'cases', tx => tx.post('cases', { cases: cases.filter(item => item.id !== deletingCase.id), baseCases: cases }));
       if (mounted.current && stage.isCurrent()) setDeletingCase(null);
+    }} />}
+    {discarding && <ConfirmCaseDialog key={`discard-${discarding.item.id}`} item={discarding.item} title="Discard draft?" action="Discard draft" working="Discarding…" pending={pending} disabled={locked} focusFallback={focusCase(discarding.item.id)} onClose={() => setDiscarding(null)} onConfirm={async () => {
+      await stage.perform('browser', 'discard-code', tx => tx.post('specs/discard', { caseId: discarding.item.id, hash: discarding.hash }));
+      if (mounted.current && stage.isCurrent()) setDiscarding(null);
     }} />}
     {editingCase && <BusinessCaseEditor key={editingCase.id} draftKey={caseDraftKey(repoPath, stageId, editingCase.id)} item={editingCase} focusFallback={focusCase(editingCase.id)} onClose={() => setEditingCase(null)} onSave={saveCase} />}
     {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runNotice} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
