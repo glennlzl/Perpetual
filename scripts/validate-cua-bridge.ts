@@ -1,15 +1,16 @@
 // Opt-in acceptance for one existing owned guest. Importing never starts work; running it validates one guest:
 //   node scripts/validate-cua-bridge.ts --id ID --output DIR [--data DIR]
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { localDockerEnvironment } from '../src/process.ts';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   executeSandbox, screenshotSandbox, uploadSandboxFile,
-  downloadSandboxFile, sandboxMcpCommand,
+  downloadSandboxFile, sandboxMcpCommand, listSandboxes,
 } from '../src/sandbox/cua.ts';
 
 type BridgeError = Error & { bridgeValidation: true; report?: BridgeReport };
@@ -20,6 +21,8 @@ type ListedTool = { name?: unknown; inputSchema?: ToolSchema | null; annotations
 type ContentItem = { type?: unknown; text?: unknown; data?: unknown };
 type ToolResult = { isError?: unknown; structuredContent?: unknown; content?: unknown };
 type ScreenSize = { width: number; height: number; scale_factor: number };
+// Docker's inspection of the desktop's container, as far as it is read here; each value is checked before use.
+type InspectedPorts = { HostConfig?: { PublishAllPorts?: unknown; PortBindings?: unknown } | null; NetworkSettings?: { Ports?: unknown } | null };
 interface DiscoveredTool { name: string; inputSchema: ToolSchema; annotations?: unknown }
 interface PendingRequest { resolve(result: unknown): void; reject(error: unknown): void; timer: NodeJS.Timeout }
 type McpSession = ReturnType<typeof mcpSession>;
@@ -35,6 +38,7 @@ interface BridgeReport {
 
 const PNG = Buffer.from('89504e470d0a1a0a', 'hex');
 const RESPONSE_LIMIT = 4 * 1024 * 1024;
+const execute = promisify(execFile);
 const ownError = (message: string): BridgeError => Object.assign(new Error(message), { bridgeValidation: true as const });
 function ensure(condition: unknown, message: string): asserts condition { if (!condition) throw ownError(message); }
 const sha256 = (content: Buffer) => createHash('sha256').update(content).digest('hex');
@@ -126,6 +130,20 @@ function mcpSession(invocation: { command: string; args: string[] }) {
       ensure(await waitForExit(1000), 'The guest MCP client process could not be stopped.');
     },
   };
+}
+
+// Whether a port map holds any binding; ports the image exposes but nothing publishes map to null or an empty list.
+const bindsPorts = (ports: unknown) => ports != null && typeof ports === 'object'
+  && Object.values(ports).some(bindings => bindings != null && (!Array.isArray(bindings) || bindings.length > 0));
+
+/** Docker's own report of host ports published or requested for the desktop, read apart from the adapter's checks. */
+async function publishesHostPorts(dockerHost: string, containerId: string) {
+  const { stdout } = await execute('docker', ['--host', dockerHost, 'container', 'inspect', containerId],
+    { env: localDockerEnvironment(), encoding: 'utf8', timeout: 15000, maxBuffer: RESPONSE_LIMIT, windowsHide: true });
+  const parsed: unknown = JSON.parse(stdout);
+  ensure(Array.isArray(parsed) && parsed.length === 1 && parsed[0] && typeof parsed[0] === 'object', 'Docker returned an unreadable inspection of the desktop.');
+  const container: InspectedPorts = parsed[0];
+  return container.HostConfig?.PublishAllPorts === true || bindsPorts(container.HostConfig?.PortBindings) || bindsPorts(container.NetworkSettings?.Ports);
 }
 
 function acceptsEmptyArguments(schema: ToolSchema | null | undefined) {
@@ -222,7 +240,7 @@ async function validateMcp(context: Parameters<typeof sandboxMcpCommand>[0], out
   } finally { await session.close(); }
 }
 
-/** Validate existing SDK/Driver transports; does not create or destroy a guest. */
+/** Validate an existing guest's unpublished ports and its SDK/Driver transports; does not create or destroy a guest. */
 export async function validateCuaBridge({ dataDir, id, output }: { dataDir?: unknown; id?: unknown; output?: unknown }) {
   ensure(typeof output === 'string' && output.trim(), 'Choose a bridge validation output directory.');
   await mkdir(resolve(output), { recursive: true, mode: 0o700 });
@@ -231,9 +249,17 @@ export async function validateCuaBridge({ dataDir, id, output }: { dataDir?: unk
   const guestFile = `/tmp/perpetual-bridge-${randomUUID()}.bin`;
   const reportPath = join(directory, 'report.json');
   const report: BridgeReport = { status: 'running', startedAt: new Date().toISOString(), sandboxId: id, output: directory, reportPath, checks: [] };
-  let stage = 'SDK shell', guestFileAttempted = false;
+  let stage = 'Desktop publishes no host ports', guestFileAttempted = false;
   const record = (name: string, details: object = {}) => report.checks.push({ name, status: 'passed', ...details });
   try {
+    // computer-server and the Driver are reached through docker exec only; no port is published for either.
+    const desktop = (await listSandboxes({ dataDir })).find(item => item.id === id);
+    ensure(desktop?.dockerHost && desktop.containerId, 'No saved desktop with a container has this ID.');
+    ensure(!await publishesHostPorts(desktop.dockerHost, desktop.containerId),
+      'Docker reports a published host port for the desktop. Destroy it and create a new one.');
+    record(stage, { containerId: desktop.containerId });
+
+    stage = 'SDK shell';
     const shell = await executeSandbox({ ...context, command: "printf 'perpetual-bridge-stdout'; printf 'perpetual-bridge-stderr' >&2", timeoutSeconds: 10 });
     ensure(shell.returncode === 0 && shell.stdout === 'perpetual-bridge-stdout'
       && shell.stderr === 'perpetual-bridge-stderr' && shell.truncated === false,

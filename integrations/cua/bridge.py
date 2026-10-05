@@ -1,7 +1,9 @@
 """One bounded SDK request against a verified, Perpetual-owned Cua desktop.
 
-Node verifies Docker ownership before calling this bridge. No cloud/Localhost
-fallback and no typed sandbox.driver: that accessor is Fleet-only in 0.8.0.
+Node verifies Docker ownership before calling this bridge. The desktop publishes
+no port: each SDK command runs relay.py inside it through docker exec on the
+local engine. No cloud/Localhost fallback and no typed sandbox.driver: that
+accessor is Fleet-only in 0.8.0.
 """
 
 import asyncio
@@ -9,11 +11,19 @@ import base64
 import contextlib
 import importlib.metadata
 import json
+import re
 import sys
-from urllib.parse import urlsplit
+from pathlib import Path
 
 SDK_VERSION = "0.8.0"
 MAX_BYTES = 8 * 1024 * 1024
+RESPONSE_LIMIT = 12 * 1024 * 1024
+# The values src/sandbox/cua-local.ts checks readiness with: computer-server's own
+# Python, run as the guest's UID, reaches computer-server on this port in the guest.
+GUEST_PYTHON = "/opt/computer-server/venv/bin/python"
+GUEST_USER = "1000"
+GUEST_API_PORT = 8000
+RELAY = Path(__file__).with_name("relay.py").read_text(encoding="utf-8")
 
 
 class BridgeError(Exception):
@@ -32,31 +42,75 @@ def guest_path(value):
     return value
 
 
-def checked_transport(api_url):
-    import httpx
+def local_engine(host):
+    # The local Docker socket or named pipe Node inspected the desktop on, never a TCP or SSH endpoint.
+    if (not isinstance(host, str) or "\x00" in host
+            or not (re.fullmatch(r"unix:///[^\r\n]+", host) or re.fullmatch(r"npipe:////\./pipe/[a-zA-Z0-9_.-]+", host))):
+        raise BridgeError("A local Docker engine is required.")
+    return host
+
+
+async def relay(docker_host, container_id, body, timeout):
+    """Runs relay.py in the desktop through docker exec and returns computer-server's response body."""
+    process = await asyncio.create_subprocess_exec(
+        "docker", "--host", docker_host, "exec", "-i", "--user", GUEST_USER, container_id,
+        GUEST_PYTHON, "-I", "-c", RELAY, str(GUEST_API_PORT), "POST", "/cmd", str(timeout),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        try:
+            process.stdin.write(body)
+            await process.stdin.drain()
+        except OSError:
+            pass  # A docker exec that ended early closed its input; its exit status says why.
+        finally:
+            process.stdin.close()
+        chunks, size = [], 0
+        while chunk := await process.stdout.read(65536):
+            size += len(chunk)
+            if size > RESPONSE_LIMIT:
+                raise BridgeError("Cua response exceeded its limit; guest completion may be unknown.")
+            chunks.append(chunk)
+        code = await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    # docker exec exits 126 or 127 when the guest cannot run the command it was given.
+    if code in (126, 127):
+        raise BridgeError(f"The sandbox image cannot run {GUEST_PYTHON}, which reaches its computer-server.")
+    if code != 0:
+        raise BridgeError("computer-server did not answer inside the desktop. Guest completion may be unknown; inspect it before retrying.")
+    return b"".join(chunks)
+
+
+def checked_transport(docker_host, container_id):
     from cua_sandbox.transport.http import HTTPTransport
 
-    class CheckedHTTPTransport(HTTPTransport):
-        """0.8.0 compatibility boundary: one request, strict file results,
-        structured shell failures. Re-review when updating the pinned SDK.
+    class CheckedExecTransport(HTTPTransport):
+        """0.8.0 compatibility boundary: computer-server's /cmd protocol without a
+        host port. One request per command, relayed through docker exec, strict
+        file results, structured shell failures. Re-review when updating the
+        pinned SDK.
         """
 
+        _open = False
+
+        async def connect(self):
+            # No HTTP client: nothing on the host connects to computer-server.
+            self._open = True
+
+        async def disconnect(self):
+            self._open = False
+
         async def _cmd(self, command, params=None):
-            if self._client is None:
+            if not self._open:
                 raise BridgeError("Cua transport is disconnected.")
-            body = {"command": command, "params": params or {}}
-            timeout = httpx.Timeout(30, read=float((params or {}).get("timeout", 30)) + 10)
-            # Mutations are never automatically replayed, including on HTTP 5xx.
-            async with self._client.stream("POST", "/cmd", json=body, timeout=timeout) as response:
-                response.raise_for_status()
-                chunks, size = [], 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > 12 * 1024 * 1024:
-                        raise BridgeError("Cua response exceeded its limit; guest completion may be unknown.")
-                    chunks.append(chunk)
+            body = json.dumps({"command": command, "params": params or {}}).encode("utf-8")
+            timeout = float((params or {}).get("timeout", 30)) + 10
+            # Mutations are never automatically replayed, including when computer-server answers an error.
+            output = await asyncio.wait_for(relay(docker_host, container_id, body, timeout), timeout + 10)
             payload = None
-            for line in b"".join(chunks).decode("utf-8").splitlines():
+            for line in output.decode("utf-8").splitlines():
                 if line.startswith("data: "):
                     payload = json.loads(line[6:])
                     break
@@ -95,7 +149,8 @@ def checked_transport(api_url):
                     raise BridgeError("Cua did not confirm the file write.")
             return payload
 
-    return CheckedHTTPTransport(api_url)
+    # computer-server's address inside the guest, where relay.py reaches it; the host never connects to it.
+    return CheckedExecTransport(f"http://127.0.0.1:{GUEST_API_PORT}")
 
 
 async def dispatch(request):
@@ -103,10 +158,10 @@ async def dispatch(request):
         raise BridgeError("Expected cua-sandbox 0.8.0; sync integrations/cua first.")
     from cua_sandbox import Sandbox
 
-    url = urlsplit(request.get("apiUrl", ""))
-    if (url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port
-            or url.username or url.password or url.path or url.query or url.fragment):
-        raise BridgeError("A loopback Cua API URL is required.")
+    docker_host = local_engine(request.get("dockerHost"))
+    container_id = request.get("containerId")
+    if not isinstance(container_id, str) or not re.fullmatch(r"[a-f0-9]{64}", container_id):
+        raise BridgeError("A sandbox container ID is required.")
     name = request.get("name", "")
     if not isinstance(name, str) or not name.startswith("perpetual-cua-"):
         raise BridgeError("A Perpetual sandbox name is required.")
@@ -114,9 +169,9 @@ async def dispatch(request):
     if not isinstance(action, dict):
         raise BridgeError("Invalid sandbox action.")
 
-    # Explicit HTTP transport bypasses all Fleet/name/host discovery. Leaving
+    # The explicit transport bypasses all Fleet/name/host discovery. Leaving
     # this context disconnects the client, not the persistent container.
-    async with Sandbox(checked_transport(request["apiUrl"]), name=name, _telemetry_enabled=False) as sandbox:
+    async with Sandbox(checked_transport(docker_host, container_id), name=name, _telemetry_enabled=False) as sandbox:
         kind = action.get("type")
         if kind == "exec":
             command = action.get("command")

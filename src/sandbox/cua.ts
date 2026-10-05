@@ -23,12 +23,13 @@ export interface UploadResult {bytes: number}
 interface BridgeReply {ok?: unknown; error?: unknown; result?: unknown}
 
 function pythonEnvironment() {
-  // SDK credentials and proxy variables are unnecessary for a loopback guest.
+  // The bridge reaches the guest only through a docker CLI pinned to the local engine with --host, so it needs no SDK
+  // credentials or proxy variables, and the ambient Docker endpoint never applies.
   const env: Record<string, string | undefined> = {};
   for (const key of ['PATH', 'HOME', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  return {...env, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', NO_PROXY: '127.0.0.1,localhost'};
+  return localDockerEnvironment({...env, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1'});
 }
 
 const dockerEnvironment = () => localDockerEnvironment();
@@ -43,7 +44,8 @@ export async function sandboxAction({dataDir, id, action: input}: Target & {acti
   const sandbox = await requireRunningSandbox({dataDir, id});
   const python = process.env.PERPETUAL_CUA_PYTHON || join(integrationDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   if (!isAbsolute(python)) throw new Error('PERPETUAL_CUA_PYTHON must be an absolute interpreter path.');
-  const request = JSON.stringify({name: sandbox.name, apiUrl: sandbox.apiUrl, action, timeoutSeconds: timeoutSeconds + 20});
+  // The desktop publishes no port: the bridge reaches its computer-server through docker exec into this verified container.
+  const request = JSON.stringify({name: sandbox.name, dockerHost: sandbox.dockerHost, containerId: sandbox.containerId, action, timeoutSeconds: timeoutSeconds + 20});
   if (Buffer.byteLength(request) > 12 * 1024 * 1024) throw new Error('Sandbox request exceeds the 12 MiB limit.');
   // execFile's promisified wrapper cannot pass stdin. Keep stderr private:
   // upstream SDK logs may include guest data. Only bridge JSON is returned.

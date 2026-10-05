@@ -1,13 +1,17 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createSandbox, destroySandbox, inspectSandbox, listSandboxes, sandboxMcpCommand } from '../src/sandbox/cua.ts';
 
+const relay = fileURLToPath(new URL('../integrations/cua/relay.py', import.meta.url));
+const GUEST_PYTHON = '/opt/computer-server/venv/bin/python';
+
 // A docker CLI stand-in for one owned desktop on a local socket. It keeps its engine's state in state.json; no container
-// starts. Its computer-server is a local HTTP server that answers the readiness check.
+// starts. An exec of computer-server's Python is the readiness check, answered as state.computerServer says; any other
+// exec is the Driver's, answered as state.exec says.
 const DOCKER = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,36 +32,35 @@ else if (command === 'image' && rest[0] === 'inspect') process.stdout.write(JSON
 else if (command === 'container' && rest[0] === 'create') {
   const labels = Object.fromEntries(rest.flatMap((arg, index) => arg === '--label' ? [rest[index + 1].split('=')] : []));
   state.container = { Id: randomBytes(32).toString('hex'), Name: '/' + option('--name'), Image: rest.at(-1), Config: { Labels: labels }, running: false,
-    cpus: Number(option('--cpus')), memoryMiB: parseInt(option('--memory'), 10), pids: Number(option('--pids-limit')) };
+    cpus: Number(option('--cpus')), memoryMiB: parseInt(option('--memory'), 10), pids: Number(option('--pids-limit')), created: rest };
   save();
   process.stdout.write(state.container.Id + '\\n');
 } else if (command === 'container' && rest[0] === 'inspect') {
   if (!container || (rest[1] !== container.Id && '/' + rest[1] !== container.Name)) fail('Error response from daemon: No such container: ' + rest[1]);
-  const published = { HostIp: '127.0.0.1', HostPort: String(state.apiPort) }, requested = { HostIp: '127.0.0.1', HostPort: '' };
+  // The image exposes these ports; they are bound only for a desktop that publishes them, as earlier versions did.
+  const published = state.published ? [{ HostIp: '127.0.0.1', HostPort: '49152' }] : null, requested = state.published ? [{ HostIp: '127.0.0.1', HostPort: '' }] : null;
   process.stdout.write(JSON.stringify([{ Id: container.Id, Name: container.Name, Image: container.Image, Config: container.Config,
     State: { Running: container.running, Paused: false, Restarting: false },
-    NetworkSettings: { Ports: container.running ? { '8000/tcp': [published], '6080/tcp': [published] } : {} },
+    NetworkSettings: { Ports: container.running ? { '8000/tcp': published, '6080/tcp': published } : {} },
     HostConfig: { NetworkMode: 'bridge', NanoCpus: container.cpus * 1e9, Memory: container.memoryMiB * 1024 * 1024, PidsLimit: container.pids,
-      PortBindings: { '8000/tcp': [requested], '6080/tcp': [requested] } }, Mounts: [] }]));
+      PortBindings: requested ? { '8000/tcp': requested, '6080/tcp': requested } : {} }, Mounts: [] }]));
 } else if (command === 'container' && rest[0] === 'start') { container.running = true; save(); }
 else if (command === 'container' && rest[0] === 'rm') { if (state.rmError) fail(state.rmError); delete state.container; save(); }
 else if (command === 'exec') {
-  process.stdout.write(state.exec.stdout || '');
-  process.stderr.write(state.exec.stderr || '');
-  process.exit(state.exec.code || 0);
+  const readiness = rest.includes(${JSON.stringify(GUEST_PYTHON)});
+  if (readiness) { state.readiness = args.slice(2); save(); }
+  const reply = readiness ? state.computerServer : state.exec;
+  process.stdout.write(reply.stdout || '');
+  process.stderr.write(reply.stderr || '');
+  process.exit(reply.code || 0);
 } else fail('Unexpected Docker fixture command', 82);
 `;
 
 async function localEngine(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'perpetual-cua-sandbox-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const api = createServer((request, response) => { response.statusCode = request.url === '/status' ? 200 : 404; response.end(); });
-  await new Promise<void>(resolve => api.listen(0, '127.0.0.1', resolve));
-  t.after(() => api.close());
-  const address = api.address();
-  assert.ok(address && typeof address === 'object');
   const socket = `unix://${join(directory, 'docker.sock')}`, state = join(directory, 'state.json');
-  await writeFile(state, JSON.stringify({ socket, apiPort: address.port, imageId: `sha256:${'a'.repeat(64)}`, exec: { stdout: 'cua-driver 0.28.2\n' } }));
+  await writeFile(state, JSON.stringify({ socket, imageId: `sha256:${'a'.repeat(64)}`, computerServer: { stdout: '{"status":"ok"}' }, exec: { stdout: 'cua-driver 0.28.2\n' } }));
   await writeFile(join(directory, 'docker'), DOCKER, { mode: 0o700 });
   const saved = { PATH: process.env.PATH, DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT };
   process.env.PATH = `${directory}:${process.env.PATH}`;
@@ -120,4 +123,44 @@ test('the guest Driver check says what failed', async t => {
   await engine.set({ exec: { stdout: 'cua-driver 0.28.2\n' } });
   const invocation = await sandboxMcpCommand({ dataDir, id });
   assert.deepEqual(invocation.args.slice(-3), [(await listSandboxes({ dataDir }))[0].containerId, '/usr/local/bin/cua-driver', 'mcp']);
+});
+
+const ENDPOINTS = ['apiUrl', 'desktopUrl', 'publishedPorts'];
+
+test('a desktop publishes no port, and its computer-server is checked inside it', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const created = await createSandbox({ dataDir });
+  assert.deepEqual(ENDPOINTS.filter(key => key in created), []);
+  const { container, readiness } = await engine.read();
+  assert.deepEqual(container.created.filter((arg: string) => /^(?:-p|-P|--publish)/.test(arg)), [], 'No port is published');
+  assert.deepEqual(readiness, ['exec', '--user', '1000', created.containerId, GUEST_PYTHON, '-I', '-c', await readFile(relay, 'utf8'), '8000', 'GET', '/status', '3']);
+  // A command still waits until computer-server answers inside the guest.
+  await engine.set({ computerServer: { code: 3 } });
+  await assert.rejects(sandboxMcpCommand({ dataDir, id: created.id }), { code: 'SANDBOX_NOT_READY' });
+});
+
+test('a desktop that publishes ports, as earlier versions created, is refused until it is destroyed', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const { id } = await createSandbox({ dataDir });
+  // The record and the container as an earlier version left them.
+  const file = join(dataDir, 'sandboxes', `${id}.json`);
+  await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, 'utf8')),
+    apiUrl: 'http://127.0.0.1:49152', desktopUrl: 'http://127.0.0.1:49153/', publishedPorts: { 8000: 49152, 6080: 49153 } }));
+  await engine.set({ published: true });
+  const [listed] = await listSandboxes({ dataDir });
+  assert.deepEqual(ENDPOINTS.filter(key => key in listed), [], 'Former endpoints are not reported');
+  await assert.rejects(inspectSandbox({ dataDir, id }), { code: 'SANDBOX_PORTS_INVALID', message: /Destroy it and create a new one\.$/ });
+  await assert.rejects(sandboxMcpCommand({ dataDir, id }), { code: 'SANDBOX_PORTS_INVALID' });
+  const destroyed = await destroySandbox({ dataDir, id });
+  assert.deepEqual([destroyed.status, ENDPOINTS.filter(key => key in destroyed), (await engine.read()).container], ['destroyed', [], undefined]);
+});
+
+test('a desktop image that cannot run the guest relay fails creation at once', { timeout: 30_000 }, async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  await engine.set({ computerServer: { code: 127,
+    stderr: `OCI runtime exec failed: exec failed: unable to start container process: exec: "${GUEST_PYTHON}": stat ${GUEST_PYTHON}: no such file or directory: unknown` } });
+  await assert.rejects(createSandbox({ dataDir }),
+    { code: 'SANDBOX_INVALID_IMAGE', message: `The sandbox image cannot run ${GUEST_PYTHON}, which reaches its computer-server.` });
+  const [failed] = await listSandboxes({ dataDir });
+  assert.deepEqual([failed.status, failed.errorCode, Boolean(failed.cleanedAt), (await engine.read()).container], ['failed', 'SANDBOX_INVALID_IMAGE', true, undefined]);
 });
