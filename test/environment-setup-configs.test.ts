@@ -230,7 +230,8 @@ test('a key that is not one plain word is quoted on one line, so a file cannot a
 test('each reader takes time in proportion to its file, however the file is crafted', () => {
   const MB = 1024 * 1024, KB = 1024;
   const fill = (unit: string, head = '', tail = '', size = MB) => head + unit.repeat(Math.ceil((size - head.length - tail.length) / unit.length)) + tail;
-  const nested = (depth: number) => { let value: unknown = 'echo a'; for (let index = 0; index < depth; index += 1) value = { [`n${index}`]: value, [`m${index}`]: 'echo b' }; return value; };
+  // Names nested `depth` deep, each beside `commands` commands.
+  const nested = (depth: number, commands: number) => { let value: unknown = 'echo a'; for (let index = 0; index < depth; index += 1) value = { [`n${index}`]: value, ...Object.fromEntries(Array.from({ length: commands }, (_, command) => [`m${command}`, 'echo b'])) }; return value; };
   const commands = (count: number, entry: (index: number) => string, separator: string) => Array.from({ length: count }, (_, index) => entry(index)).join(separator);
   const numbered = (make: (index: number) => string, separator = '\n') => { const parts: string[] = []; for (let index = 0, size = 0; size < MB; index += 1) { parts.push(make(index)); size += parts.at(-1)!.length + 1; } return parts.join(separator); };
   // Each was quadratic or worse: a name looked up across the whole file, a growing instruction tested again for each of
@@ -256,7 +257,7 @@ test('each reader takes time in proportion to its file, however the file is craf
     ['a Dockerfile whose continued line is followed by 65,536 comment rows', () => dockerfile(`RUN ${'\\a'.repeat(32 * KB)}\\\n${'#\n'.repeat(64 * KB)}`)],
     ['a deploy manifest whose 100 KB key holds 9,000 commands', () => deployManifest('vercel.json', `{"${'k'.repeat(100 * KB)}":{${commands(9000, index => `"c${index}Cmd":"x"`, ',')}}}`)],
     ['a Supabase config whose 100 KB table holds 9,000 references', () => supabaseConfig(`[${'k'.repeat(100 * KB)}]\n${commands(9000, index => `r${index} = "env(A${index})"`, '\n')}\n`)],
-    ['a dev container whose commands are named 1,500 deep', () => devcontainer(JSON.stringify({ postCreateCommand: nested(1500) }))],
+    ['a 240 KB dev container whose 16,500 commands are named 1,500 deep', () => devcontainer(JSON.stringify({ postCreateCommand: nested(1500, 11) }))],
   ];
   for (const [name, read] of cases) {
     const started = performance.now();
