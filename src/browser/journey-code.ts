@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {hasJourneyChecks} from '../business/browser-cases.ts';
 import {caseHash,specHash,validateJourneySpec} from '../journeys/playwright/specs.ts';
 import {CHECK_VERSION} from '../journeys/playwright/checks.ts';
+import {controlBlockerText} from '../journeys/playwright/control.ts';
 import type {BrowserCase} from '../business/browser-cases.ts';
 import type {JourneyResult} from './results.ts';
 
@@ -91,7 +92,7 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
     if(passes<3)return {status:'cancelled',passes,control:null};
     if(!result)return failed();
     if(result.status==='passed')return {status:'failed',passes,control:'missed',error:MISSED};
-    if(noticed(run,caseId,result)&&result.controlRead!==true)return {status:'failed',passes,control:'missed',error:UNREAD};
+    if(noticed(run,caseId,result)&&result.controlRead!==true)return {status:'failed',passes,control:'missed',error:controlBlockerText(result.controlBlocker)||UNREAD};
     return noticed(run,caseId,result)?{status:'passed',passes,control:'caught'}:failed(result.error?`${UNJUDGED} ${result.error}`:UNJUDGED);
   }
   return error?{status:'failed',passes,control:null,error}:{status:'cancelled',passes,control:null};

@@ -9,11 +9,13 @@ import type { FullResult, Reporter, TestCase, TestError, TestResult, TestStep } 
 import { SIGN_IN_ACTION, STEPS, approvedCase, type ApprovedCase } from './checks.ts';
 import { hide, failureText } from '../../redaction.ts';
 import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
+import { controlBlockerText } from './control.ts';
+import type { ControlBlocker } from '../../../contract/browser.ts';
 
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
-export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string; actionFeedback?: string };
+export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; controlBlocker?: ControlBlocker; error?: string; actionFeedback?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
 type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown; feedback?: unknown };
 
@@ -101,9 +103,13 @@ export default class JourneyReporter implements Reporter {
   // Facts, never a verdict: the controller decides status from these, the milestones and the approved case.
   facts(): JourneyFacts {
     const { id: caseId, steps = [] } = this.approved, result = this.result;
-    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }) };
+    const controlBlocker = this.controlRead === false ? (['shared-worker', 'unguarded-transport'] as const).find(value => controlBlockerText(value) === this.stop) : undefined;
+    const base = { caseId, assertions: this.assertions, ...(this.controlRead === undefined ? {} : { controlRead: this.controlRead }), ...(controlBlocker ? { controlBlocker } : {}) };
     if (result?.status === 'passed') return { ...base, stopCause: 'none' };
     if (result?.status === 'timedOut') return { ...base, stopCause: 'deadline' };
+    // An unguarded control is inconclusive even when an independently reviewed check failed.
+    // Keep that transport refusal alongside its already reported failed milestone.
+    if (this.controlRead === false && this.stop) return { ...base, stopCause: 'action', error: this.safe(this.stop) };
     // A reviewed check that failed decides the journey; the error that stopped it adds nothing.
     if (this.checkFailed || this.assertions.some(item => item.passed === false)) return { ...base, stopCause: 'none' };
     const title = steps.find(step => step.id === this.running)?.title;

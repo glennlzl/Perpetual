@@ -358,11 +358,19 @@ test('a control run that a write could get around cannot pass, so its verificati
   const ends=async(via:string,item:ApprovedCase=live)=>(await runSpec(target,liveSpec(via),{item,blockWrites:true})).at(-1)?.result;
   // A worker's socket, a shared worker and a page's WebSocketStream bypass every route, and a socket that opens after the
   // click sends before the journey acts again: the note is kept and every check passes, which proves nothing.
-  for(const via of ['worker','shared','stream','lazy'])assert.deepEqual(await ends(via),{caseId:journey.id,assertions:[],stopCause:'action',error:'The control run could not block everything the pages sent.'},via);
+  for(const via of ['worker','shared','stream','lazy'])assert.deepEqual(await ends(via),{caseId:journey.id,assertions:[],stopCause:'action',error:via==='shared'?'The control run cannot block shared-worker communication.':'The control run could not block everything the pages sent.'},via);
   assert.equal(f.app.state.notes,4);
   // The page's own socket signs in, and checks that cannot tell pass: the sign-in it forwarded is no write around the block.
   assert.deepEqual(await ends('page',{...live,steps:live.steps.map((step,index)=>index?{...step,checks:[]}:step)}),{caseId:journey.id,assertions:[],stopCause:'none'});
   assert.deepEqual([f.app.state.notes,f.app.received.filter(type=>type!=='hello')],[4,['sign-in','add','sign-in','add','sign-in','add','sign-in','add','sign-in']]);
+});
+
+test('a failed reviewed check retains the shared-worker control refusal',{timeout:60000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const item={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[{type:'text-visible' as const,value:'Name {run}'}]}:step)};
+  const events=await runSpec(target,liveSpec('shared'),{item,blockWrites:true});
+  assert.equal(events.some(event=>event.type==='journey-step'&&event.stepId===item.steps[2].id&&event.status==='failed'),true);
+  assert.deepEqual(events.at(-1)?.result,{caseId:journey.id,assertions:[],controlRead:false,controlBlocker:'shared-worker',stopCause:'action',error:'The control run cannot block shared-worker communication.'});
 });
 
 test('a reviewed check the application does not satisfy fails the journey',{timeout:120000},async t=>{

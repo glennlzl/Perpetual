@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
-import { controlReads } from './control.ts';
+import { controlReads, controlBlockerText } from './control.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
@@ -54,7 +54,8 @@ const BLOCK_WRITES = env.PERPETUAL_BLOCK_WRITES === '1', READS = new Set(['GET',
 // Fixed reasons a journey stops for review (the runner's navigation_not_allowed and payment_live_mode_rejected), and
 // why a control run in which every check passed proves nothing; a page calls REPORT when a write may have got past.
 const NAVIGATION = 'Navigation is outside approved origins.', PAYMENT = 'Payment pages accept input only in Stripe test mode.';
-const UNGUARDED = 'The control run could not block everything the pages sent.', REPORT = '__perpetualUnguarded';
+const UNGUARDED = controlBlockerText('unguarded-transport')!, REPORT = '__perpetualUnguarded';
+const SHARED_WORKER = controlBlockerText('shared-worker')!;
 // Why journey.signIn() found no sign-in form to fill.
 const NO_FORM = 'The application URL shows no sign-in form. Set the sign-in page.', NO_SIGN_IN_FORM = 'The sign-in page shows no sign-in form. Check the sign-in page.';
 const OFF_ORIGIN = 'The sign-in form is not on the application origin.';
@@ -257,7 +258,8 @@ export const test = base.extend<{ journey: JourneyFixture }>({
   journey: async ({ page, context }, use, testInfo) => {
     if (createHash('sha256').update(readFileSync(testInfo.file)).digest('hex') !== env.PERPETUAL_SPEC_HASH) throw halt('The spec differs from its approved version.');
     const timeout = Number(env.PERPETUAL_CHECK_TIMEOUT_MS) || 10000, captures: Captures = {}, done: string[] = [];
-    let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false;
+    let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false, sharedWorker = false;
+    const controlRefusal = () => sharedWorker ? SHARED_WORKER : UNGUARDED;
     const controlFailures: (() => boolean)[] = [];
     let controlCheckFailed = false;
     const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context) : undefined;
@@ -328,7 +330,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       });
       await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', ...(BLOCK_WRITES && readRequests.length ? {} : { resourceType: 'Document' }), requestStage: 'Request' }] });
       if (!BLOCK_WRITES) return;
-      cdp.on('Target.targetCreated', ({ targetInfo: created }) => { if (created.type === 'shared_worker') unguarded = true; });
+      cdp.on('Target.targetCreated', ({ targetInfo: created }) => { if (created.type === 'shared_worker') { sharedWorker = true; unguarded = true; } });
       await cdp.send('Target.setDiscoverTargets', { discover: true });
     };
     if (CHECKS >= 2) await context.addInitScript(markEdits, EDITED);
@@ -445,10 +447,11 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       emit({ type: 'assertions', assertions: assertions.map(({ type, value, passed, resolved }) => ({ type, value, passed, ...(resolved ? { resolved } : {}) })) });
       if (assertions.some(item => !item.passed)) throw new Error('A final assertion failed.');
       // Every check passed, but a write may have got past the block: the control run is inconclusive, not missed.
-      if (unguarded) throw halt(UNGUARDED);
+      if (unguarded) throw halt(controlRefusal());
     } finally {
       diagnostic?.cleanup();
       await stopFrames();
+      if (unguarded) emit({ type: 'journey-stop', error: controlRefusal() });
       if (control && controlCheckFailed) emit({ type: 'control-read', eligible: !unguarded && controlFailures.some(valid => valid()) });
     }
   },

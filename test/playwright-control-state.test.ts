@@ -75,3 +75,30 @@ test('a blocked read during observation cannot be erased by a new document befor
   f.reads.blockedRequest(f.request(f.first, 'POST')); f.fresh();
   assert.equal(observed(f.failed), undefined);
 });
+
+test('a delayed blocked response does not invalidate the fresh document after that blocked change', () => {
+  const f = setup(), write = f.request(f.first, 'POST');
+  f.context.emit('request', write); f.reads.blockedRequest(write);
+  f.fresh();
+  const witness = f.reads.observation(f.first)(f.failed);
+  assert.ok(witness);
+  // A paired response wait can start the reload before Playwright delivers its response event.
+  f.context.emit('response', { request: () => write, ok: () => false, status: () => 503 });
+  assert.equal(witness(), true, 'This is the already blocked change, not a failed read of the new document.');
+  const read = f.request();
+  f.context.emit('response', { request: () => read, ok: () => false, status: () => 503 });
+  assert.equal(witness(), false, 'An actual failed read still makes the new document unreadable.');
+  f.fresh();
+  f.context.emit('requestfailed', write);
+  assert.equal(f.reads.eligible(f.first, f.failed), false, 'A failed transport remains inconclusive, even for a blocked request.');
+});
+
+test('a later blocked request invalidates the fresh document even when its response is ignored', () => {
+  const f = setup(); f.reads.blocked(f.first); f.fresh();
+  const witness = f.reads.observation(f.first)(f.failed);
+  assert.ok(witness);
+  const write = f.request(f.first, 'POST');
+  f.context.emit('request', write); f.reads.blockedRequest(write);
+  f.context.emit('response', { request: () => write, ok: () => false, status: () => 503 });
+  assert.equal(witness(), false);
+});

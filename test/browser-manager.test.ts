@@ -76,6 +76,19 @@ test('code feedback is scrubbed with its originating account, stays private and 
   assert.ok(!('codeFeedback' in (await restarted.view(f.context)).runs[0]));
 });
 
+test('restart refuses malformed stored control limitations before publishing run history',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const {run}=await f.manager.run(f.context,{},manual);const report=await completed(f,run.id);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),saved=JSON.parse(await readFile(file,'utf8'));
+  for(const fields of [{controlRead:false,controlBlocker:{}},{controlRead:false,controlBlocker:'unknown'},{controlRead:true,controlBlocker:'shared-worker'},{controlBlocker:'unguarded-transport'}]){
+    const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control limitation/);
+  }
+  await writeFile(file,JSON.stringify(saved));
+  const restored=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restored.close());
+  assert.deepEqual((await restored.runProgress(f.context,run.id)).results,report.results,'Legacy evidence without a limitation stays unchanged.');
+});
+
 test('unverified passed claims and missing results cannot become business passes',async t=>{
   const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',status:'passed',agentCompleted:true,assertions:[]}}]);
   const {run}=await f.manager.run(f.context,{},manual);const report=await completed(f,run.id);assert.equal(report.run.status,'needs_review');assert.equal(report.results[0].status,'needs_review');

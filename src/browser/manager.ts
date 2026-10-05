@@ -13,6 +13,7 @@ import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
+import {controlBlockerText} from '../journeys/playwright/control.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createJourneyCode,restoreJourneyCode,replaceJourneyCases} from './journey-code.ts';
 import type {GenerationFailure,JourneyCodeState,JourneyCodeSnapshot,Verification,VerificationIdentity,RunnableCode} from './journey-code.ts';
@@ -246,6 +247,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};
   {const saved=await readStateFile(file,{limit:16*1024*1024,invalid:'Invalid browser state.'});if(saved!==undefined){if(!isRecord(saved)||saved.version!==1||!Array.isArray(saved.runs)||!saved.configs||!saved.cases||!saved.analyses)throw new Error('Unsupported browser state.');state=saved as BrowserState;}}
   for(const key of ['preparations','preparationAttempts','configTargets','specs'] as const){state[key]??={};if(typeof state[key]!=='object'||Array.isArray(state[key]))throw new Error('Unsupported browser preparation state.');}
+  // A stored transport refusal has the same fixed shape as live worker facts, before history or
+  // verification is reconstructed. Legacy results without this optional field remain unchanged.
+  for(const run of state.runs)for(const result of run.results||[]){
+    const facts:unknown=result;
+    if(!isRecord(facts)||facts.controlBlocker!==undefined&&(facts.controlRead!==false||!controlBlockerText(facts.controlBlocker)))throw new Error('Invalid stored control limitation.');
+  }
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
   for(const config of Object.values(state.configs))if(config.readOnlyRequests!==undefined){

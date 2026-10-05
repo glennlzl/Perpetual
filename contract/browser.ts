@@ -35,7 +35,8 @@ export type BlockerKind = 'account' | 'fixture' | 'integration' | 'permission' |
 export interface Blocker { stepId?: string; kind: BlockerKind; evidence: string }
 export type AssertionResult = FinalAssertion & { passed: boolean; resolved?: string; reached?: false };
 export type JourneyVerdict = 'passed' | 'failed' | 'blocked' | 'needs_review';
-export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
+export type ControlBlocker = 'shared-worker' | 'unguarded-transport';
+export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
 export type RunStatus = JourneyVerdict | 'cancelled' | 'completed';
 export type ConcurrencyLimit = 'account' | 'shared-data' | null;
 export type MilestoneCheckResult = MilestoneCheck & { passed: boolean; observed?: number; resolved?: string; error?: string; provenance?: 'independent' };

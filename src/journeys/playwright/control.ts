@@ -1,11 +1,15 @@
 import type { BrowserContext, Page, Request } from '@playwright/test';
 import { RUN, checkTemplate, type EvaluatedCheck } from './checks.ts';
 
+/** Fixed transport limitations, never page text, URLs or message contents. */
+export const controlBlockerText = (value: unknown): string | undefined => value === 'shared-worker' ? 'The control run cannot block shared-worker communication.'
+  : value === 'unguarded-transport' ? 'The control run could not block everything the pages sent.' : undefined;
+
 /** A control failure needs a fresh document of the judged page, after its blocked change. */
 export function controlReads(context: BrowserContext) {
   type Document = { request: Request; epoch: number; ok: boolean; finished: boolean; committed: boolean };
   type State = { epoch: number; document?: Document; invalid: boolean };
-  const pages = new WeakMap<Page, State>(), documents = new WeakMap<Request, Document>(), captures = new Map<string, number>();
+  const pages = new WeakMap<Page, State>(), documents = new WeakMap<Request, Document>(), blockedRequests = new WeakSet<Request>(), captures = new Map<string, number>();
   let sequence = 0;
   const state = (page: Page) => { let item = pages.get(page); if (!item) { item = { epoch: 0, invalid: true }; pages.set(page, item); } return item; };
   const owner = (request: Request) => { try { return request.frame().page(); } catch { return undefined; } };
@@ -23,7 +27,9 @@ export function controlReads(context: BrowserContext) {
   context.on('response', response => {
     const request = response.request(), document = documents.get(request);
     if (document) document.ok = response.ok();
-    if (response.status() >= 400) invalidate(request);
+    // The block already invalidated its document. Its synthetic response may arrive after a paired
+    // response wait starts the fresh GET; it is not a failed read of that new document.
+    if (response.status() >= 400 && !blockedRequests.has(request)) invalidate(request);
   });
   context.on('requestfailed', invalidate);
   context.on('requestfinished', request => { const document = documents.get(request); if (document) document.finished = true; });
@@ -48,7 +54,7 @@ export function controlReads(context: BrowserContext) {
   }
   return {
     blocked,
-    blockedRequest(request: Request) { blocked(owner(request)); },
+    blockedRequest(request: Request) { blockedRequests.add(request); blocked(owner(request)); },
     captured(check: EvaluatedCheck) { if (check.type === 'read-number' && check.passed && Number.isFinite(check.observed)) captures.set(check.name, sequence); },
     eligible,
     // Snapshot before the browser observation. A later document can never certify this check,

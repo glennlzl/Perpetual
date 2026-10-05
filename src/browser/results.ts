@@ -1,8 +1,9 @@
 import {browserError} from './runtime.ts';
 import {RUN,resolvedFrom} from '../journeys/playwright/checks.ts';
+import {controlBlockerText} from '../journeys/playwright/control.ts';
 import type {BrowserCase} from '../business/browser-cases.ts';
 
-import type { BlockerKind, Blocker, AssertionResult, JourneyVerdict, JourneyResult, RunStatus } from '../../contract/browser.ts';
+import type { BlockerKind, Blocker, AssertionResult, JourneyVerdict, JourneyResult, RunStatus, ControlBlocker } from '../../contract/browser.ts';
 export type { BlockerKind, Blocker, AssertionResult, JourneyVerdict, JourneyResult, RunStatus } from '../../contract/browser.ts';
 /** A milestone's progress as the controller accepted it. */
 export type MilestoneState={id:string;title:string;status:string};
@@ -43,6 +44,7 @@ export function journeyResult(approved:ApprovedJourney,reported:unknown,steps:re
   const facts=isRecord(reported)?reported:{};
   if(facts.caseId!==approved.id)throw new Error('Browser runtime returned an unknown case.');
   if(facts.controlRead!==undefined&&typeof facts.controlRead!=='boolean')throw new Error('Browser runtime returned invalid control evidence.');
+  if(facts.controlBlocker!==undefined&&(facts.controlRead!==false||!controlBlockerText(facts.controlBlocker)))throw new Error('Browser runtime returned an invalid control limitation.');
   const stop=facts.stopCause;
   if(!stopCauses.has(stop))throw new Error('Browser runtime returned an invalid stop cause.');
   const blockers=reportedBlockers(approved,facts.blockers),checks=finalChecks(approved,facts.assertions);
@@ -69,7 +71,7 @@ export function journeyResult(approved:ApprovedJourney,reported:unknown,steps:re
     return assertions.length||(approved.steps||[]).some(step=>step.checks?.length)?['passed',null]:['needs_review','The journey has no reviewed checks or final assertions.'];
   }
   const [status,error]=decide();
-  return {caseId:approved.id,status,engine:'playwright',assertions,...(facts.controlRead===undefined?{}:{controlRead:facts.controlRead as boolean}),...(blockers?.length?{blockers}:{}),...(error?{error}:{})};
+  return {caseId:approved.id,status,engine:'playwright',assertions,...(facts.controlRead===undefined?{}:{controlRead:facts.controlRead as boolean}),...(facts.controlBlocker===undefined?{}:{controlBlocker:facts.controlBlocker as ControlBlocker}),...(blockers?.length?{blockers}:{}),...(error?{error}:{})};
 }
 
 const rollUp=['failed','blocked','needs_review','cancelled'] as const;
