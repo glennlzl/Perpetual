@@ -6,11 +6,3 @@ dependencies = ["cua-sandbox==0.8.0"]
 
 [tool.uv]
 package = false
-
-[[tool.uv.index]]
-name = "cua-wheels"
-url = "https://wheels.cua.ai/simple"
-explicit = true
-
-[tool.uv.sources]
-cua-fleet = { index = "cua-wheels" }

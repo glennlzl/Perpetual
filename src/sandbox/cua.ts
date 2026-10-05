@@ -52,7 +52,7 @@ export async function sandboxAction({dataDir, id, action: input}: Target & {acti
       env: pythonEnvironment(), timeout: (timeoutSeconds + 25) * 1000,
       killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
     }, (error, stdout) => {
-      if (error?.code === 'ENOENT') return reject(new Error('Cua Python environment is missing. Run uv sync --project integrations/cua.'));
+      if (error?.code === 'ENOENT') return reject(new Error('Cua Python environment is missing. Run uv sync --project integrations/cua --frozen.'));
       if (error?.killed || error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
         return reject(new Error('Cua request exceeded its limit. Guest completion is unknown; inspect before retrying.'));
       }

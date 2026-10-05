@@ -22,7 +22,7 @@ Requirements: Node 24.12 or later, a local Docker engine running Linux container
 
 ```sh
 # Install the host SDK environment; this does not start a desktop.
-uv sync --project integrations/cua
+uv sync --project integrations/cua --frozen
 
 # Returns an ID and local API and desktop endpoints once computer-server is ready.
 node src/cli.ts sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]
