@@ -751,6 +751,26 @@ test('finished repairs keep their failures in brief, and the state file stays wi
   assert.deepEqual([kept.length < 40, kept[0].id], [true, 'r0'], 'The newest repairs stay.');
 });
 
+// Earlier controllers wrote the file without a bound, and a start that refused it kept the whole controller from starting.
+test('a start reads back a larger file an earlier controller wrote and trims it, keeping a merge and an open pull request longest', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', file = join(dataDir, 'repairs', 'state.json');
+  const failure = { runId: '2', jobs: [{ id: 'job-2', name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log: 'x'.repeat(20_000), tail: 'y'.repeat(12_000), diagnosis: diagnoseFailure(LOGS.build), observedAt: at };
+  const record = (index: number, extra: object) => ({ id: `r${index}`, key: KEY, repository: 'owner/app', branch: 'main', sha: index.toString(16).padStart(40, '0'), login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  await writeFile(file, JSON.stringify({ version: 1, repairs: Array.from({ length: 100 }, (_, index) => record(index, { failures: Array.from({ length: 6 }, () => failure) })) }));
+  assert.ok((await stat(file)).size > 16 * 1024 * 1024);
+  const legacy = await harness(t, { dataDir });
+  assert.deepEqual([(await legacy.saved()).repairs.length, (await stat(file)).size < 8 * 1024 * 1024], [100, true]);
+  await legacy.manager.close();
+  const reason = 'x'.repeat(300_000), closedPull = { ...PULL, number: 8, url: 'https://github.com/owner/app/pull/8', closed: true };
+  await writeFile(file, JSON.stringify({ version: 1, repairs: Array.from({ length: 40 }, (_, index) => record(index, { reason,
+    ...(index === 39 ? { status: 'merged', merged: C } : index === 38 ? { pullRequest: PULL } : index === 37 ? { pullRequest: closedPull } : {}) })) }));
+  const bounded = await harness(t, { dataDir });
+  const kept = (await bounded.saved()).repairs.map(item => item.id);
+  assert.deepEqual([kept[0], kept.includes('r39'), kept.includes('r38'), kept.includes('r37'), kept.length < 40], ['r0', true, true, false, true], 'The loop guard\'s merge and open pull request outlast older repairs.');
+});
+
 test('the newest hundred repairs of each pipeline are kept, so a busy pipeline never drops another\'s merge', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   await mkdir(join(dataDir, 'repairs'));

@@ -133,8 +133,11 @@ const MERGED = 'Merged on GitHub.';
 const NO_AGENT = 'Automatic repair is unavailable. Fix the failure in a pull request.';
 const CLEANUP_HOLD = 'Repair cleanup must finish before another repair can start.';
 const LIMIT = 100;
-/** Bytes of state a start reads back, and the bound each save keeps, well within it. */
-const READ_LIMIT = 16 * 1024 * 1024, SAVE_LIMIT = READ_LIMIT / 2;
+/**
+ * Bytes of state a start reads back, which covers what earlier controllers wrote without a bound, and the bound each
+ * save keeps; the first save at a start trims an older, larger file.
+ */
+const READ_LIMIT = 128 * 1024 * 1024, SAVE_LIMIT = 8 * 1024 * 1024;
 /** Checks a failing head waits for the loop guard to judge it before it needs a person. */
 const GUARD = 10;
 const RUN_ID = /^\d{1,20}$/;
@@ -244,16 +247,19 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const baselines = new Map<string, { branch: string; sha: string }>(), passing = new Map<string, string>();
   const followed = new Map<string, Followed>(), unjudged = new Set<string>(), inFlight = new Set<string>();
   // Each save keeps finished repairs' failures in brief and stays within SAVE_LIMIT, the oldest finished repairs that
-  // hold no cleanup giving way first, so a start always reads the file back.
+  // hold no cleanup giving way first, so a start always reads the file back. A merge and a pull request that may still
+  // be open, which the loop guard reads, give way last.
   function persist() {
     return saves.run(() => {
       for (const repair of state.repairs) if (repair.failures && !ACTIVE.includes(repair.status)) repair.failures = repair.failures.slice(0, 5).map(brief);
       let content = JSON.stringify(state);
-      for (let index = state.repairs.length - 1; index >= 0 && Buffer.byteLength(content) > SAVE_LIMIT; index -= 1) {
-        const repair = state.repairs[index];
-        if (ACTIVE.includes(repair.status) || repair.cleanup) continue;
-        state.repairs.splice(index, 1);
-        content = JSON.stringify(state);
+      for (const spare of [(repair: Repair) => !repair.merged && (!repair.pullRequest || repair.pullRequest.closed), () => true]) {
+        for (let index = state.repairs.length - 1; index >= 0 && Buffer.byteLength(content) > SAVE_LIMIT; index -= 1) {
+          const repair = state.repairs[index];
+          if (ACTIVE.includes(repair.status) || repair.cleanup || !spare(repair)) continue;
+          state.repairs.splice(index, 1);
+          content = JSON.stringify(state);
+        }
       }
       return writeStateFile(file, content);
     });
