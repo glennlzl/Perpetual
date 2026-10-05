@@ -286,8 +286,8 @@ export function createRepairAgent(options: RepairAgentOptions) {
       const first = checkChanges(diff.toString('utf8'), { deployFiles });
       if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
       // What git staged is checked again, whatever the box's diff said: its own paths, its text diff with the content
-      // of files it treats as binary, and the manifests whose checks it changed. The change's size stays the box
-      // diff's, where a binary file counts no lines.
+      // of files it treats as binary, and the manifests whose checks it changed. The change's size is that text diff's
+      // too, since a file git treats as binary, by its content or its attributes, counts no lines in the box's diff.
       let staged: { paths: string[]; text: string; checks: string[] };
       try { staged = await host.stage({ directory: clone, diff, base: repair.sha }); }
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
@@ -299,8 +299,8 @@ export function createRepairAgent(options: RepairAgentOptions) {
       if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);
       const sha = await host.commit({ directory: clone, parent: pushed ?? repair.sha, message: commitMessage(title, summary), author: { name: account.login, email: `${account.id}+${account.login}@users.noreply.github.com` } });
       if (!sha) { await fail('The attempt made no change since the last push.'); continue; }
-      holds = [...new Set([...first.holds, ...rules.holds, ...(staged.checks.length ? [HELD.checks] : [])])];
-      check = { paths, added: first.added, removed: first.removed };
+      holds = [...new Set([...first.holds, ...rules.holds, ...checked.holds, ...(staged.checks.length ? [HELD.checks] : [])])];
+      check = { paths, added: checked.added, removed: checked.removed };
       signal.throwIfAborted();
       let lease = pushed;
       if (!lease) {

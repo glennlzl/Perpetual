@@ -241,6 +241,25 @@ test('a change that weakens how CI checks the code reaches the merge step held f
   assert.deepEqual([seen, (await h.saved()).holds], [[[HELD.checks]], [HELD.checks]], 'The package script the failing step runs is a judge of the fix.');
 });
 
+// git attributes such as -diff make text files binary in the box's diff, where they count no lines.
+test('a change\'s size is read from what the host copy staged, so a file git treats as binary counts its lines', async t => {
+  const seen: (readonly string[])[] = [];
+  const values = Array.from({ length: 500 }, (_, index) => `exports.value${index} = ${index};`).join('\n');
+  const large: ScriptedStep[] = [
+    { calls: [{ tool: 'write', input: { path: '.gitattributes', text: '* -diff\n' } }, { tool: 'write', input: { path: 'values.js', text: `${values}\n` } }] },
+    { calls: [{ tool: 'done', input: { summary: 'Added the values.' } }] },
+  ];
+  const h = await harness(t, {
+    scripts: [large], ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request' })],
+    merge: { async merge(input) { seen.push(input.holds); return { status: 'ready', reason: `Held for a person: ${input.holds.join(' ')}` }; } },
+  });
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual(seen, [[HELD.size]]);
+  assert.match(h.records.created[0].body, /2 files, \+501 −0/);
+});
+
 test('a credential in a file git treats as binary is refused from what the host copy staged, and never pushed', async t => {
   const hidden = [
     { calls: [{ tool: 'write', input: { path: '.gitattributes', text: '*.env binary\n' } }, { tool: 'write', input: { path: 'deploy.env', text: 'GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' } }] },
