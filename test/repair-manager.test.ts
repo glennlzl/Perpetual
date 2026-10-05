@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagnoseFailure } from '../src/providers.ts';
 import { createRepairManager, type Repair, type RepairContext, type RepairGitHub, type RepairOutcome, type RepairSource, type RepairSteps } from '../src/repair/manager.ts';
+import { autopilotStages } from '../src/repair/view.ts';
 import type { BranchHeadInput } from '../src/gate/github.ts';
 import type { WorkflowRun } from '../src/github-runs.ts';
 
@@ -1316,7 +1317,7 @@ test('a pull request found merged when it is closed as superseded records the me
       await context.report({ pullRequest: { number, url: `https://github.com/owner/app/pull/${number}`, branch: `perpetual/repair/${context.repair.sha.slice(0, 7)}` } });
       return { status: 'ready' };
     }, {
-      async state(repair) { reads.push(repair.pullRequest!.number); return merged ? { state: 'merged', mergeCommit: D } : { state: 'open', mergeCommit: null }; },
+      async state(repair) { const number = repair.pullRequest!.number; reads.push(number); return merged && number === 7 ? { state: 'merged', mergeCommit: D } : { state: 'open', mergeCommit: null }; },
       async close() { merged = true; return { state: 'merged', mergeCommit: named }; },
     }).steps });
     await h.failHead([run('2', B, 'failure')]);
@@ -1325,8 +1326,48 @@ test('a pull request found merged when it is closed as superseded records the me
     await h.manager.idle();
     assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.merged ?? null, reads], ['merged', 'Merged on GitHub.', named, [7]], 'The close\'s own read names the merge commit.');
     await h.poll();
-    assert.deepEqual([h.repair(B)?.merged, reads], [D, named ? [7] : [7, 7]], named ? 'A known merge commit is not read again.' : 'One naming none is read at the next check.');
+    // The newer fix, ready at the head, has its pull request 8 read at each check.
+    assert.deepEqual([h.repair(B)?.merged, h.repair(C)?.status, reads], [D, 'ready', named ? [7, 8] : [7, 7, 8]], named ? 'A known merge commit is not read again.' : 'One naming none is read at the next check.');
   }
+});
+
+test('a ready repair\'s pull request is read at every check, so one a person closes reads Not merged and its failed run may be repaired again', async t => {
+  const reads: number[] = [], states: Record<number, 'open' | 'closed' | 'merged'> = {};
+  const a = pulled(() => ({ status: 'ready', reason: 'Auto-merge is off.' }), states, { reads });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  await h.poll();
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.pullRequest?.closed, reads], ['ready', undefined, [7, 7]], 'The fix at the watched head is read at each check.');
+  assert.deepEqual(autopilotStages(h.manager.view(), 'build').build.failed?.runs, [], 'A fix waiting with its pull request is not started again.');
+  await assert.rejects(h.manager.repair({ runId: '2' }), (error: HttpError) => error.statusCode === 409 && error.message === 'This commit already has a repair.');
+  states[7] = 'closed';
+  await h.poll();
+  const reached = reads.length;
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.pullRequest?.closed, reads.length], ['ready', true, reached], 'A closed pull request is recorded and not read again.');
+  assert.equal((await h.saved()).repairs[0].pullRequest?.closed, true);
+  const stage = autopilotStages(h.manager.view(), 'build').build;
+  assert.deepEqual([stage.changes[0].status, stage.failed?.runs], ['not-merged', [shown('2')]], 'The rejected fix reads Not merged, and Build offers Repair again.');
+  await h.manager.repair({ runId: '2' });
+  await h.manager.idle();
+  assert.deepEqual([h.manager.view().repairs.length, h.repair(B)?.trigger, h.repair(B)?.status, a.contexts.length], [2, 'person', 'ready', 2]);
+});
+
+test('a ready repair whose pull request a person merges is merged at the next check, before the head moves, and its merge failing needs a person', async t => {
+  const states: Record<number, 'open' | 'closed' | 'merged'> = {};
+  const a = pulled(() => ({ status: 'ready', reason: 'Auto-merge is off.' }), states, { commits: { 7: C } });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  states[7] = 'merged';
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.merged], ['merged', 'Merged on GitHub.', C]);
+  h.github.head = C;
+  h.github.runs[C] = [run('3', C, 'failure')];
+  await h.poll();
+  assert.deepEqual([h.repair(C)?.status, h.repair(C)?.reason, a.contexts.length], ['needs-person', 'The merge of repair #7 failed again.', 1]);
 });
 
 test('loop guard: a person\'s merge of a pull request whose repair was verifying its gates is read once the repair ends at ready or is stopped', async t => {

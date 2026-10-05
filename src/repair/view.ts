@@ -93,12 +93,12 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
 /**
  * The Build stage's Autopilot: only a managed GitHub source has one. Its mode is the auto-merge switch, its changes the
  * repairs, and the watched head's failed runs are offered for a person's Repair while the head has no repair under way
- * or waiting with its pull request.
+ * or waiting with its pull request, such as a ready one whose pull request a person closed.
  */
 export function autopilotStages(view: RepairView, stageId: string | null, names: Names = id => id): Record<string, StageAutopilot> {
   if (!stageId || view.autoMerge === undefined) return {};
   const { head } = view, current = head && view.repairs.find(repair => repair.sha === head.sha);
-  const runs = head && (!current || retryable(current.status)) ? head.failed : [];
+  const runs = head && (!current || retryable(current)) ? head.failed : [];
   return { [stageId]: { mode: view.autoMerge ? 'merge' : 'ask', changes: view.repairs.map(repair => repairChange(repair, stageId, names)), ...(head ? { failed: { sha: head.sha, runs } } : {}) } };
 }
 

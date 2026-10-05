@@ -120,8 +120,12 @@ export const ACTIVE: readonly RepairStatus[] = Object.freeze(['triaging', 'rerun
 const STATUSES: Record<RepairStatus, true> = { triaging: true, rerunning: true, repairing: true, 'verifying-ci': true, 'verifying-gates': true, ready: true, merged: true, flaky: true, 'needs-person': true, failed: true, superseded: true, cancelled: true };
 const OUTCOMES = new Set(['ready', 'merged', 'failed', 'needs-person']);
 const PROGRESS = new Set(['repairing', 'verifying-ci', 'verifying-gates']);
-/** A finished repair a person may start again; a ready or merged one already has its pull request. */
-export const retryable = (status: RepairStatus) => !ACTIVE.includes(status) && status !== 'ready' && status !== 'merged';
+/**
+ * A finished repair a person may start again: one with no fix waiting with its pull request. A merged one has its fix,
+ * and a ready one waits with its pull request until a person closes it.
+ */
+export const retryable = (repair: { status: RepairStatus; pullRequest?: { closed?: true } }) => !ACTIVE.includes(repair.status) && repair.status !== 'merged'
+  && (repair.status !== 'ready' || Boolean(repair.pullRequest?.closed));
 // Finished repairs left for a person with their pull request: a failed or stopped repair keeps its draft, and a restart
 // leaves an interrupted one's open. A newer passing head supersedes each of them.
 const KEPT: readonly RepairStatus[] = ['ready', 'failed', 'needs-person', 'cancelled'];
@@ -513,15 +517,31 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   // gave up on. Active work holds every head until it ends, and its pull request is read then.
   const holding = (current: Managed, connection: Connection, seen: Followed) => scoped(current).filter(repair => repair.login === connection.login && repair.repository === connection.repository
     && repair.pullRequest && !unjudged.has(repair.id) && (repair.status === 'merged' ? !repair.merged : repair.sha !== seen.sha && mergeable(repair) && !seen.read.has(repair.id)));
+  // A ready repair's fix waits with its pull request, which a person may merge or close on GitHub at any time, at the
+  // watched head too: it is read at every check, once a minute, as long as it is open as far as Perpetual knows, unless
+  // the loop guard gave up on reading it.
+  const waiting = (current: Managed, connection: Connection) => scoped(current).filter(repair => repair.status === 'ready' && unclosed(repair)
+    && repair.login === connection.login && repair.repository === connection.repository && !unjudged.has(repair.id));
+  // What a read found a person did to a finished repair's pull request: merged makes the repair merged, with the merge
+  // commit that read names, and closed is recorded and not read again.
+  function recordRead(repair: Repair, state: 'closed' | 'merged', merged?: string) {
+    const pullRequest = { ...repair.pullRequest! };
+    delete pullRequest.closing;
+    if (state === 'merged') Object.assign(repair, { status: 'merged', reason: MERGED, pullRequest, ...(merged ? { merged } : {}) } satisfies Partial<Repair>);
+    else repair.pullRequest = { ...pullRequest, closed: true };
+    repair.updatedAt = now();
+  }
   // A head that moved may be a person's merge of an older repair's pull request, whatever its runs do next. What the loop
-  // guard waits for is read, as the account that opened it: merged makes the repair merged, with the merge commit that
-  // read names, and closed is recorded and not read again. A read that failed, or a merge commit still unknown, is read
-  // again at the next check. Returns what the guard has read at this head.
+  // guard waits for is read, as the account that opened it, and so is each ready repair's pull request. A read that
+  // failed, or a merge commit still unknown, is read again at the next check. Returns what the guard has read at this
+  // head.
   async function follow(current: Managed, connection: Connection, sha: string) {
     if (!steps.state) return null;
     let seen = followed.get(current.key);
     if (seen?.branch !== current.branch || seen.login !== connection.login || seen.sha !== sha) followed.set(current.key, seen = { branch: current.branch, login: connection.login, sha, read: new Set(), waits: 0 });
+    const reading = new Set<string>();
     for (const repair of holding(current, connection, seen)) {
+      reading.add(repair.id);
       const read = await steps.state(structuredClone(repair)).then(pullRead, () => null);
       if (closed) return null;
       if (!read) continue;
@@ -533,11 +553,15 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       }
       seen.read.add(repair.id);
       if (!mergeable(repair) || read.state === 'open') continue;
-      const pullRequest = { ...repair.pullRequest! };
-      delete pullRequest.closing;
-      if (read.state === 'merged') Object.assign(repair, { status: 'merged', reason: MERGED, pullRequest, ...(read.merged ? { merged: read.merged } : {}) } satisfies Partial<Repair>);
-      else repair.pullRequest = { ...pullRequest, closed: true };
-      repair.updatedAt = now();
+      recordRead(repair, read.state, read.merged);
+      await persist();
+    }
+    for (const repair of waiting(current, connection)) {
+      if (reading.has(repair.id)) continue;
+      const read = await steps.state(structuredClone(repair)).then(pullRead, () => null);
+      if (closed) return null;
+      if (!read || read.state === 'open' || repair.status !== 'ready' || !unclosed(repair)) continue;
+      recordRead(repair, read.state, read.merged);
       await persist();
     }
     return seen;
@@ -694,7 +718,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
         const started = () => {
           const existing = scoped(current).find(repair => repair.sha === head.sha);
           if (existing && ACTIVE.includes(existing.status)) return true;
-          if (existing && !retryable(existing.status)) throw conflict('This commit already has a repair.');
+          if (existing && !retryable(existing)) throw conflict('This commit already has a repair.');
           if (running()) throw conflict('Another repair is running.');
           // A person's Repair is not offered while the startup sweep is owed, and says why.
           if (recovering) throw conflict(recoveryHold());
@@ -718,7 +742,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
         // then read admission evidence again; stopped work and owned resources keep their existing hold.
         const previous = scoped(current).find(repair => controllers.has(repair.id));
         const ending = previous && controllers.get(previous.id);
-        if (previous && retryable(previous.status) && !previous.cleanup && ending && !ending.controller.signal.aborted) {
+        if (previous && retryable(previous) && !previous.cleanup && ending && !ending.controller.signal.aborted) {
           await ending.finished;
           unchanged();
           continue;
