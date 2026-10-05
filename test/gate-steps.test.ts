@@ -31,6 +31,7 @@ function fakes({ environments: list = [], created = { id: 'new', status: 'ready'
     async view() { return { config: { targetUrl: target } }; },
     async run(ctx, input) { calls.push(`run ${JSON.stringify(input)}`); return { run: { id: 'run-1', status: 'queued', environmentId: resolves } }; },
     async runProgress(ctx, id) { calls.push(`progress ${id}`); return { run: { id, status: runs[Math.min(polls++, runs.length - 1)] } }; },
+    async stop(ctx, id) { calls.push(`stop ${id}`); return {}; },
   };
   return { calls, readiness, environments, browser };
 }
@@ -186,14 +187,19 @@ test('a gate waiting for a health lease refuses a target changed before browser 
   assert.equal(started, 0);
 });
 
-test('a run the browser admitted for another application never becomes the gate\'s verdict', async () => {
+test('a run the browser admitted for another application is stopped and never becomes the gate\'s verdict', async () => {
   for (const environmentId of ['other', undefined]) {
     const f = fakes();
     // A person saved another application URL between the gate's check and the browser's admission.
     f.browser.run = async () => ({ run: { id: 'run-1', ...(environmentId ? { environmentId } : {}) } });
     await assert.rejects(steps(f).run(context, { id: 'new', status: 'ready' }), /application URL to the rebuilt twin/);
-    assert.deepEqual(f.calls, [], 'The run is never followed for a verdict.');
+    assert.deepEqual(f.calls, ['stop run-1'], 'The gate stops the run it started and never follows it for a verdict.');
   }
+  // A stop that fails still leaves the gate's own reason.
+  const f = fakes();
+  f.browser.run = async () => ({ run: { id: 'run-1', environmentId: 'other' } });
+  f.browser.stop = async () => { throw new Error('Run not found.'); };
+  await assert.rejects(steps(f).run(context, { id: 'new', status: 'ready' }), /application URL to the rebuilt twin/);
 });
 
 test('a run is refused when the application URL does not point at the rebuilt twin', async () => {

@@ -29,6 +29,7 @@ test('a health check that takes the previous twin during gate admission delays r
     // The browser admits the run against the environment the configured URL resolves to.
     run: async () => { runs++; return { run: { id: 'journey-run', environmentId: environments.summaries(context.key).find(item => item.status === 'ready')?.id } }; },
     runProgress: async () => ({ run: { id: 'journey-run', status: 'passed', results: [{ status: 'passed' }] } }),
+    stop: async () => ({}),
   };
   let ticking: Promise<void> | undefined, checkedOut = false;
   const steps = createGateSteps({ environments, browser, readiness, interval: 1, checkout: async () => {

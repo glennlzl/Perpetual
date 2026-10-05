@@ -33,6 +33,7 @@ export interface GateBrowser<C> {
   /** The run names the environment its application URL resolved to when it was admitted. */
   run(context: C, input: Record<string, never>): Promise<{ run: { id: string; environmentId?: string } }>;
   runProgress(context: C, id: string): Promise<{ run: GateRun }>;
+  stop(context: C, id: string): Promise<unknown>;
 }
 export interface Readiness { done(id: string): void; wait(id: string): Promise<void>; forget(id: string): void }
 export interface GateStepsOptions<C extends StageContext> {
@@ -119,8 +120,8 @@ export function createGateSteps<C extends StageContext>({ environments, browser,
         catch (error) { if (!isEnvironmentBusy(error) && !isStageHeld(error)) throw error; await pause(interval, signal); }
       }
       // The browser reads the application URL again as it admits the run, so a URL saved since the check above never
-      // lends another application's journeys to this gate's verdict.
-      if (run.environmentId !== twin.id) throw new Error(REBUILT);
+      // lends another application's journeys to this gate's verdict, and the gate stops the run it started there.
+      if (run.environmentId !== twin.id) { await browser.stop(context, run.id).catch(() => {}); throw new Error(REBUILT); }
       for (;;) {
         const { run: current } = await browser.runProgress(context, run.id);
         if (!RUNNING.includes(current.status)) return current;
