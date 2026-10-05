@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { environmentBusy } from '../src/environments/usage.ts';
 import { createGateManager, type GateConnection, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from '../src/gate/github.ts';
 import type { Gate, GateRef, RunRollup } from '../src/gate/rules.ts';
@@ -21,7 +22,7 @@ type Options = {
   dataDir?: string; stages?: GateStage[]; sha?: string; repository?: string | null; connection?: GateConnection | null | (() => GateConnection | null);
   journeys?: number | ((context: Context) => number); runs?: Record<string, RunRollup>; heads?: (BranchHead | Error)[]; post?: (status: CommitStatusPost) => Promise<void>;
 };
-type Holds = { prepare?: (gate: GateRef) => Error | null; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
+type Holds = { prepare?: (gate: GateRef) => Error | null | Promise<Error | null>; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
 
 // Injected source, GitHub and steps record what the gate asked for; nothing reaches the network or Docker.
 async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repository = 'owner/app', connection = { login: 'developer', repository: 'owner/app' }, journeys = 1, runs = {}, heads = [], post }: Options = {}) {
@@ -38,7 +39,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
   };
   const steps: GateSteps<Context, { id: string }> = {
     async prepare(gate) {
-      if (holds.prepare) { const error = holds.prepare(gate); if (error) throw error; }
+      if (holds.prepare) { const error = await holds.prepare(gate); if (error) throw error; }
       log.push(`prepare ${gate.stageId} ${gate.sha[0]}`);
       current.sha = gate.sha;
       return { key: gate.key, stageId: gate.stageId, sha: gate.sha };
@@ -161,6 +162,38 @@ test('a newer commit supersedes queued ones; the running gate finishes and only 
   const after = await h.gates('beta');
   assert.deepEqual(after.map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded'], ['a', 'passed']]);
   assert.equal(h.posts.some(item => item.sha === B), false, 'A superseded commit reports no status.');
+});
+
+test('a push while a gate is prepared supersedes it before any twin or journey work', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const preparing = deferred(), moved = deferred();
+  h.holds.prepare = async gate => { if (gate.sha === B) { preparing.resolve(); await moved.promise; } return null; };
+  await h.manager.watch(); // push B
+  await preparing.promise;
+  await h.manager.watch(); // push C while the source moves to B
+  moved.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log, ['prepare beta b', 'prepare beta c', 'rebuild beta c', 'run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded']]);
+  assert.equal(h.current.sha, C);
+});
+
+test('a rebuilding gate put back to queued behind a newer commit is superseded, never run after it', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const rebuilding = deferred(), taken = deferred();
+  let held = false;
+  // A health check takes the old twin once while B rebuilds, after C was pushed.
+  h.holds.rebuild = async context => { if (context.sha === B && !held) { held = true; rebuilding.resolve(); await taken.promise; throw environmentBusy(); } };
+  await h.manager.watch(); // push B
+  await rebuilding.promise;
+  await h.manager.watch(); // push C while B rebuilds
+  taken.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status, item.reason ?? null]), [['c', 'passed', null], ['b', 'superseded', `Superseded by ${C.slice(0, 7)}.`]]);
+  assert.equal(h.current.sha, C);
 });
 
 test('only a gate that needs release can be released, by a GitHub login, and never a failed one', async t => {

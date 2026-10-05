@@ -201,11 +201,14 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     catch (error) {
       if (closed) return false;
       if (await stopped()) return true;
+      // A newer commit may have superseded it meanwhile.
+      if (!PENDING.includes(gate.status)) return true;
       if ((error as { statusCode?: unknown }).statusCode === 409) return false;
       await settle(gate, 'needs-release', text(error));
       return true;
     }
-    if (await stopped()) return true;
+    // A newer commit that reached the stage while the gate was admitted or prepared supersedes it before any twin work.
+    if (await stopped() || !PENDING.includes(gate.status)) return true;
     try {
       if (!(await steps.journeys(context))) { await settle(gate, 'needs-release', 'No reviewed journeys.'); return true; }
       await transition(gate, 'rebuilding', { startedAt: now() });
@@ -224,6 +227,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       // No journey has started during rebuilding: retry admission, never a journey execution or its result.
       if (gate.status === 'rebuilding' && isEnvironmentBusy(error)) {
         delete gate.startedAt;
+        // A newer commit queued at the stage while this one rebuilt supersedes it, as it would a queued gate, so the
+        // older commit never runs after it and moves the source back.
+        const newer = !gate.repair && state.gates.find(item => !item.repair && item.key === gate.key && item.branch === gate.branch && item.stageId === gate.stageId && item.status !== 'superseded' && item.detectedAt > gate.detectedAt);
+        if (newer) { await transition(gate, 'superseded', { reason: `Superseded by ${short(newer.sha)}.` }); return true; }
         await transition(gate, 'queued');
         return false;
       }
