@@ -295,6 +295,12 @@ export function browserConcurrencyLabel(run: Pick<BrowserRun, 'concurrency' | 'e
   return `${run.effectiveConcurrency} of ${run.concurrency} browsers${reason ? ` · ${reason}` : ''}`;
 }
 
+// A discovery's model use, concisely: whether Browser Use forced its final report, and the tokens it spent.
+export function discoveryUsage(run: Pick<BrowserRun, 'mode' | 'diagnostics'> | null | undefined) {
+  const counts = run?.mode === 'discover' ? run.diagnostics : undefined, tokens = counts ? counts.inputTokens + counts.outputTokens : 0;
+  return { endedEarly: counts?.forcedFinalization === true, tokens: tokens > 0 ? `${number(tokens)} tokens` : '' };
+}
+
 // Reviewed journeys lead; step-less legacy cases and drafts stay available but grouped.
 export function stageJourneyGroups<T extends BrowserCase>(cases: T[], runs: BrowserRun[] = []) {
   const journeys = cases.filter(item => (!item.needsReview && (item.steps?.length ?? 0) > 0) || journeyActive(browserCaseState(item, runs).status));

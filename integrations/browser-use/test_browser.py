@@ -423,10 +423,13 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
         async def ended_without_report(agent, **_):
             # As when Browser Use cancels every model call at its own timeout: no report and no model error.
             return agent.history
-        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}), patch.object(runner, "emit", [].append), patch("browser_use.Agent.run", ended_without_report):
+        events = []
+        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}), patch.object(runner, "emit", events.append), patch("browser_use.Agent.run", ended_without_report):
             with self.assertRaises(runner.InputError) as caught:
                 await runner.discover(payload)
         self.assertEqual(runner.safe_error(caught.exception), "The agent did not produce a valid discovery result.")
+        # A failed discovery still reports what its agent counted.
+        self.assertEqual([event["diagnostics"]["modelCalls"] for event in events if event["type"] == "diagnostics"], [0])
 
     def deadline_model(self, explore):
         model = ThreadingHTTPServer(("127.0.0.1", 0), DeadlineModelHandler)
@@ -441,11 +444,12 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
         url = f"http://127.0.0.1:{self.server.server_port}"
         # The agent would keep exploring for all 100 steps; the report must still arrive within 30 seconds.
         payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 100, "timeoutSeconds": 30})
-        with patch.dict("os.environ", environment), patch.object(runner, "emit", [].append):
+        events = []
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append):
             discovered = await asyncio.wait_for(runner.discover(payload), 60)
         self.assertEqual(discovered["type"], "discovery")
         self.assertEqual(discovered["cases"][0]["name"], "Open workspace")
-        self.assertTrue(discovered["diagnostics"]["forcedFinalization"])
+        self.assertEqual([event["diagnostics"]["forcedFinalization"] for event in events if event["type"] == "diagnostics"], [True])
         self.assertGreater(len(model.requests), 2)
         self.assertNotIn('"wait"', json.dumps(model.requests[-1]["tools"]))
 

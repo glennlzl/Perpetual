@@ -161,6 +161,24 @@ test('discovery adds unselected drafts, preserving reviewed cases and persisted 
   await f.manager.close();const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());assert.deepEqual((await restarted.view(f.context)).cases,view.cases);
 });
 
+test('a discovery keeps its agent\'s counts whether it completes or fails, and only counts of their exact shape',async t=>{
+  const counts={modelCalls:3,modelFailures:{timeout:0,invalid_output:2,provider:0,other:0},stepsWithoutActions:2,actionCount:4,modelMs:5200,inputTokens:12000,outputTokens:800,forcedFinalization:true};
+  let completes=false;
+  const f=await fixture(t,()=>[{type:'diagnostics',diagnostics:counts},{type:'diagnostics',diagnostics:{...counts,inputTokens:'many'}},...completes?[{type:'discovery',summary:'Workspace product',cases:[]}]:[]]);
+  const failed=(await f.manager.discover(f.context)).run,report=await completed(f,failed.id);
+  assert.equal(report.run.status,'failed');assert.deepEqual(report.run.diagnostics,counts);
+  completes=true;
+  const finished=(await f.manager.discover(f.context)).run;
+  assert.deepEqual([(await completed(f,finished.id)).run.status,(await f.manager.runProgress(f.context,finished.id)).run.diagnostics],['completed',counts]);
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8'));
+  state.runs.find((run:{id:string})=>run.id===finished.id).diagnostics={...counts,modelCalls:-1};
+  await writeFile(file,JSON.stringify(state));
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.runProgress(f.context,failed.id)).run.diagnostics,counts,'Counts survive a restart.');
+  assert.equal(Object.hasOwn((await restarted.runProgress(f.context,finished.id)).run,'diagnostics'),false,'Stored counts of another shape are dropped.');
+});
+
 test('scoped frames never cross stages and cancelling preserves terminal status on restart',async t=>{
   const jpeg=Buffer.from([0xff,0xd8,0xff,0xd9]);
   const f=await fixture(t,[{type:'frame',data:jpeg.toString('base64')},{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);

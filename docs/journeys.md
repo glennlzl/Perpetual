@@ -120,6 +120,8 @@ These instructions guide proposals; the case validator checks structure and expl
 
 Source and page text are untrusted content: they cannot authorize tools or change expected outcomes. Discovery is not recorded.
 
+A discovery run keeps what its agent counted, whether it completes, fails or is cancelled: model calls, failed calls by kind, steps without an action, actions, model time, input and output tokens, and whether Browser Use forced its final report, as it does after two failures in a row, at the step limit or near the time limit. Its viewer shows only **Ended early** when the report was forced, and the tokens spent. The counts explain a run; they never decide a verdict.
+
 ## Runs
 
 - **Code.** Each journey runs as one `playwright test` process. A journey without code needs review with *Generate and approve code for this journey.*, one whose approved code is stale with *The approved code is for an earlier version of this journey.*, and one whose stored code the current grammar rejects with *Generate code for this journey again: …*. These, and code that signs in with no account available (blocked), are settled without a browser while the run's other journeys still run.
@@ -283,7 +285,7 @@ The main routes are below. Every request is scoped to `repoPath` and a Sandbox `
 | `POST /api/browser/run` | Optional `caseIds` (reviewed journeys, selected or not; without them, the selected ones), `concurrency`, `credentials` or `accountId`. |
 | `POST /api/browser/skip` | `id`, `caseId` |
 | `POST /api/browser/stop` | `id` |
-| `GET /api/browser/runs/:id` | Full run progress. |
+| `GET /api/browser/runs/:id` | Full run progress, with a discovery's `diagnostics`. |
 | `GET /api/browser/runs/:id/frame` | `caseId`: the journey's latest JPEG frame. |
 | `GET /api/browser/runs/:id/video` | `caseId`, `file`: a recording the journey reported, with byte ranges. |
 | `GET /api/browser/specs/code` | `caseId`: the draft and approved code, for review. |

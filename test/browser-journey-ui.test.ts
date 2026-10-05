@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verificationAttempt, watchedRun, browserActionError, browserActionFailure, browserActionLabel, browserBlockers, browserCaseState, browserConcurrencyLabel, browserFrameLabel, browserInstallCommand, browserJourneySteps, browserReadiness, browserRunLabel, browserUnavailable, checkedOutcome, generateRequestDialog, inspectorTab, JOURNEY_GENERATE_REQUEST, journeyActions, journeyCheckState, journeyCode, journeyElapsed, journeyErrorTone, journeyLastAction, journeyOpenByDefault, journeyQueueLabel, journeyRecordings, journeyRequest, journeyRevision, journeyRunRequest, journeySegments, journeySummary, orderJourneys, browserCaseRun, codeLines, runnableCode, runReady, stageJourneyGroups, testToolbar } from '../client/src/lib/browser-test-ui.ts';
+import { discoveryUsage, verificationAttempt, watchedRun, browserActionError, browserActionFailure, browserActionLabel, browserBlockers, browserCaseState, browserConcurrencyLabel, browserFrameLabel, browserInstallCommand, browserJourneySteps, browserReadiness, browserRunLabel, browserUnavailable, checkedOutcome, generateRequestDialog, inspectorTab, JOURNEY_GENERATE_REQUEST, journeyActions, journeyCheckState, journeyCode, journeyElapsed, journeyErrorTone, journeyLastAction, journeyOpenByDefault, journeyQueueLabel, journeyRecordings, journeyRequest, journeyRevision, journeyRunRequest, journeySegments, journeySummary, orderJourneys, browserCaseRun, codeLines, runnableCode, runReady, stageJourneyGroups, testToolbar } from '../client/src/lib/browser-test-ui.ts';
 import type { BrowserCase, BrowserRun, CodeVerification, JourneySpec, JourneyStep } from '../client/src/lib/browser-test-ui.ts';
 
 import { browserRunFixture, journeyResultFixture } from './fixtures/browser-view.ts';
@@ -148,6 +148,14 @@ test('forced serial execution is shown with its reason', () => {
   assert.equal(browserConcurrencyLabel({concurrency:2,effectiveConcurrency:1,concurrencyLimit:'account'}),'1 of 2 browsers · Test account');
   assert.equal(browserConcurrencyLabel({concurrency:2,effectiveConcurrency:2}),'');
   assert.equal(browserConcurrencyLabel({}),'');
+});
+test('a discovery shows only whether its report was forced and the tokens it spent', () => {
+  const diagnostics = { modelCalls:3, modelFailures:{ timeout:0, invalid_output:2, provider:0, other:0 }, stepsWithoutActions:2, actionCount:4, modelMs:5200, inputTokens:12000, outputTokens:800, forcedFinalization:true };
+  assert.deepEqual(discoveryUsage({ mode:'discover', diagnostics }), { endedEarly:true, tokens:'12,800 tokens' });
+  assert.deepEqual(discoveryUsage({ mode:'discover', diagnostics:{ ...diagnostics, forcedFinalization:false, inputTokens:0, outputTokens:0 } }), { endedEarly:false, tokens:'' });
+  // Counts belong to discovery; an older discovery has none.
+  assert.deepEqual(discoveryUsage({ mode:'run', diagnostics }), { endedEarly:false, tokens:'' });
+  assert.deepEqual(discoveryUsage({ mode:'discover' }), { endedEarly:false, tokens:'' });
 });
 test('blockers name their milestone and kind', () => {
   assert.deepEqual(browserBlockers({blockers:[{stepId:'execute',kind:'integration',evidence:'Workflow runner is not configured'},{kind:'bogus',evidence:'x'}]},journey.steps),[{kind:'Integration',step:'Execute workflow',evidence:'Workflow runner is not configured'},{kind:'Blocker',step:'',evidence:'x'}]);

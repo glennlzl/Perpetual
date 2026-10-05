@@ -117,3 +117,46 @@ test('the run viewer closes without cancelling, reads a refused or unanswered ru
   assert.equal(await quiet(), 0, 'A run that left the stage is not read again.');
   assert.deepEqual(pageErrors, []);
 });
+
+test('a discovery\'s viewer shows whether its report was forced and the tokens it spent, never the counts behind them', { timeout: 60000 }, async t => {
+  const entry = `
+    import React from 'react'; import { createRoot } from 'react-dom/client';
+    import BrowserAgentViewer from '/src/BrowserAgentViewer.tsx';
+    import '/src/index.css';
+    const root = createRoot(document.getElementById('root'));
+    window.addEventListener('fixture:viewer', event => root.render(React.createElement(BrowserAgentViewer, { key: event.detail, repoPath: '/acme/app', stageId: 'beta', runId: event.detail, mode: 'discover', onClose: () => {} })));
+  `;
+  const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
+    name: 'discovery-viewer-test', resolveId(id) { if (id.endsWith('/__discovery-ui.tsx')) return '\0discovery-ui.tsx'; }, load(id) { if (id === '\0discovery-ui.tsx') return entry; },
+    configureServer(server) { server.middlewares.use(async (req, res, next) => {
+      if (req.url !== '/build/__discovery-ui') return next();
+      res.setHeader('Content-Type', 'text/html');
+      res.end(await server.transformIndexHtml('/__discovery-ui', '<div id="root"></div><script type="module" src="/build/__discovery-ui.tsx"></script>'));
+    }); },
+  }] });
+  await server.listen();
+  const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage();
+  const forced = '44444444-4444-4444-8444-444444444444', plain = '55555555-5555-4555-8555-555555555555';
+  const diagnostics = { modelCalls: 3, modelFailures: { timeout: 0, invalid_output: 2, provider: 0, other: 0 }, stepsWithoutActions: 2, actionCount: 4, modelMs: 5200, inputTokens: 12000, outputTokens: 800, forcedFinalization: true };
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/session') return route.fulfill({ json: { token: 'fixture-token' } });
+    if (path.endsWith('/frame')) return route.fulfill({ status: 204, body: '' });
+    const id = decodeURIComponent(path.split('/').at(-1)!);
+    const run = browserRunFixture({ id, mode: 'discover', status: 'failed', error: 'Browser agent did not return business cases.', progress: { revision: 1, cases: [{ id: 'discovery', name: 'Explore application', status: 'failed' }] }, ...(id === forced ? { diagnostics } : {}) });
+    await route.fulfill({ json: { run, results: [], progress: run.progress } });
+  });
+  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__discovery-ui`);
+  const open = (id: string) => page.evaluate(detail => window.dispatchEvent(new CustomEvent('fixture:viewer', { detail })), id);
+  const viewer = page.getByRole('dialog');
+  await open(forced);
+  await expect(viewer.getByRole('alert')).toHaveText('Browser agent did not return business cases.');
+  await expect(viewer.getByText('Ended early', { exact: true })).toBeVisible();
+  await expect(viewer.getByText('12,800 tokens', { exact: true })).toBeVisible();
+  for (const detail of ['5200', 'invalid_output', 'Model calls']) await expect(viewer.getByText(detail)).toHaveCount(0);
+  await open(plain);
+  await expect(viewer.getByRole('alert')).toHaveText('Browser agent did not return business cases.');
+  await expect(viewer.getByText('Ended early', { exact: true })).toHaveCount(0);
+  await expect(viewer.getByText(/tokens$/)).toHaveCount(0);
+});

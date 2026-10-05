@@ -32,7 +32,7 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {ModelSettingsReply} from '../../contract/settings.ts';
-import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
+import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,DiscoveryDiagnostics,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
 export type {BrowserConfig,PublicRun,RunSummary} from '../../contract/browser.ts';
 import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
@@ -124,6 +124,15 @@ const touch=(run:BrowserRun)=>{run.progress.revision=(run.progress.revision||0)+
 const settleSteps=(progress:{steps?:StepProgress[]},status:string)=>{for(const step of progress.steps||[])if(step.status==='running')step.status=['skipped','cancelled'].includes(status)?status:'unconfirmed';};
 const actionErrorCodes:ReadonlySet<string>=new Set(['action_not_allowed','navigation_not_allowed','attachments_not_allowed','credential_literal_rejected','credential_reference_invalid','credential_origin_mismatch','credential_field_unavailable','credential_target_mismatch','credential_frame_mismatch','credential_field_type_mismatch','credential_verification_failed','browser_action_failed','action_result_missing','journey_progress_invalid']);
 const controls=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+// A discovery agent's counts as its worker reports them, or null when they have another shape.
+const COUNTS=['modelCalls','stepsWithoutActions','actionCount','modelMs','inputTokens','outputTokens'] as const,FAILURES=['timeout','invalid_output','provider','other'] as const;
+const isCount=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0;
+function discoveryDiagnostics(value:unknown):DiscoveryDiagnostics|null{
+  if(!isRecord(value)||!isRecord(value.modelFailures)||typeof value.forcedFinalization!=='boolean')return null;
+  const failures=value.modelFailures;
+  if(!COUNTS.every(key=>isCount(value[key]))||!FAILURES.every(key=>isCount(failures[key])))return null;
+  return {...Object.fromEntries(COUNTS.map(key=>[key,value[key]])),modelFailures:Object.fromEntries(FAILURES.map(key=>[key,failures[key]])),forcedFinalization:value.forcedFinalization} as DiscoveryDiagnostics;
+}
 const webFrontend=/^(?:next(?:\.js)?|vite|nuxt|react|sveltekit|astro|remix)$/i;
 const originOf=(value:string)=>{try{return new URL(value).origin;}catch{return null;}};
 const externalOrigin=(value:string)=>{const origin=applicationOrigin(value);if(!origin)throw new Error('Invalid application origin.');return origin;};
@@ -287,6 +296,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     if(!isRecord(feedback)||Object.keys(feedback).length>30||Object.entries(feedback).some(([id,error])=>!run.caseIds.includes(id)||typeof error!=='string'||!error||error.length>4000))throw new Error('Invalid stored code feedback.');
     run.codeFeedback=Object.fromEntries(Object.entries(feedback).map(([id,error])=>[id,generationDiagnostic(error,4000)]));
   }
+  // Stored counts are file data too: only their exact shape is kept.
+  for(const run of state.runs)if(run.diagnostics!==undefined){const diagnostics=discoveryDiagnostics(run.diagnostics);if(diagnostics)run.diagnostics=diagnostics;else delete run.diagnostics;}
   for(const run of state.runs)if(run.blockedRequests!==undefined){
     const found:BlockedRequest[]=[];
     for(const item of Array.isArray(run.blockedRequests)?run.blockedRequests:[]){
@@ -933,6 +944,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const blockedNote=run.blockedRequests?.length?`Blocked ${run.blockedRequests.slice(0,3).map(item=>`${item.method} ${item.url}`).join('; ')}. Review read-only POST requests in Test settings.`:'';
                 const suffix=[note,blockedNote].filter(Boolean).join('\n');
                 discovery={cases:drafts,summary:[safeText(event.summary,4000-(suffix?1+suffix.length:0)),suffix].filter(Boolean).join('\n'),authenticated:!!credentials&&event.authenticated===true};omittedCount=omitted.length;
+              }else if(event.type==='diagnostics'){
+                // The agent's counts are kept on the run whether discovery completes or fails; others are ignored.
+                const diagnostics=discoveryDiagnostics(event.diagnostics);if(diagnostics){run.diagnostics=diagnostics;touch(run);}
               }else if(event.type==='result')throw new Error('Browser runtime returned unexpected results.');
               else if(event.type==='sign-in-page'){
                 // Where the account signed in becomes the stage's sign-in page while it has none, so a person's value

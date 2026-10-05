@@ -990,17 +990,21 @@ async def discover(payload):
     task = DISCOVERY_INSTRUCTIONS + (AUTHENTICATED_DISCOVERY if payload.get("credentials") else "") + json.dumps({key: payload[key] for key in ["targetUrl", "allowedOrigins", "scope", "requirements"]}, ensure_ascii=False)
     async with OwnedBrowser(payload) as owned:
         agent, ended = create_agent(payload, owned, task, schema, "discovery", actions, source_context=payload["sourceContext"], report_by=deadline - min(REPORT_SECONDS, payload["timeoutSeconds"] // 2))
-        async with asyncio.timeout_at(deadline):
-            history = await agent.run(max_steps=payload["maxSteps"], on_step_end=ended)
-        owned.require_guard()
-        output = history.get_structured_output(schema)
-        if not output:
-            if owned.model_error:
-                raise InputError(owned.model_error)
-            raise InputError("The agent did not produce a valid discovery result.")
-        cases, summary = accepted_proposals(payload, output.cases, output.summary)
-        # Authenticated means an actual sign-in exchange succeeded, not that an account was supplied.
-        return {"type": "discovery", "cases": cases, "summary": summary, "diagnostics": copy.deepcopy(owned.diagnostics), "authenticated": owned.auth_exchanges > 0}
+        try:
+            async with asyncio.timeout_at(deadline):
+                history = await agent.run(max_steps=payload["maxSteps"], on_step_end=ended)
+            owned.require_guard()
+            output = history.get_structured_output(schema)
+            if not output:
+                if owned.model_error:
+                    raise InputError(owned.model_error)
+                raise InputError("The agent did not produce a valid discovery result.")
+            cases, summary = accepted_proposals(payload, output.cases, output.summary)
+            # Authenticated means an actual sign-in exchange succeeded, not that an account was supplied.
+            return {"type": "discovery", "cases": cases, "summary": summary, "authenticated": owned.auth_exchanges > 0}
+        finally:
+            # The agent's counts precede the result or the error, whether discovery completes, fails or is cancelled.
+            emit({"type": "diagnostics", "diagnostics": copy.deepcopy(owned.diagnostics)})
 
 
 def safe_error(error):
