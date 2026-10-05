@@ -37,11 +37,13 @@ function literalUrlPassword(text: string): boolean {
     return colon >= 0 && password !== '' && !/^(?:\{\{[\w.-]+\}\}|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)$/.test(password);
   });
 }
-// A credential written as a literal, which a repair's change may never add: a credential name set to a quoted value
-// anywhere, or to an unquoted one on an env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a
-// template, `process.env.X`), a URL or path without a password, or a type is not one.
+// A credential written as a literal, which a repair's change may never add: a private key block, a credential name set
+// to a quoted value anywhere (after a type annotation, and as a || or ?? fallback, too), or to an unquoted one on an
+// env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a template, `process.env.X`), a URL or path
+// without a password, or a type is not one.
 const CREDENTIAL_NAME = `[\\w-]*(?:${NAMES})[\\w-]*`;
 const CREDENTIAL_MEMBER = new RegExp(`^${CREDENTIAL_NAME}$`, 'i');
+const PRIVATE_KEY_BLOCK = new RegExp(`-----BEGIN ${PRIVATE_KEY}-----`);
 // Decode URL escapes for inspection without changing ordinary source text. Malformed escapes remain data.
 const decodedUri = (text: string) => {
   for (let depth = 0; depth < 4; depth += 1) {
@@ -54,7 +56,7 @@ const decodedUri = (text: string) => {
   return text;
 };
 const NOT_LITERAL = '(?![$<{%/]|\\w+://)';
-const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*[=:]\\s*(["'])${NOT_LITERAL}[^"'\\s]{8,}\\1`, 'i');
+const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|? ]+?)?(?:[=:]|\\|\\|=?|\\?\\?=?)\\s*(["'\`])${NOT_LITERAL}(?:(?!\\$\\{)[^"'\`\\s]){8,}\\1`, 'i');
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
@@ -83,12 +85,13 @@ export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?:
 }
 
 /**
- * Whether text holds a credential as a literal value: a known token shape, a URL with a password, or a credential
- * name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted one counts.
+ * Whether text holds a credential as a literal value: a known token shape, a private key block, a URL with a password,
+ * or a credential name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted
+ * one counts.
  */
 export function hasCredential(input: string, { code = false, url = false }: { code?: boolean; url?: boolean } = {}): boolean {
   if (url) { const value = decodedUri(input); return redact(value) !== value; }
-  return new RegExp(TOKEN_SHAPE.source).test(input) || literalUrlPassword(input)
+  return new RegExp(TOKEN_SHAPE.source).test(input) || PRIVATE_KEY_BLOCK.test(input) || literalUrlPassword(input)
     || QUOTED_LITERAL.test(input) || !code && UNQUOTED_LITERAL.test(input);
 }
 

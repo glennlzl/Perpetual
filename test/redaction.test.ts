@@ -80,6 +80,18 @@ test('common credential names, token shapes, escaped JSON and PGP key blocks are
   assert.equal(hasCredential('const CACHE_KEY = "user-profile-v2";', { code: true }), false, 'The change rule leaves a cache key alone.');
 });
 
+test('a change that adds a private key or a credential literal in an ordinary code form holds a credential', () => {
+  for (const line of ['-----BEGIN RSA PRIVATE KEY-----', '-----BEGIN OPENSSH PRIVATE KEY-----', '-----BEGIN PGP PRIVATE KEY BLOCK-----', 'const pem = "-----BEGIN PRIVATE KEY-----\\nMIIE";',
+    'const password: string = "fixture-literal-1";', 'password: Optional[str] = "fixture-literal-1"', 'const password = `fixture-literal-1`;',
+    'const key = process.env.API_KEY || "fixture-literal-1";', 'process.env.API_KEY ??= "fixture-literal-1";', 'const privateKey = "fixture-literal-1";', 'DB_PASS: "fixture-literal-1"']) {
+    assert.equal(hasCredential(line, { code: true }), true, line);
+  }
+  for (const line of ['-----BEGIN CERTIFICATE-----', 'token: string;', 'password?: string;', 'const token = `Bearer ${value}`;', 'const token = `fixture-${id}-value`;',
+    'const required = ["API_KEY", "DATABASE_URL"];', 'const pwd = process.cwd();', 'const passenger = "fixture-literal-1";']) {
+    assert.equal(hasCredential(line, { code: true }), false, line);
+  }
+});
+
 test('a private key block is blanked line by line, so line numbers hold', () => {
   const block = 'before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nAAAA\n-----END RSA PRIVATE KEY-----\nafter';
   assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
