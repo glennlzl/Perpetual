@@ -212,7 +212,7 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
                 <div className="flex items-center gap-2"><Checkbox id={`read-review-${row.key}`} checked={row.reviewed} onCheckedChange={value => update({ reviewed: value === true })} /><Label htmlFor={`read-review-${row.key}`}>I reviewed this request; it only reads data</Label></div>
               </div>;
             })}
-            <Button type="button" variant="outline" size="sm" disabled={reads.length >= 10} onClick={() => setReads(current => [...current, { key: crypto.randomUUID(), url: '', body: '{}', reviewed: false }])}><Plus />Add read-only POST</Button>
+            <Button type="button" variant="outline" size="sm" disabled={reads.length >= 32} onClick={() => setReads(current => [...current, { key: crypto.randomUUID(), url: '', body: '{}', reviewed: false }])}><Plus />Add read-only POST</Button>
           </CollapsibleContent>
         </Collapsible>
         <Field id="journey-time-limit" label="Journey time limit"><div className="flex items-center gap-2"><Input id="journey-time-limit" type="number" inputMode="decimal" min={1} max={30} step="any" required value={minutes} aria-invalid={Boolean(shown.timeout) || undefined} aria-describedby={described('journey-time-limit', shown.timeout)} className="w-28" onChange={event => setMinutes(event.target.value)} /><span className="text-sm text-muted-foreground">min</span></div><FieldError id="journey-time-limit">{shown.timeout}</FieldError></Field>

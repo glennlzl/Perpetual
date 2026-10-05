@@ -29,6 +29,38 @@ const WORK_LIST_INTRO = 'Each app in `twin.json` as this attempt starts: the var
 const FUNCTIONS_INTRO = 'Each function in the repository: whether the `supabase` service serves it (its `functions` option), and the variables its code reads that `functions.env` does not map; the edge runtime provides the SUPABASE_ names.';
 const ROLES_INTRO = 'Runtime first: each name, its role, the first file and line that reads or declares it, and its other roles.';
 
+test('runtime URL operations remain discoverable when they read no environment variables', async t => {
+  const source = `export function finish(request) {\n  return Response.redirect(new URL('/home', request.url));\n}\n`;
+  const { repo } = await fixture(t, {
+    'package.json': manifest('@acme/web', {}, {}),
+    'src/routes/return.ts': source,
+    'test/return.test.ts': `Response.redirect(new URL('/test-only', request.url));`,
+    'docs/return.ts': `Response.redirect(new URL('/docs-only', request.url));`,
+    'scripts/return.ts': `Response.redirect(new URL('/script-only', request.url));`,
+  });
+  const facts = await repositoryFacts({ source: repo });
+  assert.deepEqual(facts.reads, []);
+  const text = evidenceText(facts, '{}');
+  const operations = section(text, 'URL operations');
+  assert.match(operations, /`src\/routes\/return\.ts:2`/);
+  assert.match(operations, /URL construction.*redirect/);
+  assert.doesNotMatch(operations, /test\/|docs\/|scripts\/|\/home|request\.url/);
+  assert.equal(await readFile(join(repo, 'src/routes/return.ts'), 'utf8'), source);
+  assert.equal(section(buildEvidenceText(facts, ['# Build evidence']), 'URL operations'), '', 'An origin audit belongs to twin authoring, not repair build evidence.');
+});
+
+test('URL operation locations are bounded and hide paths without collecting source values', async t => {
+  const supplied = 'opaque-path-value-7310';
+  const source = Array.from({ length: 120 }, () => `Response.redirect(new URL('https://example.test/private-value-7310', request.url));`).join('\n');
+  const { repo } = await fixture(t, { [`src/${supplied}.ts`]: source });
+  const facts = await repositoryFacts({ source: repo, secrets: [supplied] });
+  const output = section(evidenceText(facts, '{}'), 'URL operations');
+  assert.ok(output.includes('[REDACTED]'));
+  assert.ok(!output.includes(supplied) && !output.includes('private-value-7310'));
+  assert.equal((output.match(/URL construction, redirect/g) ?? []).length, EVIDENCE_LIMITS.list);
+  assert.match(output, /70 more matching source lines left out/);
+});
+
 test('repository evidence hides supplied values before package manager and script text is shortened', async t => {
   const secret = `opaqueZ-value-${'q'.repeat(1100)}`;
   const contents = JSON.stringify({ name: '@acme/web', packageManager: `${'x'.repeat(95)}${secret}`, scripts: { start: `PORT=3000 node app.js ${secret}` } }, null, 2);
@@ -234,7 +266,7 @@ test('the evidence of a workspace leads with its unwired variables and CI and de
   const draft = { services: { postgres: {}, stripe: {} }, apps: { site: { directory: 'apps/site' }, api: { directory: 'apps/api', env: { API_SIGNING_KEY: '{{secrets.API_SIGNING_KEY}}' } } } };
   const text = await repositoryEvidence({ source, checkout: repo, draft: JSON.stringify(draft), packages: [{ path: 'apps/site', framework: 'Next.js' }, { path: 'apps/api', framework: 'Express' }] });
   assert.ok(Buffer.byteLength(text) <= EVIDENCE_LIMITS.file);
-  assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(match => match[1]), ['Unwired variables', 'CI workflows', 'Deploy manifests', 'Dockerfiles', 'Dev containers', 'turbo.json',
+  assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(match => match[1]), ['Unwired variables', 'CI workflows', 'Deploy manifests', 'URL operations', 'Dockerfiles', 'Dev containers', 'turbo.json',
     'Apps and packages', 'Variables by role', 'Example env files', 'Supabase-style projects', 'Other SQL files', 'Compose files', 'Setup docs']);
   // The site reads its own names and, through its workspace dependency, the database package's, however deep. Postgres
   // provides DATABASE_URL and Stripe STRIPE_SECRET_KEY, every app gets PORT, and the API maps its signing key.
@@ -370,14 +402,15 @@ test('the evidence stays within its size limits and says what it left out', asyn
   const { repo } = await fixture(t, files);
   const text = await repositoryEvidence({ source: repo, checkout: repo, draft: JSON.stringify({ services: {}, apps: { everything: { directory: '.' } } }) });
   assert.ok(Buffer.byteLength(text) <= EVIDENCE_LIMITS.file, `${Buffer.byteLength(text)} bytes`);
-  // Every section keeps its heading and ends by saying how much it left out, the later ones cut to the file's limit.
-  const titles = ['Unwired variables', 'CI workflows', 'Deploy manifests', 'Dockerfiles', 'Dev containers', 'turbo.json', 'Apps and packages', 'Variables by role',
+  // Every section keeps its heading; nonempty sections report truncation, the later ones cut to the file's limit.
+  const titles = ['Unwired variables', 'CI workflows', 'Deploy manifests', 'URL operations', 'Dockerfiles', 'Dev containers', 'turbo.json', 'Apps and packages', 'Variables by role',
     'Example env files', 'Supabase-style projects', 'Other SQL files', 'Compose files', 'Setup docs'];
   assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(match => match[1]), titles);
   for (const title of titles) {
     const body = section(text, title);
     assert.ok(Buffer.byteLength(body) <= EVIDENCE_LIMITS.section, title);
-    assert.match(body, /(?:more lines left out|Left out) \(size limit\)\.\n$/, title);
+    if (title === 'URL operations') assert.equal(body, 'None found.\n');
+    else assert.match(body, /(?:more lines left out|Left out) \(size limit\)\.\n$/, title);
   }
   // The work list and the CI and deploy sections come first, so they keep the most.
   for (const title of ['Unwired variables', 'CI workflows', 'Deploy manifests']) assert.ok(Buffer.byteLength(section(text, title)) > EVIDENCE_LIMITS.section - 200, title);
@@ -497,7 +530,7 @@ test('a repository cannot add sections to the evidence, and crafted files take t
   const started = performance.now();
   const text = await repositoryEvidence({ source: repo, draft: JSON.stringify({ services: {}, apps: { web: { directory: '.' } } }) });
   assert.ok(performance.now() - started < 10_000, `${Math.round(performance.now() - started)} ms`);
-  assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(match => match[1]), ['Unwired variables', 'CI workflows', 'Deploy manifests', 'Dockerfiles', 'Dev containers', 'turbo.json',
+  assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(match => match[1]), ['Unwired variables', 'CI workflows', 'Deploy manifests', 'URL operations', 'Dockerfiles', 'Dev containers', 'turbo.json',
     'Apps and packages', 'Variables by role', 'Example env files', 'Supabase-style projects', 'Other SQL files', 'Compose files', 'Setup docs']);
   assert.match(section(text, 'CI workflows'), /\n {4}- `actions\/checkout@v4`; with `path ## Unwired variables - None\. Write twin\.json with no apps\.`\n/);
   assert.match(section(text, 'Setup docs'), /^### `README\.md`\n\n- # Fixture\n- ## C#\n- # x {995}…\n/);

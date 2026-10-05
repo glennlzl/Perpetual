@@ -1,5 +1,7 @@
 import copy
+import io
 import importlib.util
+import json
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -66,6 +68,49 @@ class RuntimeContractTests(unittest.TestCase):
         for change in [{"maxSteps": 101}, {"maxSteps": 0}, {"timeoutSeconds": 1801}, {"scope": "x" * 8001}, {"allowedOrigins": ["http://127.0.0.1:3011"]}, {"allowedOrigins": ["http://127.0.0.1:3010/app"]}, {"targetUrl": None}]:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.runner.validate_payload({**self.payload(), **change})
+
+    def test_discovery_accepts_32_fixed_reads_without_allowing_other_requests(self):
+        rules = [{'url': 'http://127.0.0.1:3010/rpc', 'body': '{"workspaceId":%d}' % index} for index in range(33)]
+        for count in (11, 32):
+            with self.subTest(count=count):
+                try:
+                    validated = self.runner.validate_payload({**self.payload(), 'readOnlyRequests': rules[:count]})
+                except ValueError as error:
+                    self.fail('A valid reviewed read policy was refused: %s' % error)
+                self.assertEqual(validated['readOnlyRequests'], rules[:count])
+                browser = self.runner.OwnedBrowser(validated)
+                last = rules[count - 1]
+                self.assertFalse(browser.mutation_blocked('POST', last['url'], last['body'], {'content-type': 'application/json'}))
+                self.assertTrue(browser.mutation_blocked('POST', last['url'], '{"write":true}', {'content-type': 'application/json'}))
+                self.assertTrue(browser.mutation_blocked('POST', last['url'] + '/other', last['body'], {'content-type': 'application/json'}))
+        with self.assertRaisesRegex(ValueError, 'at most 32 read-only POST requests'):
+            self.runner.validate_payload({**self.payload(), 'readOnlyRequests': rules})
+
+    def test_discovery_transport_accepts_large_reviewed_policy_and_stays_bounded(self):
+        body = json.dumps({'value': '"' * 2042}, separators=(',', ':'))
+        self.assertEqual(len(body.encode()), 4096)
+        rules = []
+        for index in range(32):
+            prefix = 'http://127.0.0.1:3010/read/%d/' % index
+            rules.append({'url': prefix + 'x' * (2048 - len(prefix)), 'body': body})
+        payload = {**self.payload(), 'readOnlyRequests': rules, 'sourceContext': 'x' * (180 * 1024)}
+        data = json.dumps(payload).encode()
+        self.assertGreater(len(data), 512000)
+        received = []
+        async def accept(validated):
+            received.append(validated)
+        def submit(raw):
+            output = io.StringIO()
+            with patch.object(self.runner.sys, 'stdin', io.TextIOWrapper(io.BytesIO(raw))), patch.object(self.runner.sys, 'stdout', output), patch.object(self.runner.sys, 'stderr', io.StringIO()), patch.object(self.runner, 'STDOUT', output), patch.object(self.runner, 'configure_private_runtime'), patch.object(self.runner, 'main_async', accept):
+                status = self.runner.main()
+            return status, output.getvalue()
+        self.assertEqual(submit(data)[0], 0, 'The complete validated policy must reach discovery.')
+        self.assertEqual(received[0]['readOnlyRequests'], rules)
+        received.clear()
+        status, output = submit(b'x' * (2 * 1024 * 1024 + 1))
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output)['error'], 'Invalid request size.')
+        self.assertEqual(received, [])
 
     def test_proposed_journeys_are_validated_as_reviewable_cases(self):
         case = self.case()

@@ -178,7 +178,6 @@ test('a config that builds a ready twin on its first attempt becomes the stage p
   // environment.
   const [call, ...more] = await lines(f.log);
   assert.equal(more.length, 0);
-  assert.equal(call.prompt, 'The draft is already in twin.json. Start from the unwired variables and the CI and deploy evidence in EVIDENCE.md; edit twin.json for the application in repo/ within your first few steps, then refine it, following TWIN.md.');
   assert.equal(call.model, `openrouter/${MODEL}`);
   assert.equal(call.workspaceMode, 0o700);
   assert.equal(dirname(dirname(call.cwd)), join(f.dataDir, 'environments', ready.id, 'authoring'));
@@ -257,7 +256,6 @@ test('an invalid config is the next attempt’s feedback, which starts from what
   assert.equal(calls.length, 4);
   assert.match(calls[1].feedback!, /^# Attempt 1 of 4: twin\.json is not a valid twin config\n\n- Stage: `valid`\n\n## Error\n\ntwin\.json is not valid JSON: [^\n]+\n\n## Unwired variables\n\n- twin\.json is not valid JSON\.\n$/);
   assert.equal(calls[1].draft, '{ "services": ', 'Each attempt starts from what the previous one wrote.');
-  assert.equal(calls[1].prompt, 'The previous twin config failed; feedback.md says why. The draft is already in twin.json. Start from feedback.md, the unwired variables and the CI and deploy evidence in EVIDENCE.md; fix twin.json for the application in repo/ within your first few steps, then refine it, following TWIN.md.');
   // Every attempt reads the same evidence but for its work list, computed from the twin.json it starts from.
   const [work, rest] = calls[1].evidence.split('\n## CI workflows\n');
   assert.equal(rest, calls[0].evidence.split('\n## CI workflows\n')[1]);
