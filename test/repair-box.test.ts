@@ -22,6 +22,9 @@ else if (command === 'ps' || command === 'network' && rest[0] === 'ls') {
   const filters = args.filter((arg, i) => args[i - 1] === '--filter').map(arg => arg.slice(6));
   out([...state[kind], ...(state.resources || []).filter(r => r.kind === kind && filters.every(label => r.labels.includes(label))).map(r => r.id)].join('\\n'));
 }
+else if (command === 'create' && (state.missing || []).includes(args[args.indexOf('--pull') + 2])) {
+  process.stderr.write('Error response from daemon: manifest for ' + args[args.indexOf('--pull') + 2] + ' not found: manifest unknown: manifest unknown'); process.exit(1);
+}
 else if (command === 'network' && rest[0] === 'create' || command === 'create') {
   const name = command === 'create' ? args[args.indexOf('--name') + 1] : args.at(-1);
   const id = crypto.createHash('sha256').update(name).digest('hex');
@@ -40,7 +43,7 @@ else if (command === 'rm' || command === 'network' && rest[0] === 'rm') {
 else if (command === 'exec' && rest.includes('df')) out('Filesystem 1024-blocks Used Available Capacity Mounted on\\noverlay 100000000 1000 ' + state.availableKb + ' 1% /\\n');
 else if (command === 'exec' && rest.includes('sleep')) { const timer = setInterval(() => { if (removed()) process.exit(137); }, 10); setTimeout(() => { clearInterval(timer); }, 5000); }
 `;
-async function fake(t: TestContext, state: Partial<{ size: number; availableKb: number; containers: string[]; networks: string[]; removeFailure: boolean; listFailure: boolean }> = {}, disk: Partial<typeof DISK> = {}) {
+async function fake(t: TestContext, state: Partial<{ size: number; availableKb: number; containers: string[]; networks: string[]; removeFailure: boolean; listFailure: boolean; missing: string[] }> = {}, disk: Partial<typeof DISK> = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-fake-docker-')), docker = join(dir, 'docker');
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(docker, FAKE, { mode: 0o755 });
@@ -70,6 +73,18 @@ test('a box sits alone on an internal network, reaching out only through its egr
   assert.ok(created.includes('HTTPS_PROXY=http://proxy:3128') && created.includes('NO_PROXY=localhost,127.0.0.1,::1'));
   await box.remove();
   assert.deepEqual((await f.read()).resources, [], 'Box, proxy and network are confirmed absent.');
+});
+
+test('a toolchain image the registry has no tag for gives way to the next image named, and the last one\'s failure ends the creation', async t => {
+  const f = await fake(t, { missing: ['node:14-bookworm'] });
+  const box = await f.boxes.create({ id: 'old', image: 'node:14-bookworm', fallbacks: ['node:14', 'buildpack-deps:bookworm'], source: f.dir });
+  const images = (await f.calls()).filter(call => call[0] === 'create' && call[2] === 'perpetual-repair-unit-old').map(call => call[call.indexOf('--pull') + 2]);
+  assert.deepEqual([box.image, images], ['node:14', ['node:14-bookworm', 'node:14']]);
+  await box.remove();
+  const none = await fake(t, { missing: ['node:14-bookworm', 'node:14', 'buildpack-deps:bookworm'] });
+  await assert.rejects(none.boxes.create({ id: 'none', image: 'node:14-bookworm', fallbacks: ['node:14', 'buildpack-deps:bookworm'], source: none.dir }), /Could not create the repair box from buildpack-deps:bookworm: .*manifest unknown/);
+  assert.deepEqual((await none.read()).resources, [], 'Its network and proxy are removed.');
+  await assert.rejects(f.boxes.create({ id: 'bad', image: 'node:22-bookworm', fallbacks: ['ubuntu:latest'], source: f.dir }), /Invalid repair box/);
 });
 
 test('a box that writes more than its disk limit is removed while it works, and its commands reject with why', async t => {

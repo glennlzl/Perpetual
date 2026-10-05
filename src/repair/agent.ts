@@ -25,7 +25,7 @@ import type { Repair, RepairAttempt, RepairContext, RepairOutcome, RepairPullReq
 import { UNREADY, type CiVerdict, type RepairMerge } from './merge.ts';
 import { repairTools } from './tools.ts';
 import { failedRun, passedRun } from './triage.ts';
-import { reproduces } from './workflow.ts';
+import { fallbackImages, reproduces } from './workflow.ts';
 
 /** Attempts, the attempt after which the escalation model takes over, steps and time per attempt, and dollars per repair. */
 export const BUDGET = { attempts: 4, escalateAfter: 2, steps: 100, attemptMs: 15 * 60_000, cost: 2 };
@@ -251,7 +251,8 @@ export function createRepairAgent(options: RepairAgentOptions) {
     signal.throwIfAborted();
     const original = await describeFailures(clone, repair.runs, repair.failures ?? []);
     let workflows: FailedWorkflow[] = original;
-    const box = await boxes.create({ id: repair.id, image: await chooseImage(clone, original), source: clone, signal });
+    const image = await chooseImage(clone, original);
+    const box = await boxes.create({ id: repair.id, image, fallbacks: fallbackImages(image), source: clone, signal });
     const digest = await repositoryDigest(clone), title = pullRequestTitle(repair, original);
     const body = () => pullRequestBody({ repair, workflows: original, summary, attempts, holds, check, spent });
     const record = async (ids: string[]) => { ciRuns = [...ciRuns, ...ids].slice(-100); await context.report({ ciRuns }); };

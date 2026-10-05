@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_IMAGE, boxImage, failingStep, reproduces, toolVersion, versionFromFile } from '../src/repair/workflow.ts';
+import { DEFAULT_IMAGE, boxImage, failingStep, fallbackImages, reproduces, toolVersion, versionFromFile } from '../src/repair/workflow.ts';
 
 const workflow = (steps: string, extra = '') => `name: CI\non: push\njobs:\n  test:\n    name: Test\n    runs-on: ubuntu-latest\n${extra}    steps:\n${steps}`;
 const NODE = '      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - run: npm ci\n      - name: Typecheck\n        run: npm run typecheck\n        working-directory: web\n';
@@ -15,6 +15,12 @@ test('the box image follows the failing job\'s setup action and its version', ()
   assert.equal(image('      - uses: actions/setup-go@v5\n        with:\n          go-version: stable\n'), 'golang:1-bookworm');
   assert.equal(image('      - uses: actions/checkout@v4\n      - run: make test\n'), DEFAULT_IMAGE);
   assert.equal(boxImage(null), 'buildpack-deps:bookworm');
+});
+
+test('a box falls back from a toolchain tag the registry lacks to the same version\'s default base, then to the default image', () => {
+  assert.deepEqual(fallbackImages('node:14-bookworm'), ['node:14', DEFAULT_IMAGE]);
+  assert.deepEqual(fallbackImages('python:3.15-bookworm'), ['python:3.15', DEFAULT_IMAGE]);
+  assert.deepEqual(fallbackImages(DEFAULT_IMAGE), []);
 });
 
 test('a version that is not a plain version never reaches the image name', () => {

@@ -35,6 +35,12 @@ export function boxImage(toolchain: Pick<Toolchain, 'tool' | 'version'> | null |
   return `${IMAGES[toolchain.tool]}:${version || FALLBACK[toolchain.tool]}-bookworm`;
 }
 
+/**
+ * The images a box falls back to when the registry has no tag for its toolchain image, such as an old or unreleased
+ * version without a bookworm build: the same version on the image's own default base, then DEFAULT_IMAGE.
+ */
+export const fallbackImages = (image: string) => image === DEFAULT_IMAGE ? [] : [...(image.endsWith('-bookworm') ? [image.slice(0, -'-bookworm'.length)] : []), DEFAULT_IMAGE];
+
 // How .tool-versions (asdf, mise) names each tool at the start of its line.
 const TOOL_LINE: Record<Toolchain['tool'], RegExp> = { node: /^(?:nodejs|node)\s+/i, python: /^python\s+/i, go: /^(?:golang|go)\s+/i };
 
