@@ -68,6 +68,9 @@ export function redact(input: unknown = '', { decodeUri = false, names = true }:
     .replace(USER_INFO, `$1${REDACTED}@`);
 }
 
+/** Whether text ends inside a private key or certificate block, which the next chunk of the same stream continues. */
+export const openBlock = (text: string) => [...String(text).matchAll(PEM)].some(([block]) => !block.includes('-----END '));
+
 /**
  * Whether text holds a credential as a literal value: a known token shape, a URL with a password, or a credential
  * name set to a literal. In source code (`code`) an unquoted value is an expression, so only a quoted one counts.

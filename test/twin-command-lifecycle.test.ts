@@ -59,6 +59,22 @@ test('setup logs are available before Compose exists and hide split secret outpu
   assert.match(logs, /API_KEY=\[redacted\]/i);
 });
 
+test('setup logs hide a private key whose lines arrive in separate chunks', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-setup-key-')), source = join(dataDir, 'source');
+  await mkdir(source); t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const lines = ['Generating key', '-----BEGIN PRIVATE KEY-----', 'fixture-key-body-first', 'fixture-key-body-second', '-----END PRIVATE KEY-----', 'Key ready'];
+  const service = { id: 'setup', title: 'Setup', fidelity: 'actual', env: () => ({}), setup: async ctx => {
+    // One write per line, as a CLI that prints a key line by line makes them.
+    await ctx.exec(process.execPath, ['-e', `const lines=${JSON.stringify(lines)};let i=0;const next=()=>{if(i<lines.length){process.stdout.write(lines[i++]+'\\n');setTimeout(next,30);}};next();`]);
+    throw new Error('Setup ends here.');
+  } } satisfies TwinService;
+  const runtime = createTwinRuntime({ services: { setup: service }, isFree: async () => true });
+  await assert.rejects(runtime.prepare({ dataDir, id: 'beta', source, config: { services: { setup: {} } } }), /Setup ends here/);
+  const logs = await runtime.logs({ dataDir, id: 'beta' });
+  assert.match(logs, /Generating key[\s\S]*Key ready/);
+  assert.doesNotMatch(logs, /fixture-key-body/);
+});
+
 test('setup logs retain a final diagnostic that has no newline', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-setup-tail-')), source = join(dataDir, 'source');
   await mkdir(source); t.after(() => rm(dataDir, { recursive: true, force: true }));

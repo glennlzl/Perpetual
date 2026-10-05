@@ -12,7 +12,7 @@ import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
 import type { HostPorts, ResolvedService } from './compose.ts';
 import type { CommandOutput, InputValues, ServiceContext, ServiceHealthContainer, ServiceOutputs, TwinServices } from './registry.ts';
-import { failureText, hide, redact as redactSecrets } from '../redaction.ts';
+import { failureText, hide, openBlock, redact as redactSecrets } from '../redaction.ts';
 import { diagnosticText } from '../environments/diagnostics.ts';
 import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
@@ -271,7 +271,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       ...(output ? { onOutput(chunk: string, stream: 'stdout' | 'stderr') {
         lines[stream] += chunk;
         const end = lines[stream].lastIndexOf('\n');
-        if (end >= 0) { output(redactSecrets(redact(lines[stream].slice(0, end + 1)))); lines[stream] = lines[stream].slice(end + 1); }
+        // A private key's lines can come in several chunks: they wait for the end of its block, or of the stream.
+        if (end >= 0 && !openBlock(lines[stream].slice(0, end + 1))) { output(redactSecrets(redact(lines[stream].slice(0, end + 1)))); lines[stream] = lines[stream].slice(end + 1); }
         // A CLI without newlines cannot retain unlimited memory or reveal partial secrets.
         if (lines[stream].length > LOG_LIMIT) lines[stream] = '';
       } } : {}) }); }
