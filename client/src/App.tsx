@@ -197,9 +197,9 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
 
 // Source reports where its scanned commit came from. Production distinguishes a requested
 // deployment's reported result from the journey gate's readiness for a commit.
-// null is a status not known yet, which shows no Badge.
-function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'blocked' | 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
-  if (blocked) return { kind: 'blocked', text: 'Transition paused' };
+// null is a status not known yet, which shows no Badge. A paused transition only
+// describes the pipeline, so its arrow says so and the stage keeps its own status.
+function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (stage.kind === 'source') return revision ? { kind: 'ready', text: origin === 'github' ? 'GitHub' : 'Local', sha: revision } : { kind: 'unconfigured', text: 'No commit' };
   // Ready is a gate verdict; a requested deployment reports its own state at its exact commit.
   if (stage.kind === 'production') {
@@ -268,8 +268,8 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 }
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
-  const { stage, services, repoPath, scannedAt, sha, blocked, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
-  const status = stageStatus(stage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
+  const { stage, services, repoPath, scannedAt, sha, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
+  const status = stageStatus(stage, { environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
   const sandbox = stage.kind === 'sandbox';
   // The changes Autopilot records for the stage; one under way lights the card's beam.
   const changes = autopilot?.changes || [];

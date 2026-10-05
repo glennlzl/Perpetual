@@ -69,7 +69,6 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
   const environment = latest[stage.id], services = stage.kind === 'production' && production ? production : stageServices(scan, stage);
   return {
     stage, services, repoPath: scan?.repo?.path, scannedAt: scan?.scannedAt, sha,
-    blocked: Boolean(pipeline?.transitions?.some(edge => edge.target === stage.id && edge.blocked)),
     ...outgoingTransition(stage, pipeline),
     busy, openDialog, toggleStage, addTest, selected: stage.id === selectedStageId, selection, environment, createSandbox,
     environmentBusy: busyStages.includes(stage.id), browserTests: snapshot.browserTests?.[stage.id],
