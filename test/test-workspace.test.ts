@@ -265,3 +265,22 @@ test('the scanned branch follows the active source', t => {
   workspace.activate({ ...source, branch: 'preview' }, { browserTests: {} });
   assert.equal(workspace.getSnapshot().branch, 'preview');
 });
+
+test('a reopened inspector reads its stage again before its view counts as loaded', async t => {
+  let read = deferred();
+  const { stage } = fixture(t, () => read.promise);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let stop = stage.observe(['browser']);
+  read.resolve({ cases: [scenario], runs: [], accounts: [], config: { targetUrl: 'http://127.0.0.1:3000/' } }); await flush();
+  assert.equal(stage.getSnapshot().loading.browser, false);
+  stop();
+  // While no inspector observes the stage, a new twin moves its target and adds a test account.
+  read = deferred();
+  stop = stage.observe(['browser']);
+  assert.equal(stage.getSnapshot().loading.browser, true, 'Configuration, accounts and capabilities read while closed may be out of date.');
+  read.resolve({ cases: [scenario], runs: [], accounts: [{ id: 'admin', label: 'Admin', username: 'admin@example.test' }], config: { targetUrl: 'http://127.0.0.1:4000/' } }); await flush();
+  assert.equal(stage.getSnapshot().loading.browser, false);
+  assert.equal(stage.getSnapshot().browser.config.targetUrl, 'http://127.0.0.1:4000/');
+  assert.deepEqual(stage.getSnapshot().browser.accounts?.map(account => account.id), ['admin']);
+  stop();
+});

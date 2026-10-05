@@ -312,7 +312,11 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       isCurrent: () => current(entry),
       observe(resources) {
         assertCurrent(entry);
-        for (const resource of resources) { entry.observers[resource]++; if (entry.observers[resource] === 1) void refresh(entry, resource); }
+        // Summaries carry no configuration, accounts or capabilities, so a view no one observed may be out of date:
+        // it reads as loading until the read its first observer starts returns.
+        const first = resources.filter(resource => ++entry.observers[resource] === 1);
+        if (first.some(resource => !entry.view.loading[resource])) update(entry, { loading: { ...entry.view.loading, ...Object.fromEntries(first.map(resource => [resource, true])) } });
+        for (const resource of first) void refresh(entry, resource);
         let stopped = false;
         return () => { if (!stopped) for (const resource of resources) entry.observers[resource]--; stopped = true; };
       },
