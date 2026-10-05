@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
 import { APP_IMAGE } from '../src/twin/compose.ts';
-import { PORT_BASE, PORT_BLOCK, allocatePorts, createTwinRuntime, portFree } from '../src/twin/runtime.ts';
+import { PORT_BASE, PORT_BLOCK, allocatePorts, createTwinRuntime, execCommand, portFree } from '../src/twin/runtime.ts';
 import { services } from './fixtures/twin/services.ts';
 import type { AddressInfo } from 'node:net';
 import type { Exec } from '../src/twin/runtime.ts';
@@ -194,6 +194,22 @@ test('A failed install stops prepare with its command, exit code and the end of 
   });
   assert.deepEqual(compose(calls.at(-1)), INSTALL_RUN, 'Neither fixtures nor apps run after a failed install.');
   assert.equal(calls.some(call => call.args.includes('/workspace/seed/twin.sql')), false);
+});
+
+test('An install that exits with an error or reaches its time limit says so before the end of its output', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  // The install is a real process here, so its exit code and time limit come from the command runner itself.
+  let install = 'console.log("resolving packages");process.exit(7)', timeoutMs: number | undefined;
+  const exec: Exec = async (_file, args, options) => args.includes('install') && args.includes('run')
+    ? execCommand(process.execPath, ['-e', install], { ...options, ...(timeoutMs ? { timeoutMs } : {}) }) : { stdout: '' };
+  const runtime = createTwinRuntime({ exec, services, owner: 'owner-1', isFree: async () => true });
+  const twin = { dataDir, id: 'beta', source, config: { install: { command: 'npm ci' }, apps: { web: { start: 'node app.js', port: 3000 } } } };
+  await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed with exit code 7: resolving packages' });
+  install = 'console.log("resolving packages");setInterval(()=>{},1000)';
+  timeoutMs = 300;
+  await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed: Twin command exceeded its 0.3-second limit.\nresolving packages' });
 });
 
 test('Services with missing inputs are blocked, with the services that depend on them', async t => {

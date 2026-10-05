@@ -54,9 +54,9 @@ export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutM
   signal?.throwIfAborted();
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('A twin command needs a positive time limit.');
   const output = { stdout: '', stderr: '' };
-  let outputLimited = false;
+  let outputLimited = false, exitCode: number | undefined;
   const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000, groupOnly: true,
-    unavailable: `${file} could not start.`, onOutput(chunk, stream) {
+    unavailable: `${file} could not start.`, onLifecycle(event) { if (event.name === 'worker-exit') exitCode = event.code; }, onOutput(chunk, stream) {
       output[stream] += chunk;
       if (Buffer.byteLength(output.stdout) + Buffer.byteLength(output.stderr) > outputLimitBytes) {
         outputLimited = true; output.stdout = ''; output.stderr = '';
@@ -71,7 +71,8 @@ export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutM
   catch (error) {
     const detail = error as Error & { timedOut?: true; cleanupIncomplete?: true };
     const message = outputLimited ? 'Twin command output exceeded its size limit; output discarded.' : signal?.aborted ? String(signal.reason?.message || 'Twin command stopped.') : detail.timedOut ? `Twin command exceeded its ${timeoutMs / 1000}-second limit.` : detail.message.replaceAll('Browser runtime', 'Twin command').replaceAll('Browser operation', 'Twin command');
-    throw Object.assign(new Error(message), outputLimited ? { stdout: '', stderr: '' } : output, ...(detail.timedOut ? [{ timedOut: true }] : []), ...(detail.cleanupIncomplete ? [{ cleanupIncomplete: true }] : []));
+    throw Object.assign(new Error(message), outputLimited ? { stdout: '', stderr: '' } : output, ...(detail.timedOut ? [{ timedOut: true }] : []), ...(detail.cleanupIncomplete ? [{ cleanupIncomplete: true }] : []),
+      ...(exitCode ? [{ code: exitCode }] : []));
   } finally { signal?.removeEventListener('abort', stop); }
 };
 
@@ -450,10 +451,11 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await onStep('Installing dependencies');
       try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL), { redact }); }
       catch (error) {
-        // Package managers report on stdout or stderr, so keep the end of both.
-        const failed = error as Partial<ExecFileException>;
-        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`) || errorText(error);
-        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${output}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
+        // Package managers report on stdout or stderr, so keep the end of both. A time limit or Stop is the cause: it leads.
+        const failed = error as Partial<ExecFileException> & { timedOut?: true };
+        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
+        const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
+        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
       }
     }
     for (const [index, fixture] of fixtures.entries()) {
