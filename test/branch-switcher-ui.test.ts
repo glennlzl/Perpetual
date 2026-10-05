@@ -72,13 +72,15 @@ test('the canvas branch Select lists, pages, refreshes and switches the reposito
   assert.deepEqual(reads, [1, 2, 1]);
   await page.keyboard.press('Escape');
 
-  // A failed read says why, and Try again reads again.
+  // A failed read shows why as the name of the group that holds Try again, never as a live region inside the list.
   readFailure = 'GitHub denied access. Check repository permissions and any organization SSO authorization for GitHub CLI.';
   await page.clock.fastForward(31_000);
   await trigger.click();
-  await expect(list.getByRole('alert')).toHaveText(readFailure);
+  const failed = list.getByRole('group', { name: readFailure, exact: true });
+  await expect(failed.getByText(readFailure, { exact: true })).toBeVisible();
+  await expect(list.getByRole('alert')).toHaveCount(0);
   readFailure = '';
-  await list.getByRole('option', { name: 'Try again', exact: true }).click();
+  await failed.getByRole('option', { name: 'Try again', exact: true }).click();
   await expect(list.getByRole('option', { name: 'hotfix', exact: true })).toBeVisible();
 
   // Choosing a branch saves the connected source at that branch; a failed switch reads the list again on the next open.

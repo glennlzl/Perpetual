@@ -208,10 +208,11 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
   const localOption = local && (!scannedLocal || local.branch && local.branch !== branch) && typeof onLocalScan === 'function' ? <SelectItem key={LOCAL} value={LOCAL} textValue={local.branch || 'Local checkout'} title={local.path}>
     <span className="block min-w-0 max-w-80 truncate">{local.branch || 'Local checkout'}</span>{local.branch && <Badge variant="outline">Local</Badge>}
   </SelectItem> : null;
-  const status = list.loading ? <SelectItem value={STATUS} disabled>Loading branches…</SelectItem> : list.error ? <>
-    <div role="alert" className="max-w-80 px-2 py-1.5 text-sm break-words text-destructive">{list.error}</div>
+  // A failed read names Try again's group, so the reason is read with the option that repeats the read.
+  const status = list.loading ? <SelectItem value={STATUS} disabled>Loading branches…</SelectItem> : list.error ? <SelectGroup>
+    <SelectLabel className="max-w-80 text-sm break-words text-destructive">{list.error}</SelectLabel>
     <SelectItem value={RETRY}>Try again</SelectItem>
-  </> : !canChoose ? <SelectItem value={CONFIGURE}>{list.connection?.connected ? 'Select repository…' : 'Connect GitHub…'}</SelectItem>
+  </SelectGroup> : !canChoose ? <SelectItem value={CONFIGURE}>{list.connection?.connected ? 'Select repository…' : 'Connect GitHub…'}</SelectItem>
     : !list.branches.length ? <SelectItem value={STATUS} disabled>No branches found</SelectItem>
     : list.nextPage ? <SelectItem value={MORE}>Load more…</SelectItem> : null;
 
