@@ -14,9 +14,9 @@ import { NAVIGATION_TIMEOUT_MS } from './navigation.ts';
 
 /** A Playwright project of a journey workspace's config. */
 export type JourneyProject = { name: string; testDir: string; testMatch?: string; testIgnore?: string };
-export type JourneyWorkspaceOptions = { item: ApprovedCase; targetUrl: string; timeoutSeconds: number; projects?: JourneyProject[]; video?: boolean };
+export type JourneyWorkspaceOptions = { item: ApprovedCase; targetUrl: string; timeoutSeconds: number; projects?: JourneyProject[]; video?: boolean; readOnlyRequests?: ReadOnlyRequest[] };
 export type JourneyEnvironmentOptions = {
-  hash: string; targetUrl: string; allowedOrigins?: string[]; readOnlyRequests?: ReadOnlyRequest[]; credentials?: RunCredentials; signInUrl?: string; videoDir?: string;
+  hash: string; targetUrl: string; allowedOrigins?: string[]; credentials?: RunCredentials; signInUrl?: string; videoDir?: string;
   checkTimeoutMs?: number; events?: boolean; blockWrites?: boolean; checkVersion?: number; diagnostics?: boolean;
 };
 /**
@@ -45,12 +45,14 @@ export const runToken = () => Array.from({ length: 8 }, () => TOKEN_LETTERS[rand
  * generic fixture, the approved case snapshot and a generated config. Returns the config's path. The spec is
  * `journey.spec.mjs` in the workspace unless `projects` place the tests elsewhere.
  */
-export async function writeJourneyWorkspace(workspace: string, { item, targetUrl, timeoutSeconds, projects, video = true }: JourneyWorkspaceOptions) {
+export async function writeJourneyWorkspace(workspace: string, { item, targetUrl, timeoutSeconds, projects, video = true, readOnlyRequests = [] }: JourneyWorkspaceOptions) {
   const shim = join(workspace, 'node_modules', 'perpetual');
   await mkdir(shim, { recursive: true, mode: 0o700 });
   await writeFile(join(shim, 'package.json'), JSON.stringify({ name: 'perpetual', type: 'module', exports: './index.mjs' }));
   await writeFile(join(shim, 'index.mjs'), `export * from ${JSON.stringify(fixture)};\n`);
   await writeFile(join(workspace, 'case.json'), JSON.stringify(item));
+  // Large exact policies exceed Linux's per-environment-string limit; keep them in the owned private workspace.
+  await writeFile(join(workspace, 'read-requests.json'), JSON.stringify(readOnlyRequests), { mode: 0o600 });
   // No retries: a pass that needed one is no pass, and a flaky pass fails the run.
   const config = {
     ...(projects ? { projects } : { testDir: workspace, testMatch: 'journey.spec.mjs' }), outputDir: join(workspace, 'output'), reporter: [[reporter]],
@@ -73,13 +75,13 @@ export async function writeJourneyWorkspace(workspace: string, { item, targetUrl
  * control run, and checkVersion is what its reviewed checks read. Every call draws a new run token, so each journey process, and each
  * attempt of a verification, types its own values.
  */
-export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], readOnlyRequests = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION, diagnostics = false }: JourneyEnvironmentOptions): Record<string, string> {
+export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION, diagnostics = false }: JourneyEnvironmentOptions): Record<string, string> {
   const childEnv: Record<string, string> = { FORCE_COLOR: '0' };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH']) if (typeof values[key] === 'string') childEnv[key] = values[key];
   return Object.assign(childEnv, {
     ...(events ? { PERPETUAL_EVENT_CHANNEL: `@${randomBytes(16).toString('hex')}@` } : {}),
     PERPETUAL_CASE: join(workspace, 'case.json'), PERPETUAL_SPEC_HASH: hash, PERPETUAL_CHECK_TIMEOUT_MS: String(checkTimeoutMs), PERPETUAL_CHECK_VERSION: String(checkVersion),
-    PERPETUAL_READ_REQUESTS: JSON.stringify(readOnlyRequests), PERPETUAL_TARGET_URL: targetUrl, PERPETUAL_ALLOWED_ORIGINS: JSON.stringify(allowedOrigins), PERPETUAL_RUN_TOKEN: runToken(),
+    PERPETUAL_TARGET_URL: targetUrl, PERPETUAL_ALLOWED_ORIGINS: JSON.stringify(allowedOrigins), PERPETUAL_RUN_TOKEN: runToken(),
     ...(videoDir ? { PERPETUAL_VIDEO_DIR: videoDir } : {}), ...(blockWrites ? { PERPETUAL_BLOCK_WRITES: '1' } : {}),
     ...(diagnostics && events && !blockWrites ? { PERPETUAL_LIFECYCLE_DIAGNOSTICS: '1' } : {}),
     ...(credentials ? { PERPETUAL_ACCOUNT_USERNAME: credentials.username, PERPETUAL_ACCOUNT_PASSWORD: credentials.password } : {}),
@@ -115,9 +117,9 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       const promise = (async () => {
         const workspace = await mkdtemp(join(tmpdir(), 'perpetual-playwright-'));
         try {
-          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds });
+          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds, readOnlyRequests: input.readOnlyRequests });
           await writeFile(join(workspace, 'journey.spec.mjs'), input.spec.code);
-          const childEnv = journeyEnvironment(values, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, readOnlyRequests: input.readOnlyRequests, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion, diagnostics: diagnostic.enabled });
+          const childEnv = journeyEnvironment(values, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion, diagnostics: diagnostic.enabled });
           if (cancelled) throw new Error('Browser operation cancelled.');
           // Playwright finishes the test, its recordings and its reporter on SIGINT.
           job = superviseWorker({ command: process.execPath, args: [PLAYWRIGHT_CLI, 'test', '--config', config], cwd: workspace, env: childEnv, onEvent: event => {

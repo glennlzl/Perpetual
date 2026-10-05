@@ -15,9 +15,10 @@ const hash = 'a'.repeat(64);
 test('journey authoring offers account choices and an actionable missing-check state in Chromium', { timeout: 60000 }, async t => {
   let item = structuredClone(journey);
   let reviewMode: 'none' | 'ready' | 'unavailable' = 'none';
+  let readOnlyRequests: {url:string;body:string|null}[] = [];
   const requests: { path: string; input: Record<string, unknown> }[] = [];
   const state = () => ({ cases: [item], runs: [], accounts: [], specs: { save: { draft: { hash, stale: false, ...(reviewMode !== 'none' ? { verification: { status: 'passed', passes: 3 } } : {}) } } },
-    config: { targetUrl: 'http://127.0.0.1:3000/', signInUrl: '', scope: '', requirements: '', maxSteps: 60, journeyTimeoutSeconds: 60, externalOrigins: [], authEndpoints: [] },
+    config: { targetUrl: 'http://127.0.0.1:3000/', signInUrl: '', scope: '', requirements: '', maxSteps: 60, journeyTimeoutSeconds: 60, externalOrigins: [], authEndpoints: [], readOnlyRequests },
     capabilities: { provider: 'openrouter', modelConfigured: true, runtimeInstalled: true, browserInstalled: true, playwright: { browserInstalled: true } } });
   const entry = `
     import React from 'react';
@@ -243,5 +244,36 @@ test('journey authoring offers account choices and an actionable missing-check s
     await expect(dialog).toBeHidden();
     const config=requests.find(item=>item.path==='/api/browser/config')?.input.config as {readOnlyRequests:unknown};
     assert.deepEqual(config.readOnlyRequests,[{url:'http://127.0.0.1:3000/bootstrap',body:null}]);
+  });
+  await t.test('an eleventh POST read needs its own review before settings can save', async t => {
+    requests.length=0; item=structuredClone(journey); reviewMode='none';
+    readOnlyRequests=Array.from({length:10},(_,index)=>({url:`http://127.0.0.1:3000/read/${index}`,body:'{}'}));
+    const page=await browser.newPage();t.after(()=>page.close());await page.goto(url);
+    await page.getByRole('button',{name:'Edit test settings',exact:true}).click();
+    const dialog=page.getByRole('dialog');
+    await dialog.getByRole('button',{name:/Read-only POST requests/}).click();
+    const add=dialog.getByRole('button',{name:'Add read-only POST',exact:true});
+    await expect(add).toBeEnabled();await add.click();
+    await dialog.getByLabel('POST URL 11',{exact:true}).fill('http://127.0.0.1:3000/read/new');
+    await dialog.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(dialog.getByRole('alert')).toContainText('Review each POST');assert.equal(requests.length,0);
+    await dialog.getByRole('checkbox',{name:'I reviewed this request; it only reads data',exact:true}).nth(10).check();
+    await dialog.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(dialog).toBeHidden();
+    const config=requests.find(item=>item.path==='/api/browser/config')?.input.config as {readOnlyRequests:unknown};
+    assert.deepEqual(config.readOnlyRequests,[...readOnlyRequests,{url:'http://127.0.0.1:3000/read/new',body:'{}'}]);
+  });
+  await t.test('settings stops adding reviewed POST reads at 32', async t => {
+    requests.length=0; item=structuredClone(journey); reviewMode='none';
+    readOnlyRequests=Array.from({length:32},(_,index)=>({url:`http://127.0.0.1:3000/read/${index}`,body:'{}'}));
+    const page=await browser.newPage();t.after(()=>page.close());await page.goto(url);
+    await page.getByRole('button',{name:'Edit test settings',exact:true}).click();
+    const dialog=page.getByRole('dialog');
+    await dialog.getByRole('button',{name:/Read-only POST requests/}).click();
+    await expect(dialog.getByRole('button',{name:'Add read-only POST',exact:true})).toBeDisabled();
+    await expect(dialog.getByRole('textbox',{name:/^POST URL \d+$/})).toHaveCount(32);
+    await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toBeHidden();
+    const config=requests.find(item=>item.path==='/api/browser/config')?.input.config as {readOnlyRequests:unknown};
+    assert.deepEqual(config.readOnlyRequests,readOnlyRequests);
   });
 });

@@ -1,12 +1,12 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,mkdir} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,readFile,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {journeyResult} from '../src/browser/results.ts';
-import {journeyEnvironment,runToken} from '../src/journeys/playwright/runtime.ts';
-import {RUN_TOKEN,checkText,resolveCheck,resolvedFrom} from '../src/journeys/playwright/checks.ts';
+import {journeyEnvironment,runToken,writeJourneyWorkspace} from '../src/journeys/playwright/runtime.ts';
+import {RUN_TOKEN,checkText,resolveCheck,resolvedFrom,approvedCase} from '../src/journeys/playwright/checks.ts';
 import {validateBrowserCases} from '../src/business/browser-cases.ts';
 import {codeFor} from './fixtures/journey-code.ts';
 import type {BrowserManagerOptions} from '../src/browser/manager.ts';
@@ -56,6 +56,20 @@ test('every journey process gets its own run token',()=>{
   assert.match(first.PERPETUAL_RUN_TOKEN,RUN_TOKEN);assert.match(second.PERPETUAL_RUN_TOKEN,RUN_TOKEN);
   assert.notEqual(first.PERPETUAL_RUN_TOKEN,second.PERPETUAL_RUN_TOKEN,'A control run types values of its own.');
   assert.notEqual(journeyEnvironment({PERPETUAL_RUN_TOKEN:'aaaaaaaa'},'/workspace',options).PERPETUAL_RUN_TOKEN,'aaaaaaaa','The controller environment never sets it.');
+});
+
+test('a maximum-size reviewed read policy reaches the worker without a Linux-sized environment string',async t=>{
+  const workspace=await mkdtemp(join(tmpdir(),'perpetual-read-policy-'));t.after(()=>rm(workspace,{recursive:true,force:true}));
+  const targetUrl='http://localhost:3000/',body=JSON.stringify({value:'x'.repeat(4084)});
+  assert.equal(Buffer.byteLength(body),4096);
+  const readOnlyRequests=Array.from({length:32},(_,index)=>({url:`${targetUrl}read/${index}`,body}));
+  const options={hash:'0'.repeat(64),targetUrl};
+  await writeJourneyWorkspace(workspace,{item:approvedCase(journey),targetUrl,timeoutSeconds:60,readOnlyRequests});
+  const env=journeyEnvironment({},workspace,options);
+  assert.ok(Object.values(env).every(value=>Buffer.byteLength(value)<128*1024),'Valid policies must not exceed Linux’s single environment-string limit.');
+  const file=join(workspace,'read-requests.json');
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),readOnlyRequests,'The complete exact policy reaches the private worker workspace.');
+  assert.equal((await stat(file)).mode&0o777,0o600);
 });
 
 test('a final assertion that names {run} counts only with the text it looked for',()=>{

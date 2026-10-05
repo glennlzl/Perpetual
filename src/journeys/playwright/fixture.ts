@@ -5,6 +5,7 @@
 import { test as base, errors, type Page, type Request } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
@@ -28,13 +29,14 @@ type Held = { actions: number; signedAt: number; signingIn: boolean };
 // this module: they leave the environment before any spec runs, so neither a spec nor the browser Playwright launches
 // later can read them there. A spec reads the token only as journey.run, which checks never read back.
 const env = { ...process.env }, write = process.stdout.write;
-if (env.TEST_WORKER_INDEX !== undefined) for (const key of ['PERPETUAL_EVENT_CHANNEL', 'PERPETUAL_ACCOUNT_USERNAME', 'PERPETUAL_ACCOUNT_PASSWORD', 'PERPETUAL_SIGN_IN_URL', 'PERPETUAL_RUN_TOKEN', 'PERPETUAL_READ_REQUESTS']) delete process.env[key];
+if (env.TEST_WORKER_INDEX !== undefined) for (const key of ['PERPETUAL_EVENT_CHANNEL', 'PERPETUAL_ACCOUNT_USERNAME', 'PERPETUAL_ACCOUNT_PASSWORD', 'PERPETUAL_SIGN_IN_URL', 'PERPETUAL_RUN_TOKEN']) delete process.env[key];
 // The runtime sets the case snapshot, the target URL and the allowed origins for every journey process.
 const approved: ApprovedCase = approvedCase(JSON.parse(readFileSync(env.PERPETUAL_CASE!, 'utf8')));
 const origins: unknown = JSON.parse(env.PERPETUAL_ALLOWED_ORIGINS || '[]');
 if (!Array.isArray(origins) || !origins.every((origin): origin is string => typeof origin === 'string')) throw new Error('The allowed origins are unreadable.');
 const allowed = new Set(origins);
-const readRequests = validateReadRequests(JSON.parse(env.PERPETUAL_READ_REQUESTS || '[]'), env.PERPETUAL_TARGET_URL!);
+const readInput: unknown = JSON.parse(readFileSync(join(dirname(env.PERPETUAL_CASE!), 'read-requests.json'), 'utf8'));
+const readRequests = validateReadRequests(readInput, env.PERPETUAL_TARGET_URL!);
 const account = env.PERPETUAL_ACCOUNT_USERNAME && env.PERPETUAL_ACCOUNT_PASSWORD ? { username: env.PERPETUAL_ACCOUNT_USERNAME, password: env.PERPETUAL_ACCOUNT_PASSWORD } : null;
 // The stage's sign-in page, where the account signs in when the application URL shows no sign-in form.
 const SIGN_IN_URL = env.PERPETUAL_SIGN_IN_URL || '';
