@@ -28,7 +28,7 @@ from read_requests import validate_read_requests, reviewed_read
 from action_output import single_action_output
 from journey_steps import validate_steps
 from model_settings import ModelConfigurationError, model_config
-from run_credentials import ALIASES, contains_reference, credential_alias, credential_field_error, redact, redact_messages, redact_value, validate_credentials
+from run_credentials import ALIASES, contains_account, contains_reference, credential_alias, credential_field_error, redact, redact_messages, validate_credentials
 from sign_in import sign_in_on_page
 
 VERSIONS = {"browser-use": "0.13.10", "playwright": "1.63.0"}
@@ -126,6 +126,8 @@ Draft construction rules:
 
 AUTHENTICATED_DISCOVERY = """A run-only test account is supplied for this exploration. Sign in with it to observe authenticated screens; only the configured sign-in request may submit. Make no other change: other HTTP mutations are blocked, but not every change a page sends another way.
 """
+# What the adapter itself tells the agent. Redaction would hide a test-account value inside it there too.
+OWN_TEXT = "\n".join([DISCOVERY_INSTRUCTIONS, AUTHENTICATED_DISCOVERY, CREDENTIAL_INSTRUCTIONS, *ACTION_FAILURES.values(), *SIGN_IN_REPLIES.values()])
 
 
 class InputError(ValueError):
@@ -265,7 +267,7 @@ def validate_payload(raw):
     if payload.get("mode") not in {"preflight", "discover"}:
         raise InputError("Invalid browser mode.")
     try:
-        credentials = validate_credentials(payload.get("credentials"), payload["mode"])
+        credentials = validate_credentials(payload.get("credentials"), payload["mode"], OWN_TEXT)
     except ValueError as error:
         raise InputError(str(error)) from None
     if credentials:
@@ -946,8 +948,11 @@ def supplied_lines(source_context):
 
 
 def discovered_case(candidate, supplied, credentials=None):
-    # A proposal never keeps an account value the model saw despite redaction.
-    case = redact_value(candidate.model_dump(), credentials)
+    case = candidate.model_dump()
+    # A proposal never keeps an account value the model saw despite redaction. It is left out, never rewritten, since
+    # rewriting can break its step IDs and checks.
+    if contains_account(case, credentials):
+        raise InputError("It repeats the run-only test account.")
     case["steps"] = validate_steps(case["steps"])
     # Only citations of lines actually supplied are published; others are dropped, never guessed.
     case["evidence"] = [ref for ref in case["evidence"] if ref["line"] in supplied.get(ref["path"], ())]

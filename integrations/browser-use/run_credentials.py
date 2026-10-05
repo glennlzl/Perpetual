@@ -6,9 +6,9 @@ import re
 ALIASES = {"username": "perpetual_test_username", "password": "perpetual_test_password"}
 # Each value fills only its own kind of login field.
 FIELD_TYPES = {"username": {"text", "email"}, "password": {"password"}}
-# Names the model must reproduce exactly. An account value that is a common word, such as "password", is not
-# redacted inside them, so the placeholders and the sign-in tool keep working.
-OWN_NAMES = re.compile("|".join(re.escape(name) for name in [*ALIASES.values(), "sign_in_with_test_account"]))
+# Redaction hides every copy of a value in any letter case, so a shorter value, or a word the agent's own instructions
+# use, would also hide ordinary page text, proposals and those instructions.
+MINIMUM_LENGTH = 6
 
 
 def credential_field_error(name, same_origin, agent_tab, top_frame, tag, input_type):
@@ -24,7 +24,14 @@ def credential_field_error(name, same_origin, agent_tab, top_frame, tag, input_t
     return None
 
 
-def validate_credentials(raw, mode):
+def shown_forms(value):
+    """A value as a page may show it: as given or stripped, each also clipped to the 100 characters Browser Use shows of
+    a field's value."""
+    return {form for shown in (value, value.strip()) for form in (shown, shown[:100])} - {""}
+
+
+def validate_credentials(raw, mode, own_text=""):
+    """A run-only account for discovery; own_text is what the adapter itself tells the agent."""
     if raw is None:
         return None
     if mode != "discover" or not isinstance(raw, dict) or set(raw) != set(ALIASES):
@@ -33,6 +40,8 @@ def validate_credentials(raw, mode):
         value = raw[name]
         if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\x00" in value:
             raise ValueError("Enter a valid test username and password.")
+        if len(value.strip()) < MINIMUM_LENGTH or any(form.lower() in own_text.lower() for form in shown_forms(value)):
+            raise ValueError(f"Use a test username and password of at least {MINIMUM_LENGTH} characters that are not common words, such as password or test.")
     return dict(raw)
 
 
@@ -40,32 +49,23 @@ def redact(text, credentials):
     """Account values in text the model receives, longest first, become [REDACTED].
 
     Matching ignores letter case and covers a value as Browser Use shows a field's value too: stripped, and clipped to
-    its first 100 characters. Only a value found inside one of the adapter's own names stays there.
+    its first 100 characters.
     """
     if not credentials:
         return text
-    secrets = set()
-    for value in credentials.values():
-        for shown in (value, value.strip()):
-            secrets.update({shown, shown[:100]} - {""})
-    pattern = re.compile("|".join(re.escape(item) for item in sorted(secrets, key=len, reverse=True)), re.IGNORECASE)
-    names = [found.span() for found in OWN_NAMES.finditer(text)]
-
-    def replace(found):
-        inside = any(start <= found.start() and found.end() <= end and found.end() - found.start() < end - start for start, end in names)
-        return found.group(0) if inside else "[REDACTED]"
-    return pattern.sub(replace, text)
+    secrets = {form for value in credentials.values() for form in shown_forms(value)}
+    return re.sub("|".join(re.escape(item) for item in sorted(secrets, key=len, reverse=True)), "[REDACTED]", text, flags=re.IGNORECASE)
 
 
-def redact_value(value, credentials):
-    """A copy of JSON-like data with account values redacted from every string."""
+def contains_account(value, credentials):
+    """Whether a string in JSON-like data holds an account value as redact() finds one."""
     if isinstance(value, str):
-        return redact(value, credentials)
-    if isinstance(value, list):
-        return [redact_value(item, credentials) for item in value]
+        return redact(value, credentials) != value
     if isinstance(value, dict):
-        return {key: redact_value(item, credentials) for key, item in value.items()}
-    return value
+        return any(contains_account(child, credentials) for child in value.values())
+    if isinstance(value, (tuple, list)):
+        return any(contains_account(child, credentials) for child in value)
+    return False
 
 
 def credential_alias(text):

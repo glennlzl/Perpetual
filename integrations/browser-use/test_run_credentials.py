@@ -32,28 +32,28 @@ class Redaction(unittest.TestCase):
             with self.subTest(text=text[:40]):
                 self.assertEqual(redact(text, account), expected)
 
-    def test_a_common_word_account_keeps_the_adapter_names_whole(self):
-        account = {"username": "test", "password": "password"}
-        instructions = redact(runner.CREDENTIAL_INSTRUCTIONS, account)
-        for name in ["call sign_in_with_test_account", "<secret>perpetual_test_username</secret>", "<secret>perpetual_test_password</secret> only in a [REDACTED] field"]:
-            self.assertIn(name, instructions)
-        self.assertEqual(redact("<input type=password name=Password>", account), "<input type=[REDACTED] name=[REDACTED]>")
-        # A value that merely contains or equals one of those names is redacted whole.
-        for value in ["xperpetual_test_passwordx", "perpetual_test_password"]:
-            with self.subTest(value=value):
-                self.assertEqual(redact(f"Shown: {value}", {"username": "owner@example.invalid", "password": value}), "Shown: [REDACTED]")
+    def test_a_short_or_common_word_account_is_refused_before_discovery_starts(self):
+        # Redaction would hide such a value in the agent's own instructions, and in ordinary page text and proposals.
+        for change in [{"username": "admin"}, {"password": "password"}, {"username": "Account"}, {"password": "  ab12  "}]:
+            with self.subTest(change=change), self.assertRaises(runner.InputError) as caught:
+                runner.validate_payload({"mode": "discover", "targetUrl": "http://127.0.0.1:3010/", "credentials": {**ACCOUNT, **change}})
+            self.assertEqual(str(caught.exception), "Use a test username and password of at least 6 characters that are not common words, such as password or test.")
 
-    def test_proposals_and_their_summary_never_keep_an_account_value(self):
+    def test_a_proposal_that_repeats_the_account_is_left_out_and_the_others_kept_whole(self):
         class Proposal:
-            name = "Reopen saved work"
+            def __init__(self, name, goal, step):
+                self.name = name
+                self.value = {"name": name, "goal": goal, "steps": [{"id": "sign-in", "title": "Sign in with email and password"}, {"id": step, "title": "Open the settings"}],
+                              "preconditions": ["A seeded user who signs in with email and password"], "expectedOutcomes": ["The saved settings are visible"], "assertions": [], "evidence": []}
 
             def model_dump(self):
-                return {"name": self.name, "goal": f"Sign in as {ACCOUNT['username'].upper()} and reopen saved work", "steps": [{"id": "open", "title": "Open"}, {"id": "reopen", "title": "Reopen"}],
-                        "preconditions": [], "expectedOutcomes": ["Saved work is visible"], "assertions": [], "evidence": []}
+                return json.loads(json.dumps(self.value))
         payload = runner.validate_payload({"mode": "discover", "targetUrl": "http://127.0.0.1:3010/", "credentials": ACCOUNT})
-        cases, summary = runner.accepted_proposals(payload, [Proposal()], f"Signed in as {ACCOUNT['username']}.")
-        self.assertEqual(cases[0]["goal"], "Sign in as [REDACTED] and reopen saved work")
-        self.assertEqual(summary, "Signed in as [REDACTED].")
+        natural = Proposal("Admin updates workspace settings", "Sign in and update the workspace settings", "admin-settings")
+        repeating = Proposal("Reopen saved work", f"Sign in as {ACCOUNT['username'].upper()} and reopen saved work", "reopen")
+        cases, summary = runner.accepted_proposals(payload, [natural, repeating], f"Signed in as {ACCOUNT['username']}.")
+        self.assertEqual([{key: case[key] for key in natural.value} for case in cases], [natural.value])
+        self.assertEqual(summary, 'Signed in as [REDACTED].\nOmitted "Reopen saved work": It repeats the run-only test account.')
 
 
 class CredentialValidation(unittest.TestCase):
