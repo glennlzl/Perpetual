@@ -25,11 +25,11 @@ Linux hosts may also need Chromium's system libraries (`npx playwright install-d
 
 ## Configure a model
 
-Discovery, drafting and code generation use a model; runs do not. Open the app-wide **Settings** page from the sidebar. Enter an **OpenRouter API Key** and choose a model; the list comes from OpenRouter's catalog of models that take text and images and support tools, and the saved model, else `openai/gpt-5.4-mini`, is preselected when the catalog has it. Or export the settings before starting the controller:
+Discovery, drafting and code generation use a model; runs do not. Open the app-wide **Settings** page from the sidebar. Enter an **OpenRouter API Key** and choose a model; the list comes from OpenRouter's catalog of models that take text and images and support tools, and the saved model, else `openai/gpt-6-luna`, is preselected when the catalog has it. Or export the settings before starting the controller:
 
 ```sh
 export OPENROUTER_API_KEY='your-key'
-export PERPETUAL_MODEL='openai/gpt-5.4-mini'                   # optional
+export PERPETUAL_MODEL='openai/gpt-6-luna'                     # optional
 export PERPETUAL_MODEL_BASE_URL='https://openrouter.ai/api/v1'  # optional
 node src/cli.ts serve --repo /absolute/path/to/your/repo
 ```
