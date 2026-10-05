@@ -28,9 +28,9 @@ const AUTHORIZATION = /(Authorization\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\
 const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
-// User info, a user or a password alone too, runs to the last @ before the host, so a password may hold an @. Without
-// an @ the authority is read once.
-const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^\s/?#]+@/gi;
+// User info, a user or a password alone too, ends at the last @ before the path. The user ends at ? or #, so an @ in a
+// query (`https://host?email=…@…`) is no user info, while a password may hold ?, # and @. Each part is read once.
+const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)(?!@)[^\s/?#@:]*(?::[^\s/]*)?@/gi;
 function literalUrlPassword(text: string): boolean {
   return [...text.matchAll(USER_INFO)].some(([match, scheme]) => {
     const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':'), password = userinfo.slice(colon + 1);

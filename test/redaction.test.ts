@@ -53,12 +53,20 @@ test('an Authorization value of any scheme and every part of a named value or UR
     ['postgres://user:fixture@literal@db.example.test/app', `postgres://${REDACTED}@db.example.test/app`],
     ['REDIS_URL=redis://:fixture-literal@cache:6379/0', `REDIS_URL=redis://${REDACTED}@cache:6379/0`],
     ['git clone https://0123456789abcdef@github.com/acme/app.git', `git clone https://${REDACTED}@github.com/acme/app.git`],
+    ['DATABASE_URL=postgres://app:fixture#literal@db.example.test:5432/app', `DATABASE_URL=postgres://${REDACTED}@db.example.test:5432/app`],
+    ['mysql://root:fixture?literal-1@db:3306/app', `mysql://${REDACTED}@db:3306/app`],
   ];
   for (const [input, output] of cases) assert.equal(redact(input), output, input);
-  const paths = 'http://localhost:3000/@vite/client https://registry.npmjs.org/@types/node';
-  assert.equal(redact(paths), paths, 'An @ after the host is not user info.');
+  const paths = 'http://localhost:3000/@vite/client https://registry.npmjs.org/@types/node webpack://@acme/app/./src/index.ts https://app.example.test?email=owner@example.test';
+  assert.equal(redact(paths), paths, 'An @ after the host, or in a query, is not user info.');
+  assert.equal(hasCredential(paths), false);
   assert.equal(hasCredential('REDIS_URL=redis://:fixture-literal@cache:6379/0'), true, 'A password alone is a literal URL password.');
   assert.equal(hasSecretLiteral(JSON.stringify({ url: 'redis://:fixture-literal@cache:6379/0' })), true);
+  for (const url of ['postgres://app:fixture#literal@db.example.test:5432/app', 'mysql://root:fixture?literal-1@db:3306/app']) {
+    assert.equal(hasCredential(url), true, `A password may hold ? or #: ${url}`);
+    assert.equal(hasCredential(`const url = "${url}";`, { code: true }), true, url);
+    assert.equal(hasSecretLiteral(JSON.stringify({ url })), true, url);
+  }
   assert.equal(hasCredential('git clone https://user@github.com/acme/app.git'), false, 'A user alone is not a password.');
 });
 
