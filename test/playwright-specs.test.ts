@@ -240,11 +240,11 @@ test('a text check finds its value where it stands on its own, ignoring case and
   for(const [text,value] of [['कमी','कम'],['किताब','ताब'],['Cafe\u0301','Cafe']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
   for(const [text,value] of [['यह किताब है','किताब'],['Cafe\u0301 au lait','Cafe\u0301'],['\u2714\ufe0fPaid','\u2714\ufe0f'],['\u2714\ufe0fPaid','Paid']] as const)
     assert.equal(finds(text,value),true,`${value} in ${text}`);
-  // An edge in a script written without spaces between words needs no boundary, nor does a digit beside such a script; a
-  // letter of a script written with spaces beside it does, and a digit beside another digit or such a letter.
-  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย'],['共42元','42元'],['合計1,240円','1,240円'],['第3章','3']] as const)
+  // An edge in a script written without spaces between words needs no boundary, nor does a letter or digit beside such a
+  // script; beside a digit or a letter of a script written with spaces, a letter or digit edge does.
+  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย'],['共42元','42元'],['合計1,240円','1,240円'],['第3章','3'],['Pro版','Pro'],['已支付Paid','Paid'],['购买iPhone手机','iPhone']] as const)
     assert.equal(finds(text,value),true,`${value} in ${text}`);
-  for(const [text,value] of [['Pro版','Pro'],['已支付Paid','Paid'],['42kg','42'],['3개','3']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
+  for(const [text,value] of [['42kg','42'],['3개','3'],['购买iPhones','iPhone'],['已Unpaid','Paid']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
 });
 
 // A manager whose Playwright runtime records its launches and replays scripted events.

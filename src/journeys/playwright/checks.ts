@@ -78,13 +78,14 @@ const UNSPACED = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Thai}\\
 // What a text check skips, as Playwright's text matching does: zero-width spaces and soft hyphens anywhere, and more
 // whitespace where the value has a space.
 const SKIP = '[\\u200b\\u00ad]*', SPACE = '\\s[\\s\\u200b\\u00ad]*';
-// What joins the page's text to an edge of the value that is a letter: a letter or digit. To one that is a digit: a digit
-// or a letter of a script written with spaces, so INV-7 is within INV-70, while 42元 stands on its own in 共42元.
-const JOINS = { letter: '[\\p{L}\\p{N}]', digit: `(?:\\p{N}|(?!${UNSPACED})\\p{L})` };
+// What joins the page's text to an edge of the value that is a letter or digit: a digit or a letter of a script written
+// with spaces, so Paid is within Unpaid and INV-7 within INV-70, while 42元 stands on its own in 共42元 and iPhone in
+// 购买iPhone手机.
+const JOIN = `(?:\\p{N}|(?!${UNSPACED})\\p{L})`;
 /**
  * How a text check finds its value from check version 5, in the text a page renders and in form fields alike: ignoring
  * case and runs of whitespace, and only where the value stands on its own. Right beside an edge of the value that is a
- * letter or digit, the page shows nothing that joins it (JOINS), so Paid is not found in Unpaid. A combining mark counts
+ * letter or digit, the page shows nothing that joins it (JOIN), so Paid is not found in Unpaid. A combining mark counts
  * with the character it follows: an edge of the value is its first character, or its last that is no mark. A mark right
  * after the value continues its last character, so Cafe is not found in a Café written with a combining accent, and
  * before the value, the page character that counts is the one any marks there follow, so Paid stands on its own after a
@@ -93,7 +94,7 @@ const JOINS = { letter: '[\\p{L}\\p{N}]', digit: `(?:\\p{N}|(?!${UNSPACED})\\p{L
  */
 export function textPattern(value: string): RegExp {
   const chars = [...squash(value.replace(/[\u200b\u00ad]/g, ''))], unspaced = new RegExp(UNSPACED, 'u');
-  const joins = (char = '') => unspaced.test(char) ? null : /\p{N}/u.test(char) ? JOINS.digit : /[\p{L}\p{M}]/u.test(char) ? JOINS.letter : null;
+  const joins = (char = '') => !unspaced.test(char) && /[\p{L}\p{M}\p{N}]/u.test(char) ? JOIN : null;
   const before = joins(chars[0]), after = joins(chars.findLast(char => !/\p{M}/u.test(char)));
   const body = chars.map(char => char === ' ' ? SPACE : escape(char)).join(SKIP);
   return new RegExp(`${before ? `(?<!${before}[\\p{M}\\u200b\\u00ad]*)` : ''}${body}${after ? `(?!${SKIP}(?:\\p{M}|${after}))` : ''}`, 'iu');
