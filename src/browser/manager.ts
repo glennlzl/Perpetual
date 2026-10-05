@@ -62,9 +62,9 @@ export type CaseProgress=Omit<PublicCaseProgress,'steps'>&{actionCount:number;st
 export type RunProgress=Omit<PublicRunProgress,'cases'>&{revision:number;cases:CaseProgress[]};
 type Discovery=BrowserDiscovery;
 type Analysis=BrowserAnalysis;
-/** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. */
+/** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes; gate marks a run the journey gate started. */
 export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engine'>&{
-  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;
+  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;gate?:true;
 };
 type Preparation=BrowserPreparation;
 /** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
@@ -103,7 +103,7 @@ const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&
 const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
-const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
+const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,gate,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
 const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
@@ -117,8 +117,8 @@ const defaults:BrowserConfig={targetUrl:'',signInUrl:'',scope:'',requirements:''
 // The twin a verification started on is gone or no longer ready, so its attempts cannot go on there.
 const TWIN_CHANGED='The environment changed during its verification. Verify its code again.';
 const active=(run:StoredRun)=>['queued','running'].includes(run.status);
-// Playwright names each tab's recording; a stage keeps the recordings of its latest runs.
-const VIDEO_RUNS_PER_STAGE=5,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+// Playwright names each tab's recording; a stage keeps the recordings of its latest runs, and the history the latest runs.
+const VIDEO_RUNS_PER_STAGE=5,HISTORY=50,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const safeText=(value:unknown,limit:number)=>value?browserError(String(value),process.env,limit):'';
 const touch=(run:BrowserRun)=>{run.progress.revision=(run.progress.revision||0)+1;};
 const settleSteps=(progress:{steps?:StepProgress[]},status:string)=>{for(const step of progress.steps||[])if(step.status==='running')step.status=['skipped','cancelled'].includes(status)?status:'unconfirmed';};
@@ -280,6 +280,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       }catch{throw new Error('Invalid stored read-only POST requests.');}
     }
   }
+  // Only true marks a gate run; any other stored value marks none.
+  for(const run of state.runs){const marker:unknown=run.gate;if(marker!==undefined&&marker!==true)delete run.gate;}
   for(const run of state.runs)if(run.codeFeedback!==undefined){
     const feedback:unknown=run.codeFeedback;
     if(!isRecord(feedback)||Object.keys(feedback).length>30||Object.entries(feedback).some(([id,error])=>!run.caseIds.includes(id)||typeof error!=='string'||!error||error.length>4000))throw new Error('Invalid stored code feedback.');
@@ -322,8 +324,17 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   // is derived from its runs; this marker only says it is still between or inside attempts, or why it could not go on.
   const verifications=new Map<string,VerificationEntry>(),verificationJobs=new Set<Promise<void>>();
   const verifying=(scope?:string,caseId?:string)=>[...verifications.values()].some(entry=>!entry.done&&(scope===undefined||entry.scope===scope)&&(caseId===undefined||entry.caseId===caseId));
-  // The run history keeps the controller's latest 50 runs, and every attempt of a verification still running.
-  const kept=(run:BrowserRun,index:number)=>index<50||active(run)||[...verifications.values()].some(entry=>!entry.done&&entry.id===run.verification?.id);
+  // The run history keeps the controller's latest 50 runs and, counted apart from them, its latest 50 verification
+  // attempts, so verifying code never pushes a gate or a person's run out of it. Each stage's latest gate run stays too,
+  // as does every active run and every attempt of a verification still running. runs is newest first.
+  function keptRuns(runs:BrowserRun[]){
+    const counts={runs:0,attempts:0},gates=new Set<string>();
+    return runs.filter(run=>{
+      const latestGate=Boolean(run.gate)&&!gates.has(run.scope);if(latestGate)gates.add(run.scope);
+      const recent=run.verification?counts.attempts++<HISTORY:counts.runs++<HISTORY;
+      return recent||latestGate||active(run)||[...verifications.values()].some(entry=>!entry.done&&entry.id===run.verification?.id);
+    });
+  }
   // An operation holds its stage in busy until it ends; whenFree(scope) resolves once the stage's holder lets go.
   const waiters=new Map<string,(()=>void)[]>();
   const free=(scope:string)=>{busy.delete(scope);const resolved=waiters.get(scope)||[];waiters.delete(scope);for(const resolve of resolved)resolve();resumePreparations();};
@@ -340,14 +351,24 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     let promise:Promise<T>;try{promise=Promise.resolve(work());}catch(error){return Promise.reject(error);}admissions.add(promise);
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
-  // Recordings of each stage's latest runs are kept; a run's recordings go with it.
+  // Each stage keeps the recordings of its latest runs, apart from verification attempts, of its latest gate run, and of
+  // its latest verification's attempts; a run's recordings go with it.
   async function pruneVideos(){
-    const kept=new Set<string>(),count=new Map<string,number>();
+    const kept=new Set<string>(),count=new Map<string,number>(),gates=new Set<string>(),verified=new Map<string,string>();
     for(const run of state.runs){
       if(active(run)){kept.add(run.id);continue;}
       if(run.mode!=='run')continue;
-      const n=count.get(run.scope)||0;
-      if(n<VIDEO_RUNS_PER_STAGE){kept.add(run.id);count.set(run.scope,n+1);}
+      let keep:boolean;
+      if(run.verification){
+        // Runs are newest first, so a stage's first attempt seen is of its latest verification.
+        if(!verified.has(run.scope))verified.set(run.scope,run.verification.id);
+        keep=verified.get(run.scope)===run.verification.id;
+      }else{
+        const n=count.get(run.scope)||0;count.set(run.scope,n+1);
+        keep=n<VIDEO_RUNS_PER_STAGE||Boolean(run.gate)&&!gates.has(run.scope);
+        if(run.gate)gates.add(run.scope);
+      }
+      if(keep)kept.add(run.id);
       else for(const item of run.progress?.cases||[])delete item.videos;
     }
     // Only run folders are removed; anything else placed here is left alone.
@@ -746,9 +767,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
+      // Only a person's run is manual; any other run of journeys is the journey gate's.
+      else if(mode==='run'&&!options.manual)run.gate=true;
       const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
       if(preparation){Object.assign(preparation,{status:'discovering',targetUrl:config.targetUrl,runId:run.id});delete preparation.error;delete preparation.completedAt;}
-      const admittedRuns=()=>[run,...state.runs].filter(kept);
+      const admittedRuns=()=>keptRuns([run,...state.runs]);
       // A discovery that could not be admitted leaves the stage's preparation as it was.
       try{await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});}
       catch(error){if(preparation){delete preparation.runId;delete preparation.targetUrl;Object.assign(preparation,before);}throw error;}
