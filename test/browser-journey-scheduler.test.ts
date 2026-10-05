@@ -14,7 +14,8 @@ const deferred=()=>{let resolve!:(value?:unknown)=>void,reject!:(error:unknown)=
 type Worker={input:JourneyRunInput;gate:ReturnType<typeof deferred>;completed:Set<unknown>;cancelled:boolean;event(value:WorkerEvent):void};
 const journey=(id:string,isolation='isolated')=>({id,name:id,goal:'Complete the user journey',isolation,steps:[{id:'entry',title:'Enter application'},{id:'outcome',title:'Verify saved result'}],expectedOutcomes:['Saved result visible'],assertions:[{type:'text-visible',value:'Saved'}],selected:true,needsReview:false});
 const outcome=(item:{id:string})=>({caseId:item.id,stopCause:'none',agentCompleted:true,outcomes:[{outcomeIndex:0,status:'satisfied',evidence:'Saved result visible'}],assertions:[{type:'text-visible',value:'Saved',passed:true}]});
-async function until(predicate:()=>unknown){for(let i=0;i<200;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,2));}throw new Error('Condition did not settle.');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+async function until(predicate:()=>unknown){for(const deadline=Date.now()+10000;Date.now()<deadline;await new Promise(resolve=>setTimeout(resolve,2)))if(await predicate())return;throw new Error('Condition did not settle.');}
 async function fixture(t:TestContext,cases:ReturnType<typeof journey>[]){
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-journeys-')),repo=join(dataDir,'repo');
   await mkdir(repo);await writeFile(join(repo,'app.js'),'export const saved="Saved";');

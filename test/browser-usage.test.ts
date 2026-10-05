@@ -25,7 +25,10 @@ async function fixture(t:TestContext,options:Partial<BrowserManagerOptions>={}){
   for(const stageId of ['beta','gamma']){await manager.saveConfig({...context,stageId},{targetUrl:'http://localhost:3000'});await manager.saveCases({...context,stageId},[caseItem]);await draftCode(manager,{...context,stageId},[caseItem]);}
   return {manager,context,usage,workers,dataDir,runtime,setCapabilityGate:(value:Gate)=>capabilityGate=value,setOwnedStatus:(value:string)=>ownedStatus=value};
 }
-async function terminal(f:Awaited<ReturnType<typeof fixture>>,id:string){for(let i=0;i<100;i++){const {run}=await f.manager.runProgress(f.context,id);if(!['queued','running'].includes(run.status))return run;await new Promise(r=>setTimeout(r,2));}throw Error('Run did not finish');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+const WAIT=10000;
+async function terminal(f:Awaited<ReturnType<typeof fixture>>,id:string){for(const deadline=Date.now()+WAIT;Date.now()<deadline;await new Promise(r=>setTimeout(r,2))){const {run}=await f.manager.runProgress(f.context,id);if(!['queued','running'].includes(run.status))return run;}throw Error('Run did not finish');}
+async function until(predicate:()=>unknown,message:string){for(const deadline=Date.now()+WAIT;!predicate();await new Promise(r=>setTimeout(r,2)))assert.ok(Date.now()<deadline,message);}
 
 test('browser protects its owned target across stages and releases after failed execution',async t=>{
   const f=await fixture(t);const {run}=await f.manager.run(f.context,{},manual);
@@ -34,7 +37,7 @@ test('browser protects its owned target across stages and releases after failed 
   await assert.rejects(f.manager.run({...f.context,stageId:'gamma'},{},manual),{statusCode:409});
   const other=f.usage.acquire(f.context,{environmentId:'another-app',operation:'script'});other();
   await f.manager.stop(f.context,run.id);assert.equal((await terminal(f,run.id)).status,'cancelled');
-  for(let i=0;i<100&&f.usage.isBusy('owned-app');i++)await new Promise(r=>setTimeout(r,2));
+  await until(()=>!f.usage.isBusy('owned-app'),'The run did not release its application.');
   const reset=f.usage.acquire(f.context,{environmentId:'owned-app',operation:'reset'});reset();
 });
 test('browser refuses an occupied or stale owned application but external URLs need no guest',async t=>{
@@ -81,9 +84,9 @@ test('uncertain cleanup durably quarantines the target before releasing its envi
   t.after(()=>gate.resolve());
   const f=await fixture(t,{onEnvironmentUncertain:async(id,error)=>{calls.push({id,error});await gate.promise;f.setOwnedStatus('cleanup_failed');}});
   const {run}=await f.manager.run(f.context,{},manual);
-  for(let i=0;i<100&&!f.workers.length;i++)await new Promise(r=>setTimeout(r,2));
+  await until(()=>f.workers.length,'The worker did not start.');
   f.workers[0].gate.reject(Object.assign(new Error('Cleanup incomplete after forced termination.'),{cleanupIncomplete:true}));
-  for(let i=0;i<100&&!calls.length;i++)await new Promise(r=>setTimeout(r,2));
+  await until(()=>calls.length,'The environment was not reported uncertain.');
   assert.deepEqual(calls,[{id:'owned-app',error:'Cleanup incomplete after forced termination.'}]);
   assert.equal(f.usage.isBusy('owned-app'),true,'Quarantine must finish before another manager can mutate the target.');
   const saved=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8'));

@@ -25,9 +25,11 @@ async function fixture(t:TestContext,events:Events,start?:Start){
   await manager.saveConfig(context,{targetUrl:'http://localhost:3000'});await manager.saveCases(context,[scenario]);await draftCode(manager,context,[scenario]);
   return {manager,context,dataDir,runtime};
 }
-async function completed(f:Awaited<ReturnType<typeof fixture>>,id:string){for(let i=0;i<100;i++){const report=await f.manager.runProgress(f.context,id);if(!['queued','running'].includes(report.run.status))return report;await new Promise(r=>setTimeout(r,5));}throw Error('run did not finish');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+const WAIT=10000;
+async function completed(f:Awaited<ReturnType<typeof fixture>>,id:string){for(const deadline=Date.now()+WAIT;Date.now()<deadline;await new Promise(r=>setTimeout(r,5))){const report=await f.manager.runProgress(f.context,id);if(!['queued','running'].includes(report.run.status))return report;}throw Error('run did not finish');}
 // A finished run prunes older recordings after reporting its status.
-async function removed(path:string){for(let i=0;i<100;i++){try{await access(path);}catch{return;}await new Promise(r=>setTimeout(r,5));}throw Error(`${path} was kept`);}
+async function removed(path:string){for(const deadline=Date.now()+WAIT;Date.now()<deadline;await new Promise(r=>setTimeout(r,5))){try{await access(path);}catch{return;}}throw Error(`${path} was kept`);}
 
 test('scoped reviewed cases run without Docker and require matching immutable assertions',async t=>{
   const facts={caseId:scenario.id,stopCause:'none',agentCompleted:true,outcomes:[{outcomeIndex:0,status:'satisfied',evidence:'Workspace is visible'}],assertions:[{...scenario.assertions[0],passed:true}]};
@@ -57,6 +59,15 @@ test('results survive public run history, changed case drafts and controller res
   assert.deepEqual(persisted.results,report.results);
   assert.deepEqual(persisted.run.caseSummaries[0].expectedOutcomes,approved.expectedOutcomes);
   assert.deepEqual((await restarted.view(f.context)).runs[0].results,report.results);
+});
+
+test('a model key too short to be a real credential leaves a journey\'s error text whole',async t=>{
+  const error='Next step exceeded its time limit.';
+  const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error,assertions:[]}}]);
+  // A local endpoint's placeholder key.
+  await f.manager.saveModel(f.context,{apiKey:'x',model:'fixture-chat',baseUrl:'http://localhost:11434/v1'});
+  const {run}=await f.manager.run(f.context,{},manual);
+  assert.equal((await completed(f,run.id)).results[0].error,error);
 });
 
 test('code feedback is scrubbed with its originating account, stays private and survives restart',async t=>{
@@ -195,7 +206,7 @@ test('a skipped journey keeps the recording its worker finishes while stopping',
   // Like the runner, the worker reports its recording after the skip cancelled it.
   const f=await fixture(t,[],(input,onEvent)=>{let cancel!:()=>void;const promise=new Promise<void>((_resolve,reject)=>{started=true;cancel=()=>setTimeout(()=>{writeFileSync(join(input.videoDir!,name),'webm');onEvent({type:'video',caseId:scenario.id,files:[name]});reject(new Error('cancelled'));},5);});return {promise,cancel};});
   const {run}=await f.manager.run(f.context,{},manual);
-  for(let i=0;i<100&&!started;i++)await new Promise(r=>setTimeout(r,5));
+  for(const deadline=Date.now()+WAIT;!started;await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The worker did not start.');
   await f.manager.skip(f.context,run.id,scenario.id);
   const report=await completed(f,run.id);
   assert.equal(report.progress.cases[0].status,'skipped');assert.equal(report.results[0].status,'skipped');
@@ -248,4 +259,30 @@ test('public history preserves missing progress, old revision and immutable lega
   assert.equal(missing.run.status,'legacy-completed');assert.equal(Object.hasOwn(missing.run,'progress'),false);assert.deepEqual(missing.progress,{cases:[]});
   assert.equal((await manager.view(f.context)).cases[0].goal,scenario.goal,'Editable cases normalize independently of historical approvals.');
   assert.equal(manager.summary(f.context).runs[0].progress,undefined);
+});
+
+test('a stored state whose records have another shape is refused as unsupported, never with a type error',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const {run}=await f.manager.run(f.context,{},manual);await completed(f,run.id);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),[stored]=state.runs,scope=Object.keys(state.configs)[0];
+  const unsupported={message:'Unsupported browser state.'},preparation={message:'Unsupported browser preparation state.'};
+  const changed:[string,Record<string,unknown>,{message:string}][]=[
+    ['a null run',{runs:[null]},unsupported],
+    ['a run without its case IDs',{runs:[{...stored,caseIds:undefined}]},unsupported],
+    ['a run whose progress is not a list of journeys',{runs:[{...stored,progress:{cases:'running'}}]},unsupported],
+    ['a null journey',{runs:[{...stored,progress:{...stored.progress,cases:[null]}}]},unsupported],
+    ['a null approved case',{runs:[{...stored,approvedCases:[null]}]},unsupported],
+    ['a null result',{runs:[{...stored,results:[null]}]},unsupported],
+    ['a null stage config',{configs:{[scope]:null}},unsupported],
+    ['a null preparation',{preparations:{[scope]:null}},preparation],
+    ['a null target',{configTargets:{[scope]:null}},preparation],
+  ];
+  for(const [name,change,message] of changed){
+    await writeFile(file,JSON.stringify({...state,...change}));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),message,name);
+  }
+  // An interrupted run from an older controller without its approved cases still settles.
+  await writeFile(file,JSON.stringify({...state,externalOperations:{},runs:[{...stored,status:'running',approvedCases:undefined,results:[],progress:{...stored.progress,cases:[{...stored.progress.cases[0],status:'running'}]}}]}));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  assert.deepEqual((await manager.runProgress(f.context,run.id)).results.map(item=>item.status),['failed']);
 });

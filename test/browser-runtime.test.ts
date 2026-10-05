@@ -4,7 +4,7 @@ import {access,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {validateBrowserTarget,createBrowserRuntime,superviseWorker} from '../src/browser/runtime.ts';
+import {validateBrowserTarget,createBrowserRuntime,superviseWorker,browserError} from '../src/browser/runtime.ts';
 import {createBrowserModelSettings} from '../src/browser/model.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 
@@ -14,17 +14,32 @@ test('browser target allows explicit local apps and previews but excludes contro
   // The runner's Chromium resolves a twin's host name to loopback, so twin URLs are local apps.
   assert.equal(validateBrowserTarget('http://host.docker.internal:43100/billing',{controllerOrigin:'http://127.0.0.1:4317'}),'http://host.docker.internal:43100/billing');
   for(const url of ['http://localhost:4317','http://127.1:4317','http://[::1]:4317','http://host.docker.internal:4317','https://user:secret@example.com','https://169.254.169.254/latest','https://[::ffff:169.254.169.254]/latest','http://10.0.0.1','file:///etc/passwd','https://metadata.google.internal','http://gateway.docker.internal:43100','https://metadata','http://127.example.com:43100'])assert.throws(()=>validateBrowserTarget(url,{controllerOrigin:'http://127.0.0.1:4317'}),Error,url);
+  // Only the controller's own host shares its port: a remote preview on the same port number is another application.
+  assert.equal(validateBrowserTarget('https://preview.example.com:4317/app',{controllerOrigin:'http://127.0.0.1:4317'}),'https://preview.example.com:4317/app');
+  assert.equal(validateBrowserTarget('https://preview.example.com/app',{controllerOrigin:'https://perpetual.example.com'}),'https://preview.example.com/app');
+  for(const url of ['https://perpetual.example.com/','https://perpetual.example.com./'])assert.throws(()=>validateBrowserTarget(url,{controllerOrigin:'https://perpetual.example.com'}),/not the Perpetual controller/,url);
 });
 
 test('runtime consumes bounded events and keeps model credentials out of errors',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-runtime-'));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const runner=join(directory,'runner.mjs');
-  await writeFile(runner,`process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'case',caseId:'a',status:'running',actions:[]})); console.log(JSON.stringify({type:'error',error:'failed secret-value bearer abcdefghijklmnop'})); });`);
-  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture',PERPETUAL_MODEL_API_KEY:'secret-value'}});
+  await writeFile(runner,`process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'case',caseId:'a',status:'running',actions:[]})); console.log(JSON.stringify({type:'error',error:'failed '+process.env.PERPETUAL_MODEL_API_KEY+' bearer abcdefghijklmnop'})); });`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture',PERPETUAL_MODEL_API_KEY:'secret-value-0123456789'}});
   const events:WorkerEvent[]=[];const job=runtime.start({mode:'discover'},event=>events.push(event));
-  await assert.rejects(job.promise,/\[REDACTED\]/);
+  await assert.rejects(job.promise,{message:'failed [REDACTED] Bearer [REDACTED]'});
   assert.equal(events[0].caseId,'a');
+});
+
+test('a model key too short to be a real credential, such as a local placeholder, rewrites no text',async t=>{
+  assert.equal(browserError('Browser operation exceeded its time limit.',{PERPETUAL_MODEL_API_KEY:'x'}),'Browser operation exceeded its time limit.');
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-short-key-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const discovery={type:'discovery',cases:[{id:'export-xlsx',name:'Export the next invoice',steps:[{id:'export',title:'Export',checks:[{type:'text-visible',value:'Exported'}]}]}],summary:'Explored the inbox'};
+  const runner=join(directory,'runner.mjs');
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>{console.log(${JSON.stringify(JSON.stringify(discovery))});console.log(JSON.stringify({type:'error',error:'The next export exceeded its time limit.'}));});`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture-chat',PERPETUAL_MODEL_API_KEY:'x',PERPETUAL_MODEL_BASE_URL:'http://localhost:11434/v1'}}),events:WorkerEvent[]=[];
+  await assert.rejects(runtime.start({mode:'discover'},event=>events.push(event)).promise,{message:'The next export exceeded its time limit.'});
+  assert.deepEqual(events,[discovery]);
 });
 
 test('runtime cancellation terminates owned child and deadline does not leave it running',async t=>{
@@ -44,6 +59,19 @@ test('runtime capability preflight detects missing browser and is cached without
   const runtime=createBrowserRuntime({python:process.execPath,runner,env:{OPENROUTER_API_KEY:'fixture-only'}});
   assert.deepEqual(await runtime.capabilities(),{runtimeInstalled:true,browserInstalled:false,modelConfigured:true});
   await writeFile(runner,'process.exit(1);');assert.equal((await runtime.capabilities()).runtimeInstalled,true);
+});
+
+test('the discovery worker finds Chromium where it was installed and reaches its model through the configured proxy and certificates, and nothing else',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-environment-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const proxy='http://proxy.example.test:3128',bundle=join(directory,'ca.pem');
+  const forwarded={PLAYWRIGHT_BROWSERS_PATH:join(directory,'browsers'),HTTPS_PROXY:proxy,HTTP_PROXY:proxy,NO_PROXY:'localhost,127.0.0.1',https_proxy:proxy,http_proxy:proxy,no_proxy:'localhost',SSL_CERT_FILE:bundle,SSL_CERT_DIR:directory,REQUESTS_CA_BUNDLE:bundle};
+  const runner=join(directory,'runner.mjs'),names=[...Object.keys(forwarded),'UNRELATED_SECRET'];
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>console.log(JSON.stringify({type:'status',runtimeInstalled:true,browserInstalled:Boolean(process.env.PLAYWRIGHT_BROWSERS_PATH),environment:Object.fromEntries(${JSON.stringify(names)}.map(name=>[name,process.env[name]??null]))})));`);
+  const env={PERPETUAL_MODEL_API_KEY:'fixture-only',PERPETUAL_MODEL:'fixture-chat',...forwarded,UNRELATED_SECRET:'not-for-the-worker'};
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env}),events:WorkerEvent[]=[];
+  await runtime.start({mode:'preflight'},event=>events.push(event)).promise;
+  assert.deepEqual(events[0].environment,{...forwarded,UNRELATED_SECRET:null});
+  assert.equal((await runtime.capabilities()).browserInstalled,true,'The preflight looks where Chromium was installed.');
 });
 
 test('forced termination reports that browser cleanup could not be confirmed',async t=>{
@@ -124,10 +152,96 @@ test('saved model settings reach Python unchanged and do not revive environment 
   assert.doesNotMatch(JSON.stringify(events),/saved-fixture-only|environment-fixture-only|wrong-fixture-only/);
 });
 
-test('an event whose JSON a secret also matches stops the run instead of throwing out of the event listener',async()=>{
-  // The account password is also the digits of a number, so redacting the event's text breaks its JSON.
-  const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"case",caseId:"c",actionCount:1234}))'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent(){},secrets:['1234']});
-  await assert.rejects(job.promise,/could not be redacted/);
+test('a short or common secret is hidden in free text without changing keys, numbers, statuses or step ids',async()=>{
+  // Each password also spells part of the protocol: a key, a number's digits, a status, a step id or a check value.
+  const sent=[
+    {type:'case',caseId:'c',status:'running',actionCount:1234,actions:[{type:'click',status:'passed'}]},
+    {type:'journey-step',caseId:'c',stepId:'create-test-workflow',status:'completed',evidence:'Created the test workflow; pass 1234 accepted',checks:[{type:'text-visible',value:'Test run complete',passed:true,error:'run test'}]},
+    {type:'result',result:{caseId:'c',stopCause:'none',assertions:[{type:'text-visible',value:'Test run complete',passed:true,resolved:'Test run complete'}],blockers:[{stepId:'create-test-workflow',kind:'account',evidence:'test account'}],error:'pass'}},
+  ];
+  for(const secret of ['pass','test','run','1234']){
+    const events:WorkerEvent[]=[];
+    const job=superviseWorker({command:process.execPath,args:['-e','for(const event of JSON.parse(process.argv[1]))console.log(JSON.stringify(event));',JSON.stringify(sent)],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onEvent:event=>{events.push(event);},secrets:[secret]});
+    await job.promise;
+    const text=(value:string)=>value.split(secret).join('[REDACTED]');
+    assert.deepEqual(events,[
+      sent[0],
+      {...sent[1],evidence:text(sent[1].evidence as string),checks:[{type:'text-visible',value:'Test run complete',passed:true,error:text('run test')}]},
+      {type:'result',result:{caseId:'c',stopCause:'none',assertions:[{type:'text-visible',value:'Test run complete',passed:true,resolved:'Test run complete'}],blockers:[{stepId:'create-test-workflow',kind:'account',evidence:text('test account')}],error:text('pass')}},
+    ],secret);
+  }
+});
+
+test('a discovery or sign-in-page event is free text throughout, its check values included',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-discovery-text-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  // The model reports back a page that shows its key.
+  const reported=JSON.stringify([
+    {type:'discovery',cases:[{id:'orders',name:'Place an order',steps:[{id:'pay',title:'Pay',checks:[{type:'text-visible',value:'KEY'}]}],assertions:[{type:'text-visible',value:'Key KEY'}]}],summary:'Explored'},
+    {type:'sign-in-page',caseId:'discovery',url:'https://app.example/sign-in/KEY'},
+  ]);
+  const runner=join(directory,'runner.mjs');
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>{for(const event of JSON.parse(${JSON.stringify(reported)}.replaceAll('KEY',process.env.PERPETUAL_MODEL_API_KEY)))console.log(JSON.stringify(event));});`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture-chat',PERPETUAL_MODEL_API_KEY:'fixture-model-key-0123456789'}}),events:WorkerEvent[]=[];
+  await runtime.start({mode:'discover'},event=>events.push(event)).promise;
+  assert.deepEqual(events,JSON.parse(reported.replaceAll('KEY','[REDACTED]')));
+});
+
+// A worker that runs script; its events are what the supervisor accepted.
+function supervise(script:string,{cleanupGraceMs=200}={}){
+  const events:WorkerEvent[]=[];
+  const job=superviseWorker({command:process.execPath,args:['-e',script],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs,onEvent:event=>{events.push(event);}});
+  return {promise:job.promise,events};
+}
+
+test('the worker protocol refuses malformed, incomplete and unfinished output',async()=>{
+  for(const [script,message] of [
+    ['console.log("not json")','Browser runtime returned an invalid event.'],
+    ['console.log("[]")','Browser runtime returned an invalid event.'],
+    ['process.stdout.write(JSON.stringify({type:"status"}))','Browser runtime returned an incomplete event.'],
+    ['console.log(JSON.stringify({type:"status"}));process.exitCode=1','Browser runtime exited before completing the operation.'],
+  ] as const)await assert.rejects(supervise(script).promise,{message},script);
+});
+
+test('after a protocol error the worker output is drained, never parsed or delivered again',async t=>{
+  // The worker ignores the stop signal and goes on writing a valid event.
+  const worker=supervise('process.on("SIGTERM",()=>{});console.log(JSON.stringify({type:"status",order:1}));console.log("not json");setTimeout(()=>{console.log(JSON.stringify({type:"status",order:2}));setTimeout(()=>process.exit(0),50);},100);',{cleanupGraceMs:10000});
+  await assert.rejects(worker.promise,{message:'Browser runtime returned an invalid event.'});
+  assert.deepEqual(worker.events,[{type:'status',order:1}]);
+  // An event over its size limit is dropped as it arrives. The worker ignores the stop signal and writes 256 MiB more:
+  // the controller reads all of it before the cleanup grace ends, without keeping it.
+  const before=process.memoryUsage().heapUsed;let held=0;
+  const sample=setInterval(()=>{held=Math.max(held,process.memoryUsage().heapUsed-before);},10);t.after(()=>clearInterval(sample));
+  const flood=supervise('process.on("SIGTERM",()=>{});const chunk="x".repeat(65536);let left=4096;const write=()=>left--?process.stdout.write(chunk,write):process.exit(0);write();',{cleanupGraceMs:10000});
+  await assert.rejects(flood.promise.finally(()=>clearInterval(sample)),{message:'Browser event exceeded its size limit.'});
+  assert.deepEqual(flood.events,[]);
+  assert.ok(held<192*1024*1024,`The controller held ${Math.round(held/1024/1024)} MiB of the 256 MiB it dropped.`);
+});
+
+test('the event history is bounded, while replaced action snapshots do not spend it',async()=>{
+  // About 9 MiB of other events stops the worker.
+  const padded=supervise('const pad="x".repeat(10240);for(let i=0;i<900;i++)console.log(JSON.stringify({type:"status",i,pad}));');
+  await assert.rejects(padded.promise,{message:'Browser event history exceeded its size limit.'});
+  assert.ok(padded.events.length<900);
+  // A journey re-sends its last 150 actions as each action starts and ends: about 9 MiB for 900 actions reaches its end.
+  const actions=supervise('const actions=Array.from({length:150},()=>({type:"click",status:"passed"}));for(let i=0;i<1800;i++)console.log(JSON.stringify({type:"case",caseId:"c",status:"running",actions}));console.log(JSON.stringify({type:"result",result:{caseId:"c"}}));');
+  await actions.promise;
+  assert.equal(actions.events.length,1801);
+});
+
+test('cancelling a worker leaves none of its process running',async()=>{
+  let pid=0,ready!:()=>void;const started=new Promise<void>(resolve=>{ready=resolve;});
+  const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"status",pid:process.pid}));setInterval(()=>{},1000);'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:10000,onEvent:event=>{pid=event.pid as number;ready();}});
+  await started;job.cancel();
+  await assert.rejects(job.promise,{message:'Browser operation cancelled.'});
+  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
+test('error text drops URL queries and fragments in time linear in its length',{timeout:20000},()=>{
+  assert.equal(browserError('Open https://app.example/a?token=1#top and http://app.example/b, then https://app.example/c#x',{}),'Open https://app.example/a and http://app.example/b, then https://app.example/c');
+  // About 400 KB of addresses without spaces, queries or fragments, as a minified output tail holds them.
+  const text='"https://a.example/c",'.repeat(18000),started=performance.now();
+  assert.equal(browserError(text,{},Infinity),text);
+  assert.ok(performance.now()-started<1000,'Each address is scanned once.');
 });
 
 test('error-only account values are masked before clipping without changing business evidence',async()=>{

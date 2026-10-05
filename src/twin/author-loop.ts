@@ -1,4 +1,4 @@
-// Perpetual's own twin config author (docs/SANDBOX.md, "Author harnesses"): an AI SDK tool loop, run as its own
+// Perpetual's own twin config author (docs/twins.md, "Author harnesses"): an AI SDK tool loop, run as its own
 // process through the harness seam OpenCode runs through (./authoring.ts `loopHarness`), so the workspace, the check that
 // only twin.json changed, cancellation, the time limit, the output tail and cleanup stay the controller's. Its tools are
 // its only capabilities: list, read and grep inside the workspace's project, write_config, which checks a config as the

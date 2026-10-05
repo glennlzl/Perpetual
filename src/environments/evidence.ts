@@ -15,10 +15,11 @@ import { hide, redact } from '../redaction.ts';
 import { join, posix } from 'node:path';
 import { lstat, realpath } from 'node:fs/promises';
 import { findNodeAtLocation, parseTree } from 'jsonc-parser';
+import { parse as parseToml } from 'smol-toml';
 import { envNames, services as registry } from '../twin/index.ts';
 import { PORT_VARIABLE } from '../twin/compose.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
-import { ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, WALK, dependencyNames, keptFolders, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
+import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, TEST, TOOLING, WALK, dependencyNames, keptFolders, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
 import { SETUP_LIMITS, code as inlineCode, deployManifest, devcontainer, dockerfile, lineNumbers, oneLine, supabaseConfig, turbo, word as inlineWord, workflow, yamlValue } from './setup-configs.ts';
 import type { SetupEvidence } from './setup-configs.ts';
 import type { JsonObject } from '../twin/config.ts';
@@ -45,11 +46,8 @@ export interface VariableUse { name: string; file: string; line: number; role: R
 const SOURCE = /\.(?:[cm]?[jt]sx?|pyi?|vue|svelte|astro)$/i;
 // Unclassified text matches: locations to read, never a claim about a browser or callback's behavior.
 const URL_CONSTRUCTION = /\bnew\s+URL\s*\(/, REDIRECT = /\bredirect\s*\(/;
-// Tests read variables of their own; docs' code is never run.
-const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
-// Tooling and script folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/
-// holds runtime code whatever its folders are called. Seed files and folders are scripts anywhere.
-const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
+// Tests, docs and tooling folders are TEST, DOCS and TOOLING (./plans.ts), which detection shares. Script folders are,
+// like tooling folders, the first folder inside a package or the repository. Seed files and folders are scripts anywhere.
 const SCRIPT = /^(?:scripts?|migrations?|seeds?)\//i, SEED = /(?:^|\/)(?:seeds\/|seed\.[^/]+$)/i;
 /** A file's role, by its path inside each of `packages` that holds it and inside the repository. */
 function roleOf(file: string, packages: Set<string>): Role {
@@ -64,7 +62,6 @@ function roleOf(file: string, packages: Set<string>): Role {
     if (directory === '.') return script ? 'script' : 'runtime';
   }
 }
-const DOCS = /(?:^|\/)docs\//i;
 const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
 const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
 const SETUP_DOC = /setup|develop|local|getting[-_ ]?started|contributing|install|quick[-_ ]?start|self[-_ ]?host/i;
@@ -83,11 +80,12 @@ const PUBLIC_PREFIX = /^(?:NEXT_PUBLIC_|VITE_|REACT_APP_|EXPO_PUBLIC_|PUBLIC_|NU
 // A package.json script's variables: NAME=value before a command, and $NAME or ${NAME}; the shell's own are left out.
 const SCRIPT_VARIABLE = /(?:^|[\s;&|(])([A-Z][A-Z0-9_]*)=|\$\{?([A-Z][A-Z0-9_]*)/g, SHELL = new Set(['HOME', 'PATH', 'PWD', 'OLDPWD', 'SHELL', 'USER', 'TMPDIR', 'IFS']);
 
-// How code reads a variable, by name only: process.env, import.meta.env, Deno.env and Python's os.environ.
-const NAME = '(?<name>[A-Za-z_][A-Za-z0-9_]*)', QUOTED = (quotes: string) => String.raw`(?<quote>[${quotes}])${NAME}\k<quote>`;
+// How code reads a variable, by name only: process.env, import.meta.env, Deno.env and Python's os.environ. A method
+// called on process.env or import.meta.env, such as hasOwnProperty, is no variable.
+const NAME = '(?<name>[A-Za-z_][A-Za-z0-9_]*)', QUOTED = (quotes: string) => String.raw`(?<quote>[${quotes}])${NAME}\k<quote>`, NOT_CALLED = String.raw`\b(?!\s*(?:\?\.)?\()`;
 const READS = [
-  String.raw`\bprocess\.env\.${NAME}`, String.raw`\bprocess\.env\[\s*${QUOTED('\'"`')}\s*\]`,
-  String.raw`\bimport\.meta\.env\.${NAME}`, String.raw`\bimport\.meta\.env\[\s*${QUOTED('\'"`')}\s*\]`,
+  String.raw`\bprocess\.env\.${NAME}${NOT_CALLED}`, String.raw`\bprocess\.env\[\s*${QUOTED('\'"`')}\s*\]`,
+  String.raw`\bimport\.meta\.env\.${NAME}${NOT_CALLED}`, String.raw`\bimport\.meta\.env\[\s*${QUOTED('\'"`')}\s*\]`,
   String.raw`\bDeno\.env\.get\(\s*${QUOTED('\'"`')}`,
   String.raw`\bos\.environ\[\s*${QUOTED('\'"')}\s*\]`, String.raw`\bos\.environ\.get\(\s*${QUOTED('\'"')}`, String.raw`\bos\.getenv\(\s*${QUOTED('\'"')}`,
 ].map(source => new RegExp(source, 'g'));
@@ -160,6 +158,11 @@ const clip = (text: string) => { const line = oneLine(text); return line.length 
 const size = (limit: number) => limit % 1_048_576 === 0 ? `${limit / 1_048_576} MB` : `${Math.round(limit / 1024)} KB`;
 const WALK_LIMITS = `${EVIDENCE_WALK.depth} folders deep, ${EVIDENCE_WALK.entries.toLocaleString('en-US')} entries`;
 const isFile = (path: string) => lstat(path).then(info => info.isFile(), () => false);
+/** Whether a config.toml reads as Supabase's: a top-level project_id, or a table only Supabase's config has. */
+function supabaseLike(text: string | null) {
+  try { const config = fields(parseToml(text ?? '')); return typeof config?.project_id === 'string' || ['edge_runtime', 'inbucket', 'studio'].some(key => fields(config?.[key])); }
+  catch { return false; }
+}
 
 /**
  * The files git tracks in `directory`, in git's order, or why the evidence walks the folder instead: it has no git
@@ -309,9 +312,13 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     folders.set(posix.dirname(file), folder);
     for (let directory = posix.dirname(file); directory !== '.' && !ancestors.has(directory); directory = posix.dirname(directory)) ancestors.add(directory);
   }
-  // Supabase-style projects: a config.toml in a supabase folder, or beside migrations or functions.
-  const projects = sorted(relevant.filter(file => posix.basename(file) === 'config.toml' && !DOCS.test(file)).map(posix.dirname)
-    .filter(directory => posix.basename(directory) === 'supabase' || ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))));
+  // Supabase-style projects: a config.toml in a supabase folder, or beside migrations or functions when it reads as
+  // Supabase's, with a top-level project_id or a table only Supabase's has; any other config.toml, such as a site's, is not.
+  const projects: string[] = [];
+  for (const directory of sorted(relevant.filter(file => posix.basename(file) === 'config.toml' && !DOCS.test(file)).map(posix.dirname))) {
+    if (posix.basename(directory) === 'supabase') projects.push(directory);
+    else if ((ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))) && supabaseLike(await read(under(directory, 'config.toml'), SETUP_LIMITS.bytes))) projects.push(directory);
+  }
   // The function folder each file is in, if any, <project>/functions/<name>/, and each project's function folders.
   const projectSet = new Set(projects), functions = new Map<string, string>(), projectFunctions = new Map<string, Set<string>>();
   for (const file of files) {
@@ -453,7 +460,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
       const text = await readExample(file);
       if (text === null) continue;
       const names = sorted(envNames(text));
-      for (const name of names) examples[name] ??= file;
+      for (const name of names) if (!Object.hasOwn(examples, name)) examples[name] = file;
       exampleLines.push(`- ${code(file)}: ${names.map(word).join(', ') || 'no variables'}`);
     }
     if (exampleLines.length) exampleLines.unshift(`Not in ${code(shown)}; their variable names only.`, '');
@@ -487,9 +494,10 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
 
   const sqlLines = relevant.filter(file => file.endsWith('.sql') && !listedSql.has(file) && !DOCS.test(file)).map(file => `- ${code(file)}`);
 
+  // A compose file is read as the setup files are, since its YAML parser is theirs.
   const composeLines: string[] = [];
   for (const file of relevant.filter(path => COMPOSE.test(posix.basename(path)))) {
-    const text = await read(file);
+    const text = await read(file, SETUP_LIMITS.bytes);
     let names: string[] | null = null;
     try { if (text !== null) names = Object.keys(fields(fields(yamlValue(text))?.services) ?? {}); } catch { /* Not YAML. */ }
     composeLines.push(`- ${code(file)}: ${names === null ? 'could not be read' : names.length ? `services ${names.map(code).join(', ')}` : 'no services'}`);
@@ -607,7 +615,7 @@ export function unwiredVariables(facts: WorkFacts & Pick<RepositoryFacts, 'servi
     const isServed = servedFolder !== null && posix.dirname(folder) === servedFolder, unwired = new Map<string, UnwiredVariable>();
     for (const read of reads) {
       if (unwired.has(read.name) || read.name.startsWith('SUPABASE_') || (isServed && functionEnv.has(read.name))) continue;
-      unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(facts.examples[read.name] ? { example: facts.examples[read.name] } : {}), public: false });
+      unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(Object.hasOwn(facts.examples, read.name) ? { example: facts.examples[read.name] } : {}), public: false });
     }
     // A folder whose name starts with _ is code the functions share, never a function of its own.
     return { folder, served: isServed, shared: posix.basename(folder).startsWith('_'), unwired: [...unwired.values()].sort((one, other) => byText(one.name, other.name)) };
@@ -632,7 +640,7 @@ export function unwiredVariables(facts: WorkFacts & Pick<RepositoryFacts, 'servi
         if (unwired.has(read.name) || provided.has(read.name) || mapped.has(read.name)) continue;
         const owner = innermost(owners, read.file);
         if (owner === null || !reached.has(owner)) continue;
-        unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(facts.examples[read.name] ? { example: facts.examples[read.name] } : {}), public: PUBLIC_PREFIX.test(read.name) });
+        unwired.set(read.name, { name: read.name, file: read.file, line: read.line, ...(Object.hasOwn(facts.examples, read.name) ? { example: facts.examples[read.name] } : {}), public: PUBLIC_PREFIX.test(read.name) });
       }
       return { id, directory, unwired: [...unwired.values()].sort((one, other) => byText(one.name, other.name)) };
     }),

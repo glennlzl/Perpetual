@@ -22,7 +22,8 @@ const outcome=(id:string)=>({caseId:id,stopCause:'none',agentCompleted:true,outc
 const step=(caseId:string,stepId:string,status:string,extra:Record<string,unknown>={})=>({type:'journey-step',caseId,stepId,status,...(status==='running'?{}:{evidence:`${stepId} ${status} observed`}),...extra});
 const reach=(worker:Worker,caseId:string,stepId:string,status:string,extra?:Record<string,unknown>)=>{worker.event(step(caseId,stepId,'running'));worker.event(step(caseId,stepId,status,extra));};
 const passedChecks:Record<string,Record<string,unknown>[]>={start:[{type:'read-number',label:'Credits',name:'before',passed:true,observed:10}],run:[{type:'text-visible',value:'Run complete',passed:true},{type:'compare-number',label:'Credits',name:'after',op:'<',than:'before',passed:true,observed:9}]};
-async function until(predicate:()=>unknown){for(let i=0;i<300;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,2));}throw new Error('Condition did not settle.');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+async function until(predicate:()=>unknown){for(const deadline=Date.now()+10000;Date.now()<deadline;await new Promise(resolve=>setTimeout(resolve,2)))if(await predicate())return;throw new Error('Condition did not settle.');}
 async function fixture(t:TestContext,cases=[journey('one'),journey('two')],config:Record<string,unknown>={}){
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-journey-contract-')),repo=join(dataDir,'repo');
   await mkdir(repo);await writeFile(join(repo,'app.js'),'export const credits="Credits";');
@@ -481,6 +482,22 @@ test('restart recovery cancels unstarted journeys, fails interrupted ones, finis
   assert.equal(recovered.results[1].error,'Controller stopped before this journey started');
   assert.match(recovered.results[0].error!,/controller stopped/i);assert.equal(recovered.results[2].error,undefined);
   assert.ok(typeof recovered.progress.revision==='number'&&recovered.progress.revision>revision);
+});
+
+test('a controller killed during a journey leaves the progress it saved, so a restart fails that journey with its milestones',async t=>{
+  const f=await fixture(t,[journey('one')]);
+  const {run}=await f.manager.run(f.context,{},manual);await until(()=>f.workers.length===1);
+  reach(f.workers[0],'one','start','completed',{checks:passedChecks.start});f.workers[0].event(step('one','run','running'));
+  // The data directory as a killed controller leaves it, while its journey is inside its second milestone.
+  const file=join(f.dataDir,'browser','state.json'),copy=await mkdtemp(join(tmpdir(),'perpetual-journey-killed-'));
+  t.after(()=>rm(copy,{recursive:true,force:true}));
+  await until(async()=>JSON.parse(await readFile(file,'utf8')).runs[0].progress.cases[0].steps[1].status==='running');
+  await mkdir(join(copy,'browser'));await writeFile(join(copy,'browser','state.json'),await readFile(file));
+  const reopened=await createBrowserManager({dataDir:copy,runtime:f.runtime});t.after(()=>reopened.close());
+  const recovered=await reopened.runProgress(f.context,run.id);
+  assert.equal(recovered.run.status,'failed');assert.equal(recovered.progress.cases[0].status,'failed');
+  assert.deepEqual(recovered.progress.cases[0].steps!.map(item=>item.status),['completed','unconfirmed','pending']);
+  assert.equal(recovered.results[0].status,'failed');assert.match(recovered.results[0].error!,/controller stopped during this journey/i);
 });
 
 test('evidence naming the test account is kept as reported, with its blocker kinds and check operators',async t=>{

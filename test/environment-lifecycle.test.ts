@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
-import { createEnvironmentUsage } from '../src/environments/usage.ts';
+import { createEnvironmentUsage, holdsResources } from '../src/environments/usage.ts';
 import type { EnvironmentManager, EnvironmentRecord, ManagedRuntime } from '../src/environments/manager.ts';
 import type { EnvironmentUsage } from '../src/environments/usage.ts';
 
@@ -20,6 +20,8 @@ const unexpected = async () => { throw new Error('Unexpected runtime operation')
 // A runtime with only the calls a test expects; any other call fails as it would without it.
 const only = (calls: Partial<ManagedRuntime>) => calls as ManagedRuntime;
 
+// After-hooks run in the order they are registered, and the fixture's hook closes the manager, which waits for every
+// runtime call: a test registers the hook that ends a blocked call before calling fixture, so a failure cannot hang it.
 async function fixture(t: TestContext, overrides: Partial<ManagedRuntime> = {}, options: Partial<Parameters<typeof createEnvironmentManager>[0]> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-environment-lifecycle-'));
   const usage = createEnvironmentUsage();
@@ -193,6 +195,115 @@ test('close joins an in-flight health check and does not admit an overlapping ch
   assert.equal(usage.isBusy(environment.id), false);
 });
 
+test('a creation first deletes the stage’s earlier twin that still holds resources, and one that cannot be deleted stops it', async t => {
+  const destroyed: string[] = [];
+  let cleanup: Error | null = null;
+  const { manager } = await fixture(t, {
+    environmentHealth: async () => ({ status: 'failed', final: true, error: 'Stopped: app exited (1).' }),
+    destroySandbox: async ({ environment }) => { if (cleanup) throw cleanup; destroyed.push(environment.id); },
+  });
+  const first = await createReady(manager);
+  // Docker restarted: the monitor fails the twin, which still owns its containers, ports and snapshot.
+  await manager.tick();
+  assert.deepEqual([manager.summaries(context.key)[0].step, holdsResources(manager.summaries(context.key)[0])], ['Unhealthy', true]);
+  // A creation refused for its config deletes nothing.
+  await manager.savePlan(context, { services: {}, apps: {} });
+  await assert.rejects(manager.create(context), /Add an app/);
+  assert.deepEqual([destroyed, manager.summaries(context.key).map(item => item.status)], [[], ['failed']]);
+  await manager.savePlan(context, plan);
+  const second = await createReady(manager);
+  assert.deepEqual(destroyed, [first.id]);
+  assert.deepEqual(manager.summaries(context.key).map(item => [item.id, item.status]), [[second.id, 'ready'], [first.id, 'destroyed']]);
+  // A twin whose deletion fails keeps its resources, and the creation fails with the cleanup error.
+  cleanup = new Error('compose down failed');
+  await assert.rejects(manager.create(context), /compose down failed/);
+  assert.deepEqual(manager.summaries(context.key).map(item => [item.id, item.status]), [[second.id, 'cleanup_failed'], [first.id, 'destroyed']]);
+  // Creating again retries the deletion.
+  cleanup = null;
+  const third = await createReady(manager);
+  assert.deepEqual(destroyed, [first.id, second.id]);
+  assert.deepEqual(manager.summaries(context.key).filter(holdsResources).map(item => item.id), [third.id]);
+});
+
+test('a creation after a controller crash deletes the twin the interrupted operation left', async t => {
+  const destroyed: string[] = [];
+  const f = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
+  const interrupted = await createReady(f.manager);
+  await f.manager.close();
+  // The controller was killed while it prepared this twin.
+  const file = join(f.dataDir, 'environments/state.json'), saved = JSON.parse(await readFile(file, 'utf8'));
+  Object.assign(saved.environments[0], { status: 'preparing', step: 'Preparing twin' });
+  await writeFile(file, JSON.stringify(saved));
+  const manager = await createEnvironmentManager({ dataDir: f.dataDir, runtime: f.runtime });
+  try {
+    assert.equal(manager.summaries(context.key)[0].status, 'cleanup_failed');
+    const { environment } = await manager.create(context);
+    assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+    assert.deepEqual(destroyed, [interrupted.id]);
+  } finally { await manager.close(); }
+});
+
+test('a creation waits for the health check of the twin it replaces, and names that twin when another use holds it', async t => {
+  let time = Date.now(); t.mock.method(Date, 'now', () => time);
+  const checking = deferred(), checked = deferred();
+  t.after(() => checked.resolve());
+  const stopped = { status: 'failed', final: true, error: 'Stopped: app exited (1).' };
+  let check = async () => stopped;
+  const destroyed: string[] = [];
+  const { manager, usage } = await fixture(t, { environmentHealth: () => check(), destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
+  const first = await createReady(manager);
+  await manager.tick();
+  assert.equal(manager.summaries(context.key)[0].step, 'Unhealthy');
+  // The monitor rechecks the stopped twin as a person creates the stage's environment.
+  check = async () => { checking.resolve(); await checked.promise; return stopped; };
+  time += 30_000;
+  const ticking = manager.tick();
+  await checking.promise;
+  const creating = manager.create(context);
+  await remainsPending(creating);
+  checked.resolve(); await ticking;
+  const second = await manager.awaitIdle((await creating).environment.id);
+  assert.equal(second.status, 'ready');
+  assert.deepEqual(destroyed, [first.id]);
+  // A journey run holds the twin until it finishes: the creation is refused, and the twin kept.
+  const releaseRun = usage.acquire(context, { environmentId: second.id, operation: 'browser-run' });
+  await assert.rejects(manager.create(context), { statusCode: 409, message: 'The stage’s previous twin is in use. Create the environment again once it is free.' });
+  releaseRun();
+  assert.deepEqual(manager.summaries(context.key).map(item => [item.id, item.status]), [[second.id, 'ready'], [first.id, 'destroyed']]);
+});
+
+test('a stage at the local limit can replace its own twin, and another stage cannot add one', async t => {
+  const { manager } = await fixture(t);
+  const stages = Array.from({ length: 8 }, (_, index) => ({ ...context, stageId: `stage-${index}` }));
+  for (const stage of stages) {
+    await manager.savePlan(stage, plan);
+    const { environment } = await manager.create(stage);
+    assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  }
+  const ninth = { ...context, stageId: 'stage-8' };
+  await manager.savePlan(ninth, plan);
+  await assert.rejects(manager.create(ninth), /local limit: eight/);
+  const { environment } = await manager.create(stages[0]);
+  assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  assert.equal(manager.summaries(context.key).filter(holdsResources).length, 8);
+});
+
+test('creates admitted together count toward the local limit before their environments are recorded', async t => {
+  const { manager } = await fixture(t);
+  const stages = Array.from({ length: 9 }, (_, index) => ({ ...context, stageId: `stage-${index}` }));
+  for (const stage of stages) await manager.savePlan(stage, plan);
+  for (const stage of stages.slice(0, 7)) {
+    const { environment } = await manager.create(stage);
+    assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  }
+  // Seven twins hold resources, and two stages create at once: only one fits.
+  const [created, refused] = await Promise.allSettled([manager.create(stages[7]), manager.create(stages[8])]);
+  assert.deepEqual([created.status, refused.status], ['fulfilled', 'rejected']);
+  assert.match(String(refused.status === 'rejected' && refused.reason), /local limit: eight/);
+  assert.equal(created.status === 'fulfilled' && (await manager.awaitIdle(created.value.environment.id)).status, 'ready');
+  assert.equal(manager.summaries(context.key).filter(holdsResources).length, 8);
+});
+
 test('failed plan validation releases create admission', async t => {
   const { manager, usage } = await fixture(t);
   await manager.savePlan(context, { services: { mailpit: {} } });
@@ -256,6 +367,27 @@ test('owned-target resolution canonicalizes loopback aliases and retains stale o
   assert.equal(manager.resolveTarget('http://127.0.0.1:50124/'), null);
   await manager.destroy(context, environment.id); await manager.awaitIdle(environment.id);
   assert.equal(manager.resolveTarget('http://localhost:50123/')?.status, 'destroyed');
+});
+
+test('an origin resolves to the twin that holds it over a deleted twin that used the same ports', async t => {
+  const release = deferred();
+  t.after(() => release.resolve());
+  const { manager } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    if (environment.stageId === context.stageId) await release.promise;
+    return structuredClone(ready);
+  } });
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const { environment: older } = await manager.create(context);
+  // Another stage's twin takes the free ports, becomes ready and is deleted while the first still prepares.
+  const { environment: newer } = await manager.create(gamma);
+  assert.equal((await manager.awaitIdle(newer.id)).status, 'ready');
+  await manager.destroy(gamma, newer.id);
+  assert.equal((await manager.awaitIdle(newer.id)).status, 'destroyed');
+  release.resolve();
+  assert.equal((await manager.awaitIdle(older.id)).status, 'ready');
+  assert.equal(manager.resolveTarget('http://localhost:50123/')?.id, older.id);
 });
 
 test('a ready twin runs from its source snapshot until deletion; a failed twin is cleaned up with it', async t => {
@@ -327,6 +459,32 @@ test('loading replaces a pre-twin plan with detection and retires a Cua guest un
   await manager.destroy(scoped, ids.ready);
   assert.equal((await manager.awaitIdle(ids.ready)).status, 'destroyed');
   assert.deepEqual(destroyed, [guest.sandboxId]);
+});
+
+test('a twin that still runs adds its live logs to the evidence an earlier attempt left, while it prepares and once it is unhealthy', async t => {
+  const entered = deferred(), finish = deferred();
+  t.after(() => finish.resolve());
+  let output = 'web | starting';
+  const { manager } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => {
+      // A generation's second attempt: the first one's teardown evidence is already saved.
+      await onUpdate({ sandboxId: environment.id, status: 'preparing', step: 'Preparing twin', logs: 'attempt 1 | web exited (1)' });
+      entered.resolve(); await finish.promise;
+      return structuredClone(ready);
+    },
+    environmentLogs: async () => output,
+    environmentHealth: async () => ({ status: 'failed', final: true, error: 'Stopped: web exited (1).' }),
+  });
+  const { environment } = await manager.create(context);
+  await entered.promise;
+  assert.deepEqual(await manager.logs(context, environment.id), { logs: 'attempt 1 | web exited (1)\n\nweb | starting' });
+  finish.resolve();
+  assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  // Its containers stop and the monitor fails it: the person sees why now, not only the earlier attempt's evidence.
+  await manager.tick();
+  assert.equal(manager.summaries(context.key)[0].step, 'Unhealthy');
+  output = 'web | Error: connection refused';
+  assert.deepEqual(await manager.logs(context, environment.id), { logs: 'attempt 1 | web exited (1)\n\nweb | Error: connection refused' });
 });
 
 test('a long failure keeps its start, which names the step, and its end, where the error is', async t => {

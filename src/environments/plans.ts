@@ -5,6 +5,7 @@ import { join, resolve, relative, dirname, posix, sep } from 'node:path';
 import { detectTwinConfig, envNames } from '../twin/index.ts';
 import { nodeMajor } from '../twin/detect.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
+import { gitReadOnly } from '../process.ts';
 import type { DetectedApp, DetectedConfig, DetectionEvidence } from '../twin/detect.ts';
 import type { PackageManifest, ScanRepo, ScanService } from '../scanner.ts';
 
@@ -24,6 +25,13 @@ export function snapshotKeeps(path: string) {
   const name = posix.basename(path);
   return keptFolders(path) && !SKIP.has(name) && !PRIVATE.test(name) && !(PRIVATE_NAME.test(name) && !SOURCE_MODULE.test(name));
 }
+
+// Tests read variables of their own; docs' code is never run.
+export const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
+export const DOCS = /(?:^|\/)docs\//i;
+// Tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/ holds
+// runtime code whatever its folders are called.
+export const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
 
 // Detection evidence: dependency manifests, and only the variable names of example env files.
 export const ENV_EXAMPLE = /^\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/i;
@@ -46,8 +54,11 @@ const MANIFEST_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencie
 const APP_FRAMEWORK = /next|vite|express|fastify|hono/i;
 const LOCKFILES = [['pnpm-lock.yaml', 'pnpm', 'pnpm install --frozen-lockfile'], ['yarn.lock', 'yarn', 'yarn install'], ['package-lock.json', 'npm', 'npm ci']];
 const INSTALL: Record<string, string> = { pnpm: 'pnpm install', yarn: 'yarn install', npm: 'npm install' };
-// A script that reaches a cloud account or publishes is never an app command.
-const CLOUD_LAUNCHER = /\b(?:vercel|netlify)\s+(?:dev|env|deploy|link)|\brailway\s+(?:env|deploy|link|run)|\bsupabase\s+(?:env|deploy|link|db\s+push)|\b(?:deploy|release|publish)\b/i;
+// A script that reaches a cloud account or publishes is never an app command. A deploy, release or publish word is one,
+// in a name such as semantic-release or build-and-deploy too, but not in a flag (--release, --skip-deploy), as a folder
+// (dist/release/) or in Prisma's `migrate deploy`, which applies migrations to the twin's own database. The word is found
+// before looking back, and each look back is bounded, so a crafted manifest takes time in proportion to its size.
+const CLOUD_LAUNCHER = /\b(?:vercel|netlify)\s+(?:dev|env|deploy|link)|\brailway\s+(?:env|deploy|link|run)|\bsupabase\s+(?:env|deploy|link|db\s+push)|\b(?=(?:deploy|release|publish)\b)(?<!(?:^|\s)--?[\w-]{0,64}|\bmigrate\s{1,16})(?:deploy|release|publish)\b(?!\/)/i;
 // Servers that listen on loopback or ignore PORT unless told otherwise.
 const LISTEN: [RegExp, (port: number) => string][] = [[/^\s*(?:npx\s+)?vite\b/, port => `--host 0.0.0.0 --port ${port}`], [/^\s*(?:npx\s+)?next\b/, port => `--hostname 0.0.0.0 --port ${port}`]];
 /** Each app listens on this port in its own container; the twin publishes it on a host port of its own. */
@@ -72,17 +83,21 @@ const isFile = (path: string) => lstat(path).then(info => info.isFile(), () => f
 /** A repository's package.json is untrusted: only these fields are read, and each is checked where it is used. */
 type Manifest = Pick<PackageManifest, 'scripts' | 'packageManager'>;
 const fields = (value: unknown) => value !== null && typeof value === 'object' ? value as Record<string, unknown> : null;
-const readManifest = (root: string, directory: string): Promise<Manifest | null> => readLocal(root, posix.join(directory, 'package.json')).then(text => fields(JSON.parse(text)), () => null);
+// A manifest that cannot be read or parsed is not evidence.
+const readManifest = (root: string, directory: string): Promise<Manifest | null> => readLocal(root, posix.join(directory, 'package.json')).then(text => fields(JSON.parse(text))).catch(() => null);
 
 /**
- * Repository-relative files, without following links or entering skipped directories; `complete` is false when the
- * walk's depth or entry limit left some out.
+ * Repository-relative files, without following links or entering skipped directories or folders that cannot be read,
+ * such as a container's data owned by another user; `complete` is false when the walk's depth or entry limit left some out.
  */
 export async function repositoryWalk(root: string, limits: WalkLimits = WALK) {
   const files: string[] = [];
   let entries = 0, complete = true;
   async function walk(directory: string, depth: number) {
-    for (const entry of (await readdir(join(root, directory), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    let found;
+    try { found = await readdir(join(root, directory), { withFileTypes: true }); }
+    catch (error) { if (!directory) throw error; return; }
+    for (const entry of found.sort((a, b) => a.name.localeCompare(b.name))) {
       if (++entries > limits.entries) { complete = false; return; }
       const name = directory ? `${directory}/${entry.name}` : entry.name;
       if (entry.isFile()) files.push(name);
@@ -170,11 +185,19 @@ async function repositoryApps(root: string, scan: DetectionScan): Promise<{ apps
 /**
  * The repository's detection evidence, as detectTwinConfig reads it, and the twin config it proposes: apps from the
  * scanned web packages, and services from file paths, manifest dependency names, module import specifiers and the
- * variable names (never values) of example env files.
+ * variable names (never values) of example env files. Tests, docs and tooling such as examples and fixtures, as the
+ * evidence's roles class them (./evidence.ts), are not what the product runs, so their files are not evidence.
  */
 export async function repositoryDetection(scan: DetectionScan): Promise<{ evidence: DetectionEvidence; config: DetectedConfig }> {
-  const root = await realpath(scan.repo.path);
-  const { files } = await repositoryWalk(root), packages = new Set<string>(), env = new Set<string>();
+  const root = await realpath(scan.repo.path), scanned = new Set((scan.services ?? []).map(service => service.path));
+  const aside = (file: string) => {
+    if (TEST.test(file) || DOCS.test(file)) return true;
+    for (let directory = posix.dirname(file); ; directory = posix.dirname(directory)) {
+      if ((directory === '.' || scanned.has(directory)) && TOOLING.test(directory === '.' ? file : file.slice(directory.length + 1))) return true;
+      if (directory === '.') return false;
+    }
+  };
+  const files = (await repositoryWalk(root)).files.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
   let modules = 0;
   for (const file of files) {
     if (IMPORT_MAP.test(posix.basename(file)) || SCRIPT_MODULE.test(file) && ++modules <= MODULES.files) {
@@ -214,7 +237,30 @@ async function repositoryNode(root: string) {
   return undefined;
 }
 
-/** Copy a bounded working-tree snapshot without following links or importing local credentials. */
+/**
+ * The untracked paths git ignores in the checkout at `folder` of `root`, by its .gitignore files and the user's excludes,
+ * relative to root and a folder's with a trailing slash. None outside a git checkout; when git fails in a folder with git
+ * metadata, the snapshot is refused, since it would otherwise copy every file git ignores.
+ */
+async function ignoredPaths(root: string, folder = '') {
+  const at = join(root, folder), shown = folder.split(sep).join('/');
+  try {
+    const { stdout } = await gitReadOnly(at, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+    return stdout.split('\0').filter(Boolean).map(path => shown ? `${shown}/${path}` : path);
+  } catch (error) {
+    if (!await lstat(join(at, '.git')).then(() => true, () => false)) return [];
+    const { code, killed } = error as { code?: unknown; killed?: boolean };
+    const cause = code === 'ENOENT' ? 'git is not installed' : code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'its list is over 64 MB'
+      : killed ? 'it took over 20 seconds' : typeof code === 'number' ? `it exited with status ${code}` : 'it failed';
+    throw new Error(`Git could not list the ignored files in the source folder ${shown || '.'}: ${cause}. Check that git status works there.`);
+  }
+}
+
+/**
+ * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
+ * git ignores stay out whatever their names, since local files such as credentials are never committed; so do those a
+ * repository or submodule inside it ignores.
+ */
 export async function snapshotSource(repoPath: string, destination: string) {
   const root = await realpath(repoPath), target = resolve(destination);
   if (target === root || (target.startsWith(root + sep) && relative(root, target).split(sep)[0] !== '.perpetual')) throw new Error('Keep sandbox storage outside the source or under .perpetual.');
@@ -233,16 +279,22 @@ export async function snapshotSource(repoPath: string, destination: string) {
   await mkdir(target, { recursive: true, mode: 0o700 });
   if ((await lstat(target)).isSymbolicLink() || await realpath(target) !== target) throw new Error('The snapshot destination changed during creation.');
   let count = 0, bytes = 0;
-  const hash = createHash('sha256');
+  const hash = createHash('sha256'), ignored = new Set(await ignoredPaths(root));
   async function walk(directory: string) {
     const folder = join(root, directory);
     if ((await lstat(folder)).isSymbolicLink() || await realpath(folder) !== folder) throw new Error('Source directories changed during snapshot creation.');
-    const entries = (await readdir(join(root, directory), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    const entries = (await readdir(join(root, directory), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
+      throw new Error(`The source folder ${directory.split(sep).join('/') || '.'} cannot be read. Make it readable, or move it out of the checkout or have git ignore it.`);
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    // The checkout's git lists nothing inside a repository or submodule of its own, which ignores files by its own rules.
+    if (directory && entries.some(entry => entry.name === '.git')) for (const path of await ignoredPaths(root, directory)) ignored.add(path);
     for (const entry of entries) {
-      if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink()
-        || (BUILD_OUTPUT.has(entry.name) && !directory.split(sep).includes('src'))
+      const name = join(directory, entry.name), path = name.split(sep).join('/');
+      if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink() || ignored.has(entry.isDirectory() ? `${path}/` : path)
+        || (BUILD_OUTPUT.has(entry.name) && entry.isDirectory() && !directory.split(sep).includes('src'))
         || (PRIVATE_NAME.test(entry.name) && (!entry.isFile() || !SOURCE_MODULE.test(entry.name)))) continue;
-      const name = join(directory, entry.name), original = join(root, name), output = join(target, name);
+      const original = join(root, name), output = join(target, name);
       if (entry.isDirectory()) { await mkdir(output, { mode: 0o700 }); await walk(name); continue; }
       if (!entry.isFile()) continue;
       if (await realpath(original) !== original) throw new Error('Source links changed during snapshot creation.');

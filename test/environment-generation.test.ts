@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
+import { generateTwinConfig } from '../src/environments/generation.ts';
 import { createBrowserModelSettings } from '../src/browser/model.ts';
 import { detectEnvironmentConfig } from '../src/environments/plans.ts';
 import { AUTHOR_HARNESSES, AUTHOR_PERMISSION, LOOP, OUT_OF_TIME, TIME_LIMIT_MS, UNWRITTEN, authorTwinConfig, authoringPrompt, opencodeHarness, twinInstructions } from '../src/twin/authoring.ts';
@@ -48,7 +49,8 @@ const good = { services: { database: {}, payments: {}, auth: { users: [{ id: 'ow
 const detected = { services: {}, apps: { web: app } };
 const APP_SOURCE = '// A fixture app; nothing runs it.\nexport const port = process.env.FIXTURE_PORT;\n';
 
-const lines = async (file: string): Promise<AuthorCall[]> => (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+// A call the fake author is still appending has no newline yet, so only finished lines are read.
+const lines = async (file: string): Promise<AuthorCall[]> => (await readFile(file, 'utf8').catch(() => '')).split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
 const exists = (path: string) => access(path).then(() => true, () => false);
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; } };
@@ -79,8 +81,9 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
   const server = http.createServer((_request, response) => { response.writeHead(answer.status); response.end('fixture'); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
-  // The steps the fake twin reports before it fails, and the containers its health reads.
-  const twinState = { logs: '', fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'],
+  // The steps the fake twin reports before it fails, the containers its health reads, and the logs of the whole twin or a
+  // named container.
+  const twinState = { logs: '', serviceLogs: {} as Record<string, string>, fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'],
     containers: [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'exited', health: null, exitCode: 1 }] as { name: string; state: string; health: string | null; exitCode?: number }[] };
   // repositories: the repository each twin was prepared for, whose package cache it shares; none for a cache of its own.
   const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
@@ -98,7 +101,7 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
         accounts: Array.isArray(users) && users.length ? [{ id: 'owner', label: 'owner', username: 'owner@example.test' }] : [] };
     },
     async health() { return { status: 'failed', containers: twinState.containers }; },
-    async logs({ service, tail }) { calls.logs.push({ service, tail }); return twinState.logs; },
+    async logs({ service, tail }) { calls.logs.push({ service, tail }); return service && Object.hasOwn(twinState.serviceLogs, service) ? twinState.serviceLogs[service] : twinState.logs; },
     async destroy() { calls.destroy += 1; return { status: 'destroyed' }; },
   };
   // OpenCode is the fake in place of its command; the loop keeps its own, with the scripted model's fixture as its module.
@@ -277,6 +280,32 @@ test('an invalid config is the next attempt’s feedback, which starts from what
   assert.match(logs, /Writing twin config \(attempt 3 of 4\): Failed at valid\.\n# Attempt 3 of 4: [\s\S]*auth\.users must be a list\./);
 });
 
+test('a Stop during the app check ends generation without a failed attempt or a draft', async () => {
+  // Stopping aborts the check of a slow app, which comes back as an app that did not answer.
+  let stopped = false;
+  const outcomes: unknown[] = [], drafts: unknown[] = [], torn: unknown[] = [];
+  const generation = generateTwinConfig({
+    draft: JSON.stringify(detected), services, hide: text => text, cancelled: () => stopped, step: async () => {},
+    author: async () => ({ text: JSON.stringify(good) }), prepare: async () => ({}),
+    verify: async () => { stopped = true; return { stage: 'answers', subject: WEB, app: 'web', error: 'apps.web did not answer at http://127.0.0.1:43100/: Environment creation cancelled.' }; },
+    diagnose: async () => assert.fail('Nothing failed to prepare.'), logs: async () => 'web | still starting',
+    failed: async outcome => { outcomes.push(outcome); }, checkpoint: async draft => { drafts.push(draft); }, teardown: async config => { torn.push(config); },
+  });
+  await assert.rejects(generation, /^Error: Environment creation cancelled\.$/);
+  assert.deepEqual({ outcomes, drafts, torn }, { outcomes: [], drafts: [], torn: [] });
+});
+
+test('deleting a generated twin removes its generation log with the rest of its evidence', async t => {
+  const f = await fixture(t, { script: [{ raw: '{' }, { write: good }] });
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  assert.match((await f.saved()).environments[0].authoringLogs, /^Writing twin config \(attempt 1 of 4\): Failed at valid\./);
+  await f.manager.destroy(f.context, ready.id);
+  assert.equal((await f.manager.awaitIdle(ready.id)).status, 'destroyed');
+  const [saved] = (await f.saved()).environments;
+  assert.deepEqual(['authoringLogs', 'logs', 'logsAt'].filter(key => key in saved), []);
+});
+
 test('a failed preparation is feedback with its step, error and redacted log tail, and the twin is torn down first', async t => {
   const f = await fixture(t, { script: [{ write: good }, { write: good }] });
   f.twinState.fail = prepared => prepared === 1 ? `Web: container web exited (1) with ${SECRET}` : null;
@@ -360,6 +389,29 @@ test('staged feedback names the stage an attempt failed at and the app, service,
     assert.equal(second.feedback?.split('\n## Logs\n')[0].replace(`:${f.port}/`, ':PORT/'), item.expected, item.name);
     if (item.logs) assert.deepEqual(f.calls.logs.map(call => call.service), [...item.logs, undefined], item.name);
   }
+});
+
+test('feedback keeps the logs of the app that did not answer, and an equal share of each failed container’s', async t => {
+  const logsOf = (feedback: string) => feedback.split('\n## Logs\n')[1].split('```\n')[1].replace(/\n$/, '').split('\n');
+  // The twin is up, so no container has stopped: the app that answered 500 is the one whose lines explain it.
+  const f = await fixture(t, { script: [{ write: good }, { write: good }] });
+  f.twinState.containers = [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'running', health: null }];
+  f.twinState.logs = 'gateway | a line of every container';
+  f.twinState.serviceLogs = { web: 'web | Error: missing SESSION_SECRET' };
+  f.answer.status = 500;
+  f.twinState.fail = prepared => { if (prepared === 2) f.answer.status = 200; return null; };
+  assert.equal((await f.create()).status, 'ready');
+  assert.deepEqual(logsOf((await lines(f.log))[1].feedback!), ['web | Error: missing SESSION_SECRET']);
+  assert.deepEqual(f.calls.logs.map(call => call.service), ['web', undefined]);
+  // Two containers that never started: each keeps the end of its own lines.
+  const g = await fixture(t, { script: [{ write: good }, { write: good }] });
+  const numbered = (name: string) => Array.from({ length: 100 }, (_, index) => `${name} | line ${index}`).join('\n');
+  g.twinState.containers = [{ name: 'database', state: 'created', health: null }, { name: 'web', state: 'created', health: null }];
+  g.twinState.serviceLogs = { database: numbered('database'), web: numbered('web') };
+  g.twinState.fail = prepared => prepared === 1 ? 'dependency failed to start' : null;
+  assert.equal((await g.create()).status, 'ready');
+  const kept = logsOf((await lines(g.log))[1].feedback!);
+  assert.deepEqual([kept.length, kept[0], kept[74], kept[75], kept[149]], [150, 'database | line 25', 'database | line 99', 'web | line 25', 'web | line 99']);
 });
 
 test('a generated config that fails to build later becomes, with its failure, the draft of the next creation that generates', async t => {

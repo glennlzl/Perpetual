@@ -59,7 +59,8 @@ async function fixture(t:TestContext,{authEndpoints=[],service=auth}:{authEndpoi
   await manager.saveConfig(context,{targetUrl:`${web}/`,authEndpoints});
   await manager.saveCases(context,journeys);await draftCode(manager,context,journeys);
   // A run releases its environment once its result is saved, so the next run on it waits for that too.
-  const finished=async(id:string)=>{for(let i=0;i<400;i++){const report=await manager.runProgress(context,id);if(!['queued','running'].includes(report.run.status)&&!(report.run.environmentId&&usage.isBusy(report.run.environmentId)))return report;await delay(5);}throw new Error('Run did not finish.');};
+  // Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+  const finished=async(id:string)=>{for(const deadline=Date.now()+10000;Date.now()<deadline;await delay(5)){const report=await manager.runProgress(context,id);if(!['queued','running'].includes(report.run.status)&&!(report.run.environmentId&&usage.isBusy(report.run.environmentId)))return report;}throw new Error('Run did not finish.');};
   const run=async(input:Parameters<typeof manager.run>[1])=>{const response=await manager.run(context,input,manual);return {response,report:await finished(response.run.id),request:requests.at(-1)!};};
   return {dataDir,manager,context,requests,passwords,environment,environments,web,run,finished};
 }
