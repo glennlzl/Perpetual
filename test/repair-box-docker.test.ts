@@ -62,6 +62,15 @@ test('a repair box is confined: labelled, capped, without mounts, socket or cred
   assert.notEqual(direct.exitCode, 0);
   assert.notEqual(proxied.stdout.trim(), '200');
   assert.notEqual(tunnelled.exitCode, 0);
+  // A host service listening on every address is out of reach through the gateway address of the box's network too.
+  const everywhere = createServer((incoming, answer) => { hits.push(incoming.url ?? ''); answer.end('database'); });
+  everywhere.listen(0, '0.0.0.0');
+  await once(everywhere, 'listening');
+  t.after(() => { everywhere.close(); });
+  const gateway = docker('network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{.Subnet}}{{end}}', `perpetual-repair-test-${id}`).split(' ');
+  const address = gateway[0] || gateway[1].replace(/\.\d+\/\d+$/, '.1');
+  const bridged = await box.exec(['curl', '-sS', '-m', '5', '--noproxy', '*', `http://${address}:${(everywhere.address() as AddressInfo).port}/`]);
+  assert.notEqual(bridged.exitCode, 0, `The bridge address ${address} answers nothing.`);
   assert.deepEqual(hits, [], 'Nothing from the box reached the host.');
   const registry = await box.exec(['curl', '-sS', '-m', '30', '-o', '/dev/null', '-w', '%{http_code}', 'https://registry.npmjs.org/'], { timeoutMs: 60_000 });
   assert.equal(registry.stdout.trim(), '200', 'Public registries are reached through the proxy.');
@@ -80,6 +89,22 @@ test('a real box that writes more than its disk limit is removed while its comma
   const box = await boxes.create({ id, image: 'node:22-bookworm', source });
   await assert.rejects(box.exec(['sh', '-c', 'head -c 200000000 /dev/zero > /big; sleep 120'], { timeoutMs: 180_000 }), /The repair box wrote more than 50 MB and was removed\./);
   assert.deepEqual(containers(`perpetual.repair=${id}`), [], 'The box and its proxy are gone.');
+});
+
+// Two tracked paths that differ only in case, of which a case-insensitive host such as macOS holds one file.
+test('a box holds the commit whatever the host filesystem holds, even paths that differ only in case', { skip, timeout: 10 * 60_000 }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-docker-')), source = await mkdtemp(join(tmpdir(), 'perpetual-repair-docker-source-'));
+  const id = randomUUID(), boxes = createRepairBoxes({ dataDir, owner: 'repair-test' });
+  t.after(async () => { cleanup(id); await rm(dataDir, { recursive: true, force: true }); await rm(source, { recursive: true, force: true }); });
+  const git = (args: string[], input?: string) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: source, encoding: 'utf8', ...(input === undefined ? {} : { input }) }).trim();
+  git(['init', '--quiet']);
+  for (const [path, text] of [['Readme.md', 'upper\n'], ['readme.md', 'lower\n']]) git(['update-index', '--add', '--cacheinfo', `100644,${git(['hash-object', '-w', '--stdin'], text)},${path}`]);
+  git(['commit', '--quiet', '-m', 'Two readmes']);
+  git(['reset', '--hard', '--quiet']);
+  const sha = git(['rev-parse', 'HEAD']);
+  const box = await boxes.create({ id, image: 'node:22-bookworm', source });
+  assert.equal((await box.diff(sha)).length, 0, 'The box\'s workspace is the commit: its diff deletes no file.');
+  assert.equal((await box.exec(['cat', 'Readme.md', 'readme.md'])).stdout, 'upper\nlower\n');
 });
 
 const exec = promisify(execFile) as CommandRunner;

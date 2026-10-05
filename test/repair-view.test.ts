@@ -38,8 +38,24 @@ test('a finished repair is merged, passed, under review or not merged, and says 
   assert.deepEqual([merged.status, marks(merged), merged.endedAt, merged.steps[4].detail], ['merged', ['Read the failure: done', 'Diagnose: done', 'Change: done', 'Verify: done', 'Merge: done'], '2026-09-25T11:00:00.000Z', ['Merged ', { text: '#7', href: PULL.url }, ' into ', { text: 'main' }, ' as ', { text: 'eeeeeee' }]]);
   const flaky = repairChange(repair('flaky', { category: 'availability', completedAt: '2026-09-25T10:30:00.000Z' }), 'build');
   assert.deepEqual([flaky.status, flaky.title, marks(flaky), flaky.steps[1].detail], ['passed', 'Rerunning build', ['Read the failure: done', 'Diagnose: done'], ['A network or deadline error: the rerun passed.']]);
-  const ready = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false }, reason: 'Auto-merge is off.', holds: ['The change touches tests.'] }), 'build');
+  const ready = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false }, verified: true, reason: 'Auto-merge is off.', holds: ['The change touches tests.'] }), 'build');
   assert.deepEqual([ready.status, marks(ready)[4], ready.reason, ready.steps[4].detail, ready.steps[2].detail], ['needs-review', 'Merge: waiting', 'Auto-merge is off.', ['Auto-merge is off.'], ['pull request ', { text: '#7', href: PULL.url }, ', ', 'held: The change touches tests.']]);
+  // Verify is done only once the manager recorded the head verified: a gate that did not pass, a draft no workflow that
+  // failed ran for, and a merge step that stopped before any gate ran verified nothing, so Verify waits with why.
+  const gateFailed = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false }, gates: [{ stageId: 'beta', sha: HEAD, status: 'failed' }], reason: 'Beta failed: A journey failed.' }), 'build', names);
+  assert.deepEqual([gateFailed.status, marks(gateFailed).slice(3), gateFailed.steps[3].detail], ['needs-review', ['Verify: waiting', 'Merge: pending'], ['CI on ', { text: '#7', href: PULL.url }, ', ', { text: 'Beta' }, ' failed at ', { text: 'fffffff' }, ' ', 'Beta failed: A journey failed.']]);
+  for (const reason of ['No workflow ran for the pull request.', 'The failed workflow CI did not run for the pull request.', 'The pull request\'s workflow runs ended as cancelled.']) {
+    const unrun = repairChange(repair('ready', { pullRequest: { ...PULL, draft: true }, reason }), 'build');
+    assert.deepEqual([unrun.status, marks(unrun).slice(3), unrun.steps[3].detail?.at(-1)], ['needs-review', ['Verify: waiting', 'Merge: pending'], reason], reason);
+  }
+  for (const reason of ['The active source changed.', 'The updated pull request failed CI: CI.']) {
+    const unjudged = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false }, reason }), 'build');
+    assert.deepEqual(marks(unjudged).slice(3), ['Verify: waiting', 'Merge: pending'], reason);
+  }
+  const unready = repairChange(repair('ready', { pullRequest: { ...PULL, draft: true }, gates: [{ stageId: 'beta', sha: HEAD, status: 'passed' }], verified: true, reason: 'Mark the pull request ready for review on GitHub.' }), 'build');
+  assert.deepEqual(marks(unready).slice(3), ['Verify: done', 'Merge: waiting'], 'Gates that passed verified a draft GitHub would not mark ready.');
+  const ciAlone = repairChange(repair('ready', { pullRequest: { ...PULL, draft: true }, verified: true, reason: 'Mark the pull request ready for review on GitHub.' }), 'build');
+  assert.deepEqual(marks(ciAlone).slice(3), ['Verify: done', 'Merge: waiting'], 'Without a Sandbox stage, CI alone verified it.');
   const failed = repairChange(repair('failed', { category: 'build', attempts: [{ number: 4, model: 'm', failure: 'The model stopped without calling done.' }], reason: 'The build was not fixed in 4 attempts.' }), 'build');
   assert.deepEqual([failed.status, marks(failed), failed.steps[2].detail], ['not-merged', ['Read the failure: done', 'Diagnose: done', 'Change: failed', 'Verify: pending', 'Merge: pending'], ['Attempt 4 with ', { text: 'm' }, ' ', 'The build was not fixed in 4 attempts.']]);
   const failedCi = repairChange(repair('failed', { attempts: [{ number: 4, model: 'm' }], pullRequest: { ...PULL, draft: true }, reason: 'The build was not fixed in 4 attempts.' }), 'build');
@@ -54,6 +70,8 @@ test('a finished repair is merged, passed, under review or not merged, and says 
   assert.deepEqual([stopped.status, stopped.reason, marks(stopped)[0], stopped.steps[0].detail], ['not-merged', 'Stopped.', 'Read the failure: waiting', [{ text: 'CI', href: RUN.url }, ' failed at ', { text: 'cb9292c' }, ' ', 'Stopped.']]);
   const superseded = repairChange(repair('superseded', { pullRequest: { ...PULL, draft: true, closed: true }, reason: 'Superseded by ddddddd.' }), 'build');
   assert.deepEqual([superseded.status, marks(superseded)[3]], ['not-merged', 'Verify: waiting'], 'A closed pull request is not under review.');
+  const rejected = repairChange(repair('ready', { pullRequest: { ...PULL, draft: false, closed: true }, reason: 'Auto-merge is off.' }), 'build');
+  assert.equal(rejected.status, 'not-merged', 'Nor is a ready fix whose pull request a person closed.');
 });
 
 test('only a managed source\'s Build carries Autopilot: its mode is the auto-merge switch, and the head\'s failed runs are offered while nothing repairs it', () => {

@@ -16,8 +16,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { TOO_LARGE } from '../../src/repair/box.ts';
+import { writeStateFile } from '../../src/store.ts';
 import { checkChanges } from '../../src/repair/changes.ts';
 import { EGRESS } from '../../src/repair/egress.ts';
 import { BENCH, createBenchBox, docker, dockerAvailable, removeBenchResources, useBenchDocker } from './box.ts';
@@ -25,7 +26,7 @@ import { imageFor, prepareCase, type CaseContext } from './context.ts';
 import { loadCases, type Case } from './corpus.ts';
 import { createFakeOpenAI } from './fake-openai.ts';
 import { FAKE_MODELS, corpusSolutions, createFakeUpstream, solver } from './fake-upstream.ts';
-import { PROVIDERS, REASONING, UPSTREAMS, WIRES, forkGateway, keyFileModels, type AttemptUsage, type GatewayControl, type Provider, type ReasoningPolicy } from './gateway.ts';
+import { PROVIDERS, REASONING, UPSTREAMS, WIRES, forkGateway, keyFileModels, type GatewayControl, type Provider, type ReasoningPolicy } from './gateway.ts';
 import { ADAPTERS, ADAPTER_KEYS, DEFAULT_PROVIDERS, LIMITS, modelInfo, wireOf, type Adapter, type AdapterKey, type AttemptEvent, type AttemptLimits, type AttemptOutcome, type ModelInfo } from './harness.ts';
 import { judge } from './judge.ts';
 import { loadPrices, priceFor, type PriceTable } from './prices.ts';
@@ -52,6 +53,13 @@ export interface RunOptions {
 }
 /** Time an adapter gets past its limit to stop by itself before the runner aborts it. */
 const GRACE_MS = 30_000;
+/** Runner errors in a row after which a run starts no more attempts, since something such as Docker fails every one. */
+export const RUNNER_ERRORS = 5;
+/** Counts the runner errors in a row that a judged attempt ends; true once there are limit of them. */
+export function errorStreak(limit = RUNNER_ERRORS) {
+  let streak = 0;
+  return (record: Pick<AttemptRecord, 'status'>) => (streak = record.status === 'error' ? streak + 1 : record.status === 'judged' ? 0 : streak) >= limit;
+}
 
 /** Why an adapter cannot run against a provider: it declares no wire API for it, or one the gateway does not serve there. */
 export function unsupported(adapter: Pick<Adapter, 'providers'>, provider: Provider): string | null {
@@ -82,6 +90,12 @@ const refusalReason: Partial<Record<string, FinalReason>> = { cost: 'cost', budg
 export const finalReason = (refusal: string | null, timedOut: boolean, adapter: AttemptOutcome['reason']): FinalReason => (refusal && refusalReason[refusal]) || (timedOut ? 'time' : adapter);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+/** The data hashes of a run's boxes, which cleanup removes by; a file a killed run tore keeps those it still names. */
+export async function readScopes(file: string): Promise<string[]> {
+  const text = await readFile(file, 'utf8').catch(() => '[]');
+  try { const value: unknown = JSON.parse(text); return Array.isArray(value) ? value.filter((scope): scope is string => typeof scope === 'string') : []; }
+  catch { return [...text.matchAll(/"([\da-f]{16})"/g)].map(match => match[1]); }
+}
 const pause = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) return reject(signal.reason);
   const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms);
@@ -111,57 +125,83 @@ export async function runBench(options: RunOptions) {
   const earlier: unknown = await readFile(paths.run, 'utf8').then(text => JSON.parse(text) as unknown).catch(() => null);
   const before = isRecord(earlier) ? earlier.provider ?? 'openrouter' : provider;
   if (before !== provider) throw new Error(`${out} holds a ${String(before)} run; name another --out for ${provider}.`);
+  const prices = provider === 'openai' ? options.prices ?? await loadPrices() : undefined;
+  // A resumed folder keeps the settings its judged attempts ran under, so a dry run, other limits, another reasoning
+  // policy, route or prices never pass for the same run in its report.
+  if (isRecord(earlier)) {
+    const settings: Record<string, unknown> = JSON.parse(JSON.stringify({ dryRun: options.dryRun, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null }));
+    const changed = Object.keys(settings).filter(name => name in earlier && !isDeepStrictEqual(earlier[name], settings[name]));
+    const rates = isRecord(earlier.prices) && isRecord(earlier.prices.models) ? earlier.prices.models : {};
+    if (prices && options.models.some(id => id in rates && !isDeepStrictEqual(rates[id], JSON.parse(JSON.stringify(priceFor(prices, id)))))) changed.push('prices');
+    if (changed.length) throw new Error(`${out} holds a run with other ${changed.join(', ')}; resume it with the same settings, or name another --out.`);
+  }
   await useBenchDocker();
   const unavailable = await dockerAvailable();
   if (unavailable) throw new Error(unavailable);
   const adapters = await chooseAdapters(options.frameworks, provider, log);
+  // Read before the gateway starts, which only the run's finally stops; each write replaces the file whole.
+  const scopes = new Set(await readScopes(paths.boxes));
   const cases = await loadCases(options.cases);
-  const prices = provider === 'openai' ? options.prices ?? await loadPrices() : undefined;
   const script = options.dryRun ? solver(await corpusSolutions(cases)) : null;
   const fake = !script ? null : provider === 'openai' ? await createFakeOpenAI({ script }) : await createFakeUpstream({ script });
   const upstream = fake?.url ?? options.upstream ?? UPSTREAMS[provider];
   const gateway: GatewayControl = await forkGateway({ ...(fake ? { key: fake.key } : options.key?.file ? { keyFile: options.key.file } : { key: options.key?.value }), provider, ...(prices ? { prices } : {}),
     budget: options.budget, upstream, reasoning: options.reasoning, ...(options.providerOnly ? { providerOnly: options.providerOnly } : {}), ...(options.gatewayHost ? { host: options.gatewayHost } : {}) });
-  const scopes = new Set<string>(JSON.parse(await readFile(paths.boxes, 'utf8').catch(() => '[]')) as string[]);
   let saving = Promise.resolve();
-  const onScope = (scope: string) => { scopes.add(scope); saving = saving.then(() => writeFile(paths.boxes, JSON.stringify([...scopes], null, 2))); return saving; };
+  const onScope = (scope: string) => { scopes.add(scope); saving = saving.then(() => writeStateFile(paths.boxes, JSON.stringify([...scopes], null, 2), { prefix: '.boxes-', removeTemporary: true })); return saving; };
   const stop = new AbortController(), signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
   try {
     const models: Map<string, ModelInfo> = await modelInfo(options.models, prices ?? upstream);
     const contexts = new Map<string, { c: Case; context: CaseContext }>();
+    // A case whose captured failure is not its stated one is left out before any paid attempt.
     await pool(cases, options.concurrency, async c => {
-      const context = await prepareCase(c, { directory: join(paths.cases, c.name), root: paths.boxRoot, signal, onScope, scrub: gateway.scrub });
+      const context = await prepareCase(c, { directory: join(paths.cases, c.name), root: paths.boxRoot, signal, onScope, scrub: gateway.scrub, strict: true }).catch((error: unknown) => {
+        if (signal.aborted) throw error;
+        log(`left out ${c.name}: ${String((error as Error)?.message ?? error).slice(0, 500)}`);
+        return null;
+      });
+      if (!context) return;
       contexts.set(c.name, { c, context });
       log(`prepared ${c.name}: ${context.failure.diagnosis.category} at ${context.capture.find(step => step.exit !== 0)?.name ?? 'no failure'}`);
     }, signal);
-    const run = randomUUID(), cells = matrix({ frameworks: [...adapters.keys()], models: [...models.keys()], cases: cases.map(c => c.name), seeds: options.seeds });
+    const prepared = cases.filter(c => contexts.has(c.name)).map(c => c.name);
+    if (!prepared.length) throw new Error('No case could be prepared.');
+    const run = randomUUID(), cells = matrix({ frameworks: [...adapters.keys()], models: [...models.keys()], cases: prepared, seeds: options.seeds });
     const done = new Set((await readRecords(paths.results)).filter(record => record.status === 'judged').map(record => record.key));
     const todo = remaining(cells, done);
     // The rates the run's models are priced at, so its dollars stay reproducible after the table changes.
     const priced = prices ? { source: prices.source, checked: prices.checked, tiers: prices.tiers, models: Object.fromEntries([...models.keys()].map(id => [id, priceFor(prices, id)])) } : null;
     await writeFile(paths.run, await safeJson({ run, startedAt: new Date().toISOString(), dryRun: options.dryRun, provider, prices: priced,
       frameworks: [...adapters.values()].map(adapter => ({ key: adapter.key, version: adapter.version, wire: wireOf(adapter, provider) })),
-      models: [...models.values()], cases: cases.map(c => c.name), seeds: options.seeds, budget: options.budget, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null,
+      models: [...models.values()], cases: prepared, seeds: options.seeds, budget: options.budget, limits: options.limits, reasoning: options.reasoning, providerOnly: options.providerOnly ?? null,
       cells: cells.length, resumed: cells.length - todo.length }, gateway.scrub, 2), { mode: 0o600 });
     log(`${todo.length} of ${cells.length} attempts to run (${cells.length - todo.length} already done); budget $${options.budget}, cap $${options.limits.cost} each`);
-    let exhausted = false;
+    // Once RUNNER_ERRORS attempts in a row failed in the runner, each of which may have paid for model calls first, the
+    // run starts no more; the rest is left for a resumed run.
+    const stopping = errorStreak();
+    let exhausted = false, halted: string | null = null;
     const skip = (cell: Cell, adapter: Adapter, why: 'budget'): AttemptRecord => ({
       run, key: cell.key, framework: cell.framework, frameworkVersion: adapter.version, model: cell.model, case: cell.case, seed: cell.seed, startedAt: new Date().toISOString(), status: 'skipped', skipped: why,
       reason: null, adapterReason: null, summary: '', error: '', adapterSteps: 0, reproduced: null, frameworkCost: null, gateway: null, wallMs: 0, setupMs: 0, harnessPaths: [], diff: null,
       rules: { rejected: [], holds: [] }, guards: [], scriptsChanged: [], judge: null, success: false, passedWithoutDone: false,
     });
     await pool(todo, options.concurrency, async cell => {
+      if (halted !== null) return;
       const adapter = adapters.get(cell.framework as AdapterKey)!, { c, context } = contexts.get(cell.case)!, model = models.get(cell.model)!;
       if (exhausted || !await room(gateway, options.limits.cost, signal)) {
         exhausted = true;
         return appendRecord(paths.results, skip(cell, adapter, 'budget'), gateway.scrub);
       }
-      // A failure of the runner itself (a box, Docker) is recorded and the run goes on; a resumed run retries it.
-      const record = await attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope }).catch((error: unknown): AttemptRecord => {
+      // A failure of the runner itself (a box, Docker) is recorded and the run goes on; a resumed run retries it. What
+      // the attempt already spent, and its change, are kept once the model ran.
+      const partial: { record?: AttemptRecord } = {};
+      const record = await attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope, partial }).catch((error: unknown): AttemptRecord => {
         if (signal.aborted) throw error;
-        return { ...skip(cell, adapter, 'budget'), status: 'error', skipped: undefined, reason: 'error', error: String((error as Error)?.message ?? error).slice(0, 1000) };
+        const ran = partial.record?.gateway ? partial.record : skip(cell, adapter, 'budget');
+        return { ...ran, status: 'error', skipped: undefined, reason: 'error', error: String((error as Error)?.message ?? error).slice(0, 1000), judge: null, success: false, passedWithoutDone: false };
       });
       if (record.status === 'skipped') exhausted = true;
+      if (stopping(record) && halted === null) halted = record.error;
       await appendRecord(paths.results, record, gateway.scrub);
       log(`${cell.key}: ${record.status === 'skipped' ? 'skipped (budget)' : record.status === 'error' ? `runner error: ${record.error}` : `${record.success ? 'solved' : 'not solved'} · ${record.reason} · ${record.judge?.reason ?? '–'} · $${(record.gateway?.cost ?? 0).toFixed(4)} · ${Math.round(record.wallMs / 1000)}s`}`);
     }, signal);
@@ -169,6 +209,7 @@ export async function runBench(options: RunOptions) {
     await writeFile(paths.report, report);
     const final = await gateway.status();
     log(`spent $${final.spent.toFixed(4)} of $${final.budget}; report: ${paths.report}`);
+    if (halted !== null) throw new Error(`The run stopped after ${RUNNER_ERRORS} runner errors in a row, the last: ${halted} Resume it with the same --out once the cause is fixed.`);
     return { records, report, out };
   } finally {
     stop.abort();
@@ -178,9 +219,11 @@ export async function runBench(options: RunOptions) {
   }
 }
 
-async function attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope }: {
+async function attempt({ cell, adapter, c, context, model, gateway, options, paths, run, signal, onScope, partial = {} }: {
   cell: Cell; adapter: Adapter; c: Case; context: CaseContext; model: ModelInfo; gateway: GatewayControl; options: RunOptions; paths: ReturnType<typeof resultPaths>; run: string;
   signal: AbortSignal; onScope(scope: string): Promise<void>;
+  /** The record as far as it got, for the runner to keep when the attempt fails after the model ran. */
+  partial?: { record?: AttemptRecord };
 }): Promise<AttemptRecord> {
   const folder = join(paths.attempts, cellFolder(cell)), events: AttemptEvent[] = [], scrub = gateway.scrub, provider = options.provider ?? 'openrouter';
   const record: AttemptRecord = {
@@ -188,9 +231,10 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     reason: null, adapterReason: null, summary: '', error: '', adapterSteps: 0, reproduced: null, frameworkCost: null, gateway: null, wallMs: 0, setupMs: 0, harnessPaths: [...adapter.harnessPaths ?? []], diff: null,
     rules: { rejected: [], holds: [] }, guards: [], scriptsChanged: [], judge: null, success: false, passedWithoutDone: false,
   };
+  partial.record = record;
   const setup = Date.now(), scratch = await mkdtemp(join(tmpdir(), 'bench-attempt-'));
   const box = await createBenchBox({ image: context.image, source: context.snapshot, root: paths.boxRoot, signal, onScope });
-  let diff: Buffer | null = null, tooLarge = false, usage: AttemptUsage | null = null, outcome: AttemptOutcome = { reason: 'error', steps: 0 }, timedOut = false;
+  let diff: Buffer | null = null, tooLarge = false, outcome: AttemptOutcome = { reason: 'error', steps: 0 }, timedOut = false;
   try {
     await adapter.prepare?.(box, signal);
     const boxUrl = adapter.inBox ? `${await box.attachGateway(gateway.port)}/api/v1` : undefined;
@@ -202,7 +246,7 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     }
     const timeout = AbortSignal.timeout(options.limits.timeMs + GRACE_MS), stop = AbortSignal.any([timeout, signal]), started = Date.now();
     try {
-      outcome = await adapter.runAttempt({ box, system: context.system, prompt: context.prompt, failing: context.failing, model, limits: options.limits, signal: stop, scratch,
+      outcome = await adapter.runAttempt({ box, system: context.system, prompt: context.prompt, failing: context.failing, base: context.sha, model, limits: options.limits, signal: stop, scratch,
         gateway: { baseUrl: gateway.url, ...(boxUrl ? { boxUrl } : {}), token: opened.token, provider, wire: wireOf(adapter, provider) ?? 'chat' }, log: event => { events.push({ ...event, at: Date.now() - started }); } });
     } catch (error) {
       if (signal.aborted) throw error;
@@ -210,18 +254,22 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     }
     record.wallMs = Date.now() - started;
     timedOut = timeout.aborted || record.wallMs >= options.limits.timeMs;
-    usage = await gateway.close(opened.token);
+    // From here the attempt has spent what the gateway counted: kept on the record and written out before anything
+    // else can fail, as its change is once read.
+    const { log: requests, attempt: _attempt, model: _model, cap: _cap, ...stats } = await gateway.close(opened.token);
+    Object.assign(record, {
+      gateway: stats, reason: finalReason(stats.firstRefusal, timedOut, outcome.reason), adapterReason: outcome.reason, summary: (outcome.summary ?? '').slice(0, 4000), error: (outcome.error ?? '').slice(0, 1000),
+      adapterSteps: outcome.steps, reproduced: outcome.reproduced ?? null, frameworkCost: outcome.frameworkCost ?? null,
+    });
+    await writeArtifact(folder, 'gateway.json', { json: requests }, scrub);
+    await writeArtifact(folder, 'events.json', { json: events }, scrub);
     if (record.harnessPaths.length) await box.exec(['rm', '-rf', '--', ...record.harnessPaths.map(path => `${box.root}/${path}`)], { timeoutMs: 60_000 });
     diff = await box.diff(context.sha).catch(error => { if ((error as { rejected?: unknown }).rejected) { tooLarge = true; return null; } throw error; });
+    if (diff) { record.diff = diffStats(diff); await writeArtifact(folder, 'change.diff', diff, scrub); }
   } finally {
     await box.remove();
     await rm(scratch, { recursive: true, force: true });
   }
-  const { log: requests, attempt: _attempt, model: _model, cap: _cap, ...stats } = usage!;
-  Object.assign(record, {
-    gateway: stats, reason: finalReason(stats.firstRefusal, timedOut, outcome.reason), adapterReason: outcome.reason, summary: (outcome.summary ?? '').slice(0, 4000), error: (outcome.error ?? '').slice(0, 1000),
-    adapterSteps: outcome.steps, reproduced: outcome.reproduced ?? null, frameworkCost: outcome.frameworkCost ?? null, diff: diff ? diffStats(diff) : null,
-  });
   const judged = tooLarge ? null : await judge({ c, snapshot: context.snapshot, sha: context.sha, diff: diff ?? Buffer.alloc(0), image: context.image, steps: context.job.steps, root: paths.boxRoot, signal, onScope });
   if (judged) {
     Object.assign(record, { rules: judged.rules, guards: judged.guards, scriptsChanged: judged.scriptsChanged,
@@ -230,9 +278,6 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
   if (tooLarge) record.rules = { rejected: [TOO_LARGE], holds: [] };
   record.success = Boolean(judged?.passed) && record.reason === 'done';
   record.passedWithoutDone = Boolean(judged?.passed) && record.reason !== 'done';
-  if (diff) await writeArtifact(folder, 'change.diff', diff, scrub);
-  await writeArtifact(folder, 'gateway.json', { json: requests }, scrub);
-  await writeArtifact(folder, 'events.json', { json: events }, scrub);
   if (judged) await writeArtifact(folder, 'judge.json', { json: judged }, scrub);
   return record;
 }
@@ -329,7 +374,7 @@ async function main(argv: string[]) {
   if (command === 'cleanup') {
     await useBenchDocker();
     if (!values.all && !values.out) throw new Error('Name the run with --out, or pass --all for every repair-bench container and network.');
-    const scopes = values.all ? 'all' as const : JSON.parse(await readFile(resultPaths(resolve(values.out!)).boxes, 'utf8').catch(() => '[]')) as string[];
+    const scopes = values.all ? 'all' as const : await readScopes(resultPaths(resolve(values.out!)).boxes);
     const removed = await removeBenchResources(scopes);
     console.log(`removed ${removed.containers} containers and ${removed.networks} networks`);
     return 0;

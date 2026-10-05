@@ -32,7 +32,8 @@ export interface RepairBox {
 export interface RepairBoxes {
   /** Why no box can start, such as Docker not running; null when one can. */
   available(): Promise<string | null>;
-  create(input: { id: string; image: string; source: string; signal?: AbortSignal }): Promise<RepairBox>;
+  /** A box from image, or from the first of fallbacks Docker Hub has a tag for when it has none for image. */
+  create(input: { id: string; image: string; fallbacks?: readonly string[]; source: string; signal?: AbortSignal }): Promise<RepairBox>;
   /** Confirms the resources owned by one repair are absent, including a partially created box. */
   remove(id: string): Promise<void>;
   /** Removes this controller's repair boxes that outlived their repair. */
@@ -49,9 +50,14 @@ const LIMITS = ['--memory', '4g', '--memory-swap', '4g', '--cpus', '2', '--pids-
 const PROXY_LIMITS = ['--memory', '256m', '--memory-swap', '256m', '--cpus', '1', '--pids-limit', '128'];
 /** Bytes the box may write, the free space it must leave Docker, and how often both are read while it works. */
 export const DISK = { limit: 20 * 1024 ** 3, floor: 2 * 1024 ** 3, checkMs: 15_000 };
+/** Checks between reads of a box no command runs in: once a minute at the default interval. */
+const IDLE_CHECKS = 4;
 const measure = (bytes: number) => bytes >= 1024 ** 3 ? `${Math.round(bytes / 1024 ** 3 * 10) / 10} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 const IMAGE = /^(?:node|python|golang|buildpack-deps):[\w.-]{1,64}$/;
 const ID = /^[\w-]{1,64}$/;
+// How a registry answers a tag it does not have, such as node:14-bookworm, through Docker's classic image store or its
+// containerd one, the default of new installs: failed to resolve reference "<ref>": <ref>: not found.
+const MISSING_IMAGE = /manifest unknown|manifest for \S+ not found|pull access denied|repository does not exist|failed to resolve reference \S+ \S+: not found/i;
 /**
  * The workspace against base through a temporary index, so the agent's own git use neither hides nor adds changes:
  * untracked files count and ignored ones do not; no hook, monitor, external diff or rename detection runs. Names are
@@ -168,8 +174,10 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
       } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'Install Docker to repair builds.' : 'Start Docker to repair builds.'; }
     },
     removeLeftovers, remove,
-    async create({ id, image, source, signal }) {
-      if (!ID.test(id) || !IMAGE.test(image) || !isAbsolute(source) || source.includes('\0')) throw new Error('Invalid repair box.');
+    async create({ id, image, fallbacks = [], source, signal }) {
+      const images = [image, ...fallbacks];
+      if (!ID.test(id) || !images.every(item => IMAGE.test(item)) || !isAbsolute(source) || source.includes('\0')) throw new Error('Invalid repair box.');
+      let chosen = image;
       await removeLeftovers();
       const name = `perpetual-${owner}-${id}`, proxy = `${name}-proxy`, network = name, scope = await dataScope();
       const labels = [`perpetual.owner=${owner}`, `perpetual.repair=${id}`, `perpetual.data=${scope}`].flatMap(label => ['--label', label]);
@@ -191,30 +199,43 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
         if (result.exitCode !== 0) throw new Error(`${failure}: ${firstLine(result.stderr) || `docker ${args[0]} failed`}.`);
       };
       try {
-        // The box's network has no route out; the proxy alone joins it from the default bridge, as `proxy`.
-        await step(['network', 'create', '--internal', ...labels, network], 'Could not create the repair box network', 60_000);
+        // The box's network has no route out; the proxy alone joins it from the default bridge, as `proxy`. Its bridge
+        // gets no IPv4 address either, since Docker otherwise gives an internal network's bridge one, through which the
+        // box would reach every service of the engine's host listening on all addresses. The network asks for no IPv6.
+        await step(['network', 'create', '--internal', '-o', 'com.docker.network.bridge.inhibit_ipv4=true', ...labels, network], 'Could not create the repair box network', 60_000);
         await step(['create', '--name', proxy, ...labels, '--init', '--read-only', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', EGRESS.user, ...PROXY_LIMITS,
           '--network', 'bridge', '--pull', 'missing', EGRESS.image, 'node', '-e', EGRESS_SCRIPT, String(EGRESS.port)], `Could not create the repair box proxy from ${EGRESS.image}`, 15 * 60_000);
         await step(['network', 'connect', '--alias', EGRESS.alias, network, proxy], 'Could not start the repair box proxy', 60_000);
         await step(['start', proxy], 'Could not start the repair box proxy', 60_000);
         const environment = Object.entries({ CI: 'true', DEBIAN_FRONTEND: 'noninteractive', GIT_TERMINAL_PROMPT: '0', ...egressEnvironment() }).flatMap(([key, value]) => ['--env', `${key}=${value}`]);
-        await step(['create', '--name', name, ...labels, '--init', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL',
-          ...CAPABILITIES.flatMap(capability => ['--cap-add', capability]), ...LIMITS, '--network', network, '--workdir', ROOT, ...environment,
-          '--pull', 'missing', image, 'sleep', 'infinity'], `Could not create the repair box from ${image}`, 15 * 60_000);
+        // An image whose tag the registry does not have, such as an old version without a bookworm build, gives way to
+        // the next one named; any other failure ends the creation.
+        for (const [index, candidate] of images.entries()) {
+          const created = await docker(['create', '--name', name, ...labels, '--init', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL',
+            ...CAPABILITIES.flatMap(capability => ['--cap-add', capability]), ...LIMITS, '--network', network, '--workdir', ROOT, ...environment,
+            '--pull', 'missing', candidate, 'sleep', 'infinity'], { timeoutMs: 15 * 60_000, signal });
+          if (created.exitCode === 0) { chosen = candidate; break; }
+          if (index === images.length - 1 || !MISSING_IMAGE.test(created.stderr)) throw new Error(`Could not create the repair box from ${candidate}: ${firstLine(created.stderr) || 'docker create failed'}.`);
+        }
         // The copy keeps host owners on some engines; the workspace is root's, as a runner's is its user's, so git and
-        // package managers running as root treat it as their own.
-        for (const args of [['start', name], ['cp', `${source}/.`, `${name}:${ROOT}`], ['exec', name, 'chown', '-R', '0:0', ROOT]]) await step(args, 'Could not start the repair box');
+        // package managers running as root treat it as their own. A case-insensitive host such as macOS holds one file
+        // for paths that differ only in case, so the box, case-sensitive as the runner is, checks the commit out again
+        // from the copy's index: its workspace is the commit, and its diff names no file the agent did not change.
+        for (const args of [['start', name], ['cp', `${source}/.`, `${name}:${ROOT}`], ['exec', name, 'chown', '-R', '0:0', ROOT],
+          ['exec', '-w', ROOT, name, 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.ignorecase=false', '-c', 'core.precomposeunicode=false', 'reset', '--hard', '--quiet']]) await step(args, 'Could not start the repair box');
       } catch (error) {
         try { await remove(); } catch (cleanup) { throw cleanupError(`${firstLine(error instanceof Error ? error.message : String(error))}; ${String(cleanup)}`); }
         throw error;
       }
       // While the box works, what it wrote and Docker's free space are read; past either bound the box is removed, and
-      // its commands reject with why once it is gone.
-      let busy = 0, used = false, checking = false;
+      // its commands reject with why once it is gone. An idle box is read every IDLE_CHECKS checks, since a process a
+      // command left running in the background may still write while the model thinks or CI runs.
+      let busy = 0, used = false, checking = false, idle = 0;
       const halted = async () => { if (stopped.signal.aborted) { await removing; throw stopped.signal.reason; } };
       async function check() {
-        if (checking || stopped.signal.aborted || !busy && !used) return;
-        checking = true; used = false;
+        if (checking || stopped.signal.aborted) return;
+        if (!busy && !used && ++idle < IDLE_CHECKS) return;
+        checking = true; used = false; idle = 0;
         try {
           const [size, free] = await Promise.all([
             docker(['container', 'inspect', '--size', '--format', '{{.SizeRw}}', name], { timeoutMs: 60_000 }),
@@ -250,7 +271,7 @@ export function createRepairBoxes({ dataDir, owner = 'repair', docker: program =
         } finally { busy -= 1; }
       }
       const box: RepairBox = {
-        root: ROOT, image, signal: stopped.signal,
+        root: ROOT, image: chosen, signal: stopped.signal,
         exec: (argv, options = {}) => execute(argv, options, docker),
         async diff(base) {
           if (!SHA.test(base)) throw new Error('Invalid base commit.');

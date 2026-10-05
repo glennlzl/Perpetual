@@ -184,6 +184,9 @@ test('gh failures return fixed messages, never the CLI output', async () => {
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: failure('', 'ENOENT'), log: LOG }).run }), /GitHub CLI is unavailable/);
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: '{"message":', log: LOG }).run }), /unreadable job list/);
   await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: failure('HTTP 401: Bad credentials'), log: LOG }).run }), /gh auth login/);
+  // A failed-step log over the read limit is no network problem, however often the repair is tried again.
+  const huge = Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+  await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: 1 }, { run: runner({ jobs: JOBS, log: huge }).run }), (error: Error) => error.message === 'Reading the failed log returned more than Perpetual reads.');
 });
 
 test('a rerun posts rerun-failed-jobs for the run, and a refusal names the permission it needs', async () => {
@@ -234,7 +237,7 @@ test('pull requests open as drafts of the repair branch against the target branc
   };
   const pulls = createRepairPullRequests({ run });
   assert.deepEqual(await pulls.account(), { login: 'developer', id: 1234 });
-  assert.equal(await pulls.find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c' }), null);
+  assert.equal(await pulls.find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), null);
   assert.deepEqual(await pulls.create({ repository: 'owner/app', base: 'main', branch: 'perpetual/repair/cb9292c', title: 'Fix the failed CI build at cb9292c', body: '@owner token=[REDACTED]' }), { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true });
   await pulls.ready({ repository: 'owner/app', number: 7 });
   await pulls.label({ repository: 'owner/app', number: 7, label: 'perpetual-repair' });
@@ -242,7 +245,7 @@ test('pull requests open as drafts of the repair branch against the target branc
   await pulls.close({ repository: 'owner/app', number: 7 });
   const create = calls[2];
   assert.deepEqual(create.slice(create.indexOf('--method')), ['--method', 'POST', 'repos/owner/app/pulls', '-f', 'title=Fix the failed CI build at cb9292c', '-f', 'head=perpetual/repair/cb9292c', '-f', 'base=main', '-f', 'body=@owner token=[REDACTED]', '-F', 'draft=true']);
-  assert.ok(calls[1].includes(`repos/owner/app/pulls?state=open&per_page=5&head=${encodeURIComponent('owner:perpetual/repair/cb9292c')}`));
+  assert.ok(calls[1].includes(`repos/owner/app/pulls?state=open&per_page=5&head=${encodeURIComponent('owner:perpetual/repair/cb9292c')}&base=main`));
   assert.deepEqual(calls[3], ['pr', 'ready', '7', '--repo', 'owner/app']);
   assert.deepEqual(calls[4].slice(-3), ['repos/owner/app/issues/7/labels', '-f', 'labels[]=perpetual-repair']);
   assert.deepEqual(calls[5].slice(-3), ['repos/owner/app/issues/7/comments', '-f', 'body=Perpetual closed this repair: Superseded by ddddddd.']);
@@ -250,6 +253,14 @@ test('pull requests open as drafts of the repair branch against the target branc
   await assert.rejects(pulls.create({ repository: 'owner/app', base: 'main', branch: 'main', title: 't', body: 'b' }), /only its perpetual\/repair branch/);
   await assert.rejects(pulls.ready({ repository: 'owner/app', number: '7; rm -rf /' }), /Choose the repair's pull request/);
   assert.equal(calls.length, 7);
+});
+
+// A person may open or retarget a pull request from the repair branch into another base, such as a release branch.
+test('a repair continues only its own branch\'s open pull request into the target branch, never one into another base', async () => {
+  const open = (number: number, base: string, head = 'perpetual/repair/cb9292c') => ({ number, html_url: `https://github.com/owner/app/pull/${number}`, draft: true, head: { ref: head }, base: { ref: base } });
+  const answer = (pulls: unknown[]) => createRepairPullRequests({ run: async () => ({ stdout: JSON.stringify(pulls) }) });
+  assert.deepEqual(await answer([open(9, 'release'), open(7, 'main')]).find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true });
+  assert.equal(await answer([open(9, 'release'), open(8, 'main', 'perpetual/repair/abc1234')]).find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), null);
 });
 
 // Real git against a local bare repository standing in for GitHub: the runner swaps GitHub's URL for its path.
@@ -356,7 +367,7 @@ test('the pull request branch is updated and merged only at the verified head, a
   assert.deepEqual(await pulls.merge({ repository: 'owner/app', number: 7, sha: P, title: 'Fix the failed CI build at cb9292c (#7)' }), { sha: M });
   answer = JSON.stringify({ message: 'Updating pull request branch.', url: 'https://github.com/owner/app/pull/7' });
   await pulls.updateBranch({ repository: 'owner/app', number: 7, sha: P });
-  assert.deepEqual(calls[0].slice(calls[0].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${P}`, '-f', 'commit_title=Fix the failed CI build at cb9292c (#7)']);
+  assert.deepEqual(calls[0].slice(calls[0].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${P}`, '-f', 'commit_title=Fix the failed CI build at cb9292c (#7)', '-f', 'commit_message=Merged by Perpetual.'], 'No model text from the repair reaches the target branch.');
   assert.deepEqual(calls[1].slice(calls[1].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/update-branch', '-f', `expected_head_sha=${P}`]);
   const refused = async (call: () => Promise<unknown>, stderr: string) => { answer = failure(stderr); return call().then(() => null, (error: Error & { refused?: unknown }) => [error.message, error.refused === true]); };
   const merge = () => pulls.merge({ repository: 'owner/app', number: 7, sha: P, title: 't' }), update = () => pulls.updateBranch({ repository: 'owner/app', number: 7, sha: P });
@@ -367,6 +378,11 @@ test('the pull request branch is updated and merged only at the verified head, a
   assert.deepEqual(await refused(merge, 'error connecting to api.github.com'), ['Merging the pull request failed. Check your network connection and try again.', false]);
   answer = JSON.stringify({ merged: false, message: 'Not merged' });
   await assert.rejects(merge(), /did not merge/);
+  // A repository that allows no squash merging refuses with the same 405, which no review or check changes.
+  for (const [allowed, reason] of [[false, 'This repository does not allow squash merging, which Perpetual merges with. Merge the pull request on GitHub.'], [true, 'GitHub refused the merge. Check the pull request\'s required reviews and checks.']] as const) {
+    const repository = createRepairPullRequests({ run: async (_file, args) => { if (args.includes('repos/owner/app')) return { stdout: JSON.stringify({ full_name: 'owner/app', allow_squash_merge: allowed }) }; throw failure('gh: Squash merges are not allowed on this repository. (HTTP 405)'); } });
+    assert.deepEqual(await repository.merge({ repository: 'owner/app', number: 7, sha: P, title: 't' }).then(() => null, (error: Error & { refused?: unknown }) => [error.message, error.refused === true]), [reason, true]);
+  }
   const before = calls.length;
   await assert.rejects(pulls.merge({ repository: 'owner/app', number: 7, sha: 'main', title: 't' }), /Choose a commit/);
   await assert.rejects(pulls.updateBranch({ repository: 'owner/..', number: 7, sha: P }), /Choose a GitHub repository/);

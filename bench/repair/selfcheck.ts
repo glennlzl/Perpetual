@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { triage } from '../../src/repair/triage.ts';
-import { prepareCase } from './context.ts';
+import { captureProblems, prepareCase } from './context.ts';
 import type { Case, DecoyFailure } from './corpus.ts';
 import { judge, type JudgeReason } from './judge.ts';
 import { pool } from './schedule.ts';
@@ -18,11 +18,7 @@ export async function checkCase(c: Case, { directory, root, onScope }: { directo
   const problems: string[] = [];
   const context = await prepareCase(c, { directory: join(directory, c.name), root, onScope });
   const failed = context.capture.find(run => run.exit !== 0) ?? null;
-  if (!failed) problems.push('CI passed before any change.');
-  else {
-    if (failed.name !== c.meta.failingStep) problems.push(`CI failed at ${failed.name}, not ${c.meta.failingStep}.`);
-    if (!new RegExp(c.meta.expect.logRegex).test(failed.output)) problems.push(`The failed log does not match ${c.meta.expect.logRegex}.`);
-  }
+  problems.push(...captureProblems(c, context.capture));
   if (context.failure.diagnosis.category !== c.meta.expect.diagnosis) problems.push(`Diagnosed ${context.failure.diagnosis.category}, not ${c.meta.expect.diagnosis}.`);
   const next = triage([context.failure], false).next;
   if (next !== 'repair') problems.push(`Triage sends it to ${next}.`);

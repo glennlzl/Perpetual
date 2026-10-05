@@ -49,8 +49,8 @@ const versions = async () => `ai@${await version(new URL('../../../../src/repair
 export const adapter: Adapter = {
   key: 'aisdk-openai', version: await versions().catch(() => 'ai (product) + @ai-sdk/openai (not installed)'), inBox: false, providers: { openai: 'responses' },
   async available() { return provider().then(() => null, () => '@ai-sdk/openai is not installed; run npm ci in bench/repair.'); },
-  async runAttempt({ box, system, prompt, failing, model, gateway, limits, signal, log }): Promise<AttemptOutcome> {
-    const result = await runAttempt({ model: await responsesModel(model.id, gateway), box, instructions: system, prompt, signal, failing, steps: limits.steps, timeoutMs: limits.timeMs, budget: limits.cost });
+  async runAttempt({ box, system, prompt, failing, base, model, gateway, limits, signal, log }): Promise<AttemptOutcome> {
+    const result = await runAttempt({ model: await responsesModel(model.id, gateway), box, instructions: system, prompt, signal, failing, base, steps: limits.steps, timeoutMs: limits.timeMs, budget: limits.cost });
     log({ type: 'attempt', end: result.end, steps: result.steps, inputTokens: result.inputTokens, outputTokens: result.outputTokens, reproduced: result.reproduced, ...(result.refusal ? { refusal: result.refusal } : {}) });
     return { reason: result.end, steps: result.steps, summary: result.summary, reproduced: result.reproduced, ...(result.error ? { error: result.error } : {}) };
   },

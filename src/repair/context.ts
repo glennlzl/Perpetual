@@ -106,7 +106,15 @@ export function attemptPrompt({ repair, workflows, digest, number, total, feedba
 
 export const pullRequestTitle = (repair: Pick<Repair, 'sha'>, workflows: readonly FailedWorkflow[]) =>
   inline(`Fix the failed ${[...new Set(workflows.map(workflow => workflow.name))].slice(0, 3).join(', ') || 'CI'} build at ${short(repair.sha)}`, 200);
-export const commitMessage = (title: string, summary: string) => `${redact(title)}\n\n${clip(redact(summary).trim(), 2000)}`.trim();
+// The model's summary is quoted in a commit, never acted on: GitHub reads #123, owner/repo#123, GH-123 and an issue or
+// pull request's URL as references that link or close issues, and @name as a mention, so a word joiner keeps each from
+// its number or name; and the summary is never the last paragraph, where git and GitHub read trailers such as
+// Co-authored-by.
+const inert = (text: string) => text.replace(/([#@])(?=[\w-])|(\bGH-|\/(?:issues|pull)\/)(?=\d)/gi, '$1$2⁠');
+export const commitMessage = (title: string, summary: string) => {
+  const body = clip(inert(redact(summary).trim()), 2000);
+  return body ? `${redact(title)}\n\n${body}\n\nPerpetual build repair.` : redact(title);
+};
 
 /** The pull request's body: the failure, its diagnosis, the change, holds, attempts with their models and cost; redacted. */
 export function pullRequestBody({ repair, workflows, summary, attempts, holds, check, spent }: {
@@ -120,13 +128,15 @@ export function pullRequestBody({ repair, workflows, summary, attempts, holds, c
   const log = workflows.map(workflow => workflow.failure?.log).find(Boolean);
   if (log) lines.push('', fence(clip(redact(log).split('\n').slice(0, 40).join('\n'), 3000)));
   lines.push('', '### Change');
+  // The model's summary is fenced as the log is, so mentions, issue references and closing keywords in it are inert.
   const safeSummary = redact(summary).trim();
-  if (safeSummary) lines.push(...clip(safeSummary, 3000).split('\n').map(line => `> ${line}`), '');
+  if (safeSummary) lines.push(fence(clip(safeSummary, 3000)), '');
   if (check) lines.push(`${check.paths.length} ${check.paths.length === 1 ? 'file' : 'files'}, +${check.added} −${check.removed}`, ...check.paths.slice(0, 30).map(path => `- \`${inline(path, 300)}\``));
   if (holds.length) lines.push('', `Held for a person: ${holds.map(hold => inline(hold, 300)).join(' ')}`);
   lines.push('', '### Attempts', '', '| # | Model | Result | Tokens | Cost |', '| - | - | - | - | - |');
+  // A failure can name paths the model chose, so it is code: mentions, issue references and closing keywords stay inert.
   for (const attempt of attempts) {
-    const result = attempt.failure ? inline(attempt.failure, 200).replace(/\|/g, '\\|') : attempt.completedAt ? 'Pushed' : 'Running';
+    const result = attempt.failure ? `\`${inline(attempt.failure, 200).replace(/\|/g, '\\|')}\`` : attempt.completedAt ? 'Pushed' : 'Running';
     lines.push(`| ${attempt.number} | \`${inline(attempt.model, 100)}\` | ${result} | ${(attempt.inputTokens ?? 0) + (attempt.outputTokens ?? 0)} | $${(attempt.cost ?? 0).toFixed(4)} |`);
   }
   lines.push('', `Total cost: $${spent.toFixed(4)}`);

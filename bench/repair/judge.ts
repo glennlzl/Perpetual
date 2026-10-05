@@ -74,6 +74,17 @@ async function read(box: BenchBox, argv: string[]) {
   const result = await box.exec(argv, { timeoutMs: 60_000, limit: 16 * 1024 * 1024 });
   return result.exitCode === 0 ? result.stdout : null;
 }
+/** What the judge cannot judge without: a read that failed, timed out or was cut off is a runner error, never an empty change. */
+export async function readWhole(box: Pick<BenchBox, 'exec'>, argv: string[], what: string) {
+  const result = await box.exec(argv, { timeoutMs: 60_000, limit: 16 * 1024 * 1024 });
+  if (result.exitCode !== 0 || result.timedOut || result.truncated) throw new Error(`The judge could not read ${what}.`);
+  return result.stdout;
+}
+/** A file as the commit holds it, or null when the commit has none: a listing that names nothing, never a failed read. */
+export async function readAtCommit(box: Pick<BenchBox, 'exec'>, sha: string, path: string) {
+  const listed = await readWhole(box, ['git', 'ls-tree', '--name-only', sha, '--', path], path);
+  return listed.trim() ? readWhole(box, ['git', 'show', `${sha}:${path}`], path) : null;
+}
 
 /** Judges a change to the case in a new box from snapshot at sha. */
 export async function judge({ c, snapshot, sha, diff, image, steps, root, signal, onScope }: {
@@ -85,13 +96,14 @@ export async function judge({ c, snapshot, sha, diff, image, steps, root, signal
   try {
     const applied = await box.exec(['sh', '-c', 'base64 -d > /tmp/change.diff && git apply --binary --whitespace=nowarn /tmp/change.diff'], { stdin: diff.toString('base64'), timeoutMs: 120_000 });
     if (applied.exitCode !== 0) return empty('patch', `The change does not apply: ${(applied.stdout + applied.stderr).trim().split('\n')[0] ?? ''}`.slice(0, 500), started);
-    const paths = (await read(box, ['sh', '-c', STAGED, 'sh', sha, 'paths']) ?? '').split('\0').filter(Boolean);
-    const text = await read(box, ['sh', '-c', STAGED, 'sh', sha, 'text']) ?? '';
+    const paths = (await readWhole(box, ['sh', '-c', STAGED, 'sh', sha, 'paths'], 'what git staged')).split('\0').filter(Boolean);
+    const text = await readWhole(box, ['sh', '-c', STAGED, 'sh', sha, 'text'], 'what git staged');
     const rules = changeRules(diff.toString('utf8'), { paths, text });
     // npm configuration can rewrite how scripts run (node-options, script-shell), so changing it counts as changing them.
     const scripts = paths.filter(path => /(?:^|\/)\.npmrc$/.test(path));
     for (const path of paths.filter(path => path === 'package.json' || path.endsWith('/package.json'))) {
-      if (scriptsChanged(await read(box, ['git', 'show', `${sha}:${path}`]), await read(box, ['cat', '--', path]))) scripts.push(path);
+      // A manifest absent at the commit was added; one there is read whole, so a failed read never passes for added.
+      if (scriptsChanged(await readAtCommit(box, sha, path), await read(box, ['cat', '--', path]))) scripts.push(path);
     }
     const files = new Map<string, string | null>();
     for (const guard of c.meta.guards) if (!files.has(guard.file)) files.set(guard.file, await read(box, ['cat', '--', guard.file]));

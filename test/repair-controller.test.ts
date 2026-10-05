@@ -280,7 +280,7 @@ test('without a Sandbox stage, a pull request that passed CI is squash-merged at
   assert.deepEqual(change(merged.view)?.steps.at(-1), { id: 'merge', name: 'Merge', status: 'done', detail: ['Merged ', { text: '#7', href: 'https://github.com/owner/app/pull/7' }, ' into ', { text: 'main' }, ' as ', { text: MERGED.slice(0, 7) }] });
   assert.ok(c.github.calls.some(args => args.join(' ') === 'pr ready 7 --repo owner/app'), 'CI passing readies the pull request first.');
   const merge = c.github.calls.find(args => args.includes('repos/owner/app/pulls/7/merge'))!;
-  assert.deepEqual(merge.slice(merge.indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${head}`, '-f', `commit_title=Fix the failed CI build at ${c.sha.slice(0, 7)} (#7)`]);
+  assert.deepEqual(merge.slice(merge.indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${head}`, '-f', `commit_title=Fix the failed CI build at ${c.sha.slice(0, 7)} (#7)`, '-f', 'commit_message=Merged by Perpetual.']);
   assert.ok(c.github.calls.some(args => args.includes(`repos/owner/app/compare/${c.sha}...${head}?per_page=1`)), 'The head is compared with main as GitHub has it.');
   assert.deepEqual([(await c.saved()).merged, c.github.statuses], [MERGED, []], 'No gate ran or reported.');
 });
@@ -290,7 +290,7 @@ test('a Sandbox stage without reviewed journeys holds the fix at ready, reports 
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
   const ready = await c.finished('ready');
   const head = c.github.commits[0];
-  assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.steps.at(-1)?.status], ['Beta needs release: No reviewed journeys.', 'needs-review', 'waiting']);
+  assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.steps.slice(3).map(step => step.status)], ['Beta needs release: No reviewed journeys.', 'needs-review', ['waiting', 'pending']], 'A gate that needs release verified nothing.');
   assert.equal(c.github.calls.some(args => args.includes('repos/owner/app/pulls/7/merge')), false, 'A stage without reviewed journeys never merges by itself.');
   const stored = await c.saved();
   assert.deepEqual(stored.gates?.map(item => [item.stageId, item.sha, item.status]), [['beta', head, 'needs-release']]);

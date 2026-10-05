@@ -5,7 +5,7 @@
 import { posix } from 'node:path';
 import { jsonSchema, tool, type JSONSchema7 } from 'ai';
 import type { BoxResult, RepairBox } from './box.ts';
-import { redact } from '../redaction.ts';
+import { REDACTED, redact } from '../redaction.ts';
 
 export const LIMITS = {
   path: 1024, entries: 500, lines: 2000, readBytes: 64 * 1024, lineChars: 2000, matches: 100, matchChars: 300, pattern: 500, include: 200,
@@ -19,6 +19,10 @@ export interface ToolEvents { run?(command: string, exitCode: number): void; cha
 
 const refused = (error: string): Refusal => ({ ok: false, error });
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
+// The redaction marker stands in replies for text the tools hide, such as what follows a name like token or password;
+// copied into a file it would replace real code.
+const markers = (text: string) => text.split(REDACTED).length - 1;
+const MARKED = `${REDACTED} stands for text the tools hide, such as what follows a name like token or password, and is never code`;
 const oneLine = (value: unknown, limit = 200) => clip(redact(value).replace(/\s+/g, ' ').trim(), limit);
 const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
 /** Model-facing text only; internal paths, file edits and change validation keep their original bytes. */
@@ -165,8 +169,10 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.truncated) return refused(`${found.name} is over 1 MB; change it with run.`);
     if (result.stdout.includes('\0') || result.stdout.includes('�')) return refused(`${found.name} is not UTF-8 text; change it with run.`);
     const parts = result.stdout.split(before);
+    if (parts.length === 1 && before.includes(REDACTED)) return refused(`old was not found in ${found.name}: ${MARKED}. Anchor old on the text around it.`);
     if (parts.length === 1) return refused(`old was not found in ${found.name}; read the file and copy the text exactly, with its indentation.`);
     if (parts.length > 2) return refused(`old occurs ${parts.length - 1} times in ${found.name}; include more of the surrounding lines so it is unique.`);
+    if (markers(after) > markers(before)) return refused(`new adds ${REDACTED}: ${MARKED}. Keep the original text.`);
     return await write(found, parts.join(after)) ?? { ok: true, path: found.name };
   }
   async function create(input: unknown): Promise<Result> {
@@ -175,6 +181,10 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const found = await locate(field(input, 'path'));
     if (found.error !== undefined) return refused(found.error);
     if (found.full === root) return refused('Name a file to write.');
+    if (text.includes(REDACTED)) {
+      const current = await exec(['sh', '-c', '[ -f "$1" ] || exit 0; cat "$1"', 'sh', found.full], { limit: LIMITS.editBytes });
+      if (markers(text) > markers(current.stdout)) return refused(`text adds ${REDACTED}: ${MARKED}. Keep the original text: change the file with edit, anchored around it.`);
+    }
     return await write(found, text) ?? { ok: true, path: found.name };
   }
   async function run(input: unknown): Promise<Result> {

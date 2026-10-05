@@ -72,8 +72,11 @@ async function harness(t: TestContext, { holds = [] as string[], behind = [] as 
       return { sha: M };
     },
   };
+  // Each read of the clock moves it on 1 ms, so the checks' and the update's waits end after as many reads, however busy
+  // the machine running the test is.
+  let now = 0;
   const merger = createRepairMerge({
-    github, timing: { pollMs: 1, checksMs: 20, headMs: 20, ...timing },
+    github, timing: { pollMs: 1, checksMs: 20, headMs: 20, ...timing }, clock: () => now++,
     host: { async checkout(input) { calls.checkouts.push(input); await mkdir(input.directory, { recursive: true }); return input.directory; } },
     gates: {
       ...(stages === undefined ? {} : { repairStages: () => stages }),
@@ -102,7 +105,25 @@ test('a pull request whose gates passed at its head, with every check green and 
   assert.deepEqual(await readdir(h.directory), [], 'The checkout is removed once the gates are judged.');
   assert.deepEqual(h.calls.compares, [{ base: T, head: P }], 'The head is compared with the target branch as GitHub has it now.');
   assert.deepEqual(h.calls.merges, [{ number: 7, sha: P, title: 'Fix the failed CI build at bbbbbbb (#7)' }], 'The merge names the verified head.');
-  assert.deepEqual(h.reports, [{ status: 'verifying-gates' }, { gates: [{ gateId: 'gate-Beta-f', stageId: 'beta', sha: P, status: 'passed' }] }, { merged: M }]);
+  assert.deepEqual(h.reports, [{ status: 'verifying-gates' }, { gates: [{ gateId: 'gate-Beta-f', stageId: 'beta', sha: P, status: 'passed' }], verified: P }, { merged: M }]);
+});
+
+// The view's Verify step reads what was verified, never a guess from the gates or the draft.
+test('a head is recorded verified only once every gate passed there, and a head the update made is verified again', async t => {
+  const verified = (h: Awaited<ReturnType<typeof harness>>) => h.reports.flatMap(report => report.verified ? [report.verified] : []);
+  const failing = await harness(t, { gates: async request => [gate('Beta', request.sha as string, 'failed', { reason: 'A journey failed.' })] });
+  await failing.run();
+  assert.deepEqual(verified(failing), [], 'A gate that did not pass verifies nothing.');
+  const stopped = await harness(t, { stages: null });
+  assert.deepEqual([(await stopped.run()).reason, verified(stopped)], ['The active source changed.', []], 'Nor does a merge step that stopped before any gate ran.');
+  const unready = await harness(t, { stages: [], draft: true, ready: () => new Error('GitHub denied the pull request. Check write access to this repository.') });
+  assert.deepEqual([(await unready.run()).reason, verified(unready)], [UNREADY, [P]], 'Without a Sandbox stage CI verified the head, though GitHub keeps it a draft.');
+  const updated = await harness(t, { behind: [1], ci: sha => sha === U ? { status: 'failed', reason: 'The updated pull request failed CI: CI.' } : { status: 'passed' } });
+  await updated.run();
+  assert.deepEqual([verified(updated), updated.reports.at(-1)], [[P], { pushed: U }], 'The updated head that failed CI is pushed but never verified.');
+  const merged = await harness(t, { behind: [1, 0] });
+  await merged.run();
+  assert.deepEqual(verified(merged), [P, U]);
 });
 
 test('a repository without a Sandbox stage merges on CI alone, and a repair of a pipeline no longer active never does', async t => {
@@ -272,10 +293,21 @@ test('a gate budget that runs out while a gate is at work never merges without t
     },
   });
   t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
-  const h = await harness(t, { timing: { gatesMs: 100 }, stages: manager.repairStages(KEY), gates: async (request, signal) => { budget = signal; return (await manager.runRepair(request, signal)).gates; } });
+  // The budget outlasts admitting Beta's gate on a busy machine; Beta's run then waits for it to run out.
+  const h = await harness(t, { timing: { gatesMs: 2000 }, stages: manager.repairStages(KEY), gates: async (request, signal) => { budget = signal; return (await manager.runRepair(request, signal)).gates; } });
   assert.deepEqual(await h.run(), { status: 'ready', reason: 'The journey gates did not finish in 0 hours.' });
   assert.deepEqual([log, h.calls.checks, h.calls.merges], [['prepare beta', 'run beta'], [], []], 'Gamma never runs, and nothing is read or merged.');
   assert.deepEqual(h.reports.find(report => report.gates)?.gates?.map(item => [item.stageId, item.status]), [['beta', 'passed'], ['gamma', 'superseded']]);
+});
+
+test('the journey gates have one budget for every head an update makes them verify', async t => {
+  // The first head's gates run until the budget runs out and pass; the updated head's then start with none left.
+  const h = await harness(t, { behind: [1], timing: { gatesMs: 200 }, gates: async (request, signal) => {
+    if (request.sha === P) await new Promise(done => signal?.aborted ? done(null) : signal?.addEventListener('abort', done, { once: true }));
+    return [gate('Beta', request.sha as string, request.sha === P || !signal?.aborted ? 'passed' : 'superseded')];
+  } });
+  assert.deepEqual(await h.run(), { status: 'ready', reason: 'The journey gates did not finish in 0 hours.' });
+  assert.deepEqual([h.calls.gates.map(item => item.sha), h.calls.merges], [[P, U], []]);
 });
 
 test('a repair that stops while its gates run rejects, and its checkout is removed', async t => {
@@ -289,7 +321,7 @@ test('a pull request the agent step could not mark ready still goes through its 
   const h = await harness(t, { draft: true });
   assert.deepEqual(await h.run(), { status: 'merged', merged: M });
   assert.deepEqual([h.calls.gates.length, h.calls.readied], [1, [7]]);
-  assert.deepEqual(h.reports.slice(0, 3), [{ status: 'verifying-gates' }, { gates: [{ gateId: 'gate-Beta-f', stageId: 'beta', sha: P, status: 'passed' }] }, { pullRequest: { ...PULL, draft: false } }]);
+  assert.deepEqual(h.reports.slice(0, 3), [{ status: 'verifying-gates' }, { gates: [{ gateId: 'gate-Beta-f', stageId: 'beta', sha: P, status: 'passed' }], verified: P }, { pullRequest: { ...PULL, draft: false } }]);
   const refused = await harness(t, { draft: true, ready: () => new Error('GitHub denied the pull request. Check write access to this repository.') });
   assert.deepEqual(await refused.run(), { status: 'ready', reason: UNREADY });
   assert.deepEqual([refused.calls.gates.length, refused.calls.readied, refused.calls.checks, refused.calls.merges], [1, [7], [], []], 'Its gates ran and reported on the head, and a draft never merges.');

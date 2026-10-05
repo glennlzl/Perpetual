@@ -53,6 +53,7 @@ function commandFailure(error: unknown, operation: string, denied: string, refus
   const kind = githubFailureKind(error), status = githubHttpStatus(error) as keyof Refusals;
   if (kind === 'missing' || kind === 'rate-limit' || kind === 'unauthenticated') return new Error(GITHUB_MESSAGES[kind]);
   if (kind === 'timeout') return new Error(`${operation} timed out. Try again.`);
+  if (kind === 'too-large') return new Error(`${operation} returned more than Perpetual reads.`);
   if (refusals[status]) return Object.assign(new Error(refusals[status]), { refused: true, status });
   if (kind === 'not-found' || kind === 'denied') return Object.assign(new Error(denied), { refused: true });
   return new Error(`${operation} failed. Check your network connection and try again.`);
@@ -175,12 +176,16 @@ export function createRepairPullRequests({ run = exec }: { run?: CommandRunner }
       if (!isRecord(data) || typeof data.login !== 'string' || !Number.isSafeInteger(data.id)) throw new Error('GitHub returned an unreadable account.');
       return { login: data.login, id: data.id as number };
     },
-    /** The open pull request of a head branch, such as one a previous repair of the same commit left. */
-    async find({ repository, branch }: { repository: unknown; branch: unknown }) {
+    /**
+     * The open pull request of a head branch into base, such as one a previous repair of the same commit left; one a
+     * person opened or retargeted from the branch into another base is not the repair's.
+     */
+    async find({ repository, branch, base }: { repository: unknown; branch: unknown; base: string }) {
       const name = repositoryOf(repository);
       if (typeof branch !== 'string' || !REPAIR_BRANCH.test(branch)) throw new Error('A repair opens only its perpetual/repair branch.');
-      const data = json(await api(['--method', 'GET', `repos/${name}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${name.split('/')[0]}:${branch}`)}`], 'Reading pull requests'));
-      return Array.isArray(data) && data.length ? pullRequest(data[0]) : null;
+      const data = json(await api(['--method', 'GET', `repos/${name}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${name.split('/')[0]}:${branch}`)}&base=${encodeURIComponent(base)}`], 'Reading pull requests'));
+      const found = Array.isArray(data) ? data.find(item => isRecord(item) && isRecord(item.head) && item.head.ref === branch && isRecord(item.base) && item.base.ref === base) : undefined;
+      return found ? pullRequest(found) : null;
     },
     async create({ repository, base, branch, title, body }: { repository: unknown; base: string; branch: unknown; title: string; body: string }) {
       const name = repositoryOf(repository);
@@ -261,12 +266,17 @@ export function createRepairPullRequests({ run = exec }: { run?: CommandRunner }
     },
     /**
      * Squash-merges the pull request only while its head is still sha: GitHub refuses a head that moved (409). Returns the
-     * merge commit.
+     * merge commit. Its message is fixed, so no model text from the repair's commits or body reaches the target branch.
      */
     async merge({ repository, number, sha, title }: { repository: unknown; number: unknown; sha: unknown; title: string }) {
-      const data = json(await gh(run, ['api', '--hostname', 'github.com', '-H', 'Accept: application/vnd.github+json', '--method', 'PUT', `repos/${repositoryOf(repository)}/pulls/${pullNumber(number)}/merge`,
-        '-f', 'merge_method=squash', '-f', `sha=${shaOf(sha)}`, '-f', `commit_title=${plain(title, 250)}`], 'Merging the pull request', denied, undefined,
-      { 405: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.', 409: 'The pull request changed after verification.', 422: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.' }));
+      const name = repositoryOf(repository);
+      const data = json(await gh(run, ['api', '--hostname', 'github.com', '-H', 'Accept: application/vnd.github+json', '--method', 'PUT', `repos/${name}/pulls/${pullNumber(number)}/merge`,
+        '-f', 'merge_method=squash', '-f', `sha=${shaOf(sha)}`, '-f', `commit_title=${plain(title, 250)}`, '-f', 'commit_message=Merged by Perpetual.'], 'Merging the pull request', denied, undefined,
+      { 405: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.', 409: 'The pull request changed after verification.', 422: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.' }).catch(async (error: { status?: unknown }) => {
+        // GitHub answers 405 as well when the repository does not allow squash merging, which no review or check changes.
+        const settings = error.status === 405 ? await api(['--method', 'GET', `repos/${name}`], 'Reading the repository').then(json, () => null) : null;
+        throw isRecord(settings) && settings.allow_squash_merge === false ? Object.assign(new Error('This repository does not allow squash merging, which Perpetual merges with. Merge the pull request on GitHub.'), { refused: true, status: 405 }) : error;
+      }));
       const merged = isRecord(data) && data.merged === true ? readSha(data.sha) : null;
       if (!merged) throw new Error('GitHub did not merge the pull request.');
       return { sha: merged };

@@ -86,6 +86,7 @@ test('the host copy stages a case-only rename into its index, whatever the host 
   const host = createRepairHost({ dataDir: f.dataDir, run: (file, args, options) => exec(file, args, { ...options, env: { ...options.env, GIT_TRACE2_EVENT: trace } }) });
   await host.clone({ repair: { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair, directory });
   assert.equal(fixtureGit(directory, 'config', 'core.ignorecase'), 'false', 'The copy the box gets reads names with their case, as Linux does.');
+  await assert.rejects(stat(join(directory, '.git', 'logs')), { code: 'ENOENT' }, 'The copy the box gets keeps no reflog naming the host\'s user and hostname.');
   const rename = ['diff --git a/add.js b/add.js', 'deleted file mode 100644', '--- a/add.js', '+++ /dev/null', '@@ -1 +0,0 @@', '-module.exports = (a, b) => a - b;',
     'diff --git a/Add.js b/Add.js', 'new file mode 100644', '--- /dev/null', '+++ b/Add.js', '@@ -0,0 +1 @@', '+module.exports = (a, b) => a + b;', ''].join('\n');
   const staged = await host.stage({ directory, diff: Buffer.from(rename), base: f.sha });
@@ -131,6 +132,24 @@ test('what the host copy staged is returned as git\'s text diff, binary files in
   assert.deepEqual(checkChanges(diff.toString('utf8')).rejected, [], 'The binary patch hides the token from the diff text.');
   const staged = await host.stage({ directory, diff, base: f.sha });
   assert.deepEqual(checkChanges(staged.text).rejected, [REJECTED.credential]);
+});
+
+test('the host copy names each manifest whose checks the staged change changed, read from both of its versions', async t => {
+  const f = await copy(t);
+  const directory = join(f.dataDir, 'repairs', 'r1', 'clone');
+  const host = createRepairHost({ dataDir: f.dataDir });
+  await host.clone({ repair: { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair, directory });
+  const made = await hostBox(directory);
+  t.after(() => made.box.remove());
+  const manifest = (scripts: Record<string, string>, extra: object = {}) => JSON.stringify({ name: 'app', private: true, scripts, ...extra }, null, 2);
+  await writeFile(join(made.root, 'package.json'), manifest({ check: 'node check.js' }, { dependencies: { zod: '4.0.0' } }));
+  assert.deepEqual((await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha })).checks, [], 'A dependency is not a check.');
+  await writeFile(join(made.root, 'package.json'), manifest({ check: 'exit 0' }));
+  for (const folder of ['docs', 'web']) await mkdir(join(made.root, folder));
+  await writeFile(join(made.root, 'docs', 'package.json'), JSON.stringify({ name: 'docs', private: true, dependencies: { zod: '4.0.0' } }));
+  await writeFile(join(made.root, 'web', 'package.json'), manifest({ test: 'exit 0' }));
+  const staged = await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha });
+  assert.deepEqual([staged.paths, staged.checks], [['docs/package.json', 'package.json', 'web/package.json'], ['package.json', 'web/package.json']], 'An added manifest is read as a change from an empty one.');
 });
 
 // The pull request head's checkout for its journey gates: the host copy's worktree stays at the failing commit, so the

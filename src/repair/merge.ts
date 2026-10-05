@@ -89,6 +89,8 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
     const { repair, pullRequest, holds } = input, { repository } = repair, number = pullRequest.number;
     const ready = (reason: string): RepairOutcome => ({ status: 'ready', reason });
     let sha = input.sha.toLowerCase(), updates = 0, recorded: RepairGate[] = [], draft = pullRequest.draft === true;
+    // The journey gates have gatesMs in all, however many heads an update makes them verify.
+    const budget = AbortSignal.timeout(bounds.gatesMs);
     // Each Sandbox gate at the head, over a checkout of it that is removed once the gates no longer read it. A pipeline
     // without a Sandbox stage needs no checkout, and one that is no longer active runs no gate.
     async function gatesAt(head: string) {
@@ -99,7 +101,7 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
       try {
         const snapshot = await host.checkout({ directory, clone: input.clone, repository, branch: pullRequest.branch, sha: head, rootDirectory: repair.rootDirectory });
         signal.throwIfAborted();
-        return (await gates.runRepair({ key: repair.key, repair: repair.id, branch: pullRequest.branch, sha: head, snapshot }, AbortSignal.any([signal, AbortSignal.timeout(bounds.gatesMs)]))).gates;
+        return (await gates.runRepair({ key: repair.key, repair: repair.id, branch: pullRequest.branch, sha: head, snapshot }, AbortSignal.any([signal, budget]))).gates;
       } finally { await rm(directory, { recursive: true, force: true }).catch(() => {}); }
     }
     // The head's checks, read until none is pending or checksMs passed.
@@ -164,10 +166,11 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
         const judged = await gatesAt(sha);
         signal.throwIfAborted();
         recorded = [...recorded, ...judged.map(({ id, stageId, sha: head, status }) => ({ gateId: id, stageId, sha: head, status }))].slice(-24);
-        await input.report({ gates: recorded });
-        const unready = await readied();
         // Only a pass merges: a gate that needs release, a released one and a stage without reviewed journeys wait for a person.
         const open = judged.find(gate => gate.status !== 'passed');
+        // CI and every gate passed at the head, which verifies it; whatever stops the merge from here is the merge's.
+        await input.report({ gates: recorded, ...(open ? {} : { verified: sha }) });
+        const unready = await readied();
         if (open) {
           const stage = open.context.replace(/^perpetual\//, '');
           if (open.status === 'superseded') return ready(`The journey gates did not finish in ${Math.round(bounds.gatesMs / 3_600_000)} hours.`);

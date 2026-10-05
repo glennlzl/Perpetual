@@ -17,13 +17,14 @@ import { finalReason } from '../run.ts';
 const MODEL = { id: 'fake/coder', contextWindow: 200_000, maxOutput: 32_000, reasoning: true };
 async function setup(t: TestContext, replies: FakeReply[], { cap = 0.5 } = {}) {
   const source = await mkdtemp(join(tmpdir(), 'bench-aisdk-'));
-  await brokenRepository(source);
+  const sha = await brokenRepository(source);
   const made = await hostBox(source);
   const upstream = await createFakeUpstream({ script: (_body, index) => replies[index] ?? { text: 'Finished.' } });
   const gateway = await createGateway({ key: FAKE_KEY, budget: 5, upstream: upstream.url });
   t.after(async () => { await made.box.remove(); await gateway.stop(); await upstream.stop(); await rm(source, { recursive: true, force: true }); });
   const opened = await gateway.open({ attempt: 'aisdk', model: MODEL.id, cap, deadline: Date.now() + 60_000 });
-  const run = (limits = LIMITS) => adapter.runAttempt({ box: made.box as unknown as BenchBox, system: 'Fix it.', prompt: 'Repository acme/app. Fix the build.', failing: ['node check.js'], model: MODEL,
+  // The runner names the case's commit, as the product names the failing one.
+  const run = (limits = LIMITS) => adapter.runAttempt({ box: made.box as unknown as BenchBox, system: 'Fix it.', prompt: 'Repository acme/app. Fix the build.', failing: ['node check.js'], base: sha, model: MODEL,
     gateway: { baseUrl: gateway.url, token: opened!.token }, limits, signal: new AbortController().signal, scratch: source, log: () => {} });
   return { made, upstream, gateway, token: opened!.token, run };
 }
@@ -57,6 +58,15 @@ test('the product\'s loop reproduces, edits, verifies and ends at done through t
   assert.deepEqual([first.provider, first.usage], [{ data_collection: 'deny' }, { include: true }]);
   assert.deepEqual(first.tools.map(tool => tool.function.name).sort(), ['done', 'edit', 'grep', 'list', 'read', 'run', 'write']);
   assert.equal(first.messages[0].role, 'system');
+});
+
+// The arm measures the product's ending: a model that fixes the build through a command and stops with a message ends
+// done once the failing step passes in the box, as the product's attempt does.
+test('the product\'s loop counts a change made through run, and ends done once the failing step passes', async t => {
+  const f = await setup(t, [{ calls: [{ name: 'run', arguments: { command: 'sed -i.bak "s/a - b/a + b/" add.js && rm add.js.bak' } }], cost: 0.01 }]);
+  const outcome = await f.run();
+  assert.deepEqual([outcome.reason, outcome.summary], ['done', 'The model stopped without calling done; the failing step\'s own command then passed in the box.']);
+  assert.equal(await readFile(join(f.made.root, 'add.js'), 'utf8'), 'module.exports = (a, b) => a + b;\n');
 });
 
 test('the product\'s own cost stop ends the attempt at its cap, and a gateway refusal outranks the loop\'s own reason', async t => {

@@ -22,7 +22,7 @@ const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: 'p
 type HttpError = Error & { statusCode?: number };
 type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean> };
 const run = (id: string, sha: string, conclusion: string | null, { status = conclusion ? 'completed' : 'in_progress', attempt = 1, path = CI, branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, workflowId: '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+  ({ id, workflowId: path === LINT ? '8' : '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 // A failed run as the view names it.
 const shown = (id: string, path = CI) => ({ id, name: 'CI', path, url: `https://github.com/owner/app/actions/runs/${id}` });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -44,7 +44,7 @@ async function holdTerminalSave(t: TestContext, dataDir: string) {
   return { entered: entered.promise, release: release.resolve, restore() { saving.mock.restore(); syncBuiltinESMExports(); } };
 }
 async function until(check: () => unknown) {
-  for (let attempt = 0; attempt < 500; attempt++) { if (check()) return; await new Promise(done => setTimeout(done, 2)); }
+  for (let attempt = 0; attempt < 5000; attempt++) { if (check()) return; await new Promise(done => setTimeout(done, 2)); }
   throw new Error('The repair did not settle.');
 }
 
@@ -129,6 +129,15 @@ test('a head whose runs passed opens nothing and is not read again; runs without
   assert.deepEqual(h.manager.view().repairs, []);
   assert.deepEqual(h.calls.runs, [A, B], 'The baseline is read once, and the passing head once.');
   assert.equal(a.contexts.length, 0);
+});
+
+test('a head is judged by the latest run of each workflow, as Build admission reads it: a newer run that passed clears an older failure', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure'), run('3', B, 'success', { event: 'workflow_dispatch' })]);
+  await h.poll();
+  assert.deepEqual([h.manager.view().repairs, h.manager.view().head?.failed, a.contexts.length], [[], [], 0]);
+  await assert.rejects(h.manager.repair({ runId: '2' }), (error: HttpError) => error.statusCode === 409 && error.message === 'Choose a failed workflow run.');
 });
 
 test('configuration failures need a person with the reason, and never rerun or reach the agent', async t => {
@@ -460,6 +469,23 @@ test('a ready repair is superseded, and its pull request closed, only once a new
   assert.deepEqual(closed, [h.repair(B)?.id]);
 });
 
+// A docs-only commit can pass while the workflow that failed never ran at it, such as one with a paths filter.
+test('a newer passing head where the failed workflow did not run keeps the fix and its pull request open', async t => {
+  const closed: string[] = [];
+  const h = await harness(t, { steps: agent(async context => { await context.report({ pullRequest: PULL }); return { status: 'ready' }; }, { async close(repair) { closed.push(repair.id); } }).steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  h.github.head = C;
+  h.github.runs[C] = [run('3', C, 'success', { path: LINT })];
+  await h.poll();
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, closed], ['ready', []], 'Nothing showed the branch fixed.');
+  h.github.head = D;
+  h.github.runs[D] = [run('4', D, 'success'), run('5', D, 'success', { path: LINT })];
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, closed], ['superseded', [h.repair(B)?.id]], 'A head where it passed retires the fix.');
+});
+
 test('a ready repair whose pull request a person merged is recorded as merged once a newer head passes, never superseded', async t => {
   const h = await harness(t, { steps: agent(async context => { await context.report({ pullRequest: PULL }); return { status: 'ready' }; }, { async close() { return { state: 'merged', mergeCommit: E }; } }).steps });
   await h.failHead([run('2', B, 'failure')]);
@@ -513,6 +539,46 @@ test('one repair runs at a time: another source\'s failed head waits until the a
   await h.poll();
   assert.equal(h.repair(C)?.status, 'ready');
   assert.equal(a.contexts.length, 2);
+});
+
+test('switching the pipeline to another branch stops that branch\'s repair under way, and keeps its pull request', async t => {
+  const a = agent(async (context, signal) => { await context.report({ status: 'verifying-ci', pullRequest: PULL }); await aborted(signal); return { status: 'ready' }; });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'verifying-ci');
+  h.current.branch = 'dev';
+  await h.poll();
+  assert.deepEqual(h.manager.view().repairs, [], 'The repair of main is not shown for dev.');
+  h.current.branch = 'main';
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.pullRequest?.number], ['needs-person', 'Interrupted when the pipeline switched to dev.', 7]);
+  assert.equal(a.contexts.length, 1);
+});
+
+// Another root directory of the same repository is another pipeline, whose connection check still passes for the repair.
+test('switching the pipeline to another root directory of the repository stops the repair under way of the one it left', async t => {
+  const a = agent(async (context, signal) => { await context.report({ status: 'verifying-ci', pullRequest: PULL }); await aborted(signal); return { status: 'ready' }; });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'verifying-ci');
+  Object.assign(h.current, { key: 'github:owner/app:/web', rootDirectory: '/web' });
+  await h.poll();
+  Object.assign(h.current, { key: KEY, rootDirectory: '/' });
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.pullRequest?.number], ['needs-person', 'Interrupted when the pipeline switched to another source.', 7]);
+});
+
+// A rerun follows its own repository whatever the pipeline shows, but no agent starts for a branch nothing watches.
+test('a rerun of a branch the pipeline left that fails again needs a person, and never starts the agent', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.availability;
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.equal(h.repair(B)?.status, 'rerunning');
+  h.current.branch = 'dev';
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll();
+  h.current.branch = 'main';
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.runs.map(item => item.id), a.contexts.length], ['needs-person', 'Interrupted when the pipeline switched to dev.', ['2'], 0]);
 });
 
 test('a person repairs the failed baseline head, may start a finished repair again, and never a held one', async t => {
@@ -662,6 +728,63 @@ test('a controller start removes the directories of repairs that no longer run, 
   const h = await harness(t, { dataDir });
   assert.deepEqual((await readdir(join(dataDir, 'repairs'))).sort(), ['state.json']);
   assert.equal((await h.saved()).repairs[0].status, 'needs-person');
+});
+
+// Six workflows failing together, with full logs, over a long history once outgrew what a start reads back.
+test('finished repairs keep their failures in brief, and the state file stays within what a start reads back', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', log = `${LOGS.build}\n`.repeat(400);
+  const failure = { runId: '2', jobs: [{ id: 'job-2', name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log, tail: log, diagnosis: diagnoseFailure(LOGS.build), observedAt: at };
+  const record = (index: number, extra: object) => ({ id: `r${index}`, key: KEY, repository: 'owner/app', branch: 'main', sha: index.toString(16).padStart(40, '0'), login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: Array.from({ length: 20 }, (_, index) => record(index, { failures: Array.from({ length: 6 }, () => failure) })) }));
+  const h = await harness(t, { dataDir });
+  const saved = await h.saved();
+  assert.ok((await stat(join(dataDir, 'repairs', 'state.json'))).size < 1024 * 1024);
+  assert.deepEqual([saved.repairs.length, saved.repairs[0].failures?.length, saved.repairs[0].failures?.[0].log.length, saved.repairs[0].failures?.[0].diagnosis.category], [20, 5, 2000, 'build']);
+  await h.manager.close();
+  // Whatever else a record holds, the oldest finished repairs give way before the file outgrows half the read limit.
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: Array.from({ length: 40 }, (_, index) => record(index, { reason: 'x'.repeat(300_000) })) }));
+  const bounded = await harness(t, { dataDir });
+  const kept = (await bounded.saved()).repairs;
+  assert.ok((await stat(join(dataDir, 'repairs', 'state.json'))).size <= 8 * 1024 * 1024);
+  assert.deepEqual([kept.length < 40, kept[0].id], [true, 'r0'], 'The newest repairs stay.');
+});
+
+// Earlier controllers wrote the file without a bound, and a start that refused it kept the whole controller from starting.
+test('a start reads back a larger file an earlier controller wrote and trims it, keeping a merge and an open pull request longest', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', file = join(dataDir, 'repairs', 'state.json');
+  const failure = { runId: '2', jobs: [{ id: 'job-2', name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log: 'x'.repeat(20_000), tail: 'y'.repeat(12_000), diagnosis: diagnoseFailure(LOGS.build), observedAt: at };
+  const record = (index: number, extra: object) => ({ id: `r${index}`, key: KEY, repository: 'owner/app', branch: 'main', sha: index.toString(16).padStart(40, '0'), login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  await writeFile(file, JSON.stringify({ version: 1, repairs: Array.from({ length: 100 }, (_, index) => record(index, { failures: Array.from({ length: 6 }, () => failure) })) }));
+  assert.ok((await stat(file)).size > 16 * 1024 * 1024);
+  const legacy = await harness(t, { dataDir });
+  assert.deepEqual([(await legacy.saved()).repairs.length, (await stat(file)).size < 8 * 1024 * 1024], [100, true]);
+  await legacy.manager.close();
+  const reason = 'x'.repeat(300_000), closedPull = { ...PULL, number: 8, url: 'https://github.com/owner/app/pull/8', closed: true };
+  await writeFile(file, JSON.stringify({ version: 1, repairs: Array.from({ length: 40 }, (_, index) => record(index, { reason,
+    ...(index === 39 ? { status: 'merged', merged: C } : index === 38 ? { pullRequest: PULL } : index === 37 ? { pullRequest: closedPull } : {}) })) }));
+  const bounded = await harness(t, { dataDir });
+  const kept = (await bounded.saved()).repairs.map(item => item.id);
+  assert.deepEqual([kept[0], kept.includes('r39'), kept.includes('r38'), kept.includes('r37'), kept.length < 40], ['r0', true, true, false, true], 'The loop guard\'s merge and open pull request outlast older repairs.');
+});
+
+test('the newest hundred repairs of each pipeline are kept, so a busy pipeline never drops another\'s merge', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z', OTHER = 'github:owner/other:/';
+  const record = (id: string, key: string, repository: string, sha: string, extra: object = {}) => ({ id, key, repository, branch: 'main', sha, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'failed', runs: [], createdAt: at, updatedAt: at, ...extra });
+  const others = Array.from({ length: 100 }, (_, index) => record(`o${index}`, OTHER, 'owner/other', (index + 1).toString(16).padStart(40, '0')));
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [...others, record('merged', KEY, 'owner/app', B, { status: 'merged', merged: C, pullRequest: PULL })] }));
+  const h = await harness(t, { dataDir, steps: agent().steps });
+  Object.assign(h.current, { key: OTHER, repository: 'owner/other' });
+  h.github.connection = { login: 'developer', repository: 'owner/other' };
+  await h.failHead([run('2', D, 'failure')], D);
+  await h.manager.idle();
+  const saved = (await h.saved()).repairs;
+  assert.deepEqual([saved.filter(item => item.key === OTHER).length, saved.filter(item => item.key === OTHER).at(-1)?.id, saved.some(item => item.id === 'merged')], [100, 'o98', true]);
 });
 
 test('a saved repair that is not a complete record makes the state unsupported, never a later TypeError', async t => {
@@ -1034,6 +1157,25 @@ test('the merge step records verifying-gates, the gates it ran and the merge com
   assert.deepEqual([empty.repair(B)?.status, empty.repair(B)?.reason], ['needs-person', 'The repair ended without a result.']);
 });
 
+test('a ready repair shows its head verified only while that head, as Perpetual last pushed it, is the one CI and the gates passed', async t => {
+  for (const [name, reports, shown] of [
+    ['verified', [{ pushed: C }, { verified: C }], true],
+    ['updated after', [{ pushed: C }, { verified: C }, { pushed: D }], undefined],
+    ['never verified', [{ pushed: C }], undefined],
+  ] as const) {
+    await t.test(name, async t => {
+      const h = await harness(t, { steps: agent(async context => { for (const progress of reports) await context.report(progress); return { status: 'ready', reason: 'Auto-merge is off.' }; }).steps });
+      await h.failHead([run('2', B, 'failure')]);
+      await h.manager.idle();
+      assert.deepEqual([h.repair(B)?.status, h.repair(B)?.verified], ['ready', shown]);
+    });
+  }
+  const h = await harness(t, { steps: agent(async context => { await context.report({ verified: 'main' }); return { status: 'ready' }; }).steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason], ['needs-person', 'Invalid repair progress.']);
+});
+
 test('a new head never supersedes a fix verifying its gates at once; a newer head that passes retires it and closes its pull request', async t => {
   let stopped = false;
   const closed: number[] = [];
@@ -1384,9 +1526,74 @@ test('legacy merged history without its clone still recovers Docker ownership be
   const restarted = await harness(t, { dataDir: h.dataDir, steps: next.steps });
   restarted.manager.start(); await restarted.manager.idle();
   assert.deepEqual([recovered, next.contexts.length], [1, 0]);
-  assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.status, repair.merged, repair.cleanup]), [['merged', E, { status: 'failed', reason: 'Docker list failed' }]]);
+  assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.status, repair.merged, repair.cleanup]), [['merged', E, undefined]], 'The sweep\'s failure holds new repairs without marking history as owning what it may not.');
+  assert.match(restarted.manager.view().watchError ?? '', /cleanup must finish before another repair can start\. Docker list failed/);
   failed = false; await restarted.poll();
   assert.deepEqual([recovered, next.contexts.length, (await restarted.saved()).repairs[0].cleanup], [2, 0, undefined]);
+});
+
+// A machine without Docker: a repair that needed a person at triage, or whose agent step could not start, made no box.
+test('history that never made a box needs no Docker sweep at a start', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at };
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [
+    { ...base, id: 'triaged', sha: B, status: 'needs-person', reason: 'VERCEL_TOKEN is required', category: 'configuration' },
+    { ...base, id: 'unstarted', sha: C, status: 'needs-person', reason: 'Install Docker to repair builds.', category: 'build', startedAt: at },
+  ] }));
+  let recoveries = 0;
+  const h = await harness(t, { dataDir, steps: agent(undefined, { async recover() { recoveries++; throw new Error('Docker unavailable'); }, async cleanup() {} }).steps });
+  h.github.runs[A] = [run('1', A, 'failure')];
+  await h.poll();
+  assert.deepEqual([recoveries, h.manager.view().watchError, h.manager.view().head?.failed, (await h.saved()).repairs.map(repair => repair.cleanup)], [0, undefined, [shown('1')], [undefined, undefined]]);
+});
+
+test('a startup sweep that fails holds new repairs, while heads and pull requests are still followed', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'fixed', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [{ id: '2', name: 'CI', path: CI, attempt: 1, url: null }], pullRequest: PULL, createdAt: at, updatedAt: at }] }));
+  let failed = true;
+  const a = agent(undefined, { async recover() { if (failed) throw new Error('Docker unavailable'); }, async cleanup() {}, async state() { return { state: 'merged', mergeCommit: C }; } });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  h.github.head = C;
+  h.github.runs[C] = [run('3', C, 'failure')];
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.merged, h.calls.heads.length, h.manager.view().head?.failed], ['merged', C, 1, []], 'The head is read and a person\'s merge followed; no Repair is offered while the sweep holds.');
+  assert.match(h.manager.view().watchError ?? '', /cleanup must finish before another repair can start\. Docker unavailable/);
+  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409 && error.message === 'Repair cleanup must finish before another repair can start. Docker unavailable', 'A person reads the sweep\'s reason.');
+  failed = false;
+  await h.poll();
+  assert.deepEqual([h.manager.view().watchError, h.manager.view().head?.failed, a.contexts.length], [undefined, [shown('3')], 0]);
+});
+
+// A machine that once had Docker and no longer has it still triages and reruns its failures; only the agent needs Docker.
+test('while the startup sweep fails, triage and reruns go ahead, and a failure the agent would take needs a person with the sweep\'s reason', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'old', key: KEY, repository: 'owner/app', branch: 'main', sha: E, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'merged', merged: '9'.repeat(40), runs: [], createdAt: at, updatedAt: at }] }));
+  let failed = true;
+  const a = agent(undefined, { async recover() { if (failed) throw new Error('Docker unavailable'); }, async cleanup() {} });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category], ['needs-person', 'configuration'], 'Triage needs no Docker.');
+  h.github.logs['3'] = LOGS.availability;
+  await h.failHead([run('3', C, 'failure')], C);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(C)?.status, h.calls.reruns], ['rerunning', ['3']], 'Nor does a rerun.');
+  await h.failHead([run('4', D, 'failure')], D);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(D)?.status, h.repair(D)?.reason, h.repair(D)?.cleanup, a.contexts.length], ['needs-person', 'Repair cleanup must finish before another repair can start. Docker unavailable', undefined, 0], 'No agent starts before the sweep.');
+  failed = false;
+  await h.poll();
+  assert.deepEqual(h.manager.view().head?.failed, [shown('4')], 'Once the sweep succeeds, a person may repair it.');
+  await h.manager.repair({ runId: '4' });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(D)?.status, a.contexts.length], ['ready', 1]);
 });
 
 test('cleanup held by another source stays visible and withholds Repair until cleanup succeeds', async t => {

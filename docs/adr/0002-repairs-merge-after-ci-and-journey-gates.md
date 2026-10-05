@@ -10,7 +10,7 @@ Perpetual is meant to be a self-healing pipeline. When a build fails, an agent f
 
 A repair's pull request merges itself when all of these hold at the same head sha:
 
-- every CI check succeeded;
+- every CI check succeeded, a passing run of each workflow whose failure opened the repair among them (amended 2026-10-05);
 - every Sandbox journey gate *passed*;
 - the target branch has not moved since the verified base;
 - no change rule turned auto-merge off.
@@ -20,8 +20,9 @@ Auto-merge is on by default, as the Build stage's Autopilot mode `Autopilot`, an
 Guardrails:
 
 1. **Humans keep the judges.** The agent never changes what judges its fix.
-   - A diff touching tests, or larger than the size limit, is opened but not merged automatically.
+   - A diff touching tests, or the configuration and scripts that decide how CI tests, lints and type-checks the code (amended 2026-10-05), or larger than the size limit, is opened but not merged automatically.
    - A diff touching CI or deploy configuration is refused before it is pushed, because a pushed branch runs its own workflows with the repository's secrets (amended 2026-09-25).
+   - A diff that adds the redaction marker, which the agent's tools show in place of hidden text, is refused too, since it stands where real code was (amended 2026-10-05).
    - Checks still come only from reviewed cases (ADR 0001).
 2. **Only a pass merges.**
    - A released gate is a person's decision, so a person merges.

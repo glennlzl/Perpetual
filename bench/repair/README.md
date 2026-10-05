@@ -11,7 +11,7 @@ What every framework shares:
 
 The bench is a dev-only package with its own `package.json`, lockfile, `tsconfig.json` and `node_modules`. The product's dependencies, build and root `npm test` are untouched. It imports product modules from `../../src/repair/*.ts`, and their bare imports (`ai`, `@openrouter/ai-sdk-provider`, `yaml`, `jsonc-parser`) resolve from the root `node_modules`, as the product runs them.
 
-Eight adapters are registered, as [adapters/README.md](adapters/README.md) defines them: on OpenRouter, the baseline `aisdk` and `pi`, `opencode`, `miniswe` and `openai-agents`; on the OpenAI track, `aisdk-openai`, `agents-openai` and `codex`. Every adapter ran three paid rounds on 2026-09-25 ([reports](reports/README.md)).
+Eight adapters are registered, as [adapters/README.md](adapters/README.md) defines them: on OpenRouter, the baseline `aisdk` and `pi`, `opencode`, `miniswe` and `openai-agents`; on the OpenAI track, `aisdk-openai`, `agents-openai` and `codex`. Every adapter ran the first two paid rounds on 2026-09-25, and the third re-ran the two arms that use the product loop, `aisdk` and `aisdk-openai` ([reports](reports/README.md)).
 
 A run has one provider. OpenRouter is the default, as in the product. The OpenAI track (`--provider openai`) runs bare OpenAI model ids against OpenAI's API through the same gateway, which prices each request from [prices/openai.json](prices/openai.json), since OpenAI reports no dollars. Each adapter declares the providers it runs against and the wire API it speaks to each, and a run refuses the others.
 
@@ -73,7 +73,7 @@ node run.ts cleanup --out results/<run folder>     # only if a run was killed; r
 - Every file the bench writes is redacted with the product's `redact()` and then scrubbed of the key.
 - A key file whose `baseUrl` is not OpenRouter is refused.
 
-**Resuming.** Re-running with the same `--out` resumes: judged cells are skipped, and runner errors and budget-skipped cells are retried. A folder holds one provider's run; resuming it with the other provider is refused.
+**Resuming.** Re-running with the same `--out` resumes: judged cells are skipped, and runner errors and budget-skipped cells are retried. A folder holds one provider's run under one set of settings: resuming it with the other provider, or as a dry run of a paid one or the reverse, or with other limits, reasoning, `--provider-only` or prices of its models, is refused before any box or gateway starts.
 
 **Flags:**
 - `--provider openrouter|openai` (default openrouter)
@@ -116,7 +116,7 @@ For each (framework, model, case, seed), in an interleaved order (seed → case 
 
 1. **Case preparation**, once per run.
    - The snapshot is materialized as one commit, with a fixed identity and date, on `perpetual/repair/<short>`, as the product's host copy is.
-   - Its CI runs once in a throwaway box to capture the real failure.
+   - Its CI runs once in a throwaway box to capture the real failure. The capture must be the case's stated one, failing first at `meta.failingStep` with a log matching `expect.logRegex`, as the self-check requires: one that is not, such as a registry timeout or a CI that passes, is captured again once, then the case is left out of the run before any paid attempt, and such a capture is never kept for a resume.
    - That failure goes through the product's `getGitHubFailure` (fed by a fake `gh`), then `describeFailures`, `chooseImage`, `repositoryDigest`, and `attemptPrompt` (attempt 1 of 4, no feedback).
    - `cases/<case>/prompt.md` and `failure.json` are kept for audit.
 2. **Attempt.**
@@ -130,8 +130,8 @@ For each (framework, model, case, seed), in an interleaved order (seed → case 
    2. Run the product's change rules on the diff and again on what git stages, as the product checks a push:
       - a rejection fails with `rule`;
       - a test change fails with `test-changed`;
-      - a size hold is only recorded.
-   3. Check the universal guard: no `package.json` `scripts` changed, and no `.npmrc`, which can change how scripts run.
+      - a size hold, and one for check configuration, is only recorded.
+   3. Check the universal guard: no `package.json` `scripts` changed, and no `.npmrc`, which can change how scripts run. What git staged, whether the commit holds a staged `package.json` (`git ls-tree`, which lists nothing for one the change added) and the one it holds are read whole: a read that fails, times out or is cut off is a runner error, never an empty change or an added file.
    4. Check the case's guards.
    5. Add the holdout tests.
    6. Run the CI steps.
@@ -252,7 +252,7 @@ The first eight cases are round 1's. The other twelve were added for round 2, be
 | go-error-wrapping | acme/stockroom | `%v` wrapping breaks `errors.Is` two packages below the failing HTTP test | Test | test-regression | string matching (ci), Get only (ci), bare sentinels (ci), edit the handler test (test-changed) |
 | tz-calendar-dates | acme/stays | date bug that fails only under the job's `TZ` | Run npm test | test-regression | force UTC (ci), UTC getters only (ci), drop the job's TZ (rule), TZ in the test script (scripts) |
 | python-asyncio-single-flight | acme/rates | async race: concurrent loads of one currency not shared | Test | test-regression | global lock (ci), per-key lock (ci), sticky in-flight task (ci), edit the test (test-changed) |
-| config-merge-far-cause | acme/orders | a two-level config merge shows as missing tax six files away | Run npm test | test-regression | default tax rate (ci), copy into the test config (ci), tax in the handler (ci), edit the orders test (test-changed) |
+| config-merge-far-cause | acme/orders | a two-level config merge shows as missing tax six files away | Run npm test | test-regression | default tax rate (ci), copy into the test config (test-changed), tax in the handler (ci), edit the orders test (test-changed) |
 | npm-peer-eresolve | acme/dashboard | ERESOLVE peer conflict after a host library's major bump | Install | unknown | .npmrc legacy-peer-deps (scripts), downgrade charts (guard), overrides (ci), newest legend 1.x (ci), version only (ci), workflow flag (rule) |
 | paging-boundary-shift | acme/feed | the first plausible fix changes a shared helper and breaks its other callers | Run npm test | test-regression | 1-based helper (ci), helper and red callers (ci), edit the internal tests (test-changed), special-case page 1 (ci) |
 
@@ -262,7 +262,7 @@ The first eight cases are round 1's. The other twelve were added for round 2, be
 3. Its reference patch passes the judge.
 4. Every decoy fails for its stated reason.
 
-On this machine the eight round-1 cases pass the self-check in 20–30 s with a concurrency of 3. The twelve round-2 cases have not been self-checked: their failing steps, logs, diagnoses and verdicts are reasoned from their design, not measured, until round 2's first self-check. `golang:1.26-bookworm` and `python:3.13-bookworm` are not pulled here yet; `node run.ts setup` pulls them, as does the first box that needs one.
+All twenty cases passed the self-check before round 2 ([reports](reports/README.md)); on this machine the eight round-1 cases pass it in 20–30 s with a concurrency of 3. The part the product's change rules decide runs without Docker in `test/corpus.test.ts`: every reference patch passes them, and each decoy is rejected (`rule`) or held as a test change (`test-changed`) exactly when its meta says so, so a change to the rules that moves a verdict fails there first. `node run.ts setup` pulls the box images the corpus picks, `golang:1.26-bookworm` and `python:3.13-bookworm` included, as does the first box that needs one.
 
 ## OpenAI prices (prices/openai.json)
 
@@ -285,15 +285,15 @@ USD per 1M tokens at the Standard tier on the global endpoint, read from [the pr
 | Dependency | Version | License | Where |
 | --- | --- | --- | --- |
 | typescript | 7.0.2 | Apache-2.0 | bench devDependency (as the root) |
-| @types/node | 26.6.2 | MIT | bench devDependency (as the root) |
+| @types/node | 26.6.2 | MIT | bench devDependency; the root pins 24.19.0, so the bench type-checks the product modules against newer Node types |
 | yaml | 2.9.1 | ISC | bench dependency (as the root) |
 | jsonc-parser | 3.3.1 | MIT | bench dependency (as the root); reads JSONC tsconfig guards |
-| ai | 7.0.114 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline) |
+| ai | 7.0.114 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline), as the rounds ran it; the root now pins 7.0.116 |
 | @openrouter/ai-sdk-provider | 3.1.0 | Apache-2.0 | the product's, from the root node_modules (aisdk baseline) |
 | typescript (corpus) | 5.9.3 | Apache-2.0 | installed inside boxes by the three TypeScript cases |
 | @biomejs/biome (corpus) | 2.5.14 | MIT OR Apache-2.0 | installed inside boxes by `lint-real-bugs`, with its platform packages |
 | node:22-bookworm / node:22-bookworm-slim | Node 22.23.3, npm 10.9.9 | Docker official images | box, proxy and relay images |
-| python:3.13-bookworm / golang:1.26-bookworm | not pulled here yet | Docker official images | the Python and Go cases' box images |
+| python:3.13-bookworm / golang:1.26-bookworm | Python 3.13, Go 1.26 | Docker official images | the Python and Go cases' box images |
 
 The OpenAI track adds no dependency: the gateway, the price table and the fake OpenAI use Node's standard library only.
 
@@ -315,11 +315,11 @@ Each run removes its own boxes, even on Ctrl-C. Then:
 
 - **The relay's own network.** The relay sits on its own labelled uplink network instead of Docker's default bridge. That way no other container can reach its listener, and it is removed with the box.
 - **Scrubbing.** The gateway's IPC `scrub` replaces the key only. The product's `redact()` is applied by the bench string by string inside JSON (`safe.ts`), because redacting serialized JSON can swallow its closing quotes.
-- **Diagnoses.** `dep-major-bump` and `esm-cjs-mismatch` are diagnosed `test-regression`, not `unknown`. That is the product's real reading of Node's TAP output (`# fail 1`), pinned by the self-check. Four round-2 cases should read as `unknown`, since no product rule matches go vet's finding (`go-vet-and-test`), unittest's ImportError (`python-circular-import`), Biome's findings (`lint-real-bugs`) or npm's ERESOLVE (`npm-peer-eresolve`); triage sends `unknown` to repair. Round 2's first self-check will pin them.
+- **Diagnoses.** `dep-major-bump` and `esm-cjs-mismatch` are diagnosed `test-regression`, not `unknown`. That is the product's real reading of Node's TAP output (`# fail 1`), pinned by the self-check. Four round-2 cases read as `unknown`, since no product rule matches go vet's finding (`go-vet-and-test`), unittest's ImportError (`python-circular-import`), Biome's findings (`lint-real-bugs`) or npm's ERESOLVE (`npm-peer-eresolve`); triage sends `unknown` to repair. The self-check pins them.
 - **Node's diff output.** Node 22.23.3 prints a failed strict-equal of strings longer than 12 characters as a stacked `+ actual` / `- expected` diff, not `'a' !== 'b'`, so `workspace-money-units` and `tz-calendar-dates` match the diff's two lines rather than their designed pattern.
 - **Login shells keep the image's PATH.** Debian's `/etc/profile` resets `PATH` in a login shell, so `bash -l` finds no `go` in `golang:1.26-bookworm`. ci.ts and the product's run tool use a non-login bash, but miniswe's box command and codex's shell run `bash -lc`. So every bench box writes the image's own `PATH` to `/etc/profile.d/00-image-path.sh` when it starts (box.ts), and a login shell finds the same toolchain CI does, in every image.
 - **Stricter decoys.** The dependency revert in `lock-drift` fails a guard before CI. There are extra decoys: `esm-import-path` drops the alias, and `esm-cjs-mismatch` reads relative to the working directory.
-- **Runner errors.** A runner failure (a box or Docker) is recorded as `status: error` and the run goes on. Such attempts are not counted, and a resumed run retries them.
+- **Runner errors.** A runner failure (a box or Docker) is recorded as `status: error` and the run goes on, until five in a row stop it from starting more attempts: it writes its report, exits with an error and leaves the rest to a resumed run. Such attempts are not counted, and a resumed run retries them. One that fails after the model ran keeps what the gateway counted, its change and its request log, written as soon as each is known, and the report's spend counts every attempt's dollars, a runner error's and a retried one's included.
 - **Deferred.** `--transcripts` (request bodies) is not implemented yet. `setup` fetches no adapter binaries: opencode and codex fetch and verify theirs on a run's first `prepare()`, untimed, and miniswe syncs its uv environment in `available()`, which `setup` and every run call before any attempt.
 - **Linux engines.** On a Linux engine, `--gateway-host` must name an address the relay can reach. This is untested here, on Docker Desktop.
 - **The OpenAI track's body changes beyond `store`.** The contract passes OpenAI bodies through untouched except for `store: false`. The gateway also adds `reasoning.encrypted_content` to `include` beside that `store: false` (for reasoning models), because without it a replayed reasoning item fails once `store` is false; asks a streamed chat completion for its usage, without which no stream could be priced or capped; sets `service_tier: "default"`, because the table prices only the Standard tier and a project's default could otherwise double every price; and applies the reasoning policy to Responses requests, as it does on OpenRouter. It refuses hosted tools and unpriced models before forwarding.

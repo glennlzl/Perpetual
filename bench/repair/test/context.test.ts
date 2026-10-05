@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { BUDGET } from '../../../src/repair/agent.ts';
 import { INSTRUCTIONS, attemptPrompt, describeFailures, repositoryDigest } from '../../../src/repair/context.ts';
 import { captureFailure, workflowJob } from '../ci.ts';
-import { WORKFLOW, buildContext, imageFor } from '../context.ts';
+import { WORKFLOW, buildContext, captureProblems, imageFor } from '../context.ts';
 import { loadCases, materialize } from '../corpus.ts';
 
 test('every framework gets the product\'s prompt and instructions for the case', async t => {
@@ -27,4 +27,16 @@ test('every framework gets the product\'s prompt and instructions for the case',
   assert.equal(context.system, INSTRUCTIONS);
   assert.deepEqual(context.failing, ['npm run build']);
   assert.deepEqual([context.image, await imageFor(snapshot), context.failure.diagnosis.category], ['node:22-bookworm', 'node:22-bookworm', 'build']);
+});
+
+// A registry timeout while the capture installs, or a CI that passes, is not the case's failure, and would prompt every
+// framework's paid attempt with the wrong one.
+test('a capture is the case\'s stated failure only at its failing step, with its expected log', async () => {
+  const [c] = await loadCases(['ts-refactor-rename']);
+  const step = (name: string, exit: number, output = '') => ({ name, exit, ms: 1, timedOut: false, output });
+  const build = step('Build', 2, "src/format.ts(6,24): error TS2339: Property 'name' does not exist on type 'User'.\n");
+  assert.deepEqual([c.meta.failingStep, new RegExp(c.meta.expect.logRegex).test(build.output)], ['Build', true], 'The fixture capture is the case\'s.');
+  assert.deepEqual(captureProblems(c, [step('Run npm ci', 0), build]), []);
+  assert.deepEqual(captureProblems(c, [step('Run npm ci', 1, 'npm ERR! network request to https://registry.npmjs.org/typescript failed, reason: ETIMEDOUT\n')]), [`CI failed at Run npm ci, not Build.`, `The failed log does not match ${c.meta.expect.logRegex}.`]);
+  assert.deepEqual(captureProblems(c, [step('Run npm ci', 0), step('Build', 0)]), ['CI passed before any change.']);
 });

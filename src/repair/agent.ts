@@ -3,10 +3,11 @@
 // act only inside the box: two with the Settings model, then two with the escalation model, under a cost cap summed
 // from OpenRouter's reported usage. A finished attempt's diff meets the change rules, is committed on the host copy as
 // the connected account, pushed to perpetual/repair/<short sha> and opened as a draft pull request labelled
-// perpetual-repair; its CI decides: all runs passing readies the pull request and hands it to the merge step (the
-// journey gates at its head, then the merge) even when GitHub refuses to ready it, a failure becomes the next attempt's
-// input. An attempt reproduced the failure only when a failing step's own command failed before it changed a file. The
-// OpenRouter key reaches only the model provider, never the box, a command, a log or a report.
+// perpetual-repair; its CI decides: all runs passing, the workflows that failed among them, readies the pull request and
+// hands it to the merge step (the journey gates at its head, then the merge) even when GitHub refuses to ready it, a
+// failure becomes the next attempt's input. An attempt reproduced the failure only when a failing step's own command
+// failed before it changed a file. The OpenRouter key reaches only the model provider, never the box, a command, a log
+// or a report.
 import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -16,15 +17,15 @@ import { openrouterRefusal } from '../agents/opencode.ts';
 import { redact } from '../redaction.ts';
 import type { WorkflowRun } from '../github-runs.ts';
 import type { RepairBox, RepairBoxes } from './box.ts';
-import { checkChanges, pathRules, type ChangeCheck } from './changes.ts';
+import { HELD, checkChanges, pathRules, type ChangeCheck } from './changes.ts';
 import type { RepairHost } from './clone.ts';
 import { INSTRUCTIONS, attemptPrompt, chooseImage, commitMessage, describeFailures, pullRequestBody, pullRequestTitle, repositoryDigest, type FailedWorkflow } from './context.ts';
 import { repairBranch, type GitHubFailure, type PullRequestRead, type RepairPullRequests } from './github.ts';
-import type { Repair, RepairAttempt, RepairContext, RepairOutcome, RepairPullRequest } from './manager.ts';
+import type { Repair, RepairAttempt, RepairContext, RepairOutcome, RepairPullRequest, RepairRun } from './manager.ts';
 import { UNREADY, type CiVerdict, type RepairMerge } from './merge.ts';
 import { repairTools } from './tools.ts';
 import { failedRun, passedRun } from './triage.ts';
-import { reproduces } from './workflow.ts';
+import { fallbackImages, reproduces } from './workflow.ts';
 
 /** Attempts, the attempt after which the escalation model takes over, steps and time per attempt, and dollars per repair. */
 export const BUDGET = { attempts: 4, escalateAfter: 2, steps: 100, attemptMs: 15 * 60_000, cost: 2 };
@@ -35,6 +36,11 @@ export const BUDGET = { attempts: 4, escalateAfter: 2, steps: 100, attemptMs: 15
 export const CI = { pollMs: 30_000, noRunMs: 10 * 60_000, waitMs: 6 * 60 * 60_000, outageMs: 15 * 60_000 };
 export const LABEL = 'perpetual-repair';
 export const NO_CI = 'No workflow ran for the pull request.';
+/** Why a fix waits for a person when a workflow whose failure it fixes never passed at the pull request head. */
+export const unjudged = (runs: readonly Pick<RepairRun, 'name' | 'path'>[]) => {
+  const names = [...new Set(runs.map(run => run.name || run.path))].slice(0, 5);
+  return `The failed workflow${names.length === 1 ? '' : 's'} ${names.join(', ')} did not run for the pull request.`;
+};
 const DISCONNECTED = 'Connect GitHub to repair builds.', CHANGED = 'The GitHub connection changed. Start the repair again.';
 // A conversation that outgrew the model's context window, which OpenRouter answers with HTTP 400 like a request the
 // model rejects; the next attempt starts afresh.
@@ -81,6 +87,8 @@ const VERIFIED = 'The model stopped without calling done; the failing step\'s ow
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 /** A change the box or the host copy refused, such as one too large; the attempt fails with its message. */
 const rejected = (error: unknown) => isRecord(error) && error.rejected === true;
+/** Why the change rules refused a change, with where it added credential text (never the text) for the next attempt. */
+const refusal = (reasons: readonly string[], credentials: readonly string[]) => [...reasons, ...(credentials.length ? [`Found at ${credentials.slice(0, 5).join(', ')}.`] : [])].join(' ');
 const dollars = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 /**
  * The dollars OpenRouter reported for a step. A bring-your-own-key request's cost is only OpenRouter's fee; the
@@ -115,10 +123,11 @@ export const openrouterModels = ({ fetch }: { fetch?: typeof globalThis.fetch } 
  * OpenRouter refusal it maps to, if any. `failing` holds the failing steps' run scripts: the attempt reproduced the
  * failure when it ran one of their commands and saw it fail before changing a file. A model that stops calling tools
  * after changing files without calling done still ends done when every failing step (`checks`, by default `failing` in
- * the workspace) then passes in the box: weaker models often finish with a message instead of the done call.
+ * the workspace) then passes in the box: weaker models often finish with a message instead of the done call. Files a
+ * command changed, such as a lockfile an install rewrote, count once the box's diff against `base` shows them.
  */
-export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost }: {
-  model: LanguageModel; box: RepairBox; instructions?: string; prompt: string; signal: AbortSignal; failing?: readonly string[]; checks?: readonly FailingCheck[]; steps?: number; timeoutMs?: number; budget?: number;
+export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), base, steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost }: {
+  model: LanguageModel; box: RepairBox; instructions?: string; prompt: string; signal: AbortSignal; failing?: readonly string[]; checks?: readonly FailingCheck[]; base?: string; steps?: number; timeoutMs?: number; budget?: number;
 }): Promise<AttemptResult> {
   const timeout = AbortSignal.timeout(timeoutMs), stop = AbortSignal.any([signal, timeout, ...(box.signal ? [box.signal] : [])]), seen: StepResult<ToolSet>[] = [];
   let changed = false, reproduced = false;
@@ -145,6 +154,7 @@ export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prom
   }
   if (box.signal?.aborted) throw box.signal.reason;
   const end = seen.some(step => step.toolCalls.some(call => call.toolName === 'done')) ? 'done' : spentBy(seen) >= budget ? 'cost' : seen.length >= limit ? 'steps' : 'idle';
+  if (end === 'idle' && !changed && base && checks.length) changed = await box.diff(base).then(diff => diff.length > 0, () => true);
   if (end === 'idle' && changed && checks.length && await passes(box, checks, stop)) return result('done', { summary: VERIFIED, verified: true });
   if (box.signal?.aborted) throw box.signal.reason;
   return result(end);
@@ -179,10 +189,12 @@ export function createRepairAgent(options: RepairAgentOptions) {
     if (!connection) throw new Error(DISCONNECTED);
     if (another(repair, connection)) throw new Error(CHANGED);
   }
-  // The pull request's workflow runs at its head: all passing (or skipped, one passing) is a pass, any failure fails,
-  // and runs that end otherwise, such as cancelled, are neither. No run at all within noRunMs means none will come.
-  // A read that fails, or a connection that cannot be read, is tried again at the next poll: another account ends the
-  // wait at once, and GitHub unreadable for outageMs ends it with the last error.
+  // The pull request's workflow runs at its head: all passing (or skipped, one passing) is a pass once each workflow
+  // whose failure the repair fixes passed among them, any failure fails, and runs that end otherwise, such as cancelled,
+  // are neither. No run at all within noRunMs means none will come, and a failed workflow with no passing run by then did
+  // not run for the pull request, so nothing judged the fix by it. A read that fails, or a connection that cannot be
+  // read, is tried again at the next poll: another account ends the wait at once, and GitHub unreadable for outageMs
+  // ends it with the last error.
   async function verify(repair: Repair, sha: string, signal: AbortSignal, seen: (ids: string[]) => Promise<void>) {
     const started = clock(), known = new Set<string>();
     let read = started, missed: unknown = null;
@@ -205,8 +217,10 @@ export function createRepairAgent(options: RepairAgentOptions) {
       if (own.length && own.every(run => run.status === 'completed')) {
         const failed = own.filter(failedRun), other = own.find(run => !passedRun(run) && run.conclusion !== 'skipped');
         if (failed.length) return { status: 'failed' as const, runs: failed };
-        if (!other && own.some(passedRun)) return { status: 'passed' as const };
-        return { status: 'other' as const, conclusion: String(other?.conclusion ?? 'skipped').replaceAll('_', ' ') };
+        if (other || !own.some(passedRun)) return { status: 'other' as const, conclusion: String(other?.conclusion ?? 'skipped').replaceAll('_', ' ') };
+        const missing = repair.runs.filter(run => run.path && !own.some(item => item.path === run.path && passedRun(item)));
+        if (!missing.length) return { status: 'passed' as const };
+        if (clock() - started >= ci.noRunMs) return { status: 'missing' as const, runs: missing };
       }
       if (!own.length && clock() - started >= ci.noRunMs) return { status: 'none' as const };
       if (clock() - started >= ci.waitMs) throw new Error(`The pull request's workflow runs did not finish in ${Math.round(ci.waitMs / 3_600_000)} hours.`);
@@ -241,7 +255,8 @@ export function createRepairAgent(options: RepairAgentOptions) {
     signal.throwIfAborted();
     const original = await describeFailures(clone, repair.runs, repair.failures ?? []);
     let workflows: FailedWorkflow[] = original;
-    const box = await boxes.create({ id: repair.id, image: await chooseImage(clone, original), source: clone, signal });
+    const image = await chooseImage(clone, original);
+    const box = await boxes.create({ id: repair.id, image, fallbacks: fallbackImages(image), source: clone, signal });
     const digest = await repositoryDigest(clone), title = pullRequestTitle(repair, original);
     const body = () => pullRequestBody({ repair, workflows: original, summary, attempts, holds, check, spent });
     const record = async (ids: string[]) => { ciRuns = [...ciRuns, ...ids].slice(-100); await context.report({ ciRuns }); };
@@ -250,6 +265,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       const verdict = await verify(repair, head, stop, record);
       if (verdict.status === 'passed') return verdict;
       if (verdict.status === 'none') return { status: 'failed', reason: NO_CI };
+      if (verdict.status === 'missing') return { status: 'failed', reason: unjudged(verdict.runs) };
       if (verdict.status === 'other') return { status: 'failed', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` };
       return { status: 'failed', reason: `The updated pull request failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.` };
     };
@@ -260,7 +276,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       await context.report({ status: 'repairing', attempts });
       const result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
         signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
-        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
+        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), base: repair.sha, steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
       spent += result.cost;
       Object.assign(attempt, { completedAt: now(), reproduced: result.reproduced, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost });
       const fail = async (reason: string, next = reason) => { attempt.failure = reason; feedback = next; await context.report({ attempts }); };
@@ -270,25 +286,34 @@ export function createRepairAgent(options: RepairAgentOptions) {
       let diff: Buffer;
       try { diff = await box.diff(repair.sha); }
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
-      if (!diff.toString('utf8').trim()) { await fail('The attempt changed no file.'); continue; }
+      if (!diff.toString('utf8').trim()) {
+        // Done without a change is how the instructions have the model say the code cannot fix the failure, such as one
+        // whose cause is in CI configuration: a person reads why, rather than the next attempts paying to agree. A
+        // Settings model's verdict is first put to a distinct escalation model, once.
+        const verdict = Boolean(result.summary) && !result.verified;
+        await fail('The attempt changed no file.', verdict ? `The attempt changed no file and called done: ${result.summary}` : 'The attempt changed no file.');
+        if (!verdict) continue;
+        if (number <= budget.escalateAfter && models.escalationModel && models.escalationModel !== models.model) { number = budget.escalateAfter; continue; }
+        return await finish({ status: 'needs-person', reason: `The model changed no file: ${result.summary}` });
+      }
       const first = checkChanges(diff.toString('utf8'), { deployFiles });
-      if (first.rejected.length) { await fail(first.rejected.join(' ')); continue; }
-      // What git staged is checked again, whatever the box's diff said: its own paths, and its text diff with the
-      // content of files it treats as binary. Holds and the change's size stay the box diff's, where a binary file
-      // counts no lines.
-      let staged: { paths: string[]; text: string };
+      if (first.rejected.length) { await fail(refusal(first.rejected, first.credentials)); continue; }
+      // What git staged is checked again, whatever the box's diff said: its own paths, its text diff with the content
+      // of files it treats as binary, and the manifests whose checks it changed. The change's size is that text diff's
+      // too, since a file git treats as binary, by its content or its attributes, counts no lines in the box's diff.
+      let staged: { paths: string[]; text: string; checks: string[] };
       try { staged = await host.stage({ directory: clone, diff, base: repair.sha }); }
       catch (error) { if (rejected(error)) { await fail((error as Error).message); continue; } throw error; }
       const { paths } = staged, rules = pathRules(paths, deployFiles), checked = checkChanges(staged.text, { deployFiles });
       const refused = [...new Set([...rules.rejected, ...checked.rejected])];
-      if (refused.length) { await fail(refused.join(' ')); continue; }
+      if (refused.length) { await fail(refusal(refused, checked.credentials)); continue; }
       await connected(repair);
       const account = await pulls.account();
       if (account.login.toLowerCase() !== repair.login.toLowerCase()) throw new Error(CHANGED);
       const sha = await host.commit({ directory: clone, parent: pushed ?? repair.sha, message: commitMessage(title, summary), author: { name: account.login, email: `${account.id}+${account.login}@users.noreply.github.com` } });
       if (!sha) { await fail('The attempt made no change since the last push.'); continue; }
-      holds = [...new Set([...first.holds, ...rules.holds])];
-      check = { paths, added: first.added, removed: first.removed };
+      holds = [...new Set([...first.holds, ...rules.holds, ...checked.holds, ...(staged.checks.length ? [HELD.checks] : [])])];
+      check = { paths, added: checked.added, removed: checked.removed };
       signal.throwIfAborted();
       let lease = pushed;
       if (!lease) {
@@ -304,7 +329,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       pushed = sha;
       await context.report({ pushed: sha });
       if (!pullRequest) {
-        const existing = await pulls.find({ repository: repair.repository, branch });
+        const existing = await pulls.find({ repository: repair.repository, branch, base: repair.branch });
         signal.throwIfAborted();
         const opened = existing ?? await pulls.create({ repository: repair.repository, base: repair.branch, branch, title, body: body() });
         if (existing) await pulls.update({ repository: repair.repository, number: existing.number, body: body() });
@@ -317,13 +342,15 @@ export function createRepairAgent(options: RepairAgentOptions) {
         // A pull request GitHub refuses to mark ready still goes through the gates, and the merge step marks it ready.
         const number = pullRequest.number, readied = await connected(repair).then(() => pulls.ready({ repository: repair.repository, number })).then(() => true, () => false);
         if (readied) { pullRequest = { ...pullRequest, draft: false }; await context.report({ pullRequest }); }
-        if (!options.merge) return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY });
+        // Without a merge step, CI is all that verifies the head.
+        if (!options.merge) { await context.report({ verified: sha }); return await finish(readied ? { status: 'ready' } : { status: 'ready', reason: UNREADY }); }
         // The box has no more work; the gates rebuild twins meanwhile.
         await box.remove();
         return await finish(await options.merge.merge({ repair, pullRequest, sha, holds, directory: context.directory, clone, title,
           autoMerge: () => context.autoMerge(), report: progress => context.report(progress), ci }, signal));
       }
       if (verdict.status === 'none') return await finish({ status: 'ready', reason: NO_CI });
+      if (verdict.status === 'missing') return await finish({ status: 'ready', reason: unjudged(verdict.runs) });
       if (verdict.status === 'other') return await finish({ status: 'ready', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` });
       // A failed run whose log cannot be read is still named to the next attempt.
       const failures = await Promise.all(verdict.runs.slice(0, 5).map(run => github.failure({ repository: repair.repository, runId: run.id }).catch(() => null)));

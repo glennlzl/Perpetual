@@ -73,7 +73,7 @@ Major version updates will take the `ask` path even where the journey gate passe
 
 ## Data and routes
 
-`<data>/repairs/state.json` holds the repairs, each the client's change plus `key`, `branch`, `sha`, `login`, `trigger`, `attempts`, `holds`, `gates`, `pushed` and the pull request, and `autoMerge` per pipeline key, which the Build stage's mode reads and writes. The newest 100 repairs per pipeline are kept.
+`<data>/repairs/state.json` holds the repairs, each the client's change plus `key`, `branch`, `sha`, `login`, `trigger`, `attempts`, `holds`, `gates`, `pushed` and the pull request, and `autoMerge` per pipeline key, which the Build stage's mode reads and writes. The newest 100 repairs per pipeline are kept, and a finished repair keeps its failures in brief; a save that would pass 8 MB drops the oldest finished repairs that hold no cleanup, those with a merge or a pull request that may be open last, and a start reads back up to 128 MB, so an older controller's larger file loads and its first save trims it.
 
 - `GET /api/autopilot?repoPath=` returns the contract's `AutopilotView` (`contract/autopilot.ts`) for the active source, `409` otherwise; `GET /api/state` carries the same view as `autopilot`, and its presence is what enables the interface.
 - `POST /api/autopilot/mode` with `{ repoPath, stageId, mode }` saves the Build stage's mode, validated as `unknown`.

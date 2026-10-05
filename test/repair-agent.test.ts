@@ -26,8 +26,8 @@ const FIX: ScriptedStep[] = [
   { calls: [{ tool: 'run', input: { command: 'node check.js' } }], cost: 0.01 },
   { calls: [{ tool: 'done', input: { summary: 'add() subtracted; it adds now.' } }], cost: 0.01 },
 ];
-const run = (id: string, sha: string, conclusion: string | null, { branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, workflowId: '7', name: 'CI', path: '.github/workflows/ci.yml', event, status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+const run = (id: string, sha: string, conclusion: string | null, { branch = 'main', event = 'push', name = 'CI', path = '.github/workflows/ci.yml' } = {}): WorkflowRun =>
+  ({ id, workflowId: '7', name, path, event, status: conclusion ? 'completed' : 'in_progress', conclusion, attempt: 1, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 const failure = (runId: string, log = 'Error: add(2, 3) returned -1, expected 5') =>
   ({ runId, jobs: [{ id: `job-${runId}`, name: 'test', conclusion: 'failure', failedSteps: ['Check'] }], log, tail: log, diagnosis: diagnoseFailure(log), observedAt: '2026-09-25T10:00:00.000Z' });
 async function until(check: () => unknown, attempts = 2000) {
@@ -165,6 +165,20 @@ test('a pull request no workflow runs for is ready after the wait, and stays a d
   assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready], [NO_CI, true, []]);
 });
 
+// A workflow that runs only on pushes to the target branch never runs for the pull request, so another workflow's pass
+// judges nothing of the fix.
+test('a pull request where the workflow that failed did not run waits for a person, whatever else passed, and stays a draft', async t => {
+  let merges = 0;
+  const h = await harness(t, {
+    scripts: [FIX], noRunMs: 30, merge: { async merge() { merges += 1; return { status: 'merged', merged: C }; } },
+    ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request', name: 'Lint', path: '.github/workflows/lint.yml' })],
+  });
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready, merges], ['The failed workflow CI did not run for the pull request.', true, [], 0]);
+});
+
 test('a newer head supersedes the repair waiting for CI at once and removes its box; its pull request closes with a comment once a newer head passes', async t => {
   const h = await harness(t, { scripts: [FIX], ci: (_push, sha) => [run('101', sha, null, { event: 'pull_request' })] });
   await h.fail();
@@ -199,6 +213,27 @@ test('two attempts that end without a fix escalate to the escalation model', asy
   assert.match(h.prompts[2][0], /The model stopped without calling done\./, 'Why the previous attempt failed is the next one\'s input.');
 });
 
+// The instructions have the model call done and say why when the code cannot fix the failure. A weaker Settings model
+// may give up where the escalation model would not, so its verdict is put to that model once.
+test('an attempt that calls done without changing a file ends the repair with the model\'s explanation once the escalation model agrees', async t => {
+  const explain: ScriptedStep[] = [
+    { calls: [{ tool: 'run', input: { command: 'node check.js' } }] },
+    { calls: [{ tool: 'done', input: { summary: 'The workflow pins a Node version the code does not support; the fix is in .github/workflows/ci.yml, which a repair may not change.' } }] },
+  ];
+  const h = await harness(t, { scripts: [explain, explain, FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
+  await h.fail();
+  await until(() => h.repair()?.status === 'needs-person');
+  await h.manager.idle();
+  assert.equal(h.repair()?.reason, 'The model changed no file: The workflow pins a Node version the code does not support; the fix is in .github/workflows/ci.yml, which a repair may not change.');
+  assert.deepEqual([h.models, h.pushes, (await h.saved()).attempts?.map(attempt => [attempt.number, attempt.failure])], [[MODELS.model, MODELS.escalationModel], [], [[1, 'The attempt changed no file.'], [3, 'The attempt changed no file.']]], 'No later attempt pays to agree.');
+  assert.match(h.prompts[1][0], /The attempt changed no file and called done: The workflow pins a Node version/, 'The escalation model reads the verdict it is asked about.');
+  const fixed = await harness(t, { scripts: [explain, FIX], ci: (_push, sha) => [run('101', sha, 'success', { event: 'pull_request' })] });
+  await fixed.fail();
+  await until(() => fixed.repair()?.status === 'ready');
+  await fixed.manager.idle();
+  assert.deepEqual([fixed.models, fixed.pushes.map(push => push.files)], [[MODELS.model, MODELS.escalationModel], ['add.js']], 'An escalation model that finds a fix makes it.');
+});
+
 test('a change the rules reject is never pushed, and its reason goes back to the agent', async t => {
   const leak = [{ calls: [{ tool: 'write', input: { path: 'config.js', text: "module.exports = { token: 'ghp_abcdefghijklmnopqrstuvwxyz0123' };\n" } }] }, { calls: [{ tool: 'done', input: { summary: 'Added a token.' } }] }];
   const undo = { calls: [{ tool: 'run', input: { command: 'rm config.js' } }] };
@@ -207,8 +242,43 @@ test('a change the rules reject is never pushed, and its reason goes back to the
   await until(() => h.repair()?.status === 'ready');
   await h.manager.idle();
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js']);
-  assert.equal((await h.saved()).attempts?.[0].failure, REJECTED.credential);
-  assert.ok(h.prompts[1][0].includes('looks like a credential'));
+  assert.equal((await h.saved()).attempts?.[0].failure, `${REJECTED.credential} Found at config.js:1.`);
+  assert.ok(h.prompts[1][0].includes('looks like a credential') && h.prompts[1][0].includes('config.js:1'), 'The next attempt learns where, never the text.');
+});
+
+test('a change that weakens how CI checks the code reaches the merge step held for a person', async t => {
+  const seen: (readonly string[])[] = [];
+  const weaken: ScriptedStep[] = [
+    { calls: [{ tool: 'edit', input: { path: 'package.json', old: '"check": "node check.js"', new: '"check": "exit 0"' } }] },
+    { calls: [{ tool: 'done', input: { summary: 'The check passes now.' } }] },
+  ];
+  const h = await harness(t, {
+    scripts: [weaken], ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request' })],
+    merge: { async merge(input) { seen.push(input.holds); return { status: 'ready', reason: `Held for a person: ${input.holds.join(' ')}` }; } },
+  });
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual([seen, (await h.saved()).holds], [[[HELD.checks]], [HELD.checks]], 'The package script the failing step runs is a judge of the fix.');
+});
+
+// git attributes such as -diff make text files binary in the box's diff, where they count no lines.
+test('a change\'s size is read from what the host copy staged, so a file git treats as binary counts its lines', async t => {
+  const seen: (readonly string[])[] = [];
+  const values = Array.from({ length: 500 }, (_, index) => `exports.value${index} = ${index};`).join('\n');
+  const large: ScriptedStep[] = [
+    { calls: [{ tool: 'write', input: { path: '.gitattributes', text: '* -diff\n' } }, { tool: 'write', input: { path: 'values.js', text: `${values}\n` } }] },
+    { calls: [{ tool: 'done', input: { summary: 'Added the values.' } }] },
+  ];
+  const h = await harness(t, {
+    scripts: [large], ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request' })],
+    merge: { async merge(input) { seen.push(input.holds); return { status: 'ready', reason: `Held for a person: ${input.holds.join(' ')}` }; } },
+  });
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual(seen, [[HELD.size]]);
+  assert.match(h.records.created[0].body, /2 files, \+501 −0/);
 });
 
 test('a credential in a file git treats as binary is refused from what the host copy staged, and never pushed', async t => {
@@ -222,7 +292,7 @@ test('a credential in a file git treats as binary is refused from what the host 
   await until(() => h.repair()?.status === 'ready');
   await h.manager.idle();
   assert.deepEqual(h.pushes.map(push => push.files), ['add.js']);
-  assert.equal((await h.saved()).attempts?.[0].failure, REJECTED.credential);
+  assert.equal((await h.saved()).attempts?.[0].failure, `${REJECTED.credential} Found at deploy.env:1.`);
 });
 
 test('the cost cap ends the repair as failed and keeps its pull request a draft', async t => {

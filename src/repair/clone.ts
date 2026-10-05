@@ -6,11 +6,12 @@
 // since this copy's worktree stays at the failing commit.
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { SHA, isRepository } from '../github-cli.ts';
 import { cloneGitHubSourceCommit, commandEnvironment, gitArgs } from '../github-source.ts';
 import { TOO_LARGE } from './box.ts';
+import { MANIFESTS, manifestChecksChanged } from './changes.ts';
 import { REPAIR_BRANCH, pushRepairBranch, remoteRepairBranch, repairBranch, type CommandRunner } from './github.ts';
 import type { Repair } from './manager.ts';
 
@@ -18,10 +19,10 @@ export interface RepairHost {
   clone(input: { repair: Repair; directory: string }): Promise<void>;
   /**
    * Applies a diff against base, exactly as the box wrote it, to the copy's index; returns the changed paths as git names
-   * them and git's text diff of the staged change, binary files included, for the change rules. A staged change too
-   * large to read rejects with `rejected`.
+   * them, git's text diff of the staged change, binary files included, and the manifests whose checks it changed (such
+   * as package.json's scripts), for the change rules. A staged change too large to read rejects with `rejected`.
    */
-  stage(input: { directory: string; diff: Buffer; base: string }): Promise<{ paths: string[]; text: string }>;
+  stage(input: { directory: string; diff: Buffer; base: string }): Promise<{ paths: string[]; text: string; checks: string[] }>;
   /** Commits what stage left on top of parent; null when it equals parent. */
   commit(input: { directory: string; parent: string; message: string; author: { name: string; email: string } }): Promise<string | null>;
   remote(input: { directory: string; repository: string; branch: string; signal?: AbortSignal }): Promise<string | null>;
@@ -53,6 +54,9 @@ export function createRepairHost({ dataDir, run = exec }: { dataDir: string; run
       const source = { repository: repair.repository, branch: repair.branch, rootDirectory: repair.rootDirectory, checkoutPath: repair.checkoutPath, scanPath: join(repair.checkoutPath, ...root) };
       await cloneGitHubSourceCommit({ source, dataDir, sha: repair.sha, directory, branch: repairBranch(repair.sha) });
       await git(directory, ['config', 'core.ignorecase', 'false'], 'Could not prepare the repair copy.');
+      // The checkout's reflog names the host's user, login and hostname, which the box it is copied into never learns.
+      await git(directory, ['config', 'core.logAllRefUpdates', 'false'], 'Could not prepare the repair copy.');
+      await rm(join(directory, '.git', 'logs'), { recursive: true, force: true });
     },
     async stage({ directory, diff, base }) {
       if (!SHA.test(base)) throw new Error('Invalid base commit.');
@@ -61,10 +65,21 @@ export function createRepairHost({ dataDir, run = exec }: { dataDir: string; run
       await chmod(file, 0o600);
       await git(directory, ['read-tree', base], 'Could not reset the repair copy.');
       await git(directory, ['apply', '--cached', '--binary', '--whitespace=nowarn', '--', file], 'The change does not apply to the failing commit.');
-      const paths = (await git(directory, ['diff', '--cached', '--name-only', '-z', '--no-renames', base], 'Could not read the change.')).split('\0').filter(Boolean);
+      // Each changed path with its status: added (A), deleted (D) or changed.
+      const listed = (await git(directory, ['diff', '--cached', '--name-status', '-z', '--no-renames', base], 'Could not read the change.')).split('\0').filter(Boolean);
+      const statuses = new Map<string, string>();
+      for (let index = 0; index + 1 < listed.length; index += 2) statuses.set(listed[index + 1], listed[index]);
+      const paths = [...statuses.keys()];
       const text = await git(directory, ['diff', '--cached', '--text', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', base], 'Could not read the change.', {}, TEXT_LIMIT)
         .catch((error: { code?: unknown }) => { throw error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? Object.assign(new Error(TOO_LARGE), { rejected: true }) : error; });
-      return { paths, text };
+      // A changed manifest as the failing commit and the staged change hold it, null where it does not exist.
+      const blob = (object: string) => git(directory, ['cat-file', 'blob', object], 'Could not read the change.');
+      const checks: string[] = [];
+      for (const path of paths.filter(path => MANIFESTS.has(posix.basename(path)))) {
+        const status = statuses.get(path);
+        if (manifestChecksChanged(path, status === 'A' ? null : await blob(`${base}:${path}`), status === 'D' ? null : await blob(`:0:${path}`))) checks.push(path);
+      }
+      return { paths, text, checks };
     },
     async commit({ directory, parent, message, author }) {
       if (!SHA.test(parent)) throw new Error('Invalid parent commit.');

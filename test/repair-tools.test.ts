@@ -70,6 +70,20 @@ test('edit replaces text that occurs once, write creates folders, and both repor
   assert.deepEqual(f.events.changes, ['add.js', 'docs/notes/fix.md']);
 });
 
+// Redaction hides what follows a credential-like name, so a reply can show the marker where an expression is.
+test('edit and write explain the redaction marker, and never put it into a file in place of code', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'auth.js'), 'const token = getToken(user);\nmodule.exports = token;\n');
+  assert.match(String((await f.call('read', { path: 'auth.js' })).content), /const token = \[REDACTED\]/);
+  assert.match((await f.call('edit', { path: 'auth.js', old: 'const token = [REDACTED]', new: 'const token = await getToken(user)' })).error ?? '', /\[REDACTED\] stands for text the tools hide.*Anchor old on the text around it/);
+  assert.match((await f.call('edit', { path: 'auth.js', old: 'module.exports = token;', new: 'module.exports = [REDACTED];' })).error ?? '', /new adds \[REDACTED\]/);
+  assert.match((await f.call('write', { path: 'auth.js', text: 'const token = [REDACTED];\nmodule.exports = token;\n' })).error ?? '', /text adds \[REDACTED\]/);
+  assert.equal(await readFile(join(f.root, 'auth.js'), 'utf8'), 'const token = getToken(user);\nmodule.exports = token;\n');
+  assert.equal((await f.call('edit', { path: 'auth.js', old: 'getToken(user)', new: 'await getToken(user)' })).ok, true, 'An edit anchored around the hidden text works.');
+  await writeFile(join(f.root, 'mask.js'), "module.exports = () => '[REDACTED]';\n");
+  assert.equal((await f.call('write', { path: 'mask.js', text: "module.exports = value => value ? '[REDACTED]' : '';\n" })).ok, true, 'A marker the file already holds may stay.');
+});
+
 test('run returns the exit code, withholds incomplete output and stops at its time limit', async t => {
   const f = await tools(t);
   const failing = await f.call('run', { command: 'node check.js' });

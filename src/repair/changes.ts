@@ -1,11 +1,15 @@
 // Change rules a repair's diff meets before every push, without a model. A rejection fails the attempt and its reason
 // goes back to the agent; a hold is allowed but keeps the pull request for a person (phase 3 turns auto-merge off). CI
 // and deploy configuration are rejected, not held: a pushed branch runs its own workflows with the repository's secrets,
-// and deploy previews build from its configuration, before any person looks.
+// and deploy previews build from its configuration, before any person looks. What judges a fix (its tests, and the
+// configuration and scripts that decide how CI tests, lints and type-checks the code) is held: humans keep the judges.
 import { posix } from 'node:path';
-import { hasCredential } from '../redaction.ts';
+import { isDeepStrictEqual } from 'node:util';
+import { parse as parseToml } from 'smol-toml';
+import { REDACTED, hasCredential } from '../redaction.ts';
 
-export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[] }
+/** credentials names where credential text was added, as path:line of the new file, never the text. */
+export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[]; credentials: string[] }
 
 /** Changed lines beyond which a change is held for a person. */
 export const SIZE_LIMIT = 400;
@@ -14,13 +18,69 @@ export const REJECTED = {
   path: 'The change touches .git or a path outside the repository. Change files inside the repository only.',
   submodule: 'The change adds or moves a submodule. Change files inside the repository only.',
   delivery: 'The change touches CI or deployment configuration. A repair changes the code that fails, never how it is built or deployed.',
+  marker: `The change adds ${REDACTED}, which the tools show in place of hidden text and is never code. Keep the original text.`,
 };
 export const HELD = {
   tests: 'The change touches tests.',
+  checks: 'The change touches test, lint or type configuration, or the scripts that run them.',
   size: `The change is larger than ${SIZE_LIMIT} lines.`,
 };
-const TEST_FOLDERS = new Set(['test', 'tests', '__tests__', 'spec', '__snapshots__']);
-const TEST_FILE = /\.(?:test|spec)\.[^/]+$|_test\.(?:go|py)$|^test_[^/]*\.py$|_spec\.rb$/;
+// Tests in the usual layouts, folder names read without case: test/, Tests/, spec/, __tests__/, __snapshots__/,
+// __mocks__/, e2e/, cypress/, testdata/, androidTest/ or Acme.Tests/; files such as add.test.ts, login.cy.ts,
+// server_test.go, test_add.py, conftest.py or user_spec.rb; and PascalCase test projects and classes, such as
+// AcmeTests/, UserServiceTest.java, FooTests.cs or LoginSpec.scala.
+const TEST_FOLDER = /^(?:tests?|spec|__tests__|__snapshots__|__mocks__|__fixtures__|e2e|cypress|testdata|androidtest|testfixtures|.+[._-](?:tests?|specs?))$/i;
+const TEST_FILE = /[._-](?:tests?|specs?)\.[^/]+$|\.cy\.[^/]+$|\.snap$|^(?:tests?|conftest)\.[^/]+$|^test_[^/]+$/i;
+const TEST_NAME = /[a-z\d](?:Tests?|Specs?|IT)$/;
+// Configuration that decides how CI checks the code: test runners, linters, formatters, type checkers, coverage, npm's
+// own configuration (which can change how scripts run), the build files that declare how tests run, and the make files,
+// task runners and workspace files CI commands call.
+const CHECK_FILES = new Set([
+  'pytest.ini', 'tox.ini', 'noxfile.py', 'setup.cfg', 'mypy.ini', '.mypy.ini', 'pyrightconfig.json', 'ruff.toml', '.ruff.toml', '.flake8', '.pylintrc', 'pylintrc', '.coveragerc', '.pre-commit-config.yaml',
+  '.golangci.yml', '.golangci.yaml', '.golangci.toml', '.golangci.json', '.rubocop.yml', '.rspec', 'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'phpstan.neon', 'phpstan.neon.dist', 'psalm.xml',
+  'phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml', '.phpcs.xml.dist', '.php-cs-fixer.php', '.php-cs-fixer.dist.php', '.php_cs', '.php_cs.dist', '.editorconfig',
+  'clippy.toml', '.clippy.toml', 'rustfmt.toml', '.rustfmt.toml', '.swiftlint.yml', 'biome.json', 'biome.jsonc', '.eslintignore', '.prettierignore', 'codecov.yml', '.codecov.yml',
+  'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml', 'Directory.Build.props', 'Directory.Build.targets', 'CMakeLists.txt', 'deno.json', 'deno.jsonc',
+  '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', 'pnpm-workspace.yaml', 'turbo.json', 'nx.json', 'project.json', 'Makefile', 'makefile', 'GNUmakefile', 'justfile', 'Justfile',
+  'Taskfile.yml', 'Taskfile.yaml', 'Rakefile', 'rakefile', 'Rakefile.rb', 'rakefile.rb',
+]);
+// The same with any extension, such as jest.config.ts, .eslintrc.cjs or tsconfig.build.json, and Cargo's own
+// configuration, which sets the flags and aliases cargo test runs with.
+const CHECK_CONFIG = /^(?:(?:jest|vitest|vite|playwright|cypress|karma|ava|wdio|eslint|prettier|stylelint)\.config|vitest\.workspace|karma\.conf|[jt]sconfig|\.(?:eslintrc|prettierrc|stylelintrc|mocharc|nycrc|c8rc))(?:\.[\w-]+)*$/;
+const CHECK_PATH = /(?:^|\/)\.cargo\/config(?:\.toml)?$/;
+const isTest = (path: string) => {
+  const parts = path.split('/'), name = parts.pop() ?? '';
+  return parts.some(part => TEST_FOLDER.test(part) || TEST_NAME.test(part)) || TEST_FILE.test(name) || CODE.test(name) && TEST_NAME.test(name.replace(/\.[^.]*$/, ''));
+};
+const isCheckConfig = (path: string) => { const name = posix.basename(path); return CHECK_FILES.has(name) || CHECK_CONFIG.test(name) || CHECK_PATH.test(path); };
+// What a manifest says about how its package is checked, beside its dependencies: package.json's scripts, workspaces and
+// the check tools it configures, composer.json's and Pipfile's scripts, pyproject.toml's check tools and task runners,
+// and Cargo.toml's lints and test targets.
+const PYTHON_TOOLS = [['pytest'], ['mypy'], ['pyright'], ['basedpyright'], ['ruff'], ['black'], ['isort'], ['pylint'], ['flake8'], ['coverage'], ['tox'], ['nox'], ['poe'], ['taskipy'], ['hatch', 'envs'], ['pdm', 'scripts']];
+const MANIFEST_CHECKS = new Map<string, { parse(text: string): unknown; checks: string[][] }>([
+  ['package.json', { parse: JSON.parse, checks: [['scripts'], ['workspaces'], ['jest'], ['eslintConfig'], ['eslintIgnore'], ['prettier'], ['stylelint'], ['xo'], ['standard'], ['ava'], ['mocha'], ['nyc'], ['c8']] }],
+  ['composer.json', { parse: JSON.parse, checks: [['scripts']] }],
+  ['pyproject.toml', { parse: parseToml, checks: PYTHON_TOOLS.map(keys => ['tool', ...keys]) }],
+  ['Pipfile', { parse: parseToml, checks: [['scripts']] }],
+  ['Cargo.toml', { parse: parseToml, checks: [['lints'], ['workspace', 'lints'], ['lib', 'test'], ['lib', 'doctest'], ['lib', 'harness'], ['test'], ['bin']] }],
+]);
+/** The manifest names whose two versions manifestChecksChanged compares. */
+export const MANIFESTS: ReadonlySet<string> = new Set(MANIFEST_CHECKS.keys());
+const valueAt = (value: unknown, keys: readonly string[]) => keys.reduce<unknown>((item, key) => item !== null && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>)[key] : undefined, value);
+
+/**
+ * Whether a change of a manifest changed how its package is checked, from its text at the failing commit and after the
+ * change (null when absent there): a removed manifest did, an added one did when it says anything about checks, since
+ * tools read the closest one, and one that does not parse did.
+ */
+export function manifestChecksChanged(path: string, before: string | null, after: string | null) {
+  const manifest = MANIFEST_CHECKS.get(posix.basename(path));
+  if (!manifest || before === null && after === null) return false;
+  if (after === null) return true;
+  const read = (text: string): { value: unknown } | null => { try { return { value: manifest.parse(text) }; } catch { return null; } };
+  const old = before === null ? { value: {} } : read(before), now = read(after);
+  return !old || !now || manifest.checks.some(keys => !isDeepStrictEqual(valueAt(old.value, keys), valueAt(now.value, keys)));
+}
 // Source code, where an unquoted value is an expression rather than a literal.
 const CODE = /\.(?:[cm]?[jt]sx?|py|rb|go|java|kts?|scala|groovy|gradle|rs|php|cs|fs|swift|dart|exs?|erl|clj|lua|pl|r|jl|vue|svelte|c|h|cc|cpp|hpp|m|mm)$/i;
 
@@ -34,6 +94,8 @@ function unquote(value: string) {
     if (char === '"') break;
     if (char !== '\\') { bytes.push(...Buffer.from(char)); continue; }
     const next = value[index + 1];
+    // A quoted path cut off after its backslash, which git never writes, keeps the backslash.
+    if (next === undefined) { bytes.push(0x5c); break; }
     if (/[0-7]/.test(next)) { bytes.push(parseInt(value.slice(index + 1, index + 4), 8)); index += 3; }
     else { bytes.push(...Buffer.from(escapes[next] ?? next)); index += 1; }
   }
@@ -63,32 +125,35 @@ export function pathRules(paths: readonly string[], deployFiles: readonly string
   const rejected: string[] = [], holds: string[] = [], deploy = new Set(deployFiles);
   if (paths.some(path => !insideRepository(path))) rejected.push(REJECTED.path);
   if (paths.some(path => path.startsWith('.github/') || deploy.has(path))) rejected.push(REJECTED.delivery);
-  if (paths.some(path => path.split('/').slice(0, -1).some(part => TEST_FOLDERS.has(part)) || TEST_FILE.test(posix.basename(path)))) holds.push(HELD.tests);
+  if (paths.some(isTest)) holds.push(HELD.tests);
+  if (paths.some(isCheckConfig)) holds.push(HELD.checks);
   return { rejected, holds };
 }
 
 /**
- * The rules for a `git diff` with prefixes a/ and b/: its paths, changed lines, rejections and holds. A binary patch's
- * content is not read here; the host copy checks git's --text diff of what it staged, binary files included.
+ * The rules for a `git diff` with prefixes a/ and b/: its paths, changed lines, rejections and holds, and where it adds
+ * credential text. A binary patch's content is not read here; the host copy checks git's --text diff of what it staged,
+ * binary files included.
  */
 export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?: readonly string[] } = {}): ChangeCheck {
-  const paths = new Set<string>(), rejected = new Set<string>();
-  let added = 0, removed = 0, hunk = false, binary = false, code = false;
+  const paths = new Set<string>(), rejected = new Set<string>(), gone = new Set<string>(), adds: { text: string; code: boolean; at: string }[] = [];
+  let added = 0, removed = 0, hunk = false, binary = false, code = false, file = '', number = 0, marks = 0;
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       const named = headerPaths(line.slice(11));
-      hunk = false; binary = false; code = CODE.test(named.at(-1) ?? '');
+      hunk = false; binary = false; file = named.at(-1) ?? ''; code = CODE.test(file);
       named.forEach(path => paths.add(path));
       continue;
     }
     if (binary) continue;
     if (hunk) {
-      if (line.startsWith('+')) { added += 1; if (hasCredential(line.slice(1), { code })) rejected.add(REJECTED.credential); continue; }
-      if (line.startsWith('-')) { removed += 1; continue; }
-      if (line.startsWith(' ') || line.startsWith('\\') || line === '') continue;
+      if (line.startsWith('+')) { added += 1; marks += line.split(REDACTED).length - 1; adds.push({ text: line.slice(1), code, at: `${file}:${number}` }); number += 1; continue; }
+      if (line.startsWith('-')) { removed += 1; marks -= line.split(REDACTED).length - 1; gone.add(line.slice(1)); continue; }
+      if (line.startsWith(' ')) { number += 1; continue; }
+      if (line.startsWith('\\') || line === '') continue;
       hunk = false;
     }
-    if (line.startsWith('@@')) { hunk = true; continue; }
+    if (line.startsWith('@@')) { hunk = true; number = Number(/^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line)?.[1] ?? 0); continue; }
     if (line === 'GIT binary patch') { binary = true; continue; }
     const header = /^(?:---|\+\+\+) (.+)$/.exec(line) ?? /^(?:rename|copy) (?:from|to) (.+)$/.exec(line);
     if (header) {
@@ -98,8 +163,14 @@ export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?:
     }
     if (/^(?:new file mode|deleted file mode|old mode|new mode) 160000$|^index [\da-f]+\.\.[\da-f]+ 160000$/.test(line)) rejected.add(REJECTED.submodule);
   }
+  // Credential text is text the change adds: a line it also removes, as in a file it moves, was already there.
+  const credentials = adds.filter(item => !gone.has(item.text) && hasCredential(item.text, { code: item.code })).map(item => item.at);
+  if (credentials.length) rejected.add(REJECTED.credential);
+  // The redaction marker the agent's tools show in place of hidden text, copied into a file in place of code; a line
+  // that keeps a marker the file already held adds none.
+  if (marks > 0) rejected.add(REJECTED.marker);
   const listed = [...paths], rules = pathRules(listed, deployFiles);
   rules.rejected.forEach(reason => rejected.add(reason));
   const holds = [...rules.holds, ...(added + removed > SIZE_LIMIT ? [HELD.size] : [])];
-  return { paths: listed, added, removed, rejected: [...rejected], holds };
+  return { paths: listed, added, removed, rejected: [...rejected], holds, credentials: credentials.slice(0, 10) };
 }

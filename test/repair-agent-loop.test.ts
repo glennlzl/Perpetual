@@ -56,6 +56,18 @@ test('an attempt reproduced the failure only when the failing step\'s own comman
   assert.equal(unknown.reproduced, false, 'Without the failing step\'s command nothing can be compared.');
 });
 
+// Weaker models often finish with a message instead of calling done, and fixes made by a command count as well.
+test('a model that stops without calling done ends done once its change, made through run, passes the failing step in the box', async t => {
+  const f = await workspace(t);
+  const signal = new AbortController().signal, failing = ['node check.js'];
+  const viaRun = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'run', input: { command: 'sed -i.bak "s/a - b/a + b/" add.js && rm add.js.bak' } }] }, { text: 'Fixed.' }]), box: f.box, prompt: 'x', signal, failing, base: f.sha });
+  assert.deepEqual([viaRun.end, viaRun.verified, (await f.box.diff(f.sha)).toString('utf8').includes('+module.exports = (a, b) => a + b;')], ['done', true, true]);
+  const unchanged = await hostBox(f.source);
+  t.after(() => unchanged.box.remove());
+  const idle = await runAttempt({ model: scriptedModel([{ calls: [{ tool: 'run', input: { command: 'node check.js' } }] }, { text: 'It fails.' }]), box: unchanged.box, prompt: 'x', signal, failing, base: f.sha });
+  assert.deepEqual([idle.end, idle.verified], ['idle', undefined], 'Without a change nothing is verified.');
+});
+
 test('every request routes with data collection denied and usage accounting on', async t => {
   const f = await workspace(t);
   const calls: ModelCall[] = [];
@@ -224,8 +236,29 @@ test('repair commit and pull request text redact complete secrets before their f
 
 test('ordinary repair text still uses the existing commit and pull request bounds', () => {
   const summary = 'x'.repeat(4100);
-  assert.equal(commitMessage('Fix CI', summary), `Fix CI\n\n${'x'.repeat(2000)}…`);
+  assert.equal(commitMessage('Fix CI', summary), `Fix CI\n\n${'x'.repeat(2000)}…\n\nPerpetual build repair.`);
   const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
-  assert.ok(body.includes(`> ${'x'.repeat(3000)}…`));
+  assert.ok(body.includes(`\n${'x'.repeat(3000)}…\n`));
   assert.ok(!body.includes('x'.repeat(3001)));
+});
+
+// A summary the model wrote, or that a log or source file steered, never acts as the connected account on GitHub.
+test('the model\'s summary is fenced in the pull request, and neither references, mentions nor trailers in a commit', () => {
+  const summary = 'Fixes #42 for @acme/team, see acme/other#7.\nCo-authored-by: Someone <someone@example.com>';
+  const message = commitMessage('Fix CI', summary);
+  assert.doesNotMatch(message, /#\d|@[\w-]/, 'No issue reference or mention is left to link, close or notify.');
+  assert.equal(message.replaceAll('\u2060', ''), `Fix CI\n\n${summary}\n\nPerpetual build repair.`, 'The text reads as written.');
+  assert.match(message, /\n\nPerpetual build repair\.$/, 'The summary is never the last paragraph, where trailers are read.');
+  const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
+  assert.ok(body.includes(`\`\`\`\`\n${summary}\n\`\`\`\``), 'In the body it is quoted as code, where GitHub acts on none of it.');
+  const linked = commitMessage('Fix CI', 'Closes https://github.com/acme/app/issues/12 and GH-13, like https://github.com/acme/app/pull/14.');
+  assert.doesNotMatch(linked, /\/(?:issues|pull)\/\d|GH-\d/, 'An issue or pull request named by its URL or GH- number is not referenced either.');
+  assert.equal(linked.replaceAll('⁠', ''), 'Fix CI\n\nCloses https://github.com/acme/app/issues/12 and GH-13, like https://github.com/acme/app/pull/14.\n\nPerpetual build repair.');
+});
+
+// Where a change adds credential text is named by the paths the model chose, which reach the attempts table.
+test('an attempt\'s failure is code in the pull request\'s attempts table, so the paths it names neither mention nor close anything', () => {
+  const failure = 'The change adds text that looks like a credential. Remove it; a repair never adds secrets. Found at fixes #12.env:1, @acme/team.env:1.';
+  const body = pullRequestBody({ repair, workflows: [], summary: '', attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: '2026-09-25T10:00:00.000Z', completedAt: '2026-09-25T10:05:00.000Z', failure }], holds: [], check: null, spent: 0 });
+  assert.ok(body.includes(`| 1 | \`openai/gpt-6-luna\` | \`${failure}\` | 0 | $0.0000 |`), body);
 });
