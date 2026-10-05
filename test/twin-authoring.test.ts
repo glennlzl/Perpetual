@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { authorTwinConfig } from '../src/twin/authoring.ts';
 import type { AuthoringOptions } from '../src/twin/authoring.ts';
+import { evidenceText, repositoryFacts } from '../src/environments/evidence.ts';
 import { REDACTED } from '../src/redaction.ts';
 import { scriptedLoopHarness } from './fixtures/scripted-model.ts';
 
@@ -47,6 +48,23 @@ test('the author reads a redacted source copy and feedback while the application
   }
   assert.equal(observed[0].split('\n').length, source.split('\n').length, 'Evidence line numbers still locate source.');
   assert.match(observed[0], /export const port = process\.env\.PORT/);
+});
+
+test('the author reads EVIDENCE.md as the controller formatted it, credential-named variables with the lines that read them', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { start: 'node app.mjs' } }));
+  await writeFile(join(f.source, 'app.mjs'), 'const secret = process.env.SESSION_SECRET;\nconst key = process.env.INTERNAL_API_KEY;\n');
+  const draft = JSON.stringify({ apps: { web: { start: 'node app.mjs', port: 3000 } } });
+  const evidence = evidenceText(await repositoryFacts({ source: f.source, draft }), draft);
+  assert.match(evidence, /^- SESSION_SECRET: `app\.mjs:1`$/m);
+  assert.match(evidence, /^- INTERNAL_API_KEY: runtime, `app\.mjs:2`$/m);
+  let observed = '';
+  const result = await authorTwinConfig({ ...f.options, draft, evidence, harness: ({ cwd }) => {
+    observed = readFileSync(join(cwd, 'EVIDENCE.md'), 'utf8');
+    return rewriteDraft;
+  } }).promise;
+  assert.equal(result.text, draft);
+  assert.equal(observed, evidence);
 });
 
 test('a credential-bearing draft is refused before the author starts, preserving its text', async t => {

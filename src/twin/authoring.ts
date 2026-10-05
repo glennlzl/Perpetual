@@ -342,7 +342,8 @@ export function authorTwinConfig({ workspace, source, draft, evidence, facts, fe
       } });
     await redactSource(join(project, REPO), observation);
     await writeFile(join(project, INSTRUCTIONS), observation(twinInstructions(services)));
-    await writeFile(join(project, EVIDENCE), observation(evidence));
+    // The evidence quotes values it observed one by one: its own `NAME: file:line` lines are not credential assignments.
+    await writeFile(join(project, EVIDENCE), redact(hidden(evidence), { names: false }));
     if (feedback) await writeFile(join(project, FEEDBACK), observation(feedback));
     await writeFile(join(project, 'opencode.json'), `${JSON.stringify(authorConfig(model), null, 2)}\n`);
     await writeFile(join(project, CONFIG), draft, { mode: 0o600 });

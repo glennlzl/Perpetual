@@ -280,6 +280,8 @@ export interface LoopOptions {
 export async function authorLoop({ workspace, prompt, model, services = registry, secrets = [], signal, timeoutMs = TIME_LIMIT_MS, print = (line, stream) => { process[stream].write(`${line}\n`); } }: LoopOptions): Promise<number> {
   const hidden = secrets.filter(Boolean), hide = hideValues(hidden, { preserveLines: true });
   const protect = (value: unknown) => redact(hide(value));
+  // EVIDENCE.md quotes values the controller observed one by one: its own `NAME: file:line` lines are not credential assignments.
+  const protectEvidence = (value: unknown) => redact(hide(value), { names: false });
   const say = (line: string, stream: Stream = 'stdout') => print(protect(line), stream);
   const root = await realpath(join(workspace, 'project')), text = (file: string) => readFile(file, 'utf8').catch(() => null);
   const [instructions, evidence, feedback, factsText] = await Promise.all([text(join(root, INSTRUCTIONS)), text(join(root, EVIDENCE)), text(join(root, FEEDBACK)), text(join(workspace, FACTS))]);
@@ -289,9 +291,10 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   const work = facts && { ...facts, services };
   let written = false, repeated = { error: '', count: 0 };
 
-  const file = join(root, CONFIG);
+  const file = join(root, CONFIG), evidenceFile = join(root, EVIDENCE);
   // Editable config keeps its exact templates and ordinary values. A credential literal needs a reference, never a rewritten draft.
   const observe: Observations = { text: protect, file: (path, text) => {
+    if (path === evidenceFile) return protectEvidence(text);
     if (path !== file) return protect(text);
     if (hasSecretLiteral(text, hidden)) throw new Error(CONFIG_CREDENTIAL);
     return text;
@@ -347,7 +350,7 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   const timeout = AbortSignal.timeout(timeoutMs), usage: Usage = { steps: 0, input: 0, output: 0, cost: null };
   try {
     await generateText({
-      model, tools, instructions: protect(`${instructions}\n\n${evidence}`), prompt: protect(feedback === null ? prompt : `${prompt}\n\n${feedback}`),
+      model, tools, instructions: `${protect(instructions)}\n\n${protectEvidence(evidence)}`, prompt: protect(feedback === null ? prompt : `${prompt}\n\n${feedback}`),
       stopWhen: [isStepCount(STEPS), hasToolCall('done')],
       abortSignal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       // Reasoning and its provider metadata carry over from step to step as the provider returned them: nothing here

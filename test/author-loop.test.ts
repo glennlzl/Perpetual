@@ -291,6 +291,13 @@ test('initial instructions, evidence, prompt and feedback protect known values a
   ]);
 });
 
+test('the evidence keeps its credential-named variables with their lines, in the instructions and when it is read', async t => {
+  const evidence = '# Repository evidence\n\n- SESSION_SECRET: `repo/app.mjs:1`\n- NPM_TOKEN: script, `repo/Dockerfile:2`\n';
+  const { calls } = await loop(t, [call('read', { path: 'EVIDENCE.md' }), done], { files: { 'EVIDENCE.md': evidence } });
+  assert.equal(calls[0].prompt[0].content, `${twinInstructions(services)}\n\n${evidence}`);
+  assert.deepEqual(received(calls[1]), [{ ok: true, path: 'EVIDENCE.md', lines: 4, content: evidence.trimEnd().split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'), truncated: false }]);
+});
+
 test('tool paths, list entries, refusals and logs are protected before metadata is clipped', async t => {
   const known = `caller-only-value-${'m'.repeat(90)}`, token = 'sk-list-entry-fixture-12345', absolute = `/${'x'.repeat(190)}${known}`;
   const { calls, out } = await loop(t, [{ calls: [
