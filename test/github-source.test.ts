@@ -77,11 +77,16 @@ test('connecting a source clones only its branch, scans a root without links, an
   await hub.commit({ 'apps/web/package.json': '{}\n' });
   await symlink('web', join(hub.dir, 'work/apps/linked'));
   const head = await hub.commit({});
+  // GitHub also holds another branch and a tag, which a copy of main never does.
+  await hub.push(`${head}:refs/heads/feature`);
+  await hub.git('tag', 'v1');
+  await hub.push('refs/tags/v1');
   const connect = (branch: string, rootDirectory: string) => prepareGitHubSource({ repository: 'acme/app', branch, rootDirectory, dataDir: hub.dataDir });
   const source = await connect('main', 'apps/web/');
   assert.deepEqual([source.repository, source.branch, source.rootDirectory, source.sha, source.scanPath], ['acme/app', 'main', '/apps/web', head, join(source.checkoutPath, 'apps', 'web')]);
   const copy = (...args: string[]) => exec('git', ['-C', source.checkoutPath, ...args]).then(({ stdout }) => stdout.trim());
   assert.deepEqual([await copy('config', '--get', 'remote.origin.url'), await copy('symbolic-ref', '--short', 'HEAD'), await copy('rev-parse', '--is-shallow-repository')], ['https://github.com/acme/app.git', 'main', 'true']);
+  assert.deepEqual((await copy('for-each-ref', '--format=%(refname)')).split('\n'), ['refs/heads/main', 'refs/remotes/origin/main'], 'The copy holds its branch alone.');
   const sources = join(hub.dataDir, 'sources'), kept = await readdir(sources);
   await assert.rejects(connect('main', '/apps/linked'), /without symbolic links/);
   await assert.rejects(connect('main', '/apps/none'), /does not exist in this branch/);
