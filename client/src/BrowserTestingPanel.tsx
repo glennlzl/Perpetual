@@ -524,6 +524,9 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const emphasis = (action: string) => toolbar.primary === action ? 'default' : 'outline';
   const runCases = runDialog?.caseIds ? cases.filter(item => runDialog.caseIds!.includes(item.id) && reviewed(item)) : selected;
   const runBlocked = temporary.caseIds.length ? RESTORE_FIRST : runDialog?.caseIds ? oneOffSelection(cases, runCases.map(item => item.id)).error || '' : '';
+  // The run dialog names what keeps it from running, as the code dialog does; a canvas request can open it blocked.
+  const runNotice = runBlocked || wait || (!validTarget ? 'Set a target URL.' : !runCases.length ? 'Review the journey and add checks first.'
+    : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : !runnable(runCases) ? 'Generate code first.' : '');
   const codeItem = codeDialog && cases.find(item => item.id === codeDialog.caseId);
   const codeBlocked = !codeItem || !reviewed(codeItem) ? 'Review the journey and add checks first.' : !validTarget ? 'Set a target URL.' : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : codeDialog?.action === 'generate' && !openRouterConfigured ? 'Add an OpenRouter API Key in Settings.' : '';
   const concurrencyLabel = browserConcurrencyLabel(activeRun);
@@ -689,7 +692,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       if (mounted.current && stage.isCurrent()) setDeletingCase(null);
     }} />}
     {editingCase && <BusinessCaseEditor key={editingCase.id} draftKey={caseDraftKey(repoPath, stageId, editingCase.id)} item={editingCase} focusFallback={focusCase(editingCase.id)} onClose={() => setEditingCase(null)} onSave={saveCase} />}
-    {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runBlocked} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
+    {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runNotice} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
     {codeDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${codeDialog.caseId}:${codeDialog.action}`} title={codeDialog.action === 'generate' ? 'Generate code' : 'Verify code'} action={codeDialog.action} count={1} accounts={accounts} disabled={disabled || Boolean(codeBlocked)} notice={codeBlocked} focusFallback={focusCase(codeDialog.caseId)} onClose={() => setCodeDialog(null)} onRun={account => {
       if (disabled || codeBlocked) return;
       const { action, caseId, hash } = codeDialog;

@@ -124,3 +124,27 @@ test('a kept editor draft saves the selection the journey has now, not the one i
   assert.equal(cases[0].selected, true, 'The later selection still holds, so the gate keeps running the journey.');
   assert.deepEqual(fixture.pageErrors, []);
 });
+
+test('a run requested from the canvas names what keeps its dialog from running', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  const approved = { save: { approved: { hash, stale: false } } };
+  const blockers = [
+    { name: 'no target URL', view: browserView({ specs: approved, config: { ...config, targetUrl: '' } }), notice: 'Set a target URL.' },
+    { name: 'no code', view: browserView(), notice: 'Generate code first.' },
+  ];
+  for (const blocker of blockers) await t.test(blocker.name, async t => {
+    fixture.controller.view = blocker.view;
+    const page = await fixture.open(t, { initialCaseId: '!run:save', caseRequestKey: '1' });
+    const dialog = page.getByRole('dialog', { name: 'Save a workspace', exact: true });
+    await expect(dialog.getByRole('button', { name: 'Run', exact: true })).toBeDisabled();
+    await expect(dialog.getByRole('alert')).toHaveText(blocker.notice);
+  });
+  await t.test('a runnable journey shows no notice', async t => {
+    fixture.controller.view = browserView({ specs: approved });
+    const page = await fixture.open(t, { initialCaseId: '!run:save', caseRequestKey: '1' });
+    const dialog = page.getByRole('dialog', { name: 'Save a workspace', exact: true });
+    await expect(dialog.getByRole('button', { name: 'Run', exact: true })).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  });
+  assert.deepEqual(fixture.pageErrors, []);
+});
