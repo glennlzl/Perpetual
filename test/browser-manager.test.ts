@@ -61,11 +61,13 @@ test('results survive public run history, changed case drafts and controller res
 
 test('code feedback is scrubbed with its originating account, stays private and survives restart',async t=>{
   const username=`former-${'y'.repeat(305)}`,password='former-private-test-password';
-  const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error:`Missing link ${'detail '.repeat(85)} ${username}; input ${password}`,assertions:[]}}]);
+  const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error:`Missing link ${'detail '.repeat(85)} ${username}; input ${password}`,actionFeedback:`Edited control removed: Email. Current field Email: empty, invalid. ${username} ${password}`,assertions:[]}}]);
   const {run}=await f.manager.run(f.context,{credentials:{username,password}},manual);
   const report=await completed(f,run.id);await f.manager.close();
   const stored=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8')).runs.find((item:{id:string})=>item.id===run.id);
   assert.ok(stored.codeFeedback[scenario.id].includes('Missing link'));
+  assert.ok(stored.codeFeedback[scenario.id].includes('Edited control removed: Email'));
+  assert.ok(!JSON.stringify(report).includes('Edited control removed'));
   assert.ok(!JSON.stringify(stored.codeFeedback).includes(username));assert.ok(!JSON.stringify(stored.codeFeedback).includes(password));
   assert.ok(!JSON.stringify(stored.codeFeedback).includes(username.slice(0,50)));
   assert.ok(!('codeFeedback' in report.run));

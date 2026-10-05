@@ -764,6 +764,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           else return;
           touch(run);
         }
+        const actionFeedback=new Map<string,string>();
         try{
           // Runs may reach reviewed external origins (such as Stripe test checkout); discovery stays on
           // the target environment's apps and receives auth endpoints only with a supplied test account.
@@ -818,6 +819,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const onEvent=(event:WorkerEvent)=>{
                   if(event.type==='result'){
                     if(facts)throw new Error('Browser runtime returned duplicate results.');
+                    if(isRecord(event.result)&&event.result.caseId===item.id&&event.result.stopCause==='action'&&typeof event.result.actionFeedback==='string'&&event.result.actionFeedback.length<=2000)
+                      actionFeedback.set(item.id,generationDiagnostic(event.result.actionFeedback,2000,Object.values(credentials??{})));
                     // Scrub only diagnostics before journeyResult bounds them; check identities stay unchanged.
                     facts=isRecord(event.result)&&typeof event.result.error==='string'?{...event.result,error:diagnostic(event.result.error,4000)}:event.result;
                   }else if(event.type==='discovery')throw new Error('Browser runtime returned unexpected discovery.');
@@ -912,7 +915,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           // stays as recorded; its raw errors never substitute for these private, bounded summaries.
           if(mode==='run')run.codeFeedback=Object.fromEntries(cases.flatMap(item=>{
             const result=run.results?.find(result=>result.caseId===item.id),error=result?.error||run.error;
-            return error&&result&&['failed','needs_review','blocked'].includes(result.status)?[[item.id,generationDiagnostic(error,4000,Object.values(credentials??{}))]]:[];
+            return error&&result&&['failed','needs_review','blocked'].includes(result.status)?[[item.id,generationDiagnostic([generationDiagnostic(error,1800,Object.values(credentials??{})),actionFeedback.get(item.id)].filter(Boolean).join('\n'),4000,Object.values(credentials??{}))]]:[];
           }));
           if(preparation?.runId===run.id){
             const empty=run.status==='completed'&&!(state.cases[scope]||[]).length;

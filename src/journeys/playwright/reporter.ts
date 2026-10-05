@@ -13,9 +13,9 @@ import { lifecycleEvent, lifecycleError } from './diagnostics.ts';
 /** One journey action in the live list, as the browser worker contract reports it. */
 export type JourneyAction = { type: string; status: 'running' | 'passed' | 'failed' | 'cancelled' };
 /** The facts a finished journey reports; the controller decides its status from them (src/browser/results.ts). */
-export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string };
+export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[]; stopCause: 'none' | 'deadline' | 'action'; controlRead?: boolean; error?: string; actionFeedback?: string };
 // A fixture event read back from the channel: the fixture writes it, but it is parsed text until each field is checked.
-type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown };
+type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown; feedback?: unknown };
 
 // Journey actions by Playwright step title; fixture reads stay private while explicit readiness waits are visible.
 const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
@@ -25,6 +25,7 @@ const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/
 export default class JourneyReporter implements Reporter {
   channel: string | undefined; approved: ApprovedCase; videoDir: string | undefined; secrets: string[];
   controlRead: boolean | undefined;
+  actionFeedback: string | undefined;
   diagnostics = process.env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && process.env.PERPETUAL_BLOCK_WRITES !== '1';
   diagnosticBytes = 0; diagnosticDropped = 0;
   buffer = ''; actions: JourneyAction[] = []; indexes = new Map<TestStep, number>(); running: unknown = null; checkFailed = false;
@@ -72,6 +73,7 @@ export default class JourneyReporter implements Reporter {
         if (event.type === 'journey-step') { this.running = event.status === 'running' ? event.stepId : null; this.checkFailed ||= event.status === 'failed'; }
         this.write(event);
       } else if (event.type === 'assertions' && Array.isArray(event.assertions)) this.assertions = event.assertions;
+      else if (event.type === 'action-feedback' && typeof event.feedback === 'string' && event.feedback.length <= 2000) this.actionFeedback = failureText(hide(this.secrets)(event.feedback), 2000);
       else if (event.type === 'control-read' && typeof event.eligible === 'boolean') this.controlRead = event.eligible;
       else if (event.type === 'journey-stop' && typeof event.error === 'string') this.stop ||= event.error;
     }
@@ -106,7 +108,7 @@ export default class JourneyReporter implements Reporter {
     if (this.checkFailed || this.assertions.some(item => item.passed === false)) return { ...base, stopCause: 'none' };
     const title = steps.find(step => step.id === this.running)?.title;
     const error = this.stop || this.safe((result?.errors || this.errors)[0]?.message) || 'The spec stopped before the journey ended.';
-    return { ...base, stopCause: 'action', error: title ? `Action failed at “${title}”: ${error}` : error };
+    return { ...base, stopCause: 'action', error: title ? `Action failed at “${title}”: ${error}` : error, ...(this.actionFeedback ? { actionFeedback: this.actionFeedback } : {}) };
   }
   async onEnd(full: FullResult): Promise<{ status?: FullResult['status'] } | undefined> {
     this.diagnostic({ source: 'reporter', name: 'reporter-end', status: full.status, failed: full.status !== 'passed' || this.result?.status !== 'passed' });
