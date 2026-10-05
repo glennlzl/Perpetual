@@ -358,6 +358,21 @@ test('a gate queued again or released after fifty newer gates still reports its 
   assert.deepEqual(postsOf(B, from), ['success/Released by developer']);
 });
 
+test('a gate that waited behind three hundred newer records keeps its verdict when it passes and promotes', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
+  await mkdir(join(dataDir, 'gates'));
+  const at = '2026-09-23T09:00:00.000Z', queuedAt = '2026-09-23T08:00:00.000Z', posted = { state: 'success', context: 'perpetual/Beta', description: 'Passed' };
+  const others = Array.from({ length: 300 }, (_, index) => ({ id: `other-${index}`, key: 'github:owner/other:/', branch: 'main', stageId: 'beta', sha: index.toString(16).padStart(40, '0'), context: 'perpetual/Beta', status: 'passed', createdAt: at, detectedAt: at, updatedAt: at, posted }));
+  const waiting = { id: 'waiting', key: KEY, branch: 'main', stageId: 'beta', sha: A, context: 'perpetual/Beta', status: 'queued', createdAt: queuedAt, detectedAt: queuedAt, updatedAt: queuedAt };
+  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, heads: {}, gates: [...others, waiting] }));
+  const h = await harness(t, { dataDir });
+  h.manager.start();
+  await h.manager.idle();
+  const view = h.manager.view();
+  assert.deepEqual([view.stages.beta?.status, view.stages.gamma?.status, view.production], ['passed', 'passed', { sha: A, status: 'ready' }]);
+  assert.deepEqual(h.posts.filter(item => item.context === 'perpetual/Beta').map(item => item.description), ['Running', 'Passed']);
+});
+
 test('the first head another account reads is a baseline, never a push', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
   await mkdir(join(dataDir, 'gates'));

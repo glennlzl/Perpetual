@@ -112,6 +112,12 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
   const sandboxes = (current: GateSource) => current.stages.filter(stage => stage.kind === 'sandbox');
   // The target branch's gates; repair gates are never among them.
   const scoped = (current: GateSource) => state.gates.filter(gate => gate.key === current.key && gate.branch === current.branch && !gate.repair);
+  // The most recently updated gates are kept, with every gate still pending or at work, so a gate that just reached its
+  // verdict stays however long it waited.
+  function prune() {
+    const recent = new Set(state.gates.toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, LIMIT));
+    state.gates = state.gates.filter(item => recent.has(item) || [...PENDING, ...ACTIVE].includes(item.status));
+  }
 
   function enqueue(current: GateSource, stage: GateStage, sha: string, detectedAt: string) {
     const time = now();
@@ -125,7 +131,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     for (const field of ['reason', 'startedAt', 'completedAt', 'runId', 'environmentId', 'releasedBy', 'releasedAt'] as const) delete gate[field];
     Object.assign(gate, { status: newer ? 'superseded' : 'queued', detectedAt, updatedAt: time } satisfies Partial<Gate>, newer ? { reason: 'A newer commit reached this stage.' } : {});
     if (!newer) for (const other of scoped(current)) if (other !== gate && other.stageId === stage.id && PENDING.includes(other.status)) Object.assign(other, { status: 'superseded', reason: `Superseded by ${short(sha)}.`, updatedAt: time } satisfies Partial<Gate>);
-    state.gates = state.gates.filter((item, index) => index < LIMIT || [...PENDING, ...ACTIVE].includes(item.status));
+    prune();
     return gate;
   }
   // A passed or released commit moves to the next Sandbox stage; Production is only shown Ready. A repair gate's commit
@@ -481,7 +487,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         const time = now(), stopped = Boolean(signal?.aborted);
         const gate: Gate = { id: randomUUID(), key, branch, stageId: stage.id, sha: sha.toLowerCase(), context: `perpetual/${stage.name}`, repair, snapshot, createdAt: time, status: stopped ? 'superseded' : 'queued', ...(stopped ? { reason: STOPPED, completedAt: time } : {}), detectedAt: time, updatedAt: time };
         state.gates.unshift(gate);
-        state.gates = state.gates.filter((item, index) => index < LIMIT || [...PENDING, ...ACTIVE].includes(item.status));
+        prune();
         await persist();
         if (!stopped) { void kick(); await settled(gate, signal); }
         judged.push(gate);
