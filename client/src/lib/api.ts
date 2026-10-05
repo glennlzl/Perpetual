@@ -15,13 +15,20 @@ export async function api<T = unknown>(path: string, input?: unknown, options: A
     const session = await api('/api/session', undefined, options);
     sessionToken = session !== null && typeof session === 'object' && 'token' in session && typeof session.token === 'string' ? session.token : undefined;
   }
-  const response = await fetch(path, {
-    method: input === undefined ? 'GET' : options.method || 'POST',
-    // Header values are strings; String() is the conversion fetch applies.
-    headers: input === undefined ? { Accept: 'application/json' } : { 'Content-Type': 'application/json', 'X-Perpetual-Token': String(sessionToken) },
-    ...(input === undefined ? {} : { body: JSON.stringify(input) }),
-    signal: options.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: input === undefined ? 'GET' : options.method || 'POST',
+      // Header values are strings; String() is the conversion fetch applies.
+      headers: input === undefined ? { Accept: 'application/json' } : { 'Content-Type': 'application/json', 'X-Perpetual-Token': String(sessionToken) },
+      ...(input === undefined ? {} : { body: JSON.stringify(input) }),
+      signal: options.signal,
+    });
+  } catch (error) {
+    // A stopped or restarting controller refuses the connection, which browsers word as they like.
+    if (options.signal?.aborted) throw error;
+    throw new Error('The local server is unavailable. Try reconnecting.');
+  }
   if (response.status === 403 && input !== undefined && retry) { sessionToken = undefined; return api<T>(path, input, options, false); }
   let data: unknown;
   try { data = await response.json(); } catch (error) { if ((error as Error).name === 'AbortError') throw error; throw new Error('The local server is unavailable. Try reconnecting.'); }
