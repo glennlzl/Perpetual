@@ -799,11 +799,10 @@ function PipelineApp() {
   }, [state.scan, workspace, setError]);
   const gates = useStageGates(state.scan?.repo, refreshScan);
   const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
+  // A failed refresh is the workspace's own poll error, which its next poll repeats.
   useEffect(() => {
-    if (!tests.stageRemovals?.some(item => item.status === 'completed' && pipeline?.stages.some(stage => stage.id === item.stageId))) return;
-    const refresh = () => void refreshPipeline().catch(failure => setError(failure.message, refresh));
-    refresh();
-  }, [tests.stageRemovals, pipeline, refreshPipeline, setError]);
+    if (tests.stageRemovals?.some(item => item.status === 'completed' && pipeline?.stages.some(stage => stage.id === item.stageId))) void refreshPipeline();
+  }, [tests.stageRemovals, pipeline, refreshPipeline]);
   useEffect(() => {
     if (dialog?.type === 'remove-stage' && pipeline && !pipeline.stages.some(stage => stage.id === dialog.stageId)) closeDialog();
   }, [dialog, pipeline, closeDialog]);

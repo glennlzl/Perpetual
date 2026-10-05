@@ -6,6 +6,7 @@ import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect as playwrightExpect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
+import type { StageRemoval } from '../contract/environment.ts';
 import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
@@ -282,5 +283,32 @@ test('the Source sheet shows the GitHub mark only for a repository with a GitHub
     if (mark) await expect(header.locator('img')).toHaveAttribute('alt', mark);
     else await expect(header.locator('img')).toHaveCount(0);
   }
+  assert.deepEqual(pageErrors, []);
+});
+
+test('deleting a stage asks first, follows the controller until it is removed, then refreshes the pipeline', { timeout: 60000 }, async t => {
+  let pipeline = withBeta(), status: StageRemoval['status'] | null = null;
+  const beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const removal = (): StageRemoval | null => status && { id: 'removal-1', stageId: beta, status, environmentIds: [], completedEnvironmentIds: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
+  const { page, posts, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(pipeline, { stageRemovals: status ? [removal()] : [] }) };
+    if (path === '/api/stages/remove') { status = 'removing'; return { json: { removal: removal() } }; }
+    if (path === '/api/stages/removal') return { json: { removal: removal() } };
+  });
+  await open();
+  await page.getByRole('button', { name: 'Delete Beta', exact: true }).click();
+  const dialog = page.getByRole('alertdialog', { name: 'Delete Beta?', exact: true });
+  await expect(dialog.getByText('No sandboxes or tests.', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.deepEqual(posts.filter(item => item.path === '/api/stages/remove'), [], 'Cancel deletes nothing.');
+  await page.getByRole('button', { name: 'Delete Beta', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Delete stage', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Deleting stage…', exact: true })).toBeDisabled();
+  assert.deepEqual(posts.filter(item => item.path === '/api/stages/remove').map(item => item.body), [{ repoPath, stageId: beta }]);
+  // The controller finishes removing the stage; the dialog closes and the pipeline no longer lists it.
+  status = 'completed'; pipeline = defaultPipeline(repoPath);
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Beta', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Production', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
