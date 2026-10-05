@@ -123,6 +123,21 @@ test('an unresolved deployment requested by another account names that account i
   assert.deepEqual([view.current?.status,view.current?.error,view.canDeploy],['queued','Requested by owner. Connect GitHub as that account to check its status.',false]);
 });
 
+test('a status read that fails keeps the deployment unresolved, with the failure shown',async t=>{
+  const f=await fixture(t,{read:async()=>{throw new Error('Could not read the GitHub deployment configuration or status.');}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const view=await f.manager.refresh();
+  assert.deepEqual([view.current?.status,view.current?.error,view.canDeploy],['queued','Could not read the GitHub deployment configuration or status.',false]);
+});
+
+test('an unresolved deployment of another branch is neither read nor blocking for the selected one',async t=>{
+  let reads=0;const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status:'queued'};}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const release=evidence();release.source!.branch='release';f.setEvidence(release);
+  await f.manager.configure(target);const view=await f.manager.refresh();
+  assert.equal(reads,0);assert.deepEqual([view.current,view.canDeploy],[null,true]);
+});
+
 test('a stale confirmation cannot deploy to a destination changed by another tab',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.configure({...target,environment:'other'});
   const confirmed={sha:SHA,target};await assert.rejects(f.manager.deploy(confirmed),/target changed/);assert.equal(f.requests.length,0);
