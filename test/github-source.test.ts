@@ -7,7 +7,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { ensureGitHubHistory, listGitHubBranches, listGitHubRepositories, prepareGitHubSource, updateGitHubSource } from '../src/github-source.ts';
 import { readGitHistory } from '../src/git-history.ts';
-import { startServer } from '../src/server.ts';
+import { fetch, startServer } from './fixtures/controller.ts';
 import type { SourceReply } from '../contract/pipeline.ts';
 
 const exec = promisify(execFile);
