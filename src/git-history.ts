@@ -14,6 +14,8 @@ const NULL_FILE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 const HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_REFS = 2_000;
 const MAX_OUTPUT = 4 * 1024 * 1024;
+const REF_FORMAT = '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(symref)%00';
+const TAG = 'tag: refs/tags/';
 
 class GitHistoryError extends Error {
   constructor(message: string) {
@@ -73,29 +75,27 @@ async function git(root: string, args: string[], { allowMissing = false } = {}):
   }
 }
 
-function readRefs(output: string): GitRef[] {
-  const rows = output.split('\n').filter(Boolean);
-  if (rows.length > MAX_REFS) throw new GitHistoryError('The repository has too many references to display.');
-  return rows.map(row => {
+function readRefs(output: string | null): GitRef[] {
+  return (output || '').split('\n').filter(Boolean).map(row => {
     const fields = row.split('\0');
     if (fields.length !== 5 || fields[4] !== '' || !HASH.test(fields[0])) {
       throw new GitHistoryError('Git returned unreadable references.');
     }
     const [hash, type, name, symbolic] = fields;
-    if (!/^refs\/(?:heads|remotes|tags)\//.test(name)) throw new GitHistoryError('Git returned an unexpected reference.');
+    if (!/^refs\/(?:heads|remotes)\//.test(name)) throw new GitHistoryError('Git returned an unexpected reference.');
     return { hash, type, name, symbolic };
   });
 }
 
-function readTags(output: string | null) {
-  // show-ref --dereference recursively peels annotated tags, including tags
-  // that point to another tag. Non-commit targets cannot match displayed SHAs.
-  const tags = new Map<string, string>();
-  for (const row of (output || '').split('\n').filter(Boolean)) {
-    const match = row.match(/^([a-f0-9]+) (refs\/tags\/.+?)(\^\{\})?$/);
-    if (!match || !HASH.test(match[1])) throw new GitHistoryError('Git returned unreadable tags.');
-    const [, hash, name, peeled] = match;
-    if (peeled || !tags.has(name)) tags.set(name, hash);
+function readTags(output: string) {
+  // Log decorations peel annotated tags recursively, including tags that point
+  // to another tag, onto the commit they label; a shallow boundary's grafted mark is not a tag.
+  const tags = new Map<string, string[]>(), fields = output.split('\0');
+  if (fields.pop() !== '' || fields.length % 2 !== 0) throw new GitHistoryError('Git returned unreadable tags.');
+  for (let index = 0; index < fields.length; index += 2) {
+    if (!HASH.test(fields[index])) throw new GitHistoryError('Git returned unreadable tags.');
+    const names = fields[index + 1].split(', ').filter(item => item.startsWith(TAG)).map(item => item.slice(TAG.length));
+    if (names.length) tags.set(fields[index], names.sort());
   }
   return tags;
 }
@@ -129,19 +129,22 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   // First establish that the trusted scan path still points to a Git repo.
   const shallowText = (await git(root, ['rev-parse', '--is-shallow-repository'])).trim();
   if (!['true', 'false'].includes(shallowText)) throw new GitHistoryError('Cannot read the connected repository.');
-  const [headOutput, branchOutput, refsOutput] = await Promise.all([
+  const [headOutput, branchOutput, refsOutput, currentOutput] = await Promise.all([
     git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { allowMissing: true }),
     git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowMissing: true }),
-    // Branch heads are history tips, bounded here; tags only label displayed commits and are read below.
-    git(root, ['for-each-ref', `--count=${MAX_REFS + 1}`, '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(symref)%00', 'refs/heads/', 'refs/remotes/']),
+    // Branch heads are the tips of All branches, bounded here and counted up to the bound; Current branch follows one
+    // ref, read on its own. Labels are read below for the displayed commits only.
+    git(root, ['for-each-ref', `--count=${MAX_REFS + 1}`, REF_FORMAT, 'refs/heads/', 'refs/remotes/']),
+    scope === 'current' && currentRef !== null ? git(root, ['for-each-ref', REF_FORMAT, currentRef]) : null,
   ]);
   const head = headOutput?.trim() || null;
   if (head && !HASH.test(head)) throw new GitHistoryError('Git returned an unreadable HEAD.');
   const branch = branchOutput?.trim() || null;
   const references = readRefs(refsOutput);
+  if (scope === 'all' && references.length > MAX_REFS) throw new GitHistoryError('The repository has too many references to display.');
   // Managed source files stay pinned to the scanned commit. Their graph follows
   // the fetched branch tip, so Refresh can show new commits without checkout.
-  const currentReference = currentRef === null ? null : references.find(ref => ref.name === currentRef && !ref.symbolic && ref.type === 'commit');
+  const currentReference = readRefs(currentOutput).find(ref => ref.name === currentRef && !ref.symbolic && ref.type === 'commit');
   if (scope === 'current' && currentRef !== null && !currentReference) throw new GitHistoryError('The selected GitHub branch is unavailable. Choose another branch.');
   const localBranchCount = references.filter(ref => !ref.symbolic && ref.type === 'commit' && ref.name.startsWith('refs/heads/')).length;
   const remoteBranchCount = references.filter(ref => !ref.symbolic && ref.type === 'commit' && ref.name.startsWith('refs/remotes/')).length;
@@ -152,18 +155,20 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
       if (ref.type === 'commit' && !ref.symbolic && /^refs\/(?:heads|remotes)\//.test(ref.name)) tips.add(ref.hash);
     }
   }
-  const [logOutput, tagsOutput] = await Promise.all([
-    tips.size ? git(root, [
-      'log', '--topo-order', '--no-show-signature', '--no-decorate', '--no-notes', '--no-color',
-      `--max-count=${limit + 1}`, '-z', '--format=%H%x00%P%x00%an%x00%cI%x00%s',
-      ...tips, '--',
-    ]) : Promise.resolve(''),
-    git(root, ['show-ref', '--tags', '--dereference'], { allowMissing: true }),
-  ]);
+  const logOutput = tips.size ? await git(root, [
+    'log', '--topo-order', '--no-show-signature', '--no-decorate', '--no-notes', '--no-color',
+    `--max-count=${limit + 1}`, '-z', '--format=%H%x00%P%x00%an%x00%cI%x00%s',
+    ...tips, '--',
+  ]) : '';
   const history = readCommits(logOutput);
   const commits = history.slice(0, limit);
   const displayed = new Map(commits.map(commit => [commit.hash, commit]));
-  for (const ref of references) {
+  // However many branches and tags the repository holds, only those at the displayed commits are read.
+  const [labelsOutput, tagsOutput] = commits.length ? await Promise.all([
+    git(root, ['for-each-ref', REF_FORMAT, ...commits.map(commit => `--points-at=${commit.hash}`), 'refs/heads/', 'refs/remotes/']),
+    git(root, ['log', '--no-walk=unsorted', '--no-show-signature', '--decorate=full', '--decorate-refs=refs/tags/', '-z', '--format=%H%x00%D', ...displayed.keys(), '--']),
+  ]) : ['', ''];
+  for (const ref of readRefs(labelsOutput)) {
     if (ref.symbolic || !/^refs\/(?:heads|remotes)\//.test(ref.name)) continue;
     const commit = displayed.get(ref.hash);
     if (commit) (commit.refs ??= []).push(ref.name.replace(/^refs\/(?:heads|remotes)\//, ''));
@@ -171,11 +176,9 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   if (head && !branch && displayed.has(head)) (displayed.get(head)!.refs ??= []).unshift('HEAD');
   const refRank = (name: string) => name === branch ? 0 : name === `origin/${branch}` ? 1 : 2;
   for (const commit of commits) commit.refs?.sort((a, b) => refRank(a) - refRank(b) || a.localeCompare(b));
-  for (const [name, hash] of readTags(tagsOutput)) {
+  for (const [hash, names] of readTags(tagsOutput)) {
     const commit = displayed.get(hash);
-    if (!commit) continue;
-    const tag = name.slice('refs/tags/'.length);
-    commit.tag = commit.tag ? `${commit.tag}, ${tag}` : tag;
+    if (commit) commit.tag = names.join(', ');
   }
   return {
     commits, branch,

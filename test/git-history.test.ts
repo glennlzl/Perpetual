@@ -55,10 +55,11 @@ test('a shallow clone is marked, and its boundary commit keeps only the parents 
   const origin = await repository(t);
   await origin.commit('one');
   const c2 = await origin.commit('two');
+  await origin.git('tag', 'v2', c2);
   const clone = join(origin.dir, 'clone');
   await exec('git', ['clone', '--quiet', '--depth', '1', `file://${origin.path}`, clone]);
   const history = await readGitHistory({ repo: { path: clone, remote: null, name: 'app' } }, { scope: 'current' });
-  assert.deepEqual([history.shallow, history.repository, history.commits.map(commit => [commit.hash, commit.parents])], [true, 'app', [[c2, []]]]);
+  assert.deepEqual([history.shallow, history.repository, history.commits.map(commit => [commit.hash, commit.parents, commit.tag])], [true, 'app', [[c2, [], 'v2']]]);
 });
 
 test('an empty repository has no commits, and a longer history stops at its limit', async t => {
@@ -83,4 +84,26 @@ test('tags label commits without counting toward the branch reference limit', as
   execFileSync('git', ['-C', repo.path, 'update-ref', '--stdin'], { input: Array.from({ length: 2001 }, (_, index) => `create refs/tags/v${index} ${c1}\n`).join('') });
   const history = await repo.read({ scope: 'current' });
   assert.deepEqual([history.commits.length, history.commits[0].tag?.split(', ').length, history.refCount], [1, 2001, 1]);
+});
+
+test('Current branch follows its own ref past the branch head bound, which only All branches refuses', async t => {
+  const repo = await repository(t);
+  const c1 = await repo.commit('one'), c2 = await repo.commit('two');
+  // 2,001 branch heads on a commit outside main's history, and the remote branch Current branch follows, listed after them.
+  const side = await repo.git('commit-tree', '-m', 'side', `${c1}^{tree}`);
+  execFileSync('git', ['-C', repo.path, 'update-ref', '--stdin'], { input: [...Array.from({ length: 2001 }, (_, index) => `create refs/heads/topic/${index} ${side}\n`), `create refs/remotes/origin/main ${c2}\n`].join('') });
+  await repo.git('reset', '--quiet', '--hard', c1);
+  const history = await readGitHistory({ repo: { path: repo.path, remote: 'https://github.com/acme/app.git', name: 'app' } }, { scope: 'current', currentRef: 'refs/remotes/origin/main' });
+  assert.deepEqual(history.commits.map(commit => [commit.hash, commit.refs]), [[c2, ['origin/main']], [c1, ['main']]], 'Labels name the branches at the displayed commits, wherever they sort.');
+  await assert.rejects(repo.read({ scope: 'all' }), /too many references/);
+});
+
+test('tags are read for the displayed commits only, however many the repository holds', async t => {
+  const repo = await repository(t);
+  const c1 = await repo.commit('one');
+  await repo.git('tag', 'v1', c1);
+  // More tags than one listing of every tag can carry, on a commit outside the displayed history.
+  const side = await repo.git('commit-tree', '-m', 'side', `${c1}^{tree}`), name = ['a', 'b', 'c'].map(letter => letter.repeat(240)).join('/');
+  execFileSync('git', ['-C', repo.path, 'update-ref', '--stdin'], { input: Array.from({ length: 5600 }, (_, index) => `create refs/tags/${name}/${index} ${side}\n`).join('') });
+  assert.deepEqual((await repo.read({ scope: 'current' })).commits.map(commit => [commit.hash, commit.tag]), [[c1, 'v1']]);
 });
