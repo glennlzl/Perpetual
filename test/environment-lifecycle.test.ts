@@ -409,6 +409,32 @@ test('loading replaces a pre-twin plan with detection and retires a Cua guest un
   assert.deepEqual(destroyed, [guest.sandboxId]);
 });
 
+test('a twin that still runs adds its live logs to the evidence an earlier attempt left, while it prepares and once it is unhealthy', async t => {
+  const entered = deferred(), finish = deferred();
+  let output = 'web | starting';
+  const { manager } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate }) => {
+      // A generation's second attempt: the first one's teardown evidence is already saved.
+      await onUpdate({ sandboxId: environment.id, status: 'preparing', step: 'Preparing twin', logs: 'attempt 1 | web exited (1)' });
+      entered.resolve(); await finish.promise;
+      return structuredClone(ready);
+    },
+    environmentLogs: async () => output,
+    environmentHealth: async () => ({ status: 'failed', final: true, error: 'Stopped: web exited (1).' }),
+  });
+  t.after(() => finish.resolve());
+  const { environment } = await manager.create(context);
+  await entered.promise;
+  assert.deepEqual(await manager.logs(context, environment.id), { logs: 'attempt 1 | web exited (1)\n\nweb | starting' });
+  finish.resolve();
+  assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  // Its containers stop and the monitor fails it: the person sees why now, not only the earlier attempt's evidence.
+  await manager.tick();
+  assert.equal(manager.summaries(context.key)[0].step, 'Unhealthy');
+  output = 'web | Error: connection refused';
+  assert.deepEqual(await manager.logs(context, environment.id), { logs: 'attempt 1 | web exited (1)\n\nweb | Error: connection refused' });
+});
+
 test('a long failure keeps its start, which names the step, and its end, where the error is', async t => {
   const progress = Array.from({ length: 400 }, (_, index) => `layer${index}: Pulling fs layer`).join('\n');
   const { manager } = await fixture(t, { prepareEnvironment: async () => { throw new Error(`Supabase: ${progress}\nfailed to start: container is unhealthy`); } });

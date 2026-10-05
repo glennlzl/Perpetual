@@ -486,7 +486,10 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     async logs(context: StageRef, id: string): Promise<EnvironmentLogs> {
       const environment = findEnvironment(context, id);
       if (retainDiagnostics(state.environments)) await persist();
-      if (environment.status !== 'ready') {
+      // A twin that still runs adds its live output to stored evidence, such as an earlier generation attempt's: a ready one,
+      // one its health monitor failed, and one being prepared. A failed or uncertain one has only its evidence.
+      const running = environment.status === 'ready' || canRecoverHealth(environment) || ['creating', 'preparing'].includes(environment.status) && environment.sandboxId;
+      if (!running) {
         if (environment.logs) return { logs: environment.logs };
         if (environment.logsAt) return { logs: 'Failure evidence expired.' };
       }
