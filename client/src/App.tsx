@@ -896,7 +896,7 @@ function PipelineApp() {
   </>;
 }
 
-// Without the cookie the launch link sets, the controller answers nothing: the page says only how to sign in.
+// Without the browser secret the launch link gives the page, the controller answers nothing: the page says only how to sign in.
 function SignedOut() {
   return <main className="delivery-app"><div className="pipeline-canvas canvas-empty"><KeyRound size={28} /><h1>Open the link <code>perpetual serve</code> printed</h1></div></main>;
 }

@@ -1,6 +1,6 @@
 # Pipeline interface
 
-Start the controller as described in the [README](../README.md) and open the link it prints, `http://127.0.0.1:4317/?secret=…`. The server binds only to loopback. Without the cookie that link sets, or with one from another secret, the page shows only **Open the link `perpetual serve` printed**.
+Start the controller as described in the [README](../README.md) and open the link it prints, `http://127.0.0.1:4317/#secret=…`. The server binds only to loopback. Without the secret that link gives the browser, or with one from another launch secret, the page shows only **Open the link `perpetual serve` printed**; opening the link signs it in again.
 
 ## Canvas
 

@@ -1,19 +1,34 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { controllerFetch } from '@/lib/api';
 
+// A recording plays from memory: the controller serves it only with the browser secret, which a media element's own
+// request cannot carry.
 function Recording({ src, name }: { src: string; name: string }) {
-  const [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0), [media, setMedia] = useState('');
   const recovering = useRef(false), retryButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (failed && recovering.current) retryButton.current?.focus({ preventScroll: true }); }, [failed]);
+  useEffect(() => {
+    const request = new AbortController();
+    let url = '';
+    void controllerFetch(src, { signal: request.signal }).then(async response => {
+      if (!response.ok) throw new Error('Recording unavailable.');
+      const blob = await response.blob();
+      if (request.signal.aborted) return;
+      url = URL.createObjectURL(blob);
+      setMedia(url);
+    }).catch(() => { if (!request.signal.aborted) setFailed(true); });
+    return () => { request.abort(); if (url) URL.revokeObjectURL(url); };
+  }, [src, attempt]);
   return <>
-    <video key={attempt} src={src} controls preload="metadata" playsInline hidden={failed} tabIndex={0} className="h-full w-full object-contain" aria-label={`${name} recording`}
+    <video key={attempt} src={media || undefined} controls preload="metadata" playsInline hidden={failed} tabIndex={0} className="h-full w-full object-contain" aria-label={`${name} recording`}
       onError={() => setFailed(true)} onLoadedData={event => {
         if (recovering.current) { recovering.current = false; event.currentTarget.focus({ preventScroll: true }); }
       }} />
     {failed && <div className="absolute inset-0 flex flex-col items-center justify-center-safe gap-3 overflow-y-auto p-4 pt-16">
       <p role="alert" className="text-sm text-muted-foreground">Recording unavailable.</p>
-      <Button ref={retryButton} type="button" variant="outline" onClick={() => { recovering.current = true; setFailed(false); setAttempt(value => value + 1); }}>Retry recording</Button>
+      <Button ref={retryButton} type="button" variant="outline" onClick={() => { recovering.current = true; setMedia(''); setFailed(false); setAttempt(value => value + 1); }}>Retry recording</Button>
     </div>}
   </>;
 }

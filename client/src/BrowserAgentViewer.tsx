@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
-import { api, replyError } from '@/lib/api';
+import { api, controllerFetch, replyError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
 import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
@@ -54,7 +54,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
     const controller = new AbortController();
     async function poll() {
       try {
-        const response = await fetch(`/api/browser/runs/${encodeURIComponent(runId!)}?${new URLSearchParams({ repoPath, stageId })}`, {
+        const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId!)}?${new URLSearchParams({ repoPath, stageId })}`, {
           headers: { Accept: 'application/json' }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), cache: 'no-store',
         });
         const reply: unknown = await response.json();
@@ -80,7 +80,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
     const controller = new AbortController();
     async function capture() {
       try {
-        const response = await fetch(`/api/browser/runs/${encodeURIComponent(runId!)}/frame?${new URLSearchParams({ repoPath, stageId })}`, {
+        const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId!)}/frame?${new URLSearchParams({ repoPath, stageId })}`, {
           headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
         });
         if (response.status !== 204) {

@@ -16,7 +16,7 @@ The interface's own API, at the address of the link `serve` prints (`http://127.
 
 ## 1. Start the controller
 
-In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. It prints a link, `http://127.0.0.1:4317/?secret=…`, that signs the person's browser in and opens the interface: whenever a step sends them to the interface, give them that link. Done when `GET /api/state` answers and you have the link.
+In the clone, `node src/cli.ts serve --repo <their repository>`, kept running in the background. It prints a link, `http://127.0.0.1:4317/#secret=…`, that signs the person's browser in and opens the interface: whenever a step sends them to the interface, give them that link. Done when `GET /api/state` answers and you have the link.
 
 ## 2. The model key
 

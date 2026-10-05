@@ -13,8 +13,8 @@ test('redact knows every secret shape once: named values, tokens, key blocks, us
     ['GET /callback?access_token=q1&other=keep&api_key=q2', ['q1', 'q2']],
     ['github_pat_11AAA sk-abcdefghijklmnop sbp_0123456789 AKIAABCDEFGHIJKLMNOP eyJhbGci.eyJzdWIi.SflKxw', ['github_pat_11AAA', 'sk-abcdefghijklmnop', 'sbp_0123456789', 'AKIAABCDEFGHIJKLMNOP', 'eyJhbGci.eyJzdWIi.SflKxw']],
     ['https://u:pass@example.com postgres://postgres:secret@db/app', ['u:pass', 'postgres:secret']],
-    // The controller's launch secret in its link, its header and its cookie.
-    ['http://127.0.0.1:4317/?secret=link1 X-Perpetual-Secret: header2 Cookie: perpetual-secret-4317=cookie3', ['link1', 'header2', 'cookie3']],
+    // The controller's secrets: the browser secret in the launch link and its header, and the launch secret in its header.
+    ['http://127.0.0.1:4317/#secret=link1 X-Perpetual-Browser-Secret: browser2 X-Perpetual-Secret: header3', ['link1', 'browser2', 'header3']],
   ];
   for (const [input, secrets] of cases) {
     const output = redact(input);

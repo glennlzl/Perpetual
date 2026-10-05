@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer, type Controller } from '../src/server.ts';
 
-// Every API request needs the controller's launch secret: the session cookie its launch link sets in a browser, or the
-// header a local tool sends with the secret its data directory keeps. These requests use the global fetch, which sends
-// neither unless a test adds one.
+// Every API request needs the controller's launch secret, which a local tool sends from the file its data directory
+// keeps, or the browser secret derived from it, which the launch link gives the page. These requests use the global
+// fetch, which sends neither unless a test adds one.
 const json = { 'Content-Type': 'application/json' };
 
 /** A controller over an empty checkout, with its secret file and a restart over the same data directory. */
@@ -19,20 +19,22 @@ async function controller(t: TestContext) {
     async restart() { await app.close(); app = await startServer({ port: 0, repo: dir, dataDir }); return app; } };
 }
 
-/** Opens a launch link without following its redirect: its reply, the cookies it sets and the session cookie to send back. */
-async function launch(url: string) {
-  const response = await fetch(url, { redirect: 'manual' }), cookies = response.headers.getSetCookie();
-  return { response, cookies, cookie: cookies[0]?.split(';')[0] ?? '' };
+/** The browser secret a launch link carries in its fragment, which a browser never sends to a server. */
+function browserSecret(launchUrl: string) {
+  const link = new URL(launchUrl), secret = /^#secret=([0-9a-f]{64})$/.exec(link.hash)?.[1];
+  assert.deepEqual([link.pathname, link.search, typeof secret], ['/', '', 'string'], launchUrl);
+  return secret!;
 }
 
 test('the launch secret is kept in a 0600 file in the data directory, created once and reused across restarts', async t => {
   const f = await controller(t), secret = await readFile(f.file, 'utf8');
   assert.match(secret, /^[0-9a-f]{64}$/);
   assert.equal((await stat(f.file)).mode & 0o777, 0o600);
-  assert.equal(f.app().launchUrl, `${f.app().url}/?secret=${secret}`);
+  const browser = browserSecret(f.app().launchUrl);
+  assert.notEqual(browser, secret, 'The link carries a secret of its own, never the launch secret.');
   await chmod(f.file, 0o644);
   const restarted = await f.restart();
-  assert.equal(restarted.launchUrl, `${restarted.url}/?secret=${secret}`, 'A restart keeps the secret, so the printed link stays valid.');
+  assert.equal(browserSecret(restarted.launchUrl), browser, 'A restart keeps the secret, so the printed link stays valid.');
   assert.equal(await readFile(f.file, 'utf8'), secret);
   assert.equal((await stat(f.file)).mode & 0o777, 0o600, 'A restart keeps the file private.');
 });
@@ -41,7 +43,7 @@ test('a launch secret file that holds anything else is refused, and removing it 
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-launch-file-')), dataDir = join(dir, 'data'), file = join(dataDir, 'launch-secret');
   let app: Controller | undefined = await startServer({ port: 0, repo: dir, dataDir });
   t.after(async () => { await app?.close(); await rm(dir, { recursive: true, force: true }); });
-  const first = await readFile(file, 'utf8');
+  const first = await readFile(file, 'utf8'), firstBrowser = browserSecret(app.launchUrl);
   await app.close(); app = undefined;
   await writeFile(join(dir, 'elsewhere'), first);
   for (const replace of [() => writeFile(file, 'password'), () => symlink(join(dir, 'elsewhere'), file)]) {
@@ -53,14 +55,20 @@ test('a launch secret file that holds anything else is refused, and removing it 
   const second = await readFile(file, 'utf8');
   assert.match(second, /^[0-9a-f]{64}$/);
   assert.notEqual(second, first);
+  assert.notEqual(browserSecret(app.launchUrl), firstBrowser, 'A new secret signs out the browsers the old link signed in.');
 });
 
-test('without the session cookie or the secret, the API refuses reads, the session token and changes alike', async t => {
-  const f = await controller(t), { url, launchUrl } = f.app();
-  const { cookie } = await launch(launchUrl);
-  const { token } = await (await fetch(`${url}/api/session`, { headers: { Cookie: cookie } })).json();
-  const stale = cookie.replace(/=.*/, `=${'0'.repeat(64)}`);
-  for (const headers of [{}, { Cookie: stale }, { 'X-Perpetual-Secret': '0'.repeat(64) }] as Record<string, string>[]) {
+test('without the browser secret or the launch secret, the API refuses reads, the session token and changes alike', async t => {
+  const f = await controller(t), { url, launchUrl } = f.app(), secret = await readFile(f.file, 'utf8'), browser = browserSecret(launchUrl);
+  const { token } = await (await fetch(`${url}/api/session`, { headers: { 'X-Perpetual-Browser-Secret': browser } })).json();
+  const other = '0'.repeat(64);
+  const refused: Record<string, string>[] = [
+    {}, { 'X-Perpetual-Browser-Secret': other }, { 'X-Perpetual-Secret': other },
+    // Each secret counts in its own header only, and neither in a cookie, which a browser sends to every port on the host.
+    { 'X-Perpetual-Secret': browser }, { 'X-Perpetual-Browser-Secret': secret },
+    { Cookie: `perpetual-secret-${new URL(url).port}=${secret}; perpetual-browser-secret=${browser}` },
+  ];
+  for (const headers of refused) {
     const sent = JSON.stringify(headers);
     for (const path of ['/api/state', '/api/session', '/api/settings/model', `/api/github-actions?${new URLSearchParams({ repoPath: f.dir })}`, '/api', '/api/missing']) {
       const response = await fetch(url + path, { headers });
@@ -80,23 +88,20 @@ test('without the session cookie or the secret, the API refuses reads, the sessi
   }
 });
 
-test('the launch link sets an HttpOnly, SameSite=Strict session cookie and redirects to the page without the secret', async t => {
-  const f = await controller(t), { url, launchUrl } = f.app(), secret = await readFile(f.file, 'utf8');
-  const { response, cookies, cookie } = await launch(launchUrl);
-  assert.deepEqual([response.status, response.headers.get('location')], [303, '/']);
-  assert.equal(cookies.length, 1);
-  const [, ...attributes] = cookies[0].split(';').map(part => part.trim());
-  assert.equal(cookie.slice(cookie.indexOf('=') + 1), secret);
-  assert.deepEqual(attributes.sort(), ['HttpOnly', 'Path=/api', 'SameSite=Strict']);
-  // The cookie reads, and a change from the page still carries the page's session token.
-  assert.equal((await fetch(`${url}/api/state`, { headers: { Cookie: cookie } })).status, 200);
-  const { token } = await (await fetch(`${url}/api/session`, { headers: { Cookie: cookie } })).json();
-  const scan = (headers: Record<string, string>) => fetch(`${url}/api/scan`, { method: 'POST', headers: { Cookie: cookie, ...json, ...headers }, body: JSON.stringify({ path: f.dir }) });
-  assert.equal((await scan({})).status, 403);
-  assert.equal((await scan({ 'X-Perpetual-Token': token })).status, 200);
-  // The address keeps its other parameters, and a wrong or outdated secret sets no cookie.
-  const other = await launch(`${url}/?watch=browser&secret=${'0'.repeat(64)}&stage=beta`);
-  assert.deepEqual([other.response.status, other.response.headers.get('location'), other.cookies], [303, '/?watch=browser&stage=beta', []]);
+test('the launch link signs a page in through its fragment, with no cookie, and the page\'s changes still carry its session token', async t => {
+  const f = await controller(t), { url, launchUrl } = f.app(), secret = await readFile(f.file, 'utf8'), browser = browserSecret(launchUrl);
+  assert.notEqual(browser, secret);
+  // A browser asks for the page alone, without the fragment, and the controller sets no cookie.
+  const page = await fetch(`${url}/`);
+  assert.deepEqual([page.status, page.headers.getSetCookie()], [200, []]);
+  const headers = { 'X-Perpetual-Browser-Secret': browser };
+  assert.equal((await fetch(`${url}/api/state`, { headers })).status, 200);
+  const { token } = await (await fetch(`${url}/api/session`, { headers })).json();
+  const scan = (sent: Record<string, string>) => fetch(`${url}/api/scan`, { method: 'POST', headers: { ...json, ...sent }, body: JSON.stringify({ path: f.dir }) });
+  assert.equal((await scan(headers)).status, 403, 'A change from the page also needs its session token.');
+  assert.equal((await scan({ ...headers, 'X-Perpetual-Token': token })).status, 200);
+  // A copy of the browser secret never passes as the launch secret, which needs no session token.
+  assert.equal((await scan({ 'X-Perpetual-Secret': browser })).status, 401);
 });
 
 test('a local tool reads and changes with the secret from the data directory, within the same-origin checks', async t => {

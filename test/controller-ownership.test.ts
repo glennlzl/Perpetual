@@ -89,7 +89,7 @@ test('an abrupt owner exit permits recovery of its persisted pipeline',async t=>
   t.after(async()=>{await restarted?.close();await rm(dir,{recursive:true,force:true});});
   await mkdir(repo);await writeFile(join(repo,'package.json'),'{}');
   const owner=controllerChild(t,dataDir),{url,launchUrl}=(await owner.ready)!;
-  await signIn(launchUrl!);
+  signIn(launchUrl!);
   const {token}=await (await fetch(url+'/api/session')).json();
   const post=(path: string,value: object)=>fetch(url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':token},body:JSON.stringify(value)});
   assert.equal((await post('/api/scan',{path:repo})).status,200);

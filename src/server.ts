@@ -25,7 +25,7 @@ import { sendVideo } from './browser/video-file.ts';
 import {holdsResources, createEnvironmentUsage } from './environments/usage.ts';
 import { createStageRemovalManager } from './environments/stage-removal.ts';
 import { acquireControllerOwnership } from './controller-ownership.ts';
-import { SECRET_HEADER, SECRET_PARAMETER, launchSecret } from './launch-secret.ts';
+import { BROWSER_HEADER, SECRET_HEADER, launchSecret } from './launch-secret.ts';
 import { environmentInputs, fromAppSettings } from './environments/runtime.ts';
 import { createTwinInputs, services as twinServices } from './twin/index.ts';
 import { missingInputs } from './twin/inputs.ts';
@@ -91,7 +91,7 @@ export interface ServerOptions {
    */
   repair?: { boxes?: RepairBoxes; host?: RepairHost; model?: ModelFactory; pullRequests?: RepairAgentGitHub['pullRequests']; merges?: Omit<MergeGitHub, 'connection' | 'head'>; ci?: Partial<typeof CI>; timing?: Partial<typeof MERGE> };
 }
-/** A running controller. `launchUrl` carries its launch secret: opening it signs a browser in, as `serve` prints it. */
+/** A running controller. `launchUrl` carries its browser secret: opening it signs a browser in, as `serve` prints it. */
 export interface Controller { url: string; launchUrl: string; server: ReturnType<typeof createServer>; close(): Promise<void> }
 type HttpError = Error & { statusCode?: number };
 /** A request's JSON object or query parameters: every field is checked where it is used. */
@@ -214,7 +214,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
   delete state.runs;delete state.checks;delete state.providers;
   for(const pipeline of Object.values(state.pipelines))if(Array.isArray(pipeline?.stages))for(const stage of pipeline.stages as SavedStage[])delete stage?.tests;
-  // The page's session token, which every change from the page carries, and the launch secret every API request needs.
+  // The page's session token, which every change from the page carries, and the launch secret every API request needs,
+  // as it is or as the browser secret derived from it.
   const token=randomBytes(32).toString('hex'),launch=await launchSecret(dataDir);
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
@@ -484,7 +485,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
     const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
@@ -495,22 +496,16 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     const target=URL.parse(req.url??'','http://localhost');
     if(!target)return reply(res,400,{error:'Invalid URL.'});
     const requestUrl=target,path=requestUrl.pathname,tool=launch.matches(req.headers[SECRET_HEADER]);
-    // Every API request, reads included, needs the launch secret: the session cookie the launch link set, or the header a
-    // local tool sends. The interface's own files hold no secret and stay public.
-    if((path==='/api'||path.startsWith('/api/'))&&!tool&&!launch.inCookie(req.headers.cookie,actualPort))return reply(res,401,{error:'Open the link perpetual serve printed, or send its secret in the X-Perpetual-Secret header.'});
+    // Every API request, reads included, needs the launch secret a local tool sends, or the browser secret the page sends,
+    // which the launch link gave it. Both come in headers only: a browser sends a host's cookies to every port on it, a
+    // twin's app included. The interface's own files hold no secret and stay public.
+    if((path==='/api'||path.startsWith('/api/'))&&!tool&&!launch.signedIn(req.headers[BROWSER_HEADER]))return reply(res,401,{error:'Open the link perpetual serve printed, or send its secret in the X-Perpetual-Secret header.'});
     // Every change from the page also needs its session token, whatever its method: only a GET reads without it. A local
     // tool's secret is proof enough.
     if(req.method!=='GET'&&!tool&&req.headers['x-perpetual-token']!==token)return reply(res,403,{error:'Session expired. Refresh the page before making changes.'});
     // A connection still open at shutdown, such as a polling page's, ends with this reply.
     if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
-      // The launch link: a matching secret becomes the browser's session cookie, and the page loads without the secret in
-      // its address. A wrong or outdated one sets nothing, so the page then asks for the printed link.
-      if(req.method==='GET'&&path==='/'&&requestUrl.searchParams.has(SECRET_PARAMETER)){
-        if(launch.matches(requestUrl.searchParams.get(SECRET_PARAMETER)))res.setHeader('Set-Cookie',launch.cookie(actualPort));
-        requestUrl.searchParams.delete(SECRET_PARAMETER);
-        res.writeHead(303,{Location:`/${requestUrl.search}`});return res.end();
-      }
       if(req.method==='GET'&&!publicFiles[path]&&/^\/(build\/)?assets\//.test(path))await refreshAssets();
       if(req.method==='GET'&&publicFiles[path]) {
         const [file,type]=publicFiles[path];

@@ -46,10 +46,10 @@ test('serve prints its launch link, says it is stopping on the first signal and 
     assert.ok(Date.now() < deadline && child.exitCode === null, `serve never became ready: ${stdout}`);
   }
   assert.match(stdout, new RegExp(`Data: ${join(dir, 'data').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  // The link carries the secret the data directory keeps, and the output holds it nowhere else.
+  // The link carries the browser secret in its fragment; the output never holds the launch secret the data directory keeps.
   const secret = await readFile(join(dir, 'data', 'launch-secret'), 'utf8');
-  assert.match(stdout, new RegExp(`^Perpetual is ready at http://127\\.0\\.0\\.1:\\d+/\\?secret=${secret}$`, 'm'));
-  assert.equal(stdout.split(secret).length, 2);
+  assert.match(stdout, /^Perpetual is ready at http:\/\/127\.0\.0\.1:\d+\/#secret=[0-9a-f]{64}$/m);
+  assert.equal(stdout.includes(secret), false);
   const exited = once(child, 'exit');
   child.kill('SIGINT');
   assert.deepEqual(await exited, [0, null]);

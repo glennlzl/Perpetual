@@ -1,3 +1,5 @@
+import { controllerFetch } from './api.ts';
+
 /** The journey a frame belongs to: one case of one run. */
 export interface FrameSource { repoPath: string; stageId: string; runId: string; caseId: string }
 /** The latest frame's object URL, or the last fetch's error. */
@@ -79,7 +81,7 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
 }
 
 export async function fetchJourneyFrame({ repoPath, stageId, runId, caseId }: FrameSource, signal: AbortSignal) {
-  const response = await fetch(`/api/browser/runs/${encodeURIComponent(runId)}/frame?${new URLSearchParams({ repoPath, stageId, caseId })}`, { headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) });
+  const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId)}/frame?${new URLSearchParams({ repoPath, stageId, caseId })}`, { headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) });
   if (response.status === 204) return null;
   if (!response.ok || !response.headers.get('content-type')?.startsWith('image/jpeg')) throw new Error('Stream unavailable');
   return response.blob();
