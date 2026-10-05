@@ -261,11 +261,11 @@ export function createRepairPullRequests({ run = exec }: { run?: CommandRunner }
     },
     /**
      * Squash-merges the pull request only while its head is still sha: GitHub refuses a head that moved (409). Returns the
-     * merge commit.
+     * merge commit. Its message is fixed, so no model text from the repair's commits or body reaches the target branch.
      */
     async merge({ repository, number, sha, title }: { repository: unknown; number: unknown; sha: unknown; title: string }) {
       const data = json(await gh(run, ['api', '--hostname', 'github.com', '-H', 'Accept: application/vnd.github+json', '--method', 'PUT', `repos/${repositoryOf(repository)}/pulls/${pullNumber(number)}/merge`,
-        '-f', 'merge_method=squash', '-f', `sha=${shaOf(sha)}`, '-f', `commit_title=${plain(title, 250)}`], 'Merging the pull request', denied, undefined,
+        '-f', 'merge_method=squash', '-f', `sha=${shaOf(sha)}`, '-f', `commit_title=${plain(title, 250)}`, '-f', 'commit_message=Merged by Perpetual.'], 'Merging the pull request', denied, undefined,
       { 405: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.', 409: 'The pull request changed after verification.', 422: 'GitHub refused the merge. Check the pull request\'s required reviews and checks.' }));
       const merged = isRecord(data) && data.merged === true ? readSha(data.sha) : null;
       if (!merged) throw new Error('GitHub did not merge the pull request.');

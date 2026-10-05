@@ -236,8 +236,19 @@ test('repair commit and pull request text redact complete secrets before their f
 
 test('ordinary repair text still uses the existing commit and pull request bounds', () => {
   const summary = 'x'.repeat(4100);
-  assert.equal(commitMessage('Fix CI', summary), `Fix CI\n\n${'x'.repeat(2000)}…`);
+  assert.equal(commitMessage('Fix CI', summary), `Fix CI\n\n${'x'.repeat(2000)}…\n\nPerpetual build repair.`);
   const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
-  assert.ok(body.includes(`> ${'x'.repeat(3000)}…`));
+  assert.ok(body.includes(`\n${'x'.repeat(3000)}…\n`));
   assert.ok(!body.includes('x'.repeat(3001)));
+});
+
+// A summary the model wrote, or that a log or source file steered, never acts as the connected account on GitHub.
+test('the model\'s summary is fenced in the pull request, and neither references, mentions nor trailers in a commit', () => {
+  const summary = 'Fixes #42 for @acme/team, see acme/other#7.\nCo-authored-by: Someone <someone@example.com>';
+  const message = commitMessage('Fix CI', summary);
+  assert.doesNotMatch(message, /#\d|@[\w-]/, 'No issue reference or mention is left to link, close or notify.');
+  assert.equal(message.replaceAll('\u2060', ''), `Fix CI\n\n${summary}\n\nPerpetual build repair.`, 'The text reads as written.');
+  assert.match(message, /\n\nPerpetual build repair\.$/, 'The summary is never the last paragraph, where trailers are read.');
+  const body = pullRequestBody({ repair, workflows: [], summary, attempts: [], holds: [], check: null, spent: 0 });
+  assert.ok(body.includes(`\`\`\`\`\n${summary}\n\`\`\`\``), 'In the body it is quoted as code, where GitHub acts on none of it.');
 });

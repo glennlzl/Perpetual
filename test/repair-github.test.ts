@@ -356,7 +356,7 @@ test('the pull request branch is updated and merged only at the verified head, a
   assert.deepEqual(await pulls.merge({ repository: 'owner/app', number: 7, sha: P, title: 'Fix the failed CI build at cb9292c (#7)' }), { sha: M });
   answer = JSON.stringify({ message: 'Updating pull request branch.', url: 'https://github.com/owner/app/pull/7' });
   await pulls.updateBranch({ repository: 'owner/app', number: 7, sha: P });
-  assert.deepEqual(calls[0].slice(calls[0].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${P}`, '-f', 'commit_title=Fix the failed CI build at cb9292c (#7)']);
+  assert.deepEqual(calls[0].slice(calls[0].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${P}`, '-f', 'commit_title=Fix the failed CI build at cb9292c (#7)', '-f', 'commit_message=Merged by Perpetual.'], 'No model text from the repair reaches the target branch.');
   assert.deepEqual(calls[1].slice(calls[1].indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/update-branch', '-f', `expected_head_sha=${P}`]);
   const refused = async (call: () => Promise<unknown>, stderr: string) => { answer = failure(stderr); return call().then(() => null, (error: Error & { refused?: unknown }) => [error.message, error.refused === true]); };
   const merge = () => pulls.merge({ repository: 'owner/app', number: 7, sha: P, title: 't' }), update = () => pulls.updateBranch({ repository: 'owner/app', number: 7, sha: P });

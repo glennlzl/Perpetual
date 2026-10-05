@@ -280,7 +280,7 @@ test('without a Sandbox stage, a pull request that passed CI is squash-merged at
   assert.deepEqual(change(merged.view)?.steps.at(-1), { id: 'merge', name: 'Merge', status: 'done', detail: ['Merged ', { text: '#7', href: 'https://github.com/owner/app/pull/7' }, ' into ', { text: 'main' }, ' as ', { text: MERGED.slice(0, 7) }] });
   assert.ok(c.github.calls.some(args => args.join(' ') === 'pr ready 7 --repo owner/app'), 'CI passing readies the pull request first.');
   const merge = c.github.calls.find(args => args.includes('repos/owner/app/pulls/7/merge'))!;
-  assert.deepEqual(merge.slice(merge.indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${head}`, '-f', `commit_title=Fix the failed CI build at ${c.sha.slice(0, 7)} (#7)`]);
+  assert.deepEqual(merge.slice(merge.indexOf('--method')), ['--method', 'PUT', 'repos/owner/app/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${head}`, '-f', `commit_title=Fix the failed CI build at ${c.sha.slice(0, 7)} (#7)`, '-f', 'commit_message=Merged by Perpetual.']);
   assert.ok(c.github.calls.some(args => args.includes(`repos/owner/app/compare/${c.sha}...${head}?per_page=1`)), 'The head is compared with main as GitHub has it.');
   assert.deepEqual([(await c.saved()).merged, c.github.statuses], [MERGED, []], 'No gate ran or reported.');
 });
