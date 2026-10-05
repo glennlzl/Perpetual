@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -52,7 +52,7 @@ async function github(t: TestContext, replies: Record<string, unknown> = {}) {
     await git('-C', work, 'push', '--quiet', origin, 'HEAD:refs/heads/main');
     return (await git('-C', work, 'rev-parse', 'HEAD')).stdout.trim();
   };
-  return { dir, dataDir: join(dir, 'data'), commit, answer };
+  return { dir, dataDir: join(dir, 'data'), commit, push: (...args: string[]) => git('-C', work, 'push', '--quiet', origin, ...args), git: (...args: string[]) => git('-C', work, ...args) };
 }
 
 test('a row GitHub lists that cannot be chosen is left out of its page instead of failing it', async t => {
@@ -70,6 +70,27 @@ test('a row GitHub lists that cannot be chosen is left out of its page instead o
     { fullName: 'mona_acme/dotfiles', name: 'dotfiles', private: false, defaultBranch: 'main' },
   ] }, 'An Enterprise Managed User\'s repository is listed beside the others.');
   assert.deepEqual(await listGitHubBranches({ repository: 'acme/app' }), { branches: [{ name: 'main' }, { name: 'release./next' }], nextPage: null, defaultBranch: 'main' });
+});
+
+test('connecting a source clones only its branch, scans a root without links, and leaves nothing behind when it fails', async t => {
+  const hub = await github(t, { 'repos/acme/app/branches/main': { name: 'main' }, 'repos/acme/app/branches/release': { name: 'release' } });
+  await hub.commit({ 'apps/web/package.json': '{}\n' });
+  await symlink('web', join(hub.dir, 'work/apps/linked'));
+  const head = await hub.commit({});
+  const connect = (branch: string, rootDirectory: string) => prepareGitHubSource({ repository: 'acme/app', branch, rootDirectory, dataDir: hub.dataDir });
+  const source = await connect('main', 'apps/web/');
+  assert.deepEqual([source.repository, source.branch, source.rootDirectory, source.sha, source.scanPath], ['acme/app', 'main', '/apps/web', head, join(source.checkoutPath, 'apps', 'web')]);
+  const copy = (...args: string[]) => exec('git', ['-C', source.checkoutPath, ...args]).then(({ stdout }) => stdout.trim());
+  assert.deepEqual([await copy('config', '--get', 'remote.origin.url'), await copy('symbolic-ref', '--short', 'HEAD'), await copy('rev-parse', '--is-shallow-repository')], ['https://github.com/acme/app.git', 'main', 'true']);
+  const sources = join(hub.dataDir, 'sources'), kept = await readdir(sources);
+  await assert.rejects(connect('main', '/apps/linked'), /without symbolic links/);
+  await assert.rejects(connect('main', '/apps/none'), /does not exist in this branch/);
+  // GitHub names release a branch, but the repository holds only a tag of that name: clone would check the tag out.
+  await hub.git('tag', 'release');
+  await hub.push('refs/tags/release');
+  await assert.rejects(connect('release', '/'));
+  await assert.rejects(connect('v1', '/'), /unavailable to your GitHub account/, 'A name GitHub does not list as a branch is never cloned.');
+  assert.deepEqual(await readdir(sources), kept, 'A failed connection removes its private checkout.');
 });
 
 test('after the copy moves to a pushed commit, its branch graph reaches that commit without a refresh', async t => {
