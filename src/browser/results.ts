@@ -73,4 +73,8 @@ export function journeyResult(approved:ApprovedJourney,reported:unknown,steps:re
 }
 
 const rollUp=['failed','blocked','needs_review','cancelled'] as const;
-export const runStatus=(results:readonly {status:string}[]):RunStatus=>rollUp.find(status=>results.some(item=>item.status===status))||(results.some(item=>item.status==='skipped')?'completed':'passed');
+/** A run's status from its journeys' results. A run without results, or a journey of caseIds without its own, was not judged and needs review. */
+export function runStatus(results:readonly {caseId?:string;status:string}[],caseIds:readonly string[]=[]):RunStatus{
+  const statuses=[...results.map(item=>item.status),...(!results.length||caseIds.some(id=>!results.some(item=>item.caseId===id))?['needs_review']:[])];
+  return rollUp.find(status=>statuses.includes(status))||(statuses.includes('skipped')?'completed':'passed');
+}

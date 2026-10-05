@@ -115,4 +115,9 @@ test('run roll-up orders failed, blocked, needs review, cancelled, skipped compl
   assert.equal(runStatus(statuses('skipped','cancelled','passed')),'cancelled');
   assert.equal(runStatus(statuses('skipped','passed')),'completed');
   assert.equal(runStatus(statuses('passed','passed')),'passed');
+  // A run is judged only by the results of all of its journeys.
+  assert.equal(runStatus([]),'needs_review');
+  assert.equal(runStatus([{caseId:'one',status:'passed'}],['one','two']),'needs_review');
+  assert.equal(runStatus([{caseId:'one',status:'passed'},{caseId:'two',status:'skipped'}],['one','two']),'completed');
+  assert.equal(runStatus([{caseId:'one',status:'failed'}],['one','two']),'failed');
 });

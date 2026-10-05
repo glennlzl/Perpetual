@@ -874,7 +874,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             const errors=finished.filter(item=>item.error&&item.status==='failed');
             if(errors.length)run.error=diagnostic(errors[0].error);
             // Every journey has a result row by now.
-            run.status=runStatus(run.results!);
+            run.status=runStatus(run.results!,run.caseIds);
           }else{
             const job=runtime!.start(workerInput,event=>{
               if(event.type==='discovery'){
