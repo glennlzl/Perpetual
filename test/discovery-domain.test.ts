@@ -57,21 +57,32 @@ test('component and template pages are sampled, and a large file contributes its
   assert.ok(context.warnings.some(warning => /shortened/.test(warning)));
 });
 
-test('a product route named like a tooling folder is sampled, while tooling, tests and retired plans stay out', async t => {
+test('product code named like a tooling or test folder is sampled, while tooling, test helpers and retired code stay out', async t => {
   const root = await mkdtemp(join(tmpdir(), 'discovery-aside-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const write = async (name: string, content: string) => { await mkdir(join(root, dirname(name)), { recursive: true }); await writeFile(join(root, name), content); };
   const routes = ['agents', 'scripts', 'evals', 'tests', 'fixtures', 'archive'].map(area => `frontend/pages/${area}/index.tsx`);
-  for (const name of [...routes, 'app/agents/page.tsx', 'app/agents/[id]/page.tsx']) await write(name, `export function Page() { return "${name}"; }\n`);
-  await write('frontend/pages/login.tsx', 'export function Login() { return "Sign in"; }\n');
-  // Tooling at the root, a test folder without a page, and documentation beside a route stay out.
+  // Pages, API handlers and feature folders named like tooling, and route pages named like tests.
+  const product = [...routes, 'app/agents/page.tsx', 'app/agents/[id]/page.tsx', 'app/api/agents/route.ts', 'app/api/agents/[id]/route.ts', 'backend/routes/agents/create.ts',
+    'src/features/agents/api.ts', 'src/features/agents/components/AgentList.tsx', 'src/features/evals/components/EvalList.tsx', 'src/features/evals/hooks/useEvals.ts',
+    'app/tests/page.tsx', 'app/api/tests/route.ts', 'src/routes/fixtures/+page.svelte', 'frontend/pages/login.tsx'];
+  for (const name of product) await write(name, `export function Page() { return "${name}"; }\n`);
+  // Tooling at the root, test folders holding helpers, mock data or no page, retired code and documentation stay out.
   await write('scripts/seed.ts', 'export const seed = "SEED_SCRIPT";\n');
   await write('agents/notes.md', 'AGENT_NOTES\n');
   await write('src/test/java/acme/OrderTest.java', 'class OrderTest { String note = "JAVA_TEST"; }\n');
   await write('backend/app/tests/test_orders.py', 'NOTE = "PYTHON_TEST"\n');
+  await write('src/test/test-utils.tsx', 'export const render = "TEST_UTILS";\n');
+  await write('src/test/setup.ts', 'export const setup = "TEST_SETUP";\n');
+  for (const name of ['handlers', 'data']) await write(`src/test/mocks/${name}.ts`, 'export const order = "MOCK_DATA";\n');
+  await write('packages/web/tests/render.jsx', 'export const render = "TEST_RENDER";\n');
+  await write('packages/web/tests/helpers/db.ts', 'export const db = "TEST_DB";\n');
+  await write('app/fixtures/page.mock.tsx', 'export const page = "MOCK_PAGE";\n');
+  await write('src/components/deprecated/OldCheckout.tsx', 'export const checkout = "RETIRED_UI";\n');
   await write('frontend/pages/agents/README.md', 'ROUTE_NOTES\n');
+  await write('src/features/agents/docs/notes.md', 'FEATURE_NOTES\n');
   await write('docs/superpowers/plans/old-plan.md', 'OLD_PLAN\n');
   const context = await businessSourceContext(root, { scope: '' }), names = context.files.map(file => file.path);
-  for (const name of [...routes, 'app/agents/page.tsx', 'app/agents/[id]/page.tsx', 'frontend/pages/login.tsx']) assert.ok(names.includes(name), name);
-  assert.doesNotMatch(JSON.stringify(context), /SEED_SCRIPT|AGENT_NOTES|JAVA_TEST|PYTHON_TEST|ROUTE_NOTES|OLD_PLAN/);
+  for (const name of product) assert.ok(names.includes(name), name);
+  assert.doesNotMatch(JSON.stringify(context), /SEED_SCRIPT|AGENT_NOTES|JAVA_TEST|PYTHON_TEST|TEST_UTILS|TEST_SETUP|MOCK_DATA|TEST_RENDER|TEST_DB|MOCK_PAGE|RETIRED_UI|ROUTE_NOTES|FEATURE_NOTES|OLD_PLAN/);
 });

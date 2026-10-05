@@ -14,14 +14,21 @@ const MAX_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_MODEL_BYTES = 180 * 1024;
 const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'out', 'target', '__pycache__', '__tests__', '.next', '.nuxt', '.cache', '.perpetual']);
-// By convention these folders hold tests, fixtures, tooling or retired plans, yet a product route can have the same
-// name, such as app/agents/page.tsx. One at the repository root is skipped; below it, one is sampled only when it holds
-// a page itself, and never for its documentation.
-const ASIDE_DIRS = new Set(['test', 'tests', 'fixtures', 'archive', 'archives', 'archived', 'graveyard', 'deprecated', 'superpowers', 'agents', 'scripts', 'eval', 'evals']);
+// Retired code and past plans are skipped wherever they are.
+const RETIRED_DIRS = new Set(['archived', 'graveyard', 'deprecated', 'superpowers']);
+// By convention these folders hold tests and fixtures, or tooling, yet a product route can have the same name, such as
+// app/tests/page.tsx or app/api/agents/route.ts. One at the repository root is skipped. Below it, a test folder is
+// sampled only when it holds a route's own page, never for helpers such as test-utils.tsx; a tooling folder is sampled
+// like any other. Neither is sampled for its documentation.
+const TEST_DIRS = new Set(['test', 'tests', 'fixtures']);
+const TOOLING_DIRS = new Set(['agents', 'scripts', 'eval', 'evals', 'archive', 'archives']);
 // Components and server templates render pages too.
 const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.vue', '.svelte', '.astro', '.erb', '.ejs', '.hbs', '.twig', '.cshtml', '.md', '.mdx']);
 const UI_FILE = /\.(?:jsx|tsx|html|htm|vue|svelte|astro|erb|ejs|hbs|twig|cshtml)$/i;
 const sampled = (name: string) => SOURCE_EXTENSIONS.has(path.extname(name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(name);
+// A route's own page or handler in a folder: page.tsx, +page.svelte, route.ts, or an index page below app, pages or routes.
+const routePage = (folder: string, name: string) => sampled(name) && !/\.mdx?$|test|spec|mock|setup|fixture/i.test(name)
+  && (/^(?:\+?page|route)\./i.test(name) || /^index\./i.test(name) && /(?:^|\/)(?:app|pages|routes)\//i.test(folder));
 // Generic journey vocabulary shared by most products; nothing product-specific.
 const BILLING_PATH = /billing|payment|stripe|checkout|subscription|credit|wallet|refund/i;
 const ACTION_PATH = /(?:^|\/)(?:new|create|edit|run|submit|result)(?:\/|\.|-|$)/i;
@@ -82,13 +89,14 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
     return 'other';
   };
   let visited = 0, total = 0, limited = false;
-  const queue = [{ relative: '', depth: 0, aside: false }];
+  // aside: inside a test or tooling folder, whose documentation stays out.
+  const queue = [{ relative: '', depth: 0, tests: false, aside: false }];
   while (queue.length && visited < 5000) {
-    const { relative, depth, aside } = queue.shift()!;
+    const { relative, depth, tests, aside } = queue.shift()!;
     if (depth > 8) { limited = true; continue; }
     let entries;
     try { entries = await readdir(path.join(root, relative), { withFileTypes: true }); } catch { continue; }
-    if (aside && !entries.some(entry => entry.isFile() && sampled(entry.name) && UI_FILE.test(entry.name))) continue;
+    if (tests && !entries.some(entry => entry.isFile() && routePage(relative, entry.name))) continue;
     entries.sort((a, b) => score(`${relative}/${b.name}`) - score(`${relative}/${a.name}`) || a.name.localeCompare(b.name));
     // A single generated/very wide directory cannot consume all traversal slots.
     if (entries.length > 512) limited = true;
@@ -97,8 +105,8 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       const name = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink() || SECRET_PATH.test(name) || entry.name.startsWith('.') || /^(?:AGENTS|CLAUDE|GEMINI|SKILL)\.md$/i.test(entry.name)) continue;
       if (entry.isDirectory()) {
-        const named = ASIDE_DIRS.has(entry.name.toLowerCase());
-        if (!SKIP_DIRS.has(entry.name) && !(named && !relative)) queue.push({ relative: name, depth: depth + 1, aside: named });
+        const lower = entry.name.toLowerCase(), test = TEST_DIRS.has(lower), named = test || TOOLING_DIRS.has(lower);
+        if (!SKIP_DIRS.has(entry.name) && !RETIRED_DIRS.has(lower) && !(named && !relative)) queue.push({ relative: name, depth: depth + 1, tests: test, aside: aside || named });
         continue;
       }
       if (entry.isFile() && sampled(entry.name) && !(aside && /\.mdx?$/i.test(entry.name))) candidates.push(name);
