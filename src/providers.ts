@@ -103,9 +103,10 @@ export function diagnoseFailure(log: unknown): FailureDiagnosis {
     [/\btimed out\b|\b(?:ETIMEDOUT|ESOCKETTIMEDOUT|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN)\b|socket hang up|i\/o timeout|handshake timeout|could not resolve host|temporary failure in name resolution/i,'availability','A dependency is unavailable or exceeded its deadline. Check the upstream service and target URL before changing code.'],
     [/AssertionError|TestingLibraryElementError|FAIL\s|expected .*received/i,'test-regression',assertion],
   ];
-  // An assertion's own lines, such as expected '401 Unauthorized' to equal '200 OK' or Jest's Expected: "403 Forbidden",
-  // tell what the application answered, never which credentials the run had.
-  const facts=text.split('\n').filter(line=>!/\b(?:AssertionError(?: \[[^\]\r\n]+\])?|TestingLibraryElementError):|^\s*(?:Expected|Received):/.test(line)).join('\n');
+  // An assertion's own lines, such as expected '401 Unauthorized' to equal '200 OK', Jest's Expected: "403 Forbidden" or
+  // Received string:, and node:test's expected: '401 Unauthorized', tell what the application answered, never which
+  // credentials the run had.
+  const facts=text.split('\n').filter(line=>!/\b(?:AssertionError(?: \[[^\]\r\n]+\])?|TestingLibraryElementError):|^\s*(?:expected|received|actual)(?: [a-z]+)?:/i.test(line)).join('\n');
   const rule=rules.find(([pattern,category])=>pattern.test(category==='configuration'?facts:text));
   return {method:'rule-based',category:rule?.[1]||'unknown',summary:rule?.[2]||'Inspect the failed step and reproduce its unchanged command before changing code.'};
 }

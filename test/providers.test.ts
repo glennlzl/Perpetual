@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseGitHubRemote, normalizeGitHubRuns, diagnoseFailure, redact, getProviderStatus } from '../src/providers.ts';
+import { getGitHubFailure, type CommandRunner } from '../src/repair/github.ts';
 test('GitHub remote parser rejects non-GitHub and user-supplied command material',()=>{
   assert.equal(parseGitHubRemote('git@github.com:acme/storefront.git'),'acme/storefront');
   assert.equal(parseGitHubRemote('https://github.com/acme/storefront.git'),'acme/storefront');
@@ -20,6 +21,21 @@ test('a failed assertion about a 401 or 403 is the application\'s code, not the 
     assert.equal(diagnoseFailure(log).category,'test-regression',log);
   assert.equal(diagnoseFailure('Error: HTTP 401').category,'configuration','A client refused outside an assertion still needs credentials.');
   assert.equal(diagnoseFailure("AssertionError: expected 3 to equal 4\nremote: Permission to acme/app.git denied to github-actions[bot].").category,'configuration');
+});
+// node:test's report of assert.equal(statusText, expected) failing, as its spec and TAP reporters print it.
+const spec=(actual: string,expected: string)=>['✖ signs in (0.7ms)','  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:','  + actual - expected','',`  + '${actual}'`,`  - '${expected}'`,'',
+  '      at TestContext.<anonymous> (file:///home/runner/work/app/app/test/auth.test.ts:3:62) {','    generatedMessage: true,',"    code: 'ERR_ASSERTION',",`    actual: '${actual}',`,`    expected: '${expected}',`,"    operator: 'strictEqual',","    diff: 'simple'",'  }'];
+const tap=(actual: string,expected: string)=>['not ok 1 - signs in','  ---',"  failureType: 'testCodeFailure'",'  error: |-','    Expected values to be strictly equal:','    + actual - expected','',`    + '${actual}'`,`    - '${expected}'`,'',
+  "  code: 'ERR_ASSERTION'","  name: 'AssertionError'",`  expected: '${expected}'`,`  actual: '${actual}'`,"  operator: 'strictEqual'",'  ...'];
+test('node:test\'s failed assertion about a 401 or 403, as either reporter prints it, is the application\'s code',async()=>{
+  for(const report of [spec,tap])for(const [actual,expected] of [['200 OK','401 Unauthorized'],['403 Forbidden','200 OK']]){
+    // The failed-step log as gh prints it, read through the repair's own reader, which keeps only error lines.
+    const log=report(actual,expected).map(line=>`test\tTest\t2026-09-25T10:14:01.0000000Z ${line}`).join('\n');
+    const run: CommandRunner=async(_file,args)=>({stdout:args[0]==='run'?log:'{"jobs":[]}'});
+    assert.equal((await getGitHubFailure({repository:'acme/app',runId:'1'},{run})).diagnosis.category,'test-regression',`${report.name}: expected ${expected}, got ${actual}`);
+  }
+  for(const log of ["  expected: 'HTTP 403'","Expected substring: \"401 Unauthorized\"","Received message:   \"403 Forbidden\""])
+    assert.equal(diagnoseFailure(`AssertionError [ERR_ASSERTION]: failed\n${log}`).category,'test-regression',log);
 });
 test('redacts common credential strings before persistence',()=>{
   const input='Authorization: Bearer abc123\nAPI_KEY=abcdef\nhttps://u:pass@example.com';
