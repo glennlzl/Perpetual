@@ -424,15 +424,17 @@ test('the evidence says which files were too large to read and when it read only
     'package.json': manifest('workspace', {}, { start: 'node index.js' }),
     'big.js': `process.env.BIG_FILE_VAR;\n//${'x'.repeat(300 * 1024)}\n`,
     'packages/huge/package.json': JSON.stringify({ name: 'huge', scripts: { start: 'node huge.js' }, description: 'x'.repeat(1_100_000) }),
-    // A setup file is read up to 256 KB.
+    // A setup file is read up to 256 KB, and so is a compose file, which the same YAML parser reads.
     '.github/workflows/big.yml': `jobs:\n  build:\n    runs-on: ubuntu-latest\n# ${'x'.repeat(300 * 1024)}\n`,
+    'compose.yml': `services:\n  db:\n    image: postgres\n# ${'x'.repeat(300 * 1024)}\n`,
   };
   for (let module = 0; module < 5001; module += 1) files[`src/module-${String(module).padStart(4, '0')}.ts`] = 'export {};\n';
   const { repo } = await fixture(t, files);
   const text = await repositoryEvidence({ source: repo });
   assert.match(text, /\n- Only the first 5,000 of 5,002 source files were read, runtime code first\.\n/);
-  assert.match(text, /\n- Left out as too large to read: `\.github\/workflows\/big\.yml` \(over 256 KB\), `big\.js` \(over 256 KB\), `packages\/huge\/package\.json` \(over 1 MB\)\.\n/);
+  assert.match(text, /\n- Left out as too large to read: `\.github\/workflows\/big\.yml` \(over 256 KB\), `big\.js` \(over 256 KB\), `compose\.yml` \(over 256 KB\), `packages\/huge\/package\.json` \(over 1 MB\)\.\n/);
   assert.equal(section(text, 'CI workflows'), 'None found.\n');
+  assert.equal(section(text, 'Compose files'), '- `compose.yml`: could not be read\n');
   assert.ok(!text.includes('BIG_FILE_VAR'));
   // The manifest is still listed, its scripts are not.
   assert.match(section(text, 'Apps and packages'), /### `packages\/huge`\n\n- Manifests: `packages\/huge\/package\.json`\n\n/);

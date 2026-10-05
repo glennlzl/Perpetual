@@ -485,9 +485,10 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
 
   const sqlLines = relevant.filter(file => file.endsWith('.sql') && !listedSql.has(file) && !DOCS.test(file)).map(file => `- ${code(file)}`);
 
+  // A compose file is read as the setup files are, since its YAML parser is theirs.
   const composeLines: string[] = [];
   for (const file of relevant.filter(path => COMPOSE.test(posix.basename(path)))) {
-    const text = await read(file);
+    const text = await read(file, SETUP_LIMITS.bytes);
     let names: string[] | null = null;
     try { if (text !== null) names = Object.keys(fields(fields(yamlValue(text))?.services) ?? {}); } catch { /* Not YAML. */ }
     composeLines.push(`- ${code(file)}: ${names === null ? 'could not be read' : names.length ? `services ${names.map(code).join(', ')}` : 'no services'}`);
