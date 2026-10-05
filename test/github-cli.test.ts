@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, notModified, parseGitHubResponse, runGitHub } from '../src/github-cli.ts';
+import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, notModified, parseGitHubResponse, runGitHub } from '../src/github-cli.ts';
 
 test('gh runs with its own configuration and none of the inherited git or debug settings', () => {
   const saved = { ...process.env };
@@ -28,6 +28,7 @@ test('a repository is owner/name, never a path', () => {
 test('a gh api reply parses to its status, tag, headers and body, and a 304 comes back bare', () => {
   const reply = 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\nLink: <https://api.github.com/x?page=2>; rel="next"\r\nX-Custom: value\r\n\r\n{"ok":true}';
   assert.deepEqual(parseGitHubResponse(reply), { status: 200, etag: 'W/"abc"', headers: { etag: 'W/"abc"', link: '<https://api.github.com/x?page=2>; rel="next"', 'x-custom': 'value' }, data: { ok: true } });
+  assert.deepEqual([hasNextPage(parseGitHubResponse(reply)), hasNextPage({ headers: { link: '<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=1>; rel="first"' } }), hasNextPage({})], [true, false, false], 'Only a next link names another page.');
   assert.equal(parseGitHubResponse('HTTP/2.0 200 OK\nEtag: bad\n\n[]').etag, null, 'An invalid entity tag is null.');
   assert.deepEqual(parseGitHubResponse('HTTP/2.0 304 Not Modified\n\n'), { status: 304 });
   assert.throws(() => parseGitHubResponse('not a response'), /unreadable response. Update gh/);

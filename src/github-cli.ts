@@ -70,6 +70,9 @@ export function parseGitHubResponse(stdout: string, unreadable: (message: string
   return { status: Number(status[1]), etag: etag && ENTITY_TAG.test(etag) ? etag : null, headers, data };
 }
 
+/** Whether a reply's Link header names a next page. */
+export const hasNextPage = (response: Pick<GitHubResponse, 'headers'>) => /;\s*rel="?next"?(?:\s*,|\s*$)/i.test(response.headers?.link || '');
+
 /** Whether a failed conditional request was gh reporting 304: gh exits non-zero on it, with the status line in its output. */
 export const notModified = (error: unknown, etag: string | null) => Boolean(etag) && /^HTTP\/[\d.]+ 304\b/.test(String((error as { stdout?: unknown } | null | undefined)?.stdout || ''));
 

@@ -1,4 +1,4 @@
-import { SHA, isRepository } from './github-cli.ts';
+import { SHA, hasNextPage, isRepository } from './github-cli.ts';
 import { eachBounded, failure, githubRequest, remember, type GitHubResponse } from './github-runs.ts';
 import { getGitHubSession, type GitHubSession } from './github-source.ts';
 
@@ -41,7 +41,7 @@ export function deploymentProvider(login: unknown): string {
 // never describes the current source, so non-matching SHAs are dropped.
 export function normalizeDeployments(data: unknown, sha: string): DeploymentRecord[] {
   const current = sha.toLowerCase();
-  return (Array.isArray(data) ? data as GitHubJson[] : []).filter((item): item is NonNullable<GitHubJson> => Number.isSafeInteger(item?.id) && typeof item!.sha === 'string' && item!.sha.toLowerCase() === current).slice(0, 50).map(item => {
+  return (Array.isArray(data) ? data as GitHubJson[] : []).filter((item): item is NonNullable<GitHubJson> => Number.isSafeInteger(item?.id) && typeof item!.sha === 'string' && item!.sha.toLowerCase() === current).slice(0, 1000).map(item => {
     const creator = record(item.creator) ? text(item.creator.login, 100) : null;
     return {
       id: String(item.id), environment: text(item.environment) || 'Deployment', provider: deploymentProvider(creator), creator,
@@ -63,22 +63,32 @@ export function normalizeDeploymentStatus(data: unknown): DeploymentStatus {
 export function createGitHubDeploymentsReader({ request = (endpoint, etag) => githubRequest(endpoint, etag, { subject: 'deployments' }), session = getGitHubSession, ttl = 4000, now = Date.now }: {
   request?: (endpoint: string, etag: string | null) => Promise<GitHubResponse>; session?: () => Promise<GitHubSession>; ttl?: number; now?: () => number;
 } = {}): GitHubDeploymentsReader {
-  const tags = new Map<string, { etag: string; data: unknown }>(), settled = new Map<string, DeploymentStatus>(), reads = new Map<string, { at: number; promise: Promise<CommitDeployments> }>();
-  async function conditional(login: string, endpoint: string): Promise<unknown> {
+  const tags = new Map<string, { etag: string; data: unknown; next: boolean }>(), settled = new Map<string, DeploymentStatus>(), reads = new Map<string, { at: number; promise: Promise<CommitDeployments> }>();
+  // A page's body, and whether another page follows it, which a 304 keeps from the cached reply.
+  async function conditional(login: string, endpoint: string): Promise<{ data: unknown; next: boolean }> {
     const tag = `${login}:${endpoint}`, cached = tags.get(tag), response = await request(endpoint, cached?.etag || null);
-    if (response.status === 304 && cached) return cached.data;
+    if (response.status === 304 && cached) return cached;
     if (response.status !== 200) throw failure('GitHub returned an unexpected response. Try again.');
-    if (response.etag) remember(tags, tag, { etag: response.etag, data: response.data });
-    return response.data;
+    const page = { data: response.data, next: hasNextPage(response) };
+    if (response.etag) remember(tags, tag, { etag: response.etag, ...page });
+    return page;
   }
   async function load(login: string, repository: string, sha: string): Promise<CommitDeployments> {
-    const deployments = normalizeDeployments(await conditional(login, `repos/${repository}/deployments?sha=${sha}&per_page=50`), sha);
+    // GitHub lists a commit's records newest first, 50 a page; up to 1,000 are read, as workflow runs are.
+    const listed: unknown[] = [];
+    for (let page = 1; ; page++) {
+      const { data, next } = await conditional(login, `repos/${repository}/deployments?sha=${sha}&per_page=50${page === 1 ? '' : `&page=${page}`}`);
+      if (Array.isArray(data)) listed.push(...data);
+      if (!next) break;
+      if (page === 20) throw failure('GitHub deployment records exceed the 1,000-record reading limit.');
+    }
+    const deployments = normalizeDeployments(listed, sha);
     // A pending deployment's status is re-read; a settled one is read once per update.
     await eachBounded(deployments, async deployment => {
       const key = `${login}:${repository}:${deployment.id}:${deployment.updatedAt}`, known = settled.get(key);
       if (known) { Object.assign(deployment, known); return; }
       let status: DeploymentStatus;
-      try { status = normalizeDeploymentStatus(await conditional(login, `repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`)); }
+      try { status = normalizeDeploymentStatus((await conditional(login, `repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`)).data); }
       catch { return; }
       Object.assign(deployment, status);
       if (status.state && FINAL.has(status.state)) remember(settled, key, status);

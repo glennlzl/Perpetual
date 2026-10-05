@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -110,8 +110,8 @@ export function sourceRoot(value: unknown = '/') {
 
 async function githubApi(endpoint: string): Promise<{ data: unknown; hasNext: boolean }> {
   const { stdout } = await command('gh', githubGetArgs(endpoint), 'Reading GitHub');
-  const { data, headers = {} } = parseGitHubResponse(stdout, message => new GitHubSourceError(message));
-  return { data, hasNext: /;\s*rel="?next"?(?:\s*,|\s*$)/i.test(headers.link || '') };
+  const response = parseGitHubResponse(stdout, message => new GitHubSourceError(message));
+  return { data: response.data, hasNext: hasNextPage(response) };
 }
 
 export async function getGitHubSession(): Promise<GitHubSession> {
