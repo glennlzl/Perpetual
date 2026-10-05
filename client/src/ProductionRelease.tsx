@@ -2,30 +2,42 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ExternalLink, RefreshCw, Rocket, Settings2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
-import { createReleasePoller, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import { createReleasePoller, gatesReleasable, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import type { GateView } from '../../contract/gate.ts';
 import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 
-/** One visible-page poller for the source, shared by the Production card and its Badge. */
-export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined) {
+/**
+ * One visible-page poller for the source, shared by the Production card and its Badge. The journey gates decide whether
+ * Deploy is allowed, so a changed verdict or report error reads the release at once, and while they allow the scanned
+ * commit the release is read again soon until it allows it too.
+ */
+export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined, gates: GateView | null = null) {
   const sha = scannedSha ?? null;
   const [read, setRead] = useState<{ repoPath: string; sha: string | null; view: ReleaseReply | null; error: string | null } | null>(null);
+  const refresh = useRef<(() => void) | null>(null);
+  const ready = useRef(false);
+  ready.current = gatesReleasable(gates, sha);
+  const gateKey = JSON.stringify([gates?.production, Object.values(gates?.stages ?? {}).map(gate => [gate.sha, gate.status, gate.statusError])]);
   useEffect(() => {
     if (!repoPath) return undefined;
-    const poller = createReleasePoller({ repoPath, controller: api,
+    const poller = createReleasePoller({ repoPath, controller: api, gatesReady: () => ready.current,
       onChange: view => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && JSON.stringify(previous.view) === JSON.stringify(view) ? previous : { repoPath, sha, view, error: null }),
       onError: error => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && previous.error === error ? previous : { repoPath, sha, view: previous?.repoPath === repoPath && previous.sha === sha ? previous.view : null, error }),
     });
+    refresh.current = poller.refresh;
     const unsubscribe = releaseChanges.subscribe(() => poller.refresh());
-    return () => { unsubscribe(); poller.stop(); };
+    return () => { refresh.current = null; unsubscribe(); poller.stop(); };
   }, [repoPath, sha]);
+  const verdicts = useRef(gateKey);
+  useEffect(() => { if (verdicts.current !== gateKey) { verdicts.current = gateKey; refresh.current?.(); } }, [gateKey]);
   return read && read.repoPath === repoPath && read.sha === sha ? { view: releaseForSource(read.view, repoPath, sha), error: read.error } : { view: null, error: null };
 }
 
@@ -46,8 +58,8 @@ function TargetDialog({ repoPath, target, onClose, focusFallback }: { repoPath: 
     } catch (failure) { setError((failure as Error).message); }
     finally { setPending(false); }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !pending) onClose(); }}><DialogContent onCloseAutoFocus={returnFocus} showCloseButton={!pending}>
-    <DialogHeader><DialogTitle>Deployment target</DialogTitle><DialogDescription>The workflow must handle GitHub deployment events.</DialogDescription></DialogHeader>
+  return <Dialog open onOpenChange={open => { if (!open && !pending) onClose(); }}><DialogContent aria-describedby={undefined} onCloseAutoFocus={returnFocus} showCloseButton={!pending}>
+    <DialogHeader><DialogTitle>Deployment target</DialogTitle></DialogHeader>
     <form onSubmit={save} className="space-y-4">
       <fieldset disabled={pending} className="grid gap-4">
         <div className="grid gap-2"><Label htmlFor={`${id}-environment`}>Environment</Label><Input id={`${id}-environment`} value={environment} onChange={event => setEnvironment(event.target.value)} required autoComplete="off" /></div>
@@ -103,7 +115,8 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
     {!confirmation && error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
     {readError && <p role="alert" className="basis-full break-words text-xs text-destructive">{readError}</p>}
     {!readError && !current && <p role="status" className="basis-full text-xs text-muted-foreground">Loading release status…</p>}
-    {current?.blockedReason && <p className="basis-full break-words text-xs text-muted-foreground">{current.blockedReason}</p>}
+    {/* Why a configured target cannot be deployed yet; without one, Configure deployment is the next step. */}
+    {target && current?.blockedReason && <p className="basis-full break-words text-xs text-muted-foreground">{current.blockedReason}</p>}
     {configure && <TargetDialog repoPath={repoPath} target={target || null} onClose={() => setConfigure(false)} focusFallback={focusFallback} />}
     {confirmation && <DeployDialog confirmation={confirmation} view={current} pending={pending === 'deploy'} disabled={locked} error={error}
       onClose={() => { setConfirmation(null); setError(''); }} onDeploy={async request => { if (await act('deploy', request)) setConfirmation(null); }} focusFallback={focusFallback} />}

@@ -65,6 +65,8 @@ export interface StageHandle {
 interface StageEntry {
   id: string; generation: number; listeners: Set<() => void>; observers: Record<Resource, number>; revisions: Record<Resource, number>; reading: Record<Resource, number>;
   draftRevisions: Record<string, number>; view: StageView; handle?: StageHandle;
+  /** When the stage's action error and each resource's poll error appeared, by the workspace's error clock. */
+  errorAt: Record<'action' | Resource, number>;
 }
 export type TestWorkspace = ReturnType<typeof createTestWorkspace>;
 
@@ -78,11 +80,12 @@ const active = (entry: StageEntry) => entry.view.environment.environments.some(i
   || entry.view.browser.runs.some(run => ['queued', 'running'].includes(run.status))
   || Object.values(entry.view.browser.specs || {}).some(spec => spec?.generation?.status === 'running' || spec?.draft?.verification?.status === 'running');
 // Browser progress with an unchanged revision and case states is reused whole;
-// scheduler states and frame times stay part of the key.
+// scheduler states, frame times and recordings stay part of the key, since pruning a
+// run's recordings leaves its revision unchanged.
 const progressKey = (value: unknown) => {
   // share calls this only for the controller's progress field; old saved progress could also carry status.
   const progress = value as (RunProgress & { status?: string }) | null | undefined;
-  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined)])]) : null;
+  return typeof progress?.revision === 'number' ? JSON.stringify([progress.revision, progress.status, (progress.cases || []).map(item => [item.id, item.status, item.queueReason, item.startedAt, item.completedAt, item.frameUpdatedAt, item.frameCapturedAt, item.actionCount, Array.isArray('actions' in item ? item.actions : undefined), item.videos])]) : null;
 };
 // Structural sharing: unchanged records keep their identity across polls.
 // A record reused in place of next has next's fields and values, so it stands for next's type.
@@ -102,7 +105,9 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 // source-scoped state; observing never starts discovery or test execution.
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
-  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [];
+  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], foreignReplies = 0;
+  // Errors are ordered by this clock. The page shows none from before the viewer last dismissed them.
+  let errorClock = 0, sourceErrorAt = 0, dismissedAt = 0;
   let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
   let pipelineChanges: { input: PipelineAction }[] = [], pipelineQueue: Promise<unknown> = Promise.resolve();
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
@@ -118,6 +123,21 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     listed = new Set(pipeline.stages.map(stage => stage?.id));
     pruneDrafts(source.path, [...listed]);
   }
+  // The latest stage error since the last dismissal, so an older action's failure never hides a later failure or poll
+  // error of any stage, and a dismissed one does not return when a later one clears.
+  function latestError() {
+    let error = '', at = dismissedAt;
+    for (const value of entries.values()) if (!gone(value)) {
+      const { view, errorAt } = value;
+      for (const [text, time] of [[view.error, errorAt.action], [view.pollErrors.browser, errorAt.browser], [view.pollErrors.environment, errorAt.environment]] as const) if (text && time > at) { error = text; at = time; }
+    }
+    return error;
+  }
+  // A changed source error is a new one, so an earlier dismissal does not hide it.
+  function setSourceError(message: string) {
+    if (message && message !== sourceError) sourceErrorAt = ++errorClock;
+    sourceError = message;
+  }
   function publish(entry?: StageEntry) {
     if (disposed) return;
     const next: WorkspaceSnapshot = {
@@ -128,7 +148,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       busyStages: [...entries].filter(([, value]) => value.view.pending).map(([id]) => id),
       previews,
       branch: source?.branch || '',
-      error: sourceError || [...entries.values()].filter(value => !gone(value)).map(value => value.view.error || value.view.pollError).find(Boolean) || '',
+      error: sourceError && sourceErrorAt > dismissedAt ? sourceError : latestError(),
     };
     if (sameEntries(next.browserTests, snapshot.browserTests)) next.browserTests = snapshot.browserTests;
     const keep = <K extends 'environments' | 'busyStages'>(key: K) => { if (sameItems(next[key], snapshot[key])) next[key] = snapshot[key]; };
@@ -143,8 +163,13 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     const fields: Record<string, unknown> = patch, view: Record<string, unknown> = entry.view;
     for (const key of ['browser', 'environment', 'loading', 'pollErrors'] as const) if (patch[key]) fields[key] = share(entry.view[key], patch[key]);
     if (Object.keys(patch).every(key => view[key] === fields[key])) return;
+    const before = entry.view;
     entry.view = { ...entry.view, ...patch };
     entry.view.pollError = entry.view.pollErrors.browser || entry.view.pollErrors.environment;
+    if (entry.view.error && entry.view.error !== before.error) entry.errorAt.action = ++errorClock;
+    for (const resource of ['browser', 'environment'] as const) {
+      if (entry.view.pollErrors[resource] && entry.view.pollErrors[resource] !== before.pollErrors[resource]) entry.errorAt[resource] = ++errorClock;
+    }
     publish(entry);
   }
   // Only saved definitions prune stage drafts. Pending preferences overlay that definition, in click order.
@@ -185,7 +210,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   }
   function ensure(id: string): StageEntry {
     if (!entries.has(id)) entries.set(id, {
-      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {},
+      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {}, errorAt: { action: 0, browser: 0, environment: 0 },
       view: { browser: browserView(), environment: environmentView(), drafts: {}, dirty: {}, loading: { browser: true, environment: true }, pending: '', error: '', pollErrors: { browser: '', environment: '' }, pollError: '' },
     });
     return entries.get(id)!;
@@ -217,7 +242,14 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     const revisions = new Map([...entries].map(([id, entry]) => [id, { ...entry.revisions }]));
     try {
       const next = await controller('/api/state') as T;
-      if (disposed || ownGeneration !== generation || request !== summaryRevision || sourceKey(next.scan?.repo) !== identity) return;
+      if (disposed || ownGeneration !== generation || request !== summaryRevision) return;
+      // Another window can change the controller's source. One reply may race this window's own change, so a second
+      // in a row that names another source says so instead of leaving the graph silently frozen.
+      if (sourceKey(next.scan?.repo) !== identity) {
+        if (++foreignReplies > 1) { setSourceError('The source changed. Reload the pipeline.'); publish(); }
+        return;
+      }
+      foreignReplies = 0;
       sourceError = '';
       stageRemovals = share(stageRemovals, next.stageRemovals || []);
       previews = share(previews, previewTargets(next.scan));
@@ -238,7 +270,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       publish();
       return next;
     } catch (failure) {
-      if (!disposed && ownGeneration === generation && request === summaryRevision) { sourceError = (failure as Error).message; publish(); }
+      if (!disposed && ownGeneration === generation && request === summaryRevision) { setSourceError((failure as Error).message); publish(); }
     }
   }
   // Polling pauses while the page is hidden and resumes as soon as it is visible.
@@ -301,7 +333,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         return result;
       } catch (failure) {
         const error = failure as ApiError;
-        if (resource === 'browser' && name === 'cases' && error.statusCode === 409) await refresh(entry, resource, true);
+        // A stale case list conflicts in a case save, and in the case writes a one-off run or a replacing Generate makes.
+        if (resource === 'browser' && error.statusCode === 409) await refresh(entry, resource, true);
         if (error.name !== 'AbortError') update(entry, { error: error.message });
         throw failure;
       } finally { update(entry, { pending: '' }); }
@@ -312,7 +345,11 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       isCurrent: () => current(entry),
       observe(resources) {
         assertCurrent(entry);
-        for (const resource of resources) { entry.observers[resource]++; if (entry.observers[resource] === 1) void refresh(entry, resource); }
+        // Summaries carry no configuration, accounts or capabilities, so a view no one observed may be out of date:
+        // it reads as loading until the read its first observer starts returns.
+        const first = resources.filter(resource => ++entry.observers[resource] === 1);
+        if (first.some(resource => !entry.view.loading[resource])) update(entry, { loading: { ...entry.view.loading, ...Object.fromEntries(first.map(resource => [resource, true])) } });
+        for (const resource of first) void refresh(entry, resource);
         let stopped = false;
         return () => { if (!stopped) for (const resource of resources) entry.observers[resource]--; stopped = true; };
       },
@@ -342,10 +379,12 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     stage,
     refreshSource,
     changePipeline,
+    /** Hides the page's errors so far; a later failure, or one that recurs after it cleared, shows again. */
+    dismissError() { dismissedAt = errorClock; publish(); },
     activate(nextSource: { path?: string; branch?: string | null } | null | undefined, seed: SourceState = {}) {
       if (disposed) throw new Error('The test workspace is closed.');
       const nextIdentity = sourceKey(nextSource);
-      generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; listed = null;
+      generation++; identity = nextIdentity; source = { ...nextSource }; sourceError = ''; foreignReplies = 0; listed = null;
       pipelineChanges = []; pipelineQueue = Promise.resolve(); pipelineRevision++;
       confirmedPipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? seed.pipeline : null;
       projectPipeline();

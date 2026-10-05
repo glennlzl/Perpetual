@@ -57,10 +57,11 @@ test('a gate view on another commit of the same checkout names the commit the so
   assert.equal(sourceMoved({ repoPath: '/another', sha: SHA }, repo), null, 'Another source is not this source moving.');
   assert.equal(sourceMoved(null, repo), null);
   assert.equal(sourceMoved({ repoPath: '/sources/app', sha: null }, repo), null);
-  // The page reloads once per reported commit, never again for a new callback while the next poll is pending.
+  // The page reloads once per reported commit, never again for a new callback while the next poll is pending. A reload
+  // that could not run yet is tried again, and Try again starts it over, as the mounted App shows in pipeline-canvas-ui.test.ts.
   const source = await readFile(new URL('../client/src/StageGate.tsx', import.meta.url), 'utf8');
   assert.match(source, /const moved = sourceMoved\(view, repo\);/);
-  assert.match(source, /useEffect\(\(\) => \{ if \(moved\) void reload\.current\(\); \}, \[moved\]\);/);
+  assert.match(source, /useEffect\(\(\) => \{\n    if \(!moved\) return undefined;[\s\S]*?\n  \}, \[moved, retryKey\]\);/);
 });
 
 test('unchanged gates keep their identity across polls', () => {

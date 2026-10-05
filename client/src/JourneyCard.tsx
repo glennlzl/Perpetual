@@ -39,13 +39,16 @@ export default function JourneyCard({ item, run, status, label, repoPath, stageI
   const result = run?.results?.find(value => value.caseId === item.id);
   const steps = browserJourneySteps(item, progress, status);
   const recordings = journeyRecordings({ repoPath, stageId, run, caseId: item.id, status });
-  // Only live or failed journeys open by default; a later start or failure reopens the card.
-  const attention = journeyOpenByDefault(status);
+  // Only live or failed journeys open by default, as do code being generated and code that failed to generate or
+  // verify, since the card's body is where they show; a later start or failure reopens the card.
+  const code = journeyCode(spec);
+  const attention = journeyOpenByDefault(status) || code.generating || Boolean(code.error || code.verificationError);
   const [open, setOpen] = useState(attention);
   useEffect(() => { if (attention) setOpen(true); }, [attention]);
   // A journey clicked on its stage opens its live card.
   useEffect(() => { if (focused) setOpen(true); }, [focused]);
-  return <Card className="journey-card gap-0 overflow-hidden py-0 shadow-none" data-status={status} data-case-id={item.id} data-focused={focused || undefined} tabIndex={-1}>
+  // A list item named by its journey, so focusing the card from the canvas announces which journey it is.
+  return <Card role="listitem" aria-label={item.name} className="journey-card gap-0 overflow-hidden py-0 shadow-none" data-status={status} data-case-id={item.id} data-focused={focused || undefined} tabIndex={-1}>
     <Collapsible open={open} onOpenChange={setOpen}>
       <CardHeader className="flex flex-row flex-wrap items-start gap-2 px-4 py-3">
         <div className="flex min-w-0 flex-1 basis-56 items-start gap-2">

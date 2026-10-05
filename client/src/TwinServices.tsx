@@ -15,28 +15,30 @@ import type { Environment } from '@/lib/test-workspace';
 import type { TwinService, TwinServicesReply, TwinInputsReply } from '../../contract/twin.ts';
 
 type TwinServiceRow = ReturnType<typeof twinServiceRows>[number];
-type ServicesView = { key: string; services: TwinService[]; generated: boolean; error: string };
+type ServicesView = { source: string; services: TwinService[]; generated: boolean; error: string };
 
 // The services in a Sandbox stage's twin config; nothing shows when it has none.
 // A service blocked on inputs the user supplies connects them in place; one that can be provisioned
 // also creates them, and once provisioned shows its expiry and claim link.
 export default function TwinServices({ repoPath, scannedAt, stageId, environment }: { repoPath?: string; scannedAt?: string; stageId: string; environment?: Environment | null }) {
   const revision = useSyncExternalStore(twinInputsChanges.subscribe, twinInputsChanges.revision);
-  const key = JSON.stringify([repoPath, scannedAt, stageId]);
+  const source = JSON.stringify([repoPath, stageId]), key = JSON.stringify([repoPath, scannedAt, stageId]);
   // Creating an environment may write the stage's twin config, so its services load again as the environment changes.
   const environmentState = `${environment?.id ?? ''}:${environment?.status ?? ''}`;
   const [view, setView] = useState<ServicesView | null>(null);
   const [connecting, setConnecting] = useState<TwinServiceRow | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!repoPath || !stageId) return undefined;
     const controller = new AbortController();
     api<TwinServicesReply>(`/api/twin/services?${new URLSearchParams({ repoPath, stageId })}`, undefined, { signal: controller.signal }).then(
-      result => setView({ key, services: result.services, generated: result.generated === true, error: '' }),
-      (failure: Error) => { if (failure.name !== 'AbortError') setView({ key, services: [], generated: false, error: failure.message }); });
+      result => setView({ source, services: result.services, generated: result.generated === true, error: '' }),
+      (failure: Error) => { if (failure.name !== 'AbortError') setView({ source, services: [], generated: false, error: failure.message }); });
     return () => controller.abort();
-  }, [key, revision, environmentState]);
-  // A previous source's rows never show while the current one loads.
-  const current = view?.key === key ? view : null;
+  }, [key, revision, environmentState, attempt]);
+  // A previous source's rows never show while the current one loads. A new scan of the same source reads them again
+  // while they stay, so a Connect dialog open meanwhile keeps what was typed.
+  const current = view?.source === source ? view : null;
   if (!current || (!current.error && !current.services.length)) return null;
   const rows = twinServiceRows(current.services, environment);
   const blocked = rows.filter(row => row.status === 'blocked').length;
@@ -44,9 +46,10 @@ export default function TwinServices({ repoPath, scannedAt, stageId, environment
     <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-8 justify-start gap-2 px-1 text-xs [&[data-state=open]>svg]:rotate-180">
       Services{!current.error && <Badge variant="secondary">{rows.length}</Badge>}{current.generated && <Badge variant="outline">Generated</Badge>}{blocked > 0 && <Badge variant="outline"><LockKeyhole aria-hidden="true" />{blocked}<span className="sr-only"> blocked</span></Badge>}<ChevronDown className="size-3.5 text-muted-foreground transition-transform" />
     </Button></CollapsibleTrigger>
+    {/* A failed read shows without expanding the list it replaces. */}
+    {current.error && <div className="flex flex-wrap items-center gap-2 px-1"><p role="alert" className="min-w-0 flex-1 break-words text-xs text-destructive">{current.error}</p><Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setAttempt(value => value + 1)}>Try again</Button></div>}
     <CollapsibleContent className="pt-1">
-      {current.error ? <p role="alert" className="break-words px-1 text-xs text-destructive">{current.error}</p>
-        : <ItemGroup aria-label="Services">{rows.map(row => {
+      {!current.error && <ItemGroup aria-label="Services">{rows.map(row => {
           const asset = providerAsset(row.provider || row.id) || 'service';
           return <Item key={row.id} role="listitem" size="sm" className="flex-nowrap gap-2 px-1 py-1.5">
           <ItemMedia><img className="provider-logo size-5 object-contain" data-monochrome={monochromeAsset(asset)} src={`/assets/providers/${asset}.svg`} alt="" width={20} height={20} /></ItemMedia>

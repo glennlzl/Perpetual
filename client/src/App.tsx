@@ -31,7 +31,7 @@ import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
 import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
 import { buildChanges, buildForSource, createGitHubBuildPoller, watchedBuildStatus, watchedBuildSummary, type BuildRead } from '@/lib/pipeline-github.ts';
-import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
+import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentChanges, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
 import { autopilotChanges, createAutopilotPoller, shareAutopilot, stageActive, type AutopilotView } from '@/lib/pipeline-autopilot.ts';
 import { createStageDataCache, stageNodeData, statusChanges, type PipelineStage, type PipelineView } from '@/lib/pipeline-nodes.ts';
@@ -197,9 +197,9 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
 
 // Source reports where its scanned commit came from. Production distinguishes a requested
 // deployment's reported result from the journey gate's readiness for a commit.
-// null is a status not known yet, which shows no Badge.
-function stageStatus(stage: PipelineStage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'blocked' | 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
-  if (blocked) return { kind: 'blocked', text: 'Transition paused' };
+// null is a status not known yet, which shows no Badge. A paused transition only
+// describes the pipeline, so its arrow says so and the stage keeps its own status.
+function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (stage.kind === 'source') return revision ? { kind: 'ready', text: origin === 'github' ? 'GitHub' : 'Local', sha: revision } : { kind: 'unconfigured', text: 'No commit' };
   // Ready is a gate verdict; a requested deployment reports its own state at its exact commit.
   if (stage.kind === 'production') {
@@ -268,8 +268,8 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 }
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
-  const { stage, services, repoPath, scannedAt, sha, blocked, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
-  const status = stageStatus(stage, { blocked, environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
+  const { stage, services, repoPath, scannedAt, sha, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
+  const status = stageStatus(stage, { environment, buildStatus, origin, revision, services, gate, gated, releases: data.releases });
   const sandbox = stage.kind === 'sandbox';
   // The changes Autopilot records for the stage; one under way lights the card's beam.
   const changes = autopilot?.changes || [];
@@ -371,23 +371,25 @@ function useGitHubDeployments(repoPath: string | undefined, sha: string | null, 
   useEffect(() => {
     if (!repoPath || !sha || !enabled) return undefined;
     const poller = createGitHubDeploymentsPoller({ controller: api, repoPath, onChange: setResult });
-    return () => poller.stop();
+    const unsubscribe = deploymentChanges.subscribe(() => poller.refresh());
+    return () => { unsubscribe(); poller.stop(); };
   }, [repoPath, sha, enabled]);
   return enabled && result?.sha === sha ? result : null;
 }
 
 // Autopilot's modes and changes, read once the controller reports them in the
-// pipeline state; before that the cards show nothing about Autopilot.
+// pipeline state; before that the cards show nothing about Autopilot. The state's
+// view stands only until the first read: a failed read shows nothing, never that older view.
 function useAutopilot(repoPath: string | undefined, initial: AutopilotView | null | undefined) {
-  const [view, setView] = useState<AutopilotView | null>(null);
+  const [read, setRead] = useState<{ repoPath: string; view: AutopilotView | null } | null>(null);
   const enabled = initial !== undefined;
   useEffect(() => {
     if (!repoPath || !enabled) return undefined;
-    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setView(previous => shareAutopilot(previous, next)) });
+    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setRead(previous => ({ repoPath, view: shareAutopilot(previous?.repoPath === repoPath ? previous.view : null, next) })) });
     const stop = autopilotChanges.subscribe(() => poller.refresh());
     return () => { stop(); poller.stop(); };
   }, [repoPath, enabled]);
-  const current = view ?? initial ?? null;
+  const current = read && read.repoPath === repoPath ? read.view : initial ?? null;
   return enabled && current?.repoPath === repoPath ? current : null;
 }
 
@@ -449,7 +451,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const build = useMemo(() => watchedBuildSummary(github), [github]);
   const buildStatus = useMemo(() => watchedBuildStatus(github, buildReadError), [github, buildReadError]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);
-  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha);
+  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha, gates);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
   const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
@@ -672,11 +674,12 @@ function PipelineApp() {
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
   const pipeline = tests.pipeline;
   const [loading, setLoading] = useState(true);
+  // Why the pipeline could not be read; without a pipeline, the page offers to read it again instead of Connect GitHub.
+  const [loadError, setLoadError] = useState('');
   // A failure the canvas reports, with the operation that can repeat it, if any.
   const [error, setFailure] = useState<CanvasFailure | null>(null);
   const setError = useCallback((message: string, retry: (() => void) | null = null) => setFailure(message ? { message, retry } : null), []);
-  // A poll failure the viewer dismissed stays hidden until that source of errors clears.
-  const [quietError, setQuietError] = useState('');
+  // An Autopilot poll failure the viewer dismissed stays hidden until it clears; the workspace keeps its own dismissal.
   const [quietAutopilotError, setQuietAutopilotError] = useState('');
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<PipelineDialog | null>(() => {
@@ -766,12 +769,12 @@ function PipelineApp() {
   }, [theme]);
 
   const load = useCallback(async () => {
-    setLoading(true); setError('');
+    setLoading(true); setError(''); setLoadError('');
     try {
       const fresh = await api<PipelineState>('/api/state');
       workspace.activate(fresh.scan?.repo, fresh);
       setState(fresh);
-    } catch (failure) { setError((failure as Error).message); }
+    } catch (failure) { setLoadError((failure as Error).message); }
     finally { setLoading(false); }
   }, [workspace]);
   useEffect(() => { void load(); }, [load]);
@@ -780,22 +783,27 @@ function PipelineApp() {
     if (mutation.current) return;
     await workspace.refreshSource();
   }, [workspace]);
-  // A gate moved the managed source to another commit in place; the workspace and its drafts stay.
-  const refreshScan = useCallback(async () => {
-    if (mutation.current) return;
+  // A gate moved the managed source to another commit in place; the workspace and its drafts stay. False means the
+  // reload could not run while a pipeline or source change saved, so the gate hook tries it again. Try again after a
+  // failed reload starts that hook over, so it also waits out a change saving meanwhile.
+  const [scanRetry, setScanRetry] = useState(0);
+  const refreshScan = useCallback(async (): Promise<boolean> => {
+    if (mutation.current) return false;
     const source = workspace.stage('source');
     try {
       const fresh = await api<PipelineState>('/api/state');
-      if (source.isCurrent() && !mutation.current && fresh.scan?.repo?.path === state.scan?.repo?.path && fresh.scan?.repo?.branch === state.scan?.repo?.branch) setState(fresh);
-    } catch (failure) { if (source.isCurrent()) setError((failure as Error).message); }
+      if (!source.isCurrent()) return true;
+      if (mutation.current) return false;
+      if (fresh.scan?.repo?.path === state.scan?.repo?.path && fresh.scan?.repo?.branch === state.scan?.repo?.branch) setState(fresh);
+    } catch (failure) { if (source.isCurrent()) setError((failure as Error).message, () => setScanRetry(value => value + 1)); }
+    return true;
   }, [state.scan, workspace, setError]);
-  const gates = useStageGates(state.scan?.repo, refreshScan);
+  const gates = useStageGates(state.scan?.repo, refreshScan, scanRetry);
   const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
+  // A failed refresh is the workspace's own poll error, which its next poll repeats.
   useEffect(() => {
-    if (!tests.stageRemovals?.some(item => item.status === 'completed' && pipeline?.stages.some(stage => stage.id === item.stageId))) return;
-    const refresh = () => void refreshPipeline().catch(failure => setError(failure.message, refresh));
-    refresh();
-  }, [tests.stageRemovals, pipeline, refreshPipeline, setError]);
+    if (tests.stageRemovals?.some(item => item.status === 'completed' && pipeline?.stages.some(stage => stage.id === item.stageId))) void refreshPipeline();
+  }, [tests.stageRemovals, pipeline, refreshPipeline]);
   useEffect(() => {
     if (dialog?.type === 'remove-stage' && pipeline && !pipeline.stages.some(stage => stage.id === dialog.stageId)) closeDialog();
   }, [dialog, pipeline, closeDialog]);
@@ -806,10 +814,10 @@ function PipelineApp() {
     if (stage.getSnapshot().pending) return;
     setError('');
     setDialog({ type: 'environment', stageId, tab: 'browser' });
+    // The workspace shows the stage's failed action on the canvas as well, so it is not raised here a second time.
     try { await stage.createEnvironment(); }
     catch (failure) {
       if (!stage.isCurrent()) return;
-      setError((failure as Error).message);
       setDialog(previous => previous?.type === 'environment' && previous.stageId === stageId ? { ...previous, error: (failure as Error).message } : previous);
     }
   }, [workspace]);
@@ -871,24 +879,22 @@ function PipelineApp() {
   // failures the viewer has not dismissed. Polls retry on their own, so only
   // the canvas's own operations offer Try again.
   const autopilotError = autopilot?.watchError || '';
-  useEffect(() => { if (!tests.error) setQuietError(''); }, [tests.error]);
   useEffect(() => { if (!autopilotError) setQuietAutopilotError(''); }, [autopilotError]);
-  const workspaceError = tests.error && tests.error !== quietError ? tests.error : '';
-  const pollError = workspaceError || (autopilotError !== quietAutopilotError ? autopilotError : '');
+  const pollError = tests.error || (autopilotError !== quietAutopilotError ? autopilotError : '');
   const canvasError = useMemo(() => error || (pollError ? { message: pollError, retry: null } : null), [error, pollError]);
   const retryError = useCallback(() => { const retry = error?.retry; setError(''); retry?.(); }, [error, setError]);
   const dismissError = useCallback(() => {
     if (error) setError('');
-    else if (workspaceError) setQuietError(workspaceError);
+    else if (tests.error) workspace.dismissError();
     else setQuietAutopilotError(autopilotError);
-  }, [error, setError, workspaceError, autopilotError]);
+  }, [error, setError, tests.error, workspace, autopilotError]);
 
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
       <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Pipeline'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
       {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
-        {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{error ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{error && <p role="alert">{error.message}</p>}<Button onClick={error ? load : () => openDialog({ type: 'source', connect: true })}>{error ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
+        {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
     </div>
     <PipelineDialogs dialog={page !== 'pipeline' || loading && dialog?.type === 'git-graph' ? null : dialog} onClose={closeDialog} onAppSettings={openAppSettings} scan={state.scan || { repo: { path: state.defaultRepo } }} pipeline={pipeline} onSourceSave={onSourceSave} onAction={onAction} onStageRemoved={refreshPipeline} busy={busy} />

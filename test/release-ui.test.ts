@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReleasePoller, releaseBadge, releaseForSource, releaseRequest } from '../client/src/lib/production-release.ts';
+import { createReleasePoller, gatesReleasable, releaseBadge, releaseForSource, releaseRequest } from '../client/src/lib/production-release.ts';
+import type { GateView, StageGate } from '../contract/gate.ts';
 import type { ReleaseRecord, ReleaseReply, ReleaseView } from '../contract/releases.ts';
 import type { PageVisibility, Timers } from '../client/src/lib/utils.ts';
 
@@ -104,4 +105,65 @@ test('a pending first release read is not an error, and failed reads recover wit
   await new Promise(done => setImmediate(done));
   assert.deepEqual(errors, ['Controller unavailable.', null]);
   poller.stop();
+});
+
+test('a release is read every 3 seconds only while it is pending, and otherwise once a minute', async t => {
+  const delays: number[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  let status: ReleaseRecord['status'] | null = null;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange() {}, controller: async () => ({ repoPath: '/sources/app', ...view({ current: status ? record(status) : null }) }) });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  assert.equal(delays.at(-1), 60000, 'With nothing requested, each read checking the GitHub session waits a minute.');
+  for (const pending of ['requesting', 'queued', 'deploying', 'unknown'] as const) { status = pending; poller.refresh(); await tick(); assert.equal(delays.at(-1), 3000, pending); }
+  for (const settled of ['deployed', 'failed', 'inactive'] as const) { status = settled; poller.refresh(); await tick(); assert.equal(delays.at(-1), 60000, settled); }
+});
+
+test('a release the gates allow but Deploy cannot use yet is read every 3 seconds, until their commit statuses reach it', async t => {
+  const delays: number[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  const unreported = view({ canDeploy: false, blockedReason: 'Every Sandbox gate must pass or be explicitly released and reported for this commit.' });
+  let reply = unreported, ready = true;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange() {}, gatesReady: () => ready, controller: async () => ({ repoPath: '/sources/app', ...reply }) });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  assert.equal(delays.at(-1), 3000, 'The gates passed the commit; reporting their statuses changes nothing else the page reads.');
+  reply = view(); poller.refresh(); await tick();
+  assert.equal(delays.at(-1), 60000, 'Deployable.');
+  for (const [reason, settled] of [
+    ['already deployed', view({ canDeploy: false, blockedReason: 'This commit is already deployed to this target.', current: record('deployed') })],
+    ['no target, which Configure deployment reads again', view({ target: null, canDeploy: false, blockedReason: 'Configure a deployment target.' })],
+  ] as const) { reply = settled; poller.refresh(); await tick(); assert.equal(delays.at(-1), 60000, reason); }
+  reply = unreported; ready = false; poller.refresh(); await tick();
+  assert.equal(delays.at(-1), 60000, 'Gates that do not allow the commit read the release again when their verdict changes.');
+});
+
+test('a failed release read keeps the cadence of the view before it', async t => {
+  const delays: number[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  let fails = false;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange() {}, controller: async () => {
+    if (fails) throw new Error('Controller unavailable.');
+    return { repoPath: '/sources/app', ...view({ current: record('deploying') }) };
+  } });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  assert.equal(delays.at(-1), 3000);
+  fails = true; poller.refresh(); await tick();
+  assert.equal(delays.at(-1), 3000, 'A deployment in progress is read again soon after one failed read.');
+});
+
+test('the gates allow a release only when every stage passed or was released at the scanned commit without a report error', () => {
+  const gate = (extra: Partial<StageGate> = {}): StageGate => ({ id: 'gate-1', stageId: 'beta', sha: SHA, status: 'passed', detectedAt: '2026-09-29T12:00:00.000Z', updatedAt: '2026-09-29T12:00:00.000Z', ...extra });
+  const gates = (stages: Record<string, StageGate>, production: GateView['production'] = { sha: SHA, status: 'ready' }): GateView => ({ stages, production });
+  assert.equal(gatesReleasable(gates({ beta: gate(), gamma: gate({ stageId: 'gamma', status: 'released' }) }), SHA), true);
+  assert.equal(gatesReleasable(gates({ beta: gate({ statusError: 'Connect GitHub to report commit status.' }) }), SHA), false, 'A failed report changes the gate view once it is reported.');
+  assert.equal(gatesReleasable(gates({ beta: gate({ sha: 'd'.repeat(40), status: 'running' }) }), SHA), false, 'A newer commit at work in a stage.');
+  assert.equal(gatesReleasable(gates({ beta: gate({ status: 'running' }) }), SHA), false, 'The commit run again.');
+  assert.equal(gatesReleasable(gates({ beta: gate() }, null), SHA), false);
+  assert.equal(gatesReleasable(gates({ beta: gate() }), 'd'.repeat(40)), false, 'Ready for another commit.');
+  assert.equal(gatesReleasable(null, SHA), false);
 });

@@ -420,9 +420,8 @@ test('a canvas failure is a dismissible Alert above the stages, with Try again o
   assert.match(canvas, /<div className="flow-viewport" ref=\{canvas\}>\n\s+\{error && <CanvasError error=\{error\} onRetry=\{onRetryError\} onDismiss=\{onDismissError\} \/>\}\n\s+<ReactFlow /, 'It precedes the flow, pushing the stages down.');
   assert.match(css, /\.delivery-app \.canvas-alert \{ flex: none;/);
   assert.doesNotMatch(css, /\.canvas-alert \{[^}]*position: absolute/);
-  // A failed toggle and the refresh after a stage removal can repeat; polls retry themselves.
-  assert.match(app, /const refresh = \(\) => void refreshPipeline\(\)\.catch\(failure => setError\(failure\.message, refresh\)\);/);
-  // Poll dismissal, recurrence and action retry precedence are exercised on the mounted App in pipeline-sync-ui.test.ts.
+  // Poll dismissal, recurrence and action retry precedence are exercised on the mounted App in pipeline-sync-ui.test.ts,
+  // and the refresh after a stage removal in pipeline-canvas-ui.test.ts.
 });
 
 test('the header row never clips the sidebar toggle focus ring', async () => {

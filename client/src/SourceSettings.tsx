@@ -8,6 +8,9 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
+import { deploymentChanges } from '@/lib/pipeline-deployments';
+import { buildChanges } from '@/lib/pipeline-github';
+import { releaseChanges } from '@/lib/production-release';
 import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } from '@/lib/source-selection';
 import { BranchName, BranchOptions } from './BranchSwitcher';
@@ -27,6 +30,9 @@ type SourceSettingsProps = {
 };
 
 const messageOf = (error: unknown) => error instanceof Error ? error.message : 'Could not load GitHub settings.';
+// Build, the recorded deployments and the release read GitHub through the connection, and the controller refuses those
+// reads while a sign-in is pending, so they read again at once after a connection change or a sign-in that ended.
+const readGitHubAgain = () => { buildChanges.notify(); deploymentChanges.notify(); releaseChanges.notify(); };
 const mergeBy = <Item, Key extends keyof Item>(old: Item[], incoming: Item[], key: Key) => [...new Map([...old, ...incoming].map(item => [item[key], item])).values()];
 const ownerOf = (fullName: string) => fullName.split('/')[0];
 
@@ -112,6 +118,8 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const [branch, setBranch] = useState('');
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [branchesError, setBranchesError] = useState('');
+  // A failed further page leaves the listed branches, and the choice among them, valid; Load more branches tries it again.
+  const [moreBranchesError, setMoreBranchesError] = useState('');
   const [branchPage, setBranchPage] = useState<number | null>(null);
   const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
   const [rootDirectory, setRootDirectory] = useState('/');
@@ -180,6 +188,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     } finally {
       if (active.current && request === connectionRequest.current) setConnectionAction('');
       onBusyChange?.(false);
+      readGitHubAgain();
     }
   }
 
@@ -213,8 +222,9 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   async function loadBranches(target: string, page: number = 1, append = false) {
     const request = ++branchRequest.current;
     const preferred = savedSource.current?.repository === target ? savedSource.current.branch || '' : '';
+    const setError = append ? setMoreBranchesError : setBranchesError;
     setBranchesLoading(true);
-    setBranchesError('');
+    setError('');
     try {
       const result = await api<GitHubBranchPage>(`/api/github/branches?repository=${encodeURIComponent(target)}&page=${encodeURIComponent(page)}${Number(page) === 1 && preferred ? `&preferredBranch=${encodeURIComponent(preferred)}` : ''}`);
       if (!active.current || request !== branchRequest.current) return;
@@ -223,7 +233,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       if (!append) setDefaultBranch(result.defaultBranch || null);
       if (!append) setBranch(previous => initialBranch({ previous, preferred, defaultBranch: result.defaultBranch, names: (result.branches || []).map(item => item.name) }));
     } catch (failure) {
-      if (active.current && request === branchRequest.current) setBranchesError(messageOf(failure));
+      if (active.current && request === branchRequest.current) setError(messageOf(failure));
     } finally {
       if (active.current && request === branchRequest.current) setBranchesLoading(false);
     }
@@ -235,6 +245,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     setBranchPage(null);
     setDefaultBranch(null);
     setBranchesError('');
+    setMoreBranchesError('');
     if (connected && repository) void loadBranches(repository);
     else setBranchesLoading(false);
   }, [connected, repository, connection?.account?.login]);
@@ -268,7 +279,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const repositoryItem = (item: Pick<GitHubRepositoryChoice, 'fullName'> & Partial<Pick<GitHubRepositoryChoice, 'private'>>, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
 
   return <>
-    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} focusTargets={() => [
+    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onSignInEnded={readGitHubAgain} onClose={() => setConnectOpen(false)} focusTargets={() => [
       connected ? repositoryTrigger.current : null,
       connectionButton.current,
       connectionButton.current?.closest<HTMLElement>('[data-slot="sheet-content"]'),
@@ -319,6 +330,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
           setBranches([]);
           setBranchPage(null);
           setBranchesError('');
+          setMoreBranchesError('');
           setBranchesLoading(true);
         }}>
           <SelectTrigger ref={repositoryTrigger} id="source-repository" className={`min-w-0 w-full${scanned ? ' data-[placeholder]:text-foreground' : ''}`} title={repository || scanned?.repository || undefined}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.repository || (repositoriesLoading ? 'Loading repositories…' : 'Select repository')}>{repository || undefined}</SelectValue></span></SelectTrigger>
@@ -348,6 +360,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       <SourceReadError error={branchesError} label="Retry branches" disabled={disableFields || branchesLoading} onRetry={() => loadBranches(repository)} focusTarget={() => branchTrigger.current} />
       {connected && repository && !branchesLoading && !branchesError && !branches.length && <p className="text-sm text-muted-foreground">No branches</p>}
       {branchPage && <Button type="button" variant="ghost" size="sm" className="w-fit" disabled={disableFields || branchesLoading} onClick={() => loadBranches(repository, branchPage, true)}>{branchesLoading ? 'Loading…' : 'Load more branches'}</Button>}
+      <SourceReadError error={moreBranchesError} label="Load more branches" disabled focusTarget={() => branchTrigger.current} />
     </Section>
 
     <Section>

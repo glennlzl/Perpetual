@@ -255,7 +255,7 @@ test('a case clicked on its stage focuses and expands its card, review/edit stay
   const source = (file: string) => readFile(new URL(`../client/src/${file}`, import.meta.url), 'utf8');
   const panel = await source('BrowserTestingPanel.tsx');
   assert.doesNotMatch(panel.slice(panel.indexOf('const { kind, caseId } = journeyRequest(initialCaseId);'), panel.indexOf('async function persistConfig')), /openCase|setEditingCase/, 'A stage click never opens the editor');
-  assert.match(panel, /onInspect=\{\(\) => openCase\(item\)\}/);
+  assert.match(panel, /onInspect=\{code\.generating \? undefined : \(\) => openCase\(item\)\}/, 'A journey whose code is generated is not edited meanwhile.');
   assert.match(panel, /onViewRun=\{run \? \(\) => setWatching\(\{ \.\.\.watchedRun\(run\), focusCaseId: item\.id \}\) : undefined\}/);
   const open = panel.slice(panel.indexOf('function openCase'), panel.indexOf('async function saveCase'));
   assert.match(open, /setEditingCase\(item\)/);
@@ -478,7 +478,7 @@ test('a verifying journey keeps its actions open to Stop verifying while an atte
   const menu = panel.slice(panel.indexOf('actions={<DropdownMenu>'), panel.indexOf('onSkip='));
   assert.match(menu, /<Button [^>]*disabled=\{code\.verifying \? locked : disabled\} aria-label=\{`Actions for \$\{item\.name\}`\}>/);
   assert.match(menu, /<DropdownMenuItem disabled=\{disabled \|\| !runnable\(\[item\]\) \|\| !validUrl\(config\.targetUrl\)\}/);
-  assert.match(menu, /<DropdownMenuItem disabled=\{disabled\} onSelect=\{\(\) => setEditingCase\(item\)\}>/);
+  assert.match(menu, /<DropdownMenuItem disabled=\{disabled \|\| code\.generating\} onSelect=\{\(\) => setEditingCase\(item\)\}>/);
   assert.match(menu, /<DropdownMenuItem variant="destructive" disabled=\{disabled\} onSelect=\{\(\) => setDeletingCase\(item\)\}>/);
   // Inside it, generating, verifying, approving and discarding wait for the verification; stopping it does not.
   const actions = panel.slice(panel.indexOf('function CodeActions'), panel.indexOf('function ApproveCodeDialog'));

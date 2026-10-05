@@ -33,8 +33,8 @@ export const stageBoxes = (nodes: readonly { id: string; position: { x: number; 
 
 // Automatic framing starts at the first stage at a readable zoom, up to 1. When
 // the pipeline cannot fit, it keeps READABLE_ZOOM and shows the card at the right
-// edge whole if trimming the insets is enough; otherwise panning and Jump to
-// stage reach the rest. Explicit Fit view remains unrestricted.
+// edge whole if trimming the insets is enough; otherwise panning and Fit view
+// reach the rest. Explicit Fit view remains unrestricted.
 export function entryViewport(boxes: readonly StageBox[] = [], { width = 0 }: { width?: number } = {}): Viewport {
   const right = extent(boxes);
   if (!right || !(width > 0)) return INITIAL_PIPELINE_VIEWPORT;
@@ -94,8 +94,8 @@ export function revealViewport(viewport: Viewport | null | undefined, control: F
 // returns it, unless the viewer panned or zoomed meanwhile (theirs stays) or a
 // resize or layout change reframed the narrowed canvas (frame the full width).
 // An animated move stands at its target until it lands: a sheet opened while a
-// restore or jump is still in flight records where the canvas is going, never
-// the frame passing by. A drag, zoom or reframe cancels the flight.
+// restore, an uncover or a focus reveal is still in flight records where the
+// canvas is going, never the frame passing by. A drag, zoom or reframe cancels the flight.
 export function createSheetViewport() {
   let session: { viewport: Viewport | null; moved: boolean } | null = null, flight: { target: Viewport } | null = null;
   const view = (live: Viewport) => flight ? flight.target : live;

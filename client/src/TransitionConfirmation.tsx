@@ -16,7 +16,7 @@ export default function TransitionConfirmation({ dialog, pipeline, onAction, onC
   const saving = useRef(false);
   const focusOrigin = useRef<Element | null>(null);
   const locked = busy || pending;
-  const action = paused ? 'Resume deployment' : 'Pause deployment';
+  const action = paused ? 'Resume transition' : 'Pause transition';
   const source = pipeline?.stages?.find(stage => stage.id === dialog.sourceStageId)?.name;
   const target = pipeline?.stages?.find(stage => stage.id === dialog.targetStageId)?.name;
 

@@ -95,6 +95,6 @@ export default function RunJourneyGallery({ run, repoPath, stageId, initialFocus
   if (focused) return <>{failure}<JourneyFocus entry={focused} entries={entries} run={run} repoPath={repoPath} stageId={stageId} onSkip={active ? () => skip(focused.item.id) : undefined} skipping={skipping === focused.item.id} onSelect={show} onBack={() => show('')} headingRef={viewFocus.heading} /></>;
   return <div className="min-h-0 flex-1 overflow-y-auto p-5">
     {error && <p role="alert" className="mb-4 text-sm text-destructive">{error}</p>}
-    <div className="grid items-start gap-5 xl:grid-cols-2">{entries.map(({ item, status, label }) => <JourneyCard key={item.id} item={item} run={run} status={status} label={label} repoPath={repoPath} stageId={stageId} onSkip={active ? () => skip(item.id) : undefined} skipping={skipping === item.id} onFocus={() => show(item.id)} focusRef={viewFocus.card(item.id)} />)}</div>
+    <div role="list" className="grid items-start gap-5 xl:grid-cols-2">{entries.map(({ item, status, label }) => <JourneyCard key={item.id} item={item} run={run} status={status} label={label} repoPath={repoPath} stageId={stageId} onSkip={active ? () => skip(item.id) : undefined} skipping={skipping === item.id} onFocus={() => show(item.id)} focusRef={viewFocus.card(item.id)} />)}</div>
   </div>;
 }

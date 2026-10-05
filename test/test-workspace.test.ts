@@ -14,6 +14,61 @@ test('a rejected graph skip reaches the graph error projection without an open i
   } finally { workspace.dispose(); }
 });
 
+test('the page shows the latest stage error, so an earlier action failure never hides a later one', async t => {
+  let readFails = false;
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
+    if (path.startsWith('/api/browser/run')) throw new Error('Beta could not start its run.');
+    if (path.startsWith('/api/browser/skip')) throw new Error('Journey no longer exists.');
+    if (readFails) throw new Error('Beta could not be read.');
+    return { cases: [], runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate({ path: '/repo', branch: 'main' }, { browserTests: { beta: { cases: [], runs: [] }, gamma: { cases: [], runs: [] } } });
+  const beta = workspace.stage('beta'), gamma = workspace.stage('gamma');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  assert.equal(workspace.getSnapshot().error, 'Beta could not start its run.');
+  await assert.rejects(gamma.perform('browser', 'skip', tx => tx.post('skip', { id: 'run', caseId: 'journey' })), /no longer exists/);
+  assert.equal(workspace.getSnapshot().error, 'Journey no longer exists.', 'A later failure on a following stage is shown.');
+  readFails = true; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Beta could not be read.', 'So is a later poll failure beside an older action error.');
+  readFails = false; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Journey no longer exists.');
+});
+
+test('a dismissed error stays hidden when a later one clears, and a failure after the dismissal shows even in the same words', async t => {
+  let readFails = false, sourceFails = false;
+  const unavailable = 'The local server is unavailable. Try reconnecting.';
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
+    if (path === '/api/state') { if (sourceFails) throw new Error(unavailable); return { scan: { repo: { path: '/repo', branch: 'main' } }, browserTests: {} }; }
+    if (path.startsWith('/api/browser/run')) throw new Error('Beta could not start its run.');
+    if (readFails) throw new Error('Beta could not be read.');
+    return { cases: [], runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate({ path: '/repo', branch: 'main' }, { browserTests: { beta: { cases: [], runs: [] } } });
+  const beta = workspace.stage('beta');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  workspace.dismissError();
+  assert.equal(workspace.getSnapshot().error, '');
+  // A newer poll failure shows. Once it is dismissed too and the stage reads again, the older action failure stays hidden.
+  readFails = true; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Beta could not be read.');
+  workspace.dismissError();
+  readFails = false; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, '', 'A dismissed action failure does not return.');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  assert.equal(workspace.getSnapshot().error, 'Beta could not start its run.', 'The same failure again is a new one.');
+  // A dismissed source failure stays hidden while it repeats, and shows again when it recurs after a clean read.
+  sourceFails = true; await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, unavailable);
+  workspace.dismissError();
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+  sourceFails = false; await workspace.refreshSource();
+  sourceFails = true; await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, unavailable);
+});
+
 const source = { path: '/project', branch: 'main' };
 const pipelineStages = (ids: string[]) => ids.map(id => ({ id, name: id, kind: id === 'source' ? 'source' : 'sandbox' }));
 
@@ -264,4 +319,57 @@ test('the scanned branch follows the active source', t => {
   assert.equal(workspace.getSnapshot().branch, 'main');
   workspace.activate({ ...source, branch: 'preview' }, { browserTests: {} });
   assert.equal(workspace.getSnapshot().branch, 'preview');
+});
+
+test('a reopened inspector reads its stage again before its view counts as loaded', async t => {
+  let read = deferred();
+  const { stage } = fixture(t, () => read.promise);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let stop = stage.observe(['browser']);
+  read.resolve({ cases: [scenario], runs: [], accounts: [], config: { targetUrl: 'http://127.0.0.1:3000/' } }); await flush();
+  assert.equal(stage.getSnapshot().loading.browser, false);
+  stop();
+  // While no inspector observes the stage, a new twin moves its target and adds a test account.
+  read = deferred();
+  stop = stage.observe(['browser']);
+  assert.equal(stage.getSnapshot().loading.browser, true, 'Configuration, accounts and capabilities read while closed may be out of date.');
+  read.resolve({ cases: [scenario], runs: [], accounts: [{ id: 'admin', label: 'Admin', username: 'admin@example.test' }], config: { targetUrl: 'http://127.0.0.1:4000/' } }); await flush();
+  assert.equal(stage.getSnapshot().loading.browser, false);
+  assert.equal(stage.getSnapshot().browser.config.targetUrl, 'http://127.0.0.1:4000/');
+  assert.deepEqual(stage.getSnapshot().browser.accounts?.map(account => account.id), ['admin']);
+  stop();
+});
+
+test('a source another window switched to is reported once a second poll names it, instead of a silently frozen graph', async t => {
+  let branch = 'main';
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async () => ({ scan: { repo: { path: source.path, branch } }, browserTests: {} }) });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { browserTests: {} });
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+  branch = 'feature';
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '', 'One reply may race this window\'s own source change.');
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, 'The source changed. Reload the pipeline.');
+  workspace.activate({ ...source, branch: 'feature' }, { browserTests: {} });
+  assert.equal(workspace.getSnapshot().error, '');
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+});
+
+test('a case conflict inside a one-off run or a replacing Generate reads the changed list at once', async t => {
+  let cases = [{ ...scenario, name: 'Before' }];
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async (path, input) => {
+    if (input) throw Object.assign(new Error('Tests changed. Reopen Generate and try again.'), { statusCode: 409 });
+    return { cases, runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { browserTests: { beta: { cases, runs: [] } } });
+  const stage = workspace.stage('beta');
+  for (const [mode, name] of [['run', 'After a run'], ['discover', 'After Generate']]) {
+    cases = [{ ...scenario, name }];
+    await assert.rejects(stage.perform('browser', mode, tx => tx.post('cases', { cases: [], baseCases: [] })), /Tests changed/);
+    assert.equal(stage.getSnapshot().browser.cases[0].name, name, `${mode}: a retry starts from the controller's list`);
+  }
 });

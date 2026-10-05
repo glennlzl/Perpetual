@@ -322,7 +322,8 @@ function BusinessCaseEditor({ item, draftKey, onSave, onClose, focusFallback }: 
     const { steps, error: stepError } = buildJourneySteps(draft.stepRows, item.steps || []);
     if (stepError) return setError(stepError);
     const { stepRows: _rows, ...fields } = draft;
-    const next = { ...fields, steps, name: draft.name.trim(), goal: draft.goal.trim(), preconditions, expectedOutcomes, assertions: draft.assertions.map(check => ({ type: check.type, value: check.value.trim() })), needsReview: false };
+    // A kept draft may predate a selection change, which the editor never edits; the case's own selection is saved.
+    const next = { ...fields, selected: item.selected, steps, name: draft.name.trim(), goal: draft.goal.trim(), preconditions, expectedOutcomes, assertions: draft.assertions.map(check => ({ type: check.type, value: check.value.trim() })), needsReview: false };
     // Existing step-less cases stay runnable unchanged; any reviewed edit needs real milestones.
     const legacyUnchanged = !item.needsReview && !item.steps?.length && DEFINITION.every(key => JSON.stringify(next[key] ?? []) === JSON.stringify(item[key] ?? [])) && next.isolation === (item.isolation || 'shared');
     const countError = reviewedStepError(steps, { legacyUnchanged });
@@ -440,20 +441,21 @@ function ApproveCodeDialog({ repoPath, stageId, item, onApprove, onClose, focusF
   </Dialog>;
 }
 
-function DeleteCaseDialog({ item, pending, disabled, onDelete, onClose, focusFallback }: { item: BrowserCase; pending: string; disabled: boolean; onDelete: () => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
+// Deleting a test, or discarding its generated and verified draft, cannot be undone, so each is confirmed.
+function ConfirmCaseDialog({ item, title = 'Delete test?', action = 'Delete test', working = 'Deleting…', pending, disabled, onConfirm, onClose, focusFallback }: { item: BrowserCase; title?: string; action?: string; working?: string; pending: string; disabled: boolean; onConfirm: () => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
   const returnFocus = useReturnFocus(focusFallback);
   const [error, setError] = useState('');
   return <AlertDialog open onOpenChange={open => { if (!open && !pending) onClose(); }}>
     <AlertDialogContent onCloseAutoFocus={returnFocus}>
-      <AlertDialogHeader><AlertDialogTitle>Delete test?</AlertDialogTitle><AlertDialogDescription className="break-words">{item.name}</AlertDialogDescription></AlertDialogHeader>
+      <AlertDialogHeader><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription className="break-words">{item.name}</AlertDialogDescription></AlertDialogHeader>
       <ErrorText>{error}</ErrorText>
       <AlertDialogFooter><AlertDialogCancel disabled={Boolean(pending)}>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={disabled} onClick={async event => {
         event.preventDefault();
         if (disabled) return;
         setError('');
-        try { await onDelete(); }
+        try { await onConfirm(); }
         catch (failure) { setError((failure as Error).message); }
-      }}>{pending ? 'Deleting…' : 'Delete test'}</AlertDialogAction></AlertDialogFooter>
+      }}>{pending ? working : action}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent>
   </AlertDialog>;
 }
@@ -476,6 +478,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const [editingCase, setEditingCase] = useState<BrowserCase | null>(null);
   const [caseFilter, setCaseFilter] = useState('all');
   const [deletingCase, setDeletingCase] = useState<BrowserCase | null>(null);
+  const [discarding, setDiscarding] = useState<{ item: BrowserCase; hash: string } | null>(null);
   const [approvingCase, setApprovingCase] = useState<BrowserCase | null>(null);
   const [authoringCase, setAuthoringCase] = useState<BrowserCase | null>(null);
   const [creatingCase, setCreatingCase] = useState(false);
@@ -523,6 +526,9 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const emphasis = (action: string) => toolbar.primary === action ? 'default' : 'outline';
   const runCases = runDialog?.caseIds ? cases.filter(item => runDialog.caseIds!.includes(item.id) && reviewed(item)) : selected;
   const runBlocked = temporary.caseIds.length ? RESTORE_FIRST : runDialog?.caseIds ? oneOffSelection(cases, runCases.map(item => item.id)).error || '' : '';
+  // The run dialog names what keeps it from running, as the code dialog does; a canvas request can open it blocked.
+  const runNotice = runBlocked || wait || (!validTarget ? 'Set a target URL.' : !runCases.length ? 'Review the journey and add checks first.'
+    : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : !runnable(runCases) ? 'Generate code first.' : '');
   const codeItem = codeDialog && cases.find(item => item.id === codeDialog.caseId);
   const codeBlocked = !codeItem || !reviewed(codeItem) ? 'Review the journey and add checks first.' : !validTarget ? 'Set a target URL.' : capabilities?.playwright?.browserInstalled === false ? 'Install Chromium for Playwright.' : codeDialog?.action === 'generate' && !openRouterConfigured ? 'Add an OpenRouter API Key in Settings.' : '';
   const concurrencyLabel = browserConcurrencyLabel(activeRun);
@@ -655,7 +661,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {activeRun && <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{activeRun.mode === 'discover' ? 'Exploring' : 'Running'}</Badge>{concurrencyLabel && <Badge variant="outline">{concurrencyLabel}</Badge>}</div><Button size="sm" variant="outline" onClick={() => setWatching(watchedRun(activeRun))}><Eye />Watch live</Button></div>}
       {loading && !cases.length && <TestListSkeleton label="Loading integration tests" />}
       {cases.length > 0 && <div className="flex items-center justify-between gap-3"><Select value={caseFilter} onValueChange={setCaseFilter}><SelectTrigger className="w-44" aria-label="Filter tests"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All tests</SelectItem><SelectItem value="review">Needs review</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="selected">Selected</SelectItem></SelectContent></Select>{reviewCount > 0 && <span className="text-xs tabular-nums text-muted-foreground">{reviewCount} to review</span>}</div>}
-      <div ref={caseList} className="journey-list grid gap-5" aria-label="Integration tests">
+      <div ref={caseList} role="list" className="journey-list grid gap-5" aria-label="Integration tests">
         {visibleCases.map(item => {
           const status = browserCaseState(item, data.runs);
           const run = browserCaseRun(item, data.runs);
@@ -663,16 +669,17 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
           return <JourneyCard key={item.id} item={item} run={run} status={status.status} label={status.label} repoPath={repoPath} stageId={stageId} focused={focusedCase?.id === item.id}
             selection={<Checkbox className="mt-0.5" checked={Boolean(item.selected)} disabled={disabled || (!item.selected && (!reviewed(item) || selected.length >= 30))} aria-label={`Select ${item.name}`} onCheckedChange={checked => updateCases(cases.map(current => current.id === item.id ? { ...current, selected: checked === true } : current))} />}
             spec={data.specs?.[item.id]}
-            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled} onSelect={() => setEditingCase(item)}>{journeyNeedsChecks(item) ? 'Add checks' : item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
+            actions={<DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="-my-1.5 shrink-0" disabled={code.verifying ? locked : disabled} aria-label={`Actions for ${item.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{reviewed(item) && <DropdownMenuItem disabled={disabled || !runnable([item]) || !validUrl(config.targetUrl)} onSelect={() => setRunDialog({ caseIds: [item.id], title: item.name })}><Play />Run</DropdownMenuItem>}<DropdownMenuItem disabled={disabled || code.generating} onSelect={() => setEditingCase(item)}>{journeyNeedsChecks(item) ? 'Add checks' : item.needsReview ? 'Review' : 'Edit'}</DropdownMenuItem>
               {!item.needsReview && <DropdownMenuItem disabled={disabled || code.verifying} onSelect={() => updateCases(cases.map(current => current.id === item.id ? { ...current, needsReview: true, selected: false } : current))}><Undo2 />Needs review</DropdownMenuItem>}
               {reviewed(item) && <CodeActions code={code} modelConfigured={openRouterConfigured} onGenerate={() => setCodeDialog({ action: 'generate', caseId: item.id })} onStop={() => codeAction('stop-code', 'specs/generate/cancel', { caseId: item.id })}
                 onVerify={() => setCodeDialog({ action: 'verify', caseId: item.id, hash: code.hash })} onStopVerifying={() => codeAction('stop-verifying', 'specs/verify/cancel', { caseId: item.id })}
-                onApprove={() => setApprovingCase(item)} onDiscard={() => codeAction('discard-code', 'specs/discard', { caseId: item.id, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
+                onApprove={() => setApprovingCase(item)} onDiscard={() => setDiscarding({ item, hash: code.hash })} onReuse={() => codeAction('reuse-code', 'specs/reuse', { caseId: item.id })} />}
               <DropdownMenuItem onSelect={() => setAuthoringCase(item)}><ListChecks />Authoring diagnostics</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={disabled} onSelect={() => setDeletingCase(item)}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
             onSkip={run && ACTIVE.has(run.status) ? () => perform('skip', tx => tx.post('skip', { id: run.id, caseId: item.id })) : undefined}
             skipping={pending === 'skip'}
             onViewRun={run ? () => setWatching({ ...watchedRun(run), focusCaseId: item.id }) : undefined}
-            onInspect={() => openCase(item)} />;
+            // Editing the journey while its code is generated would leave that paid generation a stale draft.
+            onInspect={code.generating ? undefined : () => openCase(item)} />;
         })}
       </div>
       {!!cases.length && !visibleCases.length && <p role="status" className="py-8 text-center text-sm text-muted-foreground">No matching tests</p>}
@@ -683,12 +690,16 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {loading && !data.runs.length && <TestListSkeleton label="Loading test runs" />}
       <ItemGroup className="test-run-list" aria-label="Test runs">{[...data.runs].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(run => <Item role="listitem" size="sm" variant="default" className="test-run-row" key={run.id}><ItemContent className="min-w-0"><Button variant="ghost" className="h-auto w-full items-start justify-between gap-3 whitespace-normal px-0 py-1" onClick={() => setWatching(watchedRun(run))}><span className="min-w-0 flex-1 space-y-1 text-left"><span className="flex flex-wrap items-center gap-1.5 break-words font-medium">{browserRunTitle(run)}{run.verification?.control && <Badge variant="outline">Control</Badge>}</span><span className="block text-xs font-normal tabular-nums text-muted-foreground">{dateLabel(run.createdAt)}</span></span><Badge className="shrink-0" variant={run.status === 'failed' ? 'destructive' : 'secondary'}>{browserRunLabel(run)}</Badge><Eye className="mt-0.5 shrink-0" /></Button></ItemContent></Item>)}</ItemGroup>
     </>}
-    {deletingCase && <DeleteCaseDialog key={deletingCase.id} item={deletingCase} pending={pending} disabled={disabled} focusFallback={sheet} onClose={() => setDeletingCase(null)} onDelete={async () => {
+    {deletingCase && <ConfirmCaseDialog key={deletingCase.id} item={deletingCase} pending={pending} disabled={disabled} focusFallback={sheet} onClose={() => setDeletingCase(null)} onConfirm={async () => {
       await stage.perform('browser', 'cases', tx => tx.post('cases', { cases: cases.filter(item => item.id !== deletingCase.id), baseCases: cases }));
       if (mounted.current && stage.isCurrent()) setDeletingCase(null);
     }} />}
+    {discarding && <ConfirmCaseDialog key={`discard-${discarding.item.id}`} item={discarding.item} title="Discard draft?" action="Discard draft" working="Discarding…" pending={pending} disabled={locked} focusFallback={focusCase(discarding.item.id)} onClose={() => setDiscarding(null)} onConfirm={async () => {
+      await stage.perform('browser', 'discard-code', tx => tx.post('specs/discard', { caseId: discarding.item.id, hash: discarding.hash }));
+      if (mounted.current && stage.isCurrent()) setDiscarding(null);
+    }} />}
     {editingCase && <BusinessCaseEditor key={editingCase.id} draftKey={caseDraftKey(repoPath, stageId, editingCase.id)} item={editingCase} focusFallback={focusCase(editingCase.id)} onClose={() => setEditingCase(null)} onSave={saveCase} />}
-    {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runBlocked} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
+    {runDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${runDialog.caseIds?.join(',') || 'selected'}`} title={runDialog.title} count={runCases.length} accounts={accounts} ready={runnable(runCases)} disabled={disabled || !validUrl(config.targetUrl) || !runCases.length || Boolean(runBlocked)} notice={runNotice} focusFallback={runDialog.caseIds?.length === 1 ? focusCase(runDialog.caseIds[0]) : sheet} onRun={(account, concurrency) => start('run', config, account, { concurrency, caseIds: runDialog.caseIds ? runCases.map(item => item.id) : undefined })} onClose={() => setRunDialog(null)} />}
     {codeDialog && visible && view === 'tests' && <RunTestsDialog key={`${repoPath}:${stageId}:${config.targetUrl}:${codeDialog.caseId}:${codeDialog.action}`} title={codeDialog.action === 'generate' ? 'Generate code' : 'Verify code'} action={codeDialog.action} count={1} accounts={accounts} disabled={disabled || Boolean(codeBlocked)} notice={codeBlocked} focusFallback={focusCase(codeDialog.caseId)} onClose={() => setCodeDialog(null)} onRun={account => {
       if (disabled || codeBlocked) return;
       const { action, caseId, hash } = codeDialog;
