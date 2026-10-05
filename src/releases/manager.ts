@@ -96,14 +96,13 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   const update=(id:string,changes:Partial<ReleaseRecord>)=>save(next=>{const entry=next.releases.find(item=>item.id===id);if(!entry)throw new Error('Release record is unavailable.');Object.assign(entry.record,changes,{updatedAt:new Date().toISOString()});});
   // A read that finds nothing new writes nothing, so observation can tell that GitHub has nothing new to report.
   const differs=(record:ReleaseRecord,changes:Partial<ReleaseRecord>)=>Object.entries(changes).some(([key,value])=>record[key as keyof ReleaseRecord]!==value);
-  // Reads the scope's unresolved releases from GitHub and, with all, its other releases at the current commit too.
+  // Reads the scope's unresolved releases from GitHub and, with all, its other releases at the current commit too. The
+  // connected account reads each one, whichever account requested it: a read changes nothing on GitHub, and the
+  // deployment it finds must match the release's identifier, commit, environment and deployment ID.
   const reconcile=(all:boolean)=>exclusive(async()=>{
     const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before checking deployments.');
     const pending=own(before.source).filter(entry=>active(entry.record)||all&&entry.source.sha===before.source!.sha).slice(-20);
     for(const entry of pending){
-      // The current account must match the one which requested this deployment; an unresolved one names that account.
-      if(entry.source.login!==before.source.login){const other=`Requested by ${entry.source.login}. Connect GitHub as that account to check its status.`;
-        if(active(entry.record)&&entry.record.error!==other)await update(entry.id,{error:other});continue;}
       try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
         if(remote&&differs(entry.record,{...remote,error:undefined}))await update(entry.id,{...remote,error:undefined});
       }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');

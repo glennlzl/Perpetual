@@ -114,13 +114,16 @@ test('an unresolved deployment prevents changing destinations or deploying a new
   await assert.rejects(f.manager.deploy({sha:OTHER,target}),/unresolved/);assert.equal(f.requests.length,1);
 });
 
-test('an unresolved deployment requested by another account names that account instead of being skipped silently',async t=>{
-  let reads=0;const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status:'queued'};}});
+test('the connected account resolves an unresolved deployment another login requested, after the source moved on',async t=>{
+  let reads=0,status:'queued'|'failed'='queued';const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status};}});
   await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
-  const other=evidence();other.source!.login='reviewer';f.setEvidence(other);
-  const view=await f.manager.refresh();
-  assert.equal(reads,0,'Only the requesting account reads the deployment.');
-  assert.deepEqual([view.current?.status,view.current?.error,view.canDeploy],['queued','Requested by owner. Connect GitHub as that account to check its status.',false]);
+  // The requesting login was renamed, and the source advanced to a newer tested commit.
+  const renamed=evidence();Object.assign(renamed.source!,{login:'owner-renamed',sha:OTHER});renamed.gates[0].sha=OTHER;f.setEvidence(renamed);
+  const waiting=await f.manager.refresh();
+  assert.deepEqual([reads,waiting.recent[0].status,waiting.recent[0].error,waiting.canDeploy],[1,'queued',undefined,false]);
+  status='failed'; // the handler reports, or a person posts a failure to the deployment on GitHub
+  const ended=await f.manager.refresh();
+  assert.deepEqual([reads,ended.recent[0].status,ended.canDeploy],[2,'failed',true]);
 });
 
 test('a status read that fails keeps the deployment unresolved, with the failure shown',async t=>{
