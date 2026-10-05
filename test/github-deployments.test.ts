@@ -112,6 +112,18 @@ test('a commit\'s deployments are read page by page, up to 1,000 records', async
   await assert.rejects(endless.read({ repository: REPO, sha: SHA, login: LOGIN }), /1,000-record reading limit/);
 });
 
+test('each settled record of a long list is read once, however many pages it takes', async () => {
+  let reads = 0, time = 0;
+  const reader = createGitHubDeploymentsReader({ ttl: 0, now: () => time++, request: async (endpoint): Promise<GitHubResponse> => {
+    if (endpoint.includes('/statuses')) { reads++; return { status: 200, data: [status('success')] }; }
+    const page = Number(/&page=(\d+)/.exec(endpoint)?.[1] ?? 1);
+    return { status: 200, headers: page < 5 ? { link: `<https://api.github.com/x?page=${page + 1}>; rel="next"` } : {}, data: Array.from({ length: 50 }, (_, index) => deployment((page - 1) * 50 + index + 1)) };
+  } });
+  assert.equal((await reader.read({ repository: REPO, sha: SHA, login: LOGIN })).deployments.length, 250);
+  await reader.read({ repository: REPO, sha: SHA, login: LOGIN });
+  assert.equal(reads, 250, 'A later poll reuses every final status.');
+});
+
 test('conditional requests reuse the cached body on 304', async () => {
   let version = 1;
   const { calls, request } = recorder([

@@ -91,7 +91,8 @@ export function createGitHubDeploymentsReader({ request = (endpoint, etag) => gi
       try { status = normalizeDeploymentStatus((await conditional(login, `repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`)).data); }
       catch { return; }
       Object.assign(deployment, status);
-      if (status.state && FINAL.has(status.state)) remember(settled, key, status);
+      // As many final statuses are kept as records are read, so a long list never evicts its own.
+      if (status.state && FINAL.has(status.state)) remember(settled, key, status, 1000);
     });
     return { repository, sha, deployments };
   }
