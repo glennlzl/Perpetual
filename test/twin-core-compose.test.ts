@@ -133,6 +133,15 @@ test('Secrets appear only in .env, which Compose reads without interpolation', (
   assert.equal(formatEnv({ A: 'p$x${Y}"q"\\end', B: 'one\ntwo' }), 'A="p\\$x\\${Y}\\"q\\"\\\\end"\nB="one\\ntwo"\n');
 });
 
+test('Directories reach Compose literally, so it never fills them from the controller environment', () => {
+  const twin = validateTwinConfig({ install: { directory: 'i${GH_TOKEN}', command: 'npm ci' }, apps: { web: { directory: 'x${GH_TOKEN:-none}', start: 'npm start', port: 3000 } } }, { services: fixtures });
+  const worker = { id: 'jobs', fidelity: 'actual', status: 'ready', env: {}, containers: [{ name: 'worker', image: 'jobs/worker:2.0', directory: 'w$HOME' }] } satisfies ResolvedService;
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: twin, services: [worker], ports: { 'apps.web': 43100 } });
+  // In a Compose file a lone $ starts interpolation; $$ is a literal dollar.
+  assert.deepEqual([file.services.install.working_dir, file.services.web.working_dir, file.services['jobs-worker'].working_dir],
+    ['/workspace/i$${GH_TOKEN}', '/workspace/x$${GH_TOKEN:-none}', '/workspace/w$$HOME']);
+});
+
 test('Unknown variables and names in mappings are reported', () => {
   const broken = validateTwinConfig({ services: { mail: {} }, apps: { web: { start: 'x', port: 1, env: { A: '{{mail.NOPE}}' } } } }, { services: fixtures });
   assert.throws(() => composeTwin({ project: 'p', owner: 'o', environment: 'e', source: '/s', config: broken, services: [mail], ports: { ...ports, 'apps.web': 1 } }),

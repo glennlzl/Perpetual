@@ -115,8 +115,8 @@ export function composeTwin({ project, owner, environment: id, source, config, s
   const common = { extra_hosts: [HOST_GATEWAY], labels: { [LABELS.owner]: owner, [LABELS.environment]: id }, logging: containerLogging() };
   const hostPort = (key: string) => ports[key] ?? fail(`No host port was allocated for ${key}.`);
   // Repository code runs from a Docker volume, not a host bind mount: installs and builds write many small files,
-  // which a host mount makes several times slower on Docker Desktop.
-  const workspace = (directory: string): Pick<ComposeService, 'working_dir' | 'volumes'> => ({ working_dir: posix.join(WORKSPACE, directory), volumes: [{ type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }, { type: 'volume', source: PACKAGE_CACHE, target: CACHE }] });
+  // which a host mount makes several times slower on Docker Desktop. A directory is config text, so Compose keeps it literal.
+  const workspace = (directory: string): Pick<ComposeService, 'working_dir' | 'volumes'> => ({ working_dir: literal(posix.join(WORKSPACE, directory)), volumes: [{ type: 'volume', source: WORKSPACE_VOLUME, target: WORKSPACE }, { type: 'volume', source: PACKAGE_CACHE, target: CACHE }] });
   const ready = services.filter(service => service.status === 'ready');
   const blocked = new Set<string | undefined>(services.filter(service => service.status !== 'ready').map(service => service.id));
   const provided = Object.fromEntries(ready.map(service => [service.id, service.env ?? {}]));
