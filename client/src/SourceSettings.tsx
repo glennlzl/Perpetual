@@ -8,6 +8,8 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api } from '@/lib/api';
+import { deploymentChanges } from '@/lib/pipeline-deployments';
+import { buildChanges } from '@/lib/pipeline-github';
 import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } from '@/lib/source-selection';
 import { BranchName, BranchOptions } from './BranchSwitcher';
@@ -175,6 +177,8 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     try {
       const result = await api<GitHubConnection>(`/api/github/${action}`, {});
       if (active.current && request === connectionRequest.current) applyConnection(result, action === 'connect');
+      // Build and the recorded deployments read GitHub through this connection, so they read again at once.
+      buildChanges.notify(); deploymentChanges.notify();
       return result;
     } catch (failure) {
       if (active.current && request === connectionRequest.current) setConnectionError(messageOf(failure));

@@ -31,7 +31,7 @@ import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
 import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
 import { buildChanges, buildForSource, createGitHubBuildPoller, watchedBuildStatus, watchedBuildSummary, type BuildRead } from '@/lib/pipeline-github.ts';
-import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
+import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentChanges, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
 import { autopilotChanges, createAutopilotPoller, shareAutopilot, stageActive, type AutopilotView } from '@/lib/pipeline-autopilot.ts';
 import { createStageDataCache, stageNodeData, statusChanges, type PipelineStage, type PipelineView } from '@/lib/pipeline-nodes.ts';
@@ -371,7 +371,8 @@ function useGitHubDeployments(repoPath: string | undefined, sha: string | null, 
   useEffect(() => {
     if (!repoPath || !sha || !enabled) return undefined;
     const poller = createGitHubDeploymentsPoller({ controller: api, repoPath, onChange: setResult });
-    return () => poller.stop();
+    const unsubscribe = deploymentChanges.subscribe(() => poller.refresh());
+    return () => { unsubscribe(); poller.stop(); };
   }, [repoPath, sha, enabled]);
   return enabled && result?.sha === sha ? result : null;
 }

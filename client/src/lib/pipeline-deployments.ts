@@ -52,6 +52,12 @@ export function productionRows<T extends DiscoveredTarget>(rows: readonly (T | D
   return next;
 }
 
+// A changed GitHub connection reads the recorded deployments again at once.
+const listeners = new Set<() => void>();
+export const deploymentChanges = {
+  subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  notify() { listeners.forEach(listener => listener()); },
+};
 export function createGitHubDeploymentsPoller({ repoPath, ...options }: Omit<GitHubPollerOptions<GitHubDeployments>, 'path' | 'active'> & { repoPath: string }) {
   return createGitHubPoller<GitHubDeployments>({ ...options, path: `/api/github/deployments?${new URLSearchParams({ repoPath })}`, active: deploymentsActive });
 }

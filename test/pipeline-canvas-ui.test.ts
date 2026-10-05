@@ -7,6 +7,7 @@ import { chromium, expect as playwrightExpect, type Request } from '@playwright/
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
+import type { BuildReply } from '../contract/github.ts';
 import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
@@ -333,5 +334,30 @@ test('the Pipeline opens with its navigation collapsed, zoom and Fit view only, 
   await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
   await expect(production.getByText('Deployingaaaaaaa', { exact: true })).toBeVisible();
   await expect(production.getByText('Readyaaaaaaa', { exact: true })).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('connecting GitHub reads Build and the recorded deployments again at once', { timeout: 60000 }, async t => {
+  const account = { login: 'acme', name: null };
+  let connected = false, deploymentReads = 0;
+  const build: BuildReply = { repoPath, repository: 'acme/app', branch: 'main', scannedSha: sha, sha, source: 'watched', runs: [{ id: '1', workflowId: '2', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success', attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] }] };
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } } } };
+    if (path === '/api/github/connection' || path === '/api/github/connect') { connected ||= path === '/api/github/connect'; return { json: { available: true, authenticated: true, account, connected, source: null, localCheckout: null } }; }
+    if (path === '/api/github/build') return connected ? { json: build } : { status: 400, json: { error: 'Connect your GitHub account to read Build.' } };
+    if (path === '/api/github/deployments') { deploymentReads++; return connected ? { json: { repository: 'acme/app', sha, deployments: [] } } : { status: 400, json: { error: 'Connect your GitHub account to read deployments.' } }; }
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+    if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
+  });
+  await open();
+  const buildCard = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(buildCard.getByText('Unverified', { exact: true })).toBeVisible();
+  await expect.poll(() => deploymentReads).toBe(1);
+  await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+  await page.locator('.pipeline-inspector').getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Connect GitHub', exact: true }).getByRole('button', { name: 'Continue as acme', exact: true }).click();
+  // Both evidence reads wait a minute after a failure; the connection change reads them again at once.
+  await expect(buildCard.getByText('Passedaaaaaaa', { exact: true })).toBeVisible();
+  await expect.poll(() => deploymentReads).toBe(2);
   assert.deepEqual(pageErrors, []);
 });
