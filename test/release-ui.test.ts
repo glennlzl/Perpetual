@@ -105,3 +105,16 @@ test('a pending first release read is not an error, and failed reads recover wit
   assert.deepEqual(errors, ['Controller unavailable.', null]);
   poller.stop();
 });
+
+test('a release is read every 3 seconds only while it is pending, and otherwise once a minute', async t => {
+  const delays: number[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  let status: ReleaseRecord['status'] | null = null;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange() {}, controller: async () => ({ repoPath: '/sources/app', ...view({ current: status ? record(status) : null }) }) });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  assert.equal(delays.at(-1), 60000, 'With nothing requested, each read checking the GitHub session waits a minute.');
+  for (const pending of ['requesting', 'queued', 'deploying', 'unknown'] as const) { status = pending; poller.refresh(); await tick(); assert.equal(delays.at(-1), 3000, pending); }
+  for (const settled of ['deployed', 'failed', 'inactive'] as const) { status = settled; poller.refresh(); await tick(); assert.equal(delays.at(-1), 60000, settled); }
+});

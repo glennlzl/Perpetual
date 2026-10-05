@@ -13,19 +13,26 @@ import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 
-/** One visible-page poller for the source, shared by the Production card and its Badge. */
-export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined) {
+/**
+ * One visible-page poller for the source, shared by the Production card and its Badge. `gateKey` names the journey gates'
+ * verdicts, which decide whether Deploy is allowed, so a changed verdict reads the release at once.
+ */
+export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined, gateKey = '') {
   const sha = scannedSha ?? null;
   const [read, setRead] = useState<{ repoPath: string; sha: string | null; view: ReleaseReply | null; error: string | null } | null>(null);
+  const refresh = useRef<(() => void) | null>(null);
   useEffect(() => {
     if (!repoPath) return undefined;
     const poller = createReleasePoller({ repoPath, controller: api,
       onChange: view => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && JSON.stringify(previous.view) === JSON.stringify(view) ? previous : { repoPath, sha, view, error: null }),
       onError: error => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && previous.error === error ? previous : { repoPath, sha, view: previous?.repoPath === repoPath && previous.sha === sha ? previous.view : null, error }),
     });
+    refresh.current = poller.refresh;
     const unsubscribe = releaseChanges.subscribe(() => poller.refresh());
-    return () => { unsubscribe(); poller.stop(); };
+    return () => { refresh.current = null; unsubscribe(); poller.stop(); };
   }, [repoPath, sha]);
+  const gates = useRef(gateKey);
+  useEffect(() => { if (gates.current !== gateKey) { gates.current = gateKey; refresh.current?.(); } }, [gateKey]);
   return read && read.repoPath === repoPath && read.sha === sha ? { view: releaseForSource(read.view, repoPath, sha), error: read.error } : { view: null, error: null };
 }
 

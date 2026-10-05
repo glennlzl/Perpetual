@@ -33,15 +33,24 @@ export const releaseChanges = {
   notify() { listeners.forEach(listener => listener()); },
 };
 
-/** Source-bound reads clear stale deployment eligibility when the controller cannot be read. */
-export function createReleasePoller({ repoPath, controller, onChange, onError, interval = 3000, document = globalThis.document, timers = globalThis }: { repoPath: string; controller: Controller; onChange: (view: ReleaseReply | null) => void; onError?: (message: string | null) => void; interval?: number; document?: PageVisibility | null; timers?: Timers }) {
-  return createVisiblePoller({ document, timers, interval: () => interval,
+/** Whether the release a person requested is still being requested, queued, deployed or resolved. */
+export const releasePending = (view: ReleaseReply | null | undefined) => ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
+
+/**
+ * Source-bound reads clear stale deployment eligibility when the controller cannot be read. Each read checks the GitHub
+ * session, so the release is read every `activeDelay` only while it is pending and otherwise every `idleDelay`; a
+ * refresh reads it at once.
+ */
+export function createReleasePoller({ repoPath, controller, onChange, onError, activeDelay = 3000, idleDelay = 60000, document = globalThis.document, timers = globalThis }: { repoPath: string; controller: Controller; onChange: (view: ReleaseReply | null) => void; onError?: (message: string | null) => void; activeDelay?: number; idleDelay?: number; document?: PageVisibility | null; timers?: Timers }) {
+  let pending = false;
+  return createVisiblePoller({ document, timers, interval: () => pending ? activeDelay : idleDelay,
     async read() {
       const reply = await controller(`/api/releases?${new URLSearchParams({ repoPath })}`) as ReleaseReply;
       if (reply?.repoPath !== repoPath) throw new Error('The source changed. Reload the pipeline.');
       return reply;
     },
     onResult(result) {
+      pending = result.ok && releasePending(result.value);
       onChange(result.ok ? result.value : null);
       onError?.(result.ok ? null : result.error instanceof Error ? result.error.message : 'Release status unavailable. Check status to retry.');
     },

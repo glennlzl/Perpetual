@@ -6,6 +6,7 @@ import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect as playwrightExpect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
+import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
 
@@ -141,5 +142,24 @@ test('a failed Load more branches keeps the branch chosen from a later page, and
   await expect(page.getByRole('option', { name: 'feature/a', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(save).toBeEnabled();
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a changed gate verdict reads the release at once, so Deploy follows it between slow reads', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
+  let passed = false;
+  const gate = (): GateReply => ({ repoPath, sha, stages: { [beta]: { id: 'gate-1', stageId: beta, sha, status: passed ? 'passed' : 'running', detectedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } }, production: passed ? { status: 'ready', sha } : null });
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(pipeline) };
+    if (path === '/api/gate') return { json: gate() };
+    if (path === '/api/releases') return { json: { ...release, target, canDeploy: passed, blockedReason: passed ? null : 'Every Sandbox gate must pass or be explicitly released for this commit.' } satisfies ReleaseReply };
+  });
+  await open();
+  const deploy = page.getByRole('button', { name: 'Deploy', exact: true });
+  await expect(deploy).toBeDisabled();
+  passed = true;
+  await refresh('/api/gate', '/build/src/lib/stage-gate.ts', 'gateChanges');
+  await expect(deploy).toBeEnabled();
   assert.deepEqual(pageErrors, []);
 });
