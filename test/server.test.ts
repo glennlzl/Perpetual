@@ -12,12 +12,12 @@ const SIGNED_IN = (login: string): GitHubSession => ({ available: true, authenti
 const NO_SIGN_IN = { isPending: () => false, dispose() {}, start(): never { throw new Error('unused'); }, status(): never { throw new Error('unused'); }, cancel(): never { throw new Error('unused'); } };
 
 /** A controller over a scanned acme/app checkout with a Beta stage; GitHub is the seams given, so no gh runs. */
-async function scanned(t: TestContext, { github = {}, state = {} }: { github?: ServerOptions['github']; state?: Record<string, unknown> } = {}) {
+async function scanned(t: TestContext, { github = {}, state = () => ({}) }: { github?: ServerOptions['github']; state?: (dir: string) => Record<string, unknown> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-scanned-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: 'a'.repeat(40), branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-23T10:00:00.000Z' };
   const stages = [['source', 'Source'], ['build', 'Build'], ['beta', 'Beta'], ['production', 'Production']].map(([id, name]) => ({ id, name, kind: id === 'beta' ? 'sandbox' : id, collapsed: false }));
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [dir]: { repoPath: dir, stages } }, ...state } }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [dir]: { repoPath: dir, stages } }, ...state(dir) } }));
   const app = await startServer({ port: 0, repo: dir, dataDir, github: { auth: NO_SIGN_IN, ...github } });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
@@ -253,4 +253,17 @@ test('closing the controller ends a polling page\'s connection with 503, so shut
   assert.equal(closed, true, `Shutdown finished while the page polled: ${JSON.stringify(polls)}`);
   await closing;
   for (const poll of polls) assert.ok(poll.status === 0 || poll.status === 503 && poll.connection === 'close', JSON.stringify(poll));
+});
+
+test('a managed source chosen through the reused CLI session stays with the account that chose it', async t => {
+  let login = 'alice';
+  const f = await scanned(t, {
+    github: { runs: { session: async () => SIGNED_IN(login), async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } } },
+    // No connection record: the session was reused, and the source was chosen as alice.
+    state: dir => ({ source: { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha: 'a'.repeat(40), connectedAccount: 'alice', savedAt: '2026-09-23T10:00:00.000Z' } }),
+  });
+  const runs = async () => { const response = await fetch(`${f.app.url}/api/github/runs?${new URLSearchParams({ repoPath: f.dir })}`); return { status: response.status, body: await response.json() }; };
+  assert.deepEqual(await runs(), { status: 200, body: { repository: 'acme/app', sha: 'a'.repeat(40), runs: [] } });
+  login = 'bob';
+  assert.deepEqual(await runs(), { status: 400, body: { error: 'Connect your GitHub account to read workflow runs.' } }, 'Another CLI account is not the connected one.');
 });

@@ -274,8 +274,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     // A local GitHub project already has a source. Reuse its verified CLI
     // session unless this instance has an explicit connection choice. A null
     // record is a deliberate Disconnect, whereas an absent record is legacy.
+    // A managed source chosen meanwhile is a choice: it stays the account's that chose it.
     const reuseLocalSession=Boolean(detected) && !Object.hasOwn(state,'githubConnection');
-    const connected=!githubAuth.isPending() && session.authenticated && (reuseLocalSession || state.githubConnection?.login===session.account.login);
+    const account=reuseLocalSession?state.source?.connectedAccount:state.githubConnection?.login;
+    const connected=!githubAuth.isPending() && session.authenticated && (reuseLocalSession&&account===undefined || account===session.account.login);
     const source: PublicGitHubSource | null=state.source ?? (detected ? {
       repository:detected,branch:state.scan!.repo.branch,rootDirectory:'/',
     } : null);
