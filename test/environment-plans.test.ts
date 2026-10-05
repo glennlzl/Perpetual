@@ -1,10 +1,12 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, open, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { APP_PORT, detectEnvironmentConfig, snapshotSource } from '../src/environments/plans.ts';
 import { validateTwinConfig } from '../src/twin/index.ts';
 import { scanRepository } from '../src/scanner.ts';
@@ -23,6 +25,11 @@ async function fixture(t: TestContext, files: Record<string, string> = {}) {
 
 const manifest = (name: string, dependencies: Record<string, string>, scripts: Record<string, string> = {}, extra: object = {}) => JSON.stringify({ name, dependencies, scripts, ...extra });
 const detect = async (repoPath: string) => detectEnvironmentConfig(await scanRepository(repoPath));
+// The fixture's git ignores only what its own .gitignore names.
+const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'init.defaultBranch=main', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', ...args],
+  { cwd, env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+const filesIn = async (directory: string) => (await readdir(directory, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile())
+  .map(entry => path.relative(directory, path.join(entry.parentPath, entry.name))).sort();
 
 test('detection proposes the Node.js major the repository asks for', async t => {
   const app = (extra: object = {}) => manifest('web', { express: '1.0.0' }, { start: 'node server.js' }, extra);
@@ -217,6 +224,28 @@ test('source snapshot excludes credentials, caches, databases and links while pr
   assert.equal(await readFile(path.join(repoPath, '.env'), 'utf8'), 'SECRET=do-not-copy');
   await writeFile(path.join(repoPath, 'src/app.mjs'), original + '// new revision\n');
   assert.notEqual((await snapshotSource(repoPath, path.join(root, 'snapshot-3'))).hash, result.hash);
+});
+
+test('a git checkout’s snapshot leaves out the local files git ignores, whatever their names', async t => {
+  const committed = { '.gitignore': '.envrc\n.dev.vars\nterraform.tfstate\nlocal-dump/\n*.log\n', 'package.json': '{}', 'src/app.mjs': 'export const app = true;\n' };
+  const { root, repoPath } = await fixture(t, {
+    ...committed,
+    '.envrc': 'export TWILIO_AUTH=fixture-local-value\n', '.dev.vars': 'SENDGRID_KEY=fixture-local-value\n', 'terraform.tfstate': '{"resources":[]}\n',
+    'local-dump/customers.csv': 'email\njane@example.test\n', 'src/debug.log': 'local output\n',
+    // A new file git would commit is source, as the gate's checkout check counts it.
+    'src/draft.mjs': 'export const draft = true;\n',
+  });
+  await git(repoPath, 'init', '--quiet');
+  await git(repoPath, 'add', '--', ...Object.keys(committed));
+  await git(repoPath, 'commit', '--quiet', '-m', 'fixture');
+  const destination = path.join(root, 'snapshot');
+  const result = await snapshotSource(repoPath, destination);
+  assert.deepEqual(await filesIn(destination), ['.gitignore', 'package.json', 'src/app.mjs', 'src/draft.mjs']);
+  assert.equal(result.files, 4);
+  // Without git metadata nothing says what is local, so the same files are copied but for the names the snapshot never takes.
+  await rm(path.join(repoPath, '.git'), { recursive: true });
+  await snapshotSource(repoPath, path.join(root, 'walked'));
+  assert.deepEqual(await filesIn(path.join(root, 'walked')), ['.dev.vars', '.envrc', '.gitignore', 'local-dump/customers.csv', 'package.json', 'src/app.mjs', 'src/debug.log', 'src/draft.mjs', 'terraform.tfstate']);
 });
 
 test('source snapshot excludes local agent configuration and instructions at every depth', async t => {

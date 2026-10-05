@@ -5,6 +5,7 @@ import { join, resolve, relative, dirname, posix, sep } from 'node:path';
 import { detectTwinConfig, envNames } from '../twin/index.ts';
 import { nodeMajor } from '../twin/detect.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
+import { gitReadOnly } from '../process.ts';
 import type { DetectedApp, DetectedConfig, DetectionEvidence } from '../twin/detect.ts';
 import type { PackageManifest, ScanRepo, ScanService } from '../scanner.ts';
 
@@ -214,7 +215,21 @@ async function repositoryNode(root: string) {
   return undefined;
 }
 
-/** Copy a bounded working-tree snapshot without following links or importing local credentials. */
+/**
+ * The untracked paths git ignores in the checkout at `root`, a folder's with a trailing slash, from its .gitignore files
+ * and the user's excludes; none when git cannot list them, as outside a git checkout.
+ */
+async function ignoredPaths(root: string) {
+  try {
+    const { stdout } = await gitReadOnly(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+    return new Set(stdout.split('\0').filter(Boolean));
+  } catch { return new Set<string>(); }
+}
+
+/**
+ * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
+ * git ignores stay out whatever their names, since local files such as credentials are never committed.
+ */
 export async function snapshotSource(repoPath: string, destination: string) {
   const root = await realpath(repoPath), target = resolve(destination);
   if (target === root || (target.startsWith(root + sep) && relative(root, target).split(sep)[0] !== '.perpetual')) throw new Error('Keep sandbox storage outside the source or under .perpetual.');
@@ -233,16 +248,17 @@ export async function snapshotSource(repoPath: string, destination: string) {
   await mkdir(target, { recursive: true, mode: 0o700 });
   if ((await lstat(target)).isSymbolicLink() || await realpath(target) !== target) throw new Error('The snapshot destination changed during creation.');
   let count = 0, bytes = 0;
-  const hash = createHash('sha256');
+  const hash = createHash('sha256'), ignored = await ignoredPaths(root);
   async function walk(directory: string) {
     const folder = join(root, directory);
     if ((await lstat(folder)).isSymbolicLink() || await realpath(folder) !== folder) throw new Error('Source directories changed during snapshot creation.');
     const entries = (await readdir(join(root, directory), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink()
+      const name = join(directory, entry.name), path = name.split(sep).join('/');
+      if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink() || ignored.has(entry.isDirectory() ? `${path}/` : path)
         || (BUILD_OUTPUT.has(entry.name) && !directory.split(sep).includes('src'))
         || (PRIVATE_NAME.test(entry.name) && (!entry.isFile() || !SOURCE_MODULE.test(entry.name)))) continue;
-      const name = join(directory, entry.name), original = join(root, name), output = join(target, name);
+      const original = join(root, name), output = join(target, name);
       if (entry.isDirectory()) { await mkdir(output, { mode: 0o700 }); await walk(name); continue; }
       if (!entry.isFile()) continue;
       if (await realpath(original) !== original) throw new Error('Source links changed during snapshot creation.');
