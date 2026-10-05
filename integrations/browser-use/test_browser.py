@@ -131,6 +131,28 @@ class DeadlineModelHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class NavigateModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: navigates to each of the server's targets as written, then reports."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        self.server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        if len(self.server.requests) <= len(self.server.targets):
+            action = {"navigate": {"url": self.server.targets[len(self.server.requests) - 1]}}
+        else:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class SocketModelHandler(BaseHTTPRequestHandler):
     """Deterministic fixture: once the page's subscription answered, press its button, then report."""
 
@@ -389,6 +411,23 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append), patch.object(runner.OwnedBrowser, "close", slow_close):
             await asyncio.wait_for(runner.execute(payload), 30)
         self.assertEqual([event["type"] for event in events if event["type"] in {"discovery", "error"}], ["discovery"])
+
+    async def test_an_allowed_origin_is_reachable_however_the_agent_writes_it(self):
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        model = ThreadingHTTPServer(("127.0.0.1", 0), NavigateModelHandler)
+        # The origin exactly as the task lists it, without a trailing slash, and with a capitalized scheme.
+        model.requests, model.targets = [], [url, url.replace("http://", "HTTP://") + "/credits"]
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        self.addCleanup(model.server_close)
+        self.addCleanup(model.shutdown)
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url + "/", "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 30})
+        events = []
+        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}), patch.object(runner, "emit", events.append):
+            discovered = await asyncio.wait_for(runner.discover(payload), 35)
+        self.assertEqual(discovered["type"], "discovery")
+        actions = [event["actions"] for event in events if event["type"] == "case" and event["actions"]][-1]
+        self.assertEqual(actions, [{"type": "navigate", "status": "passed"}] * 2 + [{"type": "done", "status": "passed"}])
+        self.assertIn((self.server.server_port, "/credits"), REQUESTS)
 
     async def test_tools_have_no_files_shell_or_evaluate(self):
         tools = runner.safe_tools(runner.discovery_schema())

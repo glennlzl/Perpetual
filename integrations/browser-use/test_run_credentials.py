@@ -65,6 +65,19 @@ class CredentialValidation(unittest.TestCase):
                 validate_credentials(value, mode)
 
 
+class PlaceholderScope(unittest.TestCase):
+    def test_placeholders_are_scoped_to_the_application_host_including_ipv6_loopback(self):
+        from browser_use.utils import match_url_with_domain_pattern
+        for target, page, other in [("http://127.0.0.1:3010/", "http://127.0.0.1:3010/login", "http://127.0.0.2:3010/login"),
+                                    ("http://[::1]:3010/", "http://[::1]:3010/login", "http://127.0.0.1:3010/login"),
+                                    ("https://app.example.test/", "https://app.example.test/sign-in", "http://app.example.test/sign-in")]:
+            with self.subTest(target=target):
+                # Browser Use fills placeholders only on pages its own matcher places on this domain.
+                domain = runner.placeholder_domain(target)
+                self.assertTrue(match_url_with_domain_pattern(page, domain))
+                self.assertFalse(match_url_with_domain_pattern(other, domain))
+
+
 class CredentialGuards(unittest.IsolatedAsyncioTestCase):
     async def test_only_matching_top_frame_login_fields_can_receive_secrets(self):
         from pydantic import BaseModel

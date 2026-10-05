@@ -185,6 +185,22 @@ def endpoint_url(url):
     return origin(url) + (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
 
 
+def navigation_url(url):
+    """The URL with its normalized origin and a path: Browser Use admits allowed origins as prefixes of the URL as written."""
+    fragment = urlsplit(url).fragment
+    return endpoint_url(url) + (f"#{fragment}" if fragment else "")
+
+
+def placeholder_domain(url):
+    """The application as Browser Use scopes placeholders, by scheme and host.
+
+    Browser Use drops a pattern's port at its first colon, which would cut an IPv6 host such as [::1]. Before any
+    placeholder is filled, the input guard checks the exact origin itself.
+    """
+    parts = urlsplit(origin(url))
+    return f"{parts.scheme}://{parts.hostname}"
+
+
 def endpoint_key(url):
     """Compare local auth aliases without changing navigation origins or endpoint addresses."""
     parsed = urlsplit(endpoint_url(url))
@@ -752,6 +768,8 @@ def safe_tools(output_model, allowed_origins=(), credentials=None, credential_or
                     return rejected("action_not_allowed")
                 if name == "navigate" and not navigation_allowed(value.get("url"), set(allowed_origins)):
                     return rejected("navigation_not_allowed")
+                if name == "navigate" and value["url"] != "about:blank":
+                    action = type(action).model_validate({name: {**value, "url": navigation_url(value["url"])}})
                 if name == "done" and value.get("files_to_display"):
                     return rejected("attachments_not_allowed")
                 if credentials and name == "input" and value.get("text") in credentials.values():
@@ -862,7 +880,7 @@ def create_agent(payload, owned, task, schema, case_id=None, actions=None, sourc
         task += CREDENTIAL_INSTRUCTIONS
     agent = Agent(
         task=task, llm=llm, browser=owned.browser, tools=safe_tools(schema, payload["allowedOrigins"], credentials, origin(payload["targetUrl"]), owned.sign_in),
-        sensitive_data={origin(payload["targetUrl"]): {ALIASES[key]: value for key, value in credentials.items()}} if credentials else None,
+        sensitive_data={placeholder_domain(payload["targetUrl"]): {ALIASES[key]: value for key, value in credentials.items()}} if credentials else None,
         output_model_schema=schema, register_new_step_callback=planned,
         # Browser Use forces a final report after this many consecutive failures.
         use_vision=not bool(credentials), max_actions_per_step=1, max_failures=2,
