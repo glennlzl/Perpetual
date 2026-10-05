@@ -172,16 +172,20 @@ test('a script that reaches a cloud CLI falls back to the next script and is nev
   }, 'A build that reaches a cloud CLI is left out.');
 });
 
-test('a database migration, a release flag or a release folder in a script is no cloud launcher', async t => {
+test('a database migration, a release flag or a release folder in a script is no cloud launcher, but a publisher named with a hyphen is', async t => {
   const { repoPath } = await fixture(t, {
     'package.json': JSON.stringify({ name: 'workspace', workspaces: ['apps/*'] }),
     'package-lock.json': '{}',
     'apps/api/package.json': manifest('api', { express: '1.0.0' }, { start: 'prisma migrate deploy && node dist/release/server.js' }),
     'apps/site/package.json': manifest('site', { next: '1.0.0' }, { build: 'prisma generate && prisma migrate deploy && next build', start: 'next start' }),
-    'apps/tool/package.json': manifest('tool', { hono: '1.0.0' }, { dev: 'npm run deploy', start: 'node server.js --release' }),
+    'apps/tool/package.json': manifest('tool', { hono: '1.0.0' }, { dev: 'npm run deploy', start: 'node server.js --release --skip-deploy' }),
+    // A build that publishes is left out, and a start script that deploys is no app.
+    'apps/docs/package.json': manifest('docs', { next: '1.0.0' }, { build: 'next build && semantic-release', start: 'next start' }),
+    'apps/admin/package.json': manifest('admin', { express: '1.0.0' }, { start: 'npm run build-and-deploy' }),
   });
   assert.deepEqual((await detect(repoPath)).apps, {
     'service-apps-2fapi': { directory: 'apps/api', start: 'npm run start', port: APP_PORT },
+    'service-apps-2fdocs': { directory: 'apps/docs', start: `npm run start -- --hostname 0.0.0.0 --port ${APP_PORT}`, port: APP_PORT },
     'service-apps-2fsite': { directory: 'apps/site', build: 'npm run build', start: `npm run start -- --hostname 0.0.0.0 --port ${APP_PORT}`, port: APP_PORT },
     'service-apps-2ftool': { directory: 'apps/tool', start: 'npm run start', port: APP_PORT },
   });
