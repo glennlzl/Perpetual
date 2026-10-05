@@ -82,6 +82,8 @@ function unquote(value: string) {
     if (char === '"') break;
     if (char !== '\\') { bytes.push(...Buffer.from(char)); continue; }
     const next = value[index + 1];
+    // A quoted path cut off after its backslash, which git never writes, keeps the backslash.
+    if (next === undefined) { bytes.push(0x5c); break; }
     if (/[0-7]/.test(next)) { bytes.push(parseInt(value.slice(index + 1, index + 4), 8)); index += 3; }
     else { bytes.push(...Buffer.from(escapes[next] ?? next)); index += 1; }
   }

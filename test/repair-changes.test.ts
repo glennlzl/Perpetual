@@ -41,6 +41,8 @@ test('a path through .git, outside the repository or a submodule rejects the cha
   const submodule = ['diff --git a/vendor/lib b/vendor/lib', 'new file mode 160000', 'index 0000000..abcdef1', '--- /dev/null', '+++ b/vendor/lib', '@@ -0,0 +1 @@', '+Subproject commit abcdef1234567890abcdef1234567890abcdef12'].join('\n');
   assert.deepEqual(checkChanges(submodule).rejected, [REJECTED.submodule]);
   assert.deepEqual(pathRules(['/etc/passwd', 'src/ok.ts']).rejected, [REJECTED.path]);
+  // The box's diff is the agent's output: a quoted path cut off after its backslash is refused as a path, never thrown on.
+  for (const cut of ['diff --git "a/x" "b/x\\\n', 'diff --git a/x b/x\n--- "a/x\\\n']) assert.deepEqual(checkChanges(cut).rejected, [REJECTED.path], cut);
 });
 
 test('tests and a large change are held for a person, never rejected', () => {
