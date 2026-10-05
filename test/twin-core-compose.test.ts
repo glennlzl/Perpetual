@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 import YAML from 'yaml';
 import { validateTwinConfig } from '../src/twin/config.ts';
 import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv } from '../src/twin/compose.ts';
 import { services as fixtures } from './fixtures/twin/services.ts';
 import type { ResolvedService } from '../src/twin/compose.ts';
+import type { AddressInfo } from 'node:net';
 
 const SECRET = 'pk_test_secret_value';
 const ports = { 'apps.web': 43100, 'apps.api': 43101, 'database.sql': 43102, 'mail.smtp': 43103, 'mail.web': 43104 };
@@ -67,6 +71,20 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.match(web.healthcheck!.test.at(-1)!, /127\.0\.0\.1:3000\//);
   assert.deepEqual(web.depends_on, { database: { condition: 'service_healthy' }, mail: { condition: 'service_healthy' }, 'payments-listener': { condition: 'service_started' } });
   assert.deepEqual(apps, [{ id: 'web', url: 'http://127.0.0.1:43100', directory: 'web' }, { id: 'api', url: 'http://127.0.0.1:43101', directory: 'api' }]);
+});
+
+test('An app\'s health check counts a redirect as an answer without following it, as the controller\'s check does', async t => {
+  // The app's home page sends the browser elsewhere, here to a port nothing listens on.
+  const server = createServer((_request, response) => { response.writeHead(302, { location: 'http://127.0.0.1:1/' }); response.end(); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const { port } = server.address() as AddressInfo;
+  const twin = validateTwinConfig({ apps: { web: { start: 'npm start', port } } }, { services: fixtures });
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: twin, services: [], ports: { 'apps.web': 43100 } });
+  const [form, command, ...args] = file.services.web.healthcheck!.test;
+  assert.deepEqual([form, command], ['CMD', 'node']);
+  // The probe itself, run where the app listens: it exits 0 when the app answers below 500.
+  await promisify(execFile)(process.execPath, args);
 });
 
 test('A shared install is a one-shot service that a plain up never starts', () => {

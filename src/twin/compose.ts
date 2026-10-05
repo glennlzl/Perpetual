@@ -169,7 +169,8 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       environment: { ...PACKAGE_CACHE_ENV, ...environment(appId, { ...automatic, [PORT_VARIABLE]: String(app.port), ...explicit }, dotenv) },
       ports: [`${LOOPBACK}:${port}:${app.port}`],
       ...common,
-      healthcheck: { test: ['CMD', 'node', '-e', `fetch('http://${LOOPBACK}:${app.port}/').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))`], ...APP_HEALTH },
+      // A redirect is an answer, as the controller's check counts it, and is never followed: it may lead off the twin.
+      healthcheck: { test: ['CMD', 'node', '-e', `fetch('http://${LOOPBACK}:${app.port}/',{redirect:'manual'}).then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))`], ...APP_HEALTH },
       ...(Object.keys(dependsOn).length ? { depends_on: { ...dependsOn } } : {}),
     };
     // App links are opened on the host; each env placeholder explicitly chooses browser or container reachability.
