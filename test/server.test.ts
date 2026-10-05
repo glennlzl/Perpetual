@@ -46,6 +46,18 @@ test('controller state refuses a linked snapshot and releases ownership after re
   assert.equal((await fetch(app.url + '/api/state')).status, 200);
 });
 
+test('controller state that is not schema 1, such as a newer build\'s, is refused and preserved', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-other-schema-')), dataDir = join(dir, 'data');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dataDir);
+  for (const content of [{ schema: 2, state: { scan: null, providers: [], pipelines: { 'github:acme/app:/': { repoPath: dir, stages: [] } } } }, { scan: null, pipelines: {} }, [], 'state', 1]) {
+    const text = JSON.stringify(content);
+    await writeFile(join(dataDir, 'state.json'), text);
+    await assert.rejects(startServer({ port: 0, repo: dir, dataDir }), /Cannot load saved state/, text);
+    assert.equal(await readFile(join(dataDir, 'state.json'), 'utf8'), text);
+  }
+});
+
 test('controller state keeps an existing data directory private', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-private-state-')), dataDir = join(dir, 'data');
   let app: Controller | undefined;

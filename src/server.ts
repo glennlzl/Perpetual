@@ -198,12 +198,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const refreshAssets=async()=>{const scan=++assetScans,assets=await assetFiles(publicDir);if(scan>appliedAssetScan){appliedAssetScan=scan;publicFiles={...staticFiles,...assets};}};
   const stateFile=join(dataDir,'state.json');
   let state: ControllerState={scan:null,providers:[],pipelines:{}};
-  // The controller's own state file: a JSON null or a schema 1 file without a state object cannot be read; any other file without schema 1 starts afresh.
+  // The controller's own state file, which every build writes as schema 1 with a state object. Anything else, such as
+  // a newer build's schema, cannot be read, and is preserved rather than replaced by the next save.
   try {
     const saved=await readStateFile(stateFile,{limit:CONTROLLER_STATE_LIMIT,invalid:INVALID_STATE});
-    if(saved===null)throw new Error(INVALID_STATE);
-    if(typeof saved==='object'&&'schema' in saved&&saved.schema===1) {
-      const stored='state' in saved?saved.state:undefined;
+    if(saved!==undefined) {
+      const stored=saved&&typeof saved==='object'&&'schema' in saved&&saved.schema===1&&'state' in saved?saved.state:undefined;
       if(!stored||typeof stored!=='object'||Array.isArray(stored))throw new Error(INVALID_STATE);
       state=stored as ControllerState;
     }
