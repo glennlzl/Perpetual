@@ -55,8 +55,9 @@ const IDLE_CHECKS = 4;
 const measure = (bytes: number) => bytes >= 1024 ** 3 ? `${Math.round(bytes / 1024 ** 3 * 10) / 10} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 const IMAGE = /^(?:node|python|golang|buildpack-deps):[\w.-]{1,64}$/;
 const ID = /^[\w-]{1,64}$/;
-// How a registry answers a tag it does not have, such as node:14-bookworm.
-const MISSING_IMAGE = /manifest unknown|manifest for \S+ not found|pull access denied|repository does not exist/i;
+// How a registry answers a tag it does not have, such as node:14-bookworm, through Docker's classic image store or its
+// containerd one, the default of new installs: failed to resolve reference "<ref>": <ref>: not found.
+const MISSING_IMAGE = /manifest unknown|manifest for \S+ not found|pull access denied|repository does not exist|failed to resolve reference \S+ \S+: not found/i;
 /**
  * The workspace against base through a temporary index, so the agent's own git use neither hides nor adds changes:
  * untracked files count and ignored ones do not; no hook, monitor, external diff or rename detection runs. Names are
