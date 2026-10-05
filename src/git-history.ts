@@ -87,16 +87,15 @@ function readRefs(output: string): GitRef[] {
   });
 }
 
-function readTags(output: string | null, references: GitRef[]) {
+function readTags(output: string | null) {
   // show-ref --dereference recursively peels annotated tags, including tags
   // that point to another tag. Non-commit targets cannot match displayed SHAs.
   const tags = new Map<string, string>();
-  const allowed = new Set(references.filter(ref => ref.name.startsWith('refs/tags/')).map(ref => ref.name));
   for (const row of (output || '').split('\n').filter(Boolean)) {
     const match = row.match(/^([a-f0-9]+) (refs\/tags\/.+?)(\^\{\})?$/);
     if (!match || !HASH.test(match[1])) throw new GitHistoryError('Git returned unreadable tags.');
     const [, hash, name, peeled] = match;
-    if (allowed.has(name) && (peeled || !tags.has(name))) tags.set(name, hash);
+    if (peeled || !tags.has(name)) tags.set(name, hash);
   }
   return tags;
 }
@@ -133,7 +132,8 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   const [headOutput, branchOutput, refsOutput] = await Promise.all([
     git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { allowMissing: true }),
     git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowMissing: true }),
-    git(root, ['for-each-ref', `--count=${MAX_REFS + 1}`, '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(symref)%00', 'refs/heads/', 'refs/remotes/', 'refs/tags/']),
+    // Branch heads are history tips, bounded here; tags only label displayed commits and are read below.
+    git(root, ['for-each-ref', `--count=${MAX_REFS + 1}`, '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(symref)%00', 'refs/heads/', 'refs/remotes/']),
   ]);
   const head = headOutput?.trim() || null;
   if (head && !HASH.test(head)) throw new GitHistoryError('Git returned an unreadable HEAD.');
@@ -158,9 +158,7 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
       `--max-count=${limit + 1}`, '-z', '--format=%H%x00%P%x00%an%x00%cI%x00%s',
       ...tips, '--',
     ]) : Promise.resolve(''),
-    references.some(ref => ref.name.startsWith('refs/tags/'))
-      ? git(root, ['show-ref', '--tags', '--dereference'], { allowMissing: true })
-      : Promise.resolve(''),
+    git(root, ['show-ref', '--tags', '--dereference'], { allowMissing: true }),
   ]);
   const history = readCommits(logOutput);
   const commits = history.slice(0, limit);
@@ -173,7 +171,7 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   if (head && !branch && displayed.has(head)) (displayed.get(head)!.refs ??= []).unshift('HEAD');
   const refRank = (name: string) => name === branch ? 0 : name === `origin/${branch}` ? 1 : 2;
   for (const commit of commits) commit.refs?.sort((a, b) => refRank(a) - refRank(b) || a.localeCompare(b));
-  for (const [name, hash] of readTags(tagsOutput, references)) {
+  for (const [name, hash] of readTags(tagsOutput)) {
     const commit = displayed.get(hash);
     if (!commit) continue;
     const tag = name.slice('refs/tags/'.length);

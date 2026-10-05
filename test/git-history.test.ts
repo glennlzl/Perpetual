@@ -76,3 +76,11 @@ test('a directory that is not a repository has no history to read', async t => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   await assert.rejects(readGitHistory({ repo: { path: dir, remote: null, name: 'app' } }), /Cannot read local Git history/);
 });
+
+test('tags label commits without counting toward the branch reference limit', async t => {
+  const repo = await repository(t);
+  const c1 = await repo.commit('one');
+  execFileSync('git', ['-C', repo.path, 'update-ref', '--stdin'], { input: Array.from({ length: 2001 }, (_, index) => `create refs/tags/v${index} ${c1}\n`).join('') });
+  const history = await repo.read({ scope: 'current' });
+  assert.deepEqual([history.commits.length, history.commits[0].tag?.split(', ').length, history.refCount], [1, 2001, 1]);
+});
