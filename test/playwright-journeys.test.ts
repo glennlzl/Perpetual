@@ -82,10 +82,11 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/')return redirect(signedIn?'/settings':'/login');
       if(url.pathname==='/login'&&req.method==='POST')return form.get('email')===account.username&&form.get('password')===account.password?redirect('/settings',{'set-cookie':'session=1; Path=/'}):redirect('/login');
       if(url.pathname==='/login')return send(page('Sign in','<form method=post action=/login><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>'));
-      // The same form, shown by a button once the socket said hello, signing in over that socket, then Notes, counted only
-      // over a socket and written over the socket of the page, a worker or a shared worker, the page's WebSocketStream or
-      // a socket the page opens only to add the note; with spa, the page itself opens a socket for Notes a moment later.
-      if(url.pathname==='/socket-login')return send(page('Sign in',`<button id=show hidden>Sign in</button><form hidden><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0],show=document.getElementById('show');open.then(()=>{show.hidden=false;});show.onclick=()=>{show.hidden=true;form.hidden=false;};form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';if(!location.search.includes('spa'))return location.assign('/live'+location.search);form.hidden=true;setTimeout(()=>{const notes=new WebSocket(SOCKET_URL);notes.onopen=()=>notes.send(JSON.stringify({type:'hello'}));notes.onmessage=event=>{document.body.insertAdjacentHTML('beforeend','<p>'+event.data+'</p><button id=add>Add note</button>');document.getElementById('add').onclick=()=>{notes.send(JSON.stringify({type:'add'}));document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');};};},1500);});</script>`));
+      // The same form, shown by a button once the application answered the socket's hello, signing in over that socket, then
+      // Notes, counted only over a socket and written over the socket of the page, a worker or a shared worker, the page's
+      // WebSocketStream or a socket the page opens only to add the note; with spa, the page itself opens a socket for Notes a
+      // moment later.
+      if(url.pathname==='/socket-login')return send(page('Sign in',`<button id=show hidden>Sign in</button><form hidden><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0],show=document.getElementById('show');socket.addEventListener('message',event=>{if(event.data.startsWith('Notes '))show.hidden=false;});show.onclick=()=>{show.hidden=true;form.hidden=false;};form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';if(!location.search.includes('spa'))return location.assign('/live'+location.search);form.hidden=true;setTimeout(()=>{const notes=new WebSocket(SOCKET_URL);notes.onopen=()=>notes.send(JSON.stringify({type:'hello'}));notes.onmessage=event=>{document.body.insertAdjacentHTML('beforeend','<p>'+event.data+'</p><button id=add>Add note</button>');document.getElementById('add').onclick=()=>{notes.send(JSON.stringify({type:'add'}));document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');};};},1500);});</script>`));
       if(url.pathname==='/note-worker.js'){res.writeHead(200,{'content-type':'text/javascript'});return res.end(`${SOCKET}const add=port=>()=>say({type:'add'}).then(()=>port.postMessage('sent'));onmessage=add(self);onconnect=event=>{event.ports[0].onmessage=add(event.ports[0]);};`);}
       // A landing page with no sign-in form, and a sign-in page whose form, shown at once, signs in over its socket.
       if(url.pathname==='/welcome')return send(page('Welcome','<h1>Welcome</h1>'));
@@ -315,8 +316,9 @@ test('a control run lets a socket opened after sign-in say hello, so checks that
   assert.deepEqual(await ends(liveSpec('page',true),weak),passed(weak));
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','hello']]);
   // A page that signed in over its socket, after the journey showed the form, then opens one for Notes: what that socket
-  // sends is no write around the block.
-  const spa={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[]}:step)};
+  // sends is no write around the block. The reloaded page is judged once its button shows that the application answered
+  // its socket's hello, so that hello is received before the browser closes.
+  const spa={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[{type:'text-visible' as const,value:'Sign in'}]}:step)};
   assert.deepEqual(await ends(liveSpec('spa'),spa),passed(spa));
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','hello','hello','sign-in','hello','hello']]);
 });
