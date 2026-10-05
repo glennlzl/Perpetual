@@ -10,6 +10,7 @@ import {createBrowserManager} from '../src/browser/manager.ts';
 import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
 import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,repairPrompt,seedSpec} from '../src/journeys/playwright/generation.ts';
 import {caseHash,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
+import {toolName} from '../src/agents/authoring-evidence.ts';
 import {codeFor} from './fixtures/journey-code.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
@@ -143,6 +144,8 @@ test('grammar repair can read and write the rejected test but cannot repeat busi
   assert.ok(Object.keys(generation.agent.tools).some(name=>name.includes('browser_click')&&generation.agent.tools[name]));
   assert.equal(repair.agent.name,'perpetual-grammar-repair');
   assert.deepEqual(repair.agent.tools,{'*':false,read:true,'playwright-test*generator_setup_page':true,'playwright-test*generator_write_test':true});
+  // Authoring diagnostics name every tool either agent can call, as the pinned Playwright configures them.
+  for(const {agent} of [generation,repair])for(const [name,enabled] of Object.entries(agent.tools))if(enabled)assert.notEqual(toolName(name.replace(/^playwright-test\*/,'')),'unknown',name);
 });
 
 test('the generation rules keep navigation on the current run’s records',()=>{
