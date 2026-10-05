@@ -30,7 +30,7 @@ test('a spec performs exactly the reviewed milestones in order, in a grammar of 
   // Comments, literals, options, regular expressions, nested locators, frames, the keyboard and the mouse.
   assert.ok(validateJourneySpec(actions('// Sign in first.','await journey.signIn();',"await page.goto('/settings');","await page.getByRole('button', { name: /Save/i, exact: true }).nth(-1).click();",
     "await page.locator('li').filter({ has: page.getByText('Pro'), hasText: `Plan` }).first().click({ force: true });","await page.frameLocator('iframe').getByLabel('Card').fill('4242');",
-    "await page.getByLabel('Plan').selectOption(['a', { label: 'b' }]);","await page.keyboard.press('Enter');","await page.mouse.wheel(0, 400);","await page.waitForURL('**/settings');"),journey));
+    "await page.getByLabel('Plan').selectOption(['a', { label: 'b' }]);","await page.keyboard.press('Enter');","await page.mouse.wheel(0, 400);","await page.waitForURL('**/settings');","await page.goto('/notes', { waitUntil: 'networkidle' });"),journey));
   const rejected:[string|undefined,RegExp][]=[
     [undefined,/at most 200 KB/],['',/at most 200 KB/],[spec(body()+`// ${'x'.repeat(200*1024)}`),/at most 200 KB/],[spec(body()+'\n  await page.reload(;'),/not valid JavaScript \(line 6\)/],
     [spec(body(),"import { test } from 'perpetual';\nimport fs from 'node:fs';"),/Import only the fixture/],[spec(body(),"import { test } from '@playwright/test';"),/Import only the fixture/],
@@ -55,6 +55,9 @@ test('a spec performs exactly the reviewed milestones in order, in a grammar of 
     [actions("await page.context().newPage();"),/is not an allowed/],[actions("await page.locator('input').setInputFiles('/etc/passwd');"),/setInputFiles is not an allowed/],
     [actions("await expect(page).toHaveURL('/x');"),/expect\(\)\.toHaveURL is not an allowed/],[actions("await test.step('x', async () => {});"),/test\.step is not an allowed/],
     [actions("await page.goto('javascript:document.body.remove()');"),/page\.goto takes a literal http\(s\) URL or path/],[actions("await page.goto('data:text/html,Renamed');"),/page\.goto takes/],
+    // An action that only checks it could act, or a page read before it has content, is no reviewed action.
+    [actions("await page.getByRole('button', { name: 'Delete' }).click({ trial: true });"),/trial and waitUntil: 'commit' are not allowed/],[actions("await page.goto('/notes', { waitUntil: 'commit' });"),/trial and waitUntil: 'commit' are not allowed/],
+    [actions("await page.reload({ 'waitUntil': `commit` });"),/trial and waitUntil: 'commit' are not allowed/],
     [actions("await page.waitForURL(url => true);"),/action arguments are literals/],[actions("await page.getByText(`${'x'}`).click();"),/action arguments are literals/],
     [actions("await page.getByRole('button', { ...{ name: 'Go' } }).click();"),/action arguments are literals/],[actions("await page.getByRole('button', { __proto__: { name: 'Go' } }).click();"),/action arguments are literals/],
     [actions("await page.getByRole('button', { name: globalThis.name }).click();"),/action arguments are literals/],
