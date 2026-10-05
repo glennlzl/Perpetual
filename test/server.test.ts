@@ -40,7 +40,8 @@ function halfSent(url: string, token: string, path: string, input: unknown) {
     res.on('data', chunk => chunks.push(chunk));
     res.on('end', () => reply.resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
   });
-  req.on('error', reply.reject);
+  // A connection cut off before `finish` is its answer, read when `finish` is.
+  req.on('error', reply.reject); reply.promise.catch(() => {});
   req.write(body.subarray(0, half));
   return { finish() { req.end(body.subarray(half)); return reply.promise; }, destroy() { req.destroy(); } };
 }
@@ -370,4 +371,19 @@ test('a change whose body finishes arriving after a source change began is refus
     assert.equal((await rescan.finish()).status, 200);
     assert.deepEqual(await names(), before);
   } finally { edit.destroy(); rescan.destroy(); }
+});
+
+test('closing the controller cuts off a request whose body never finishes arriving', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-unfinished-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'data') });
+  const { token } = await (await fetch(app.url + '/api/session')).json();
+  const stuck = halfSent(app.url, token, '/api/pipeline/action', { repoPath: dir, action: 'add-stage', name: 'Gamma' });
+  t.after(async () => { stuck.destroy(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  await fetch(app.url + '/api/state');
+  let closed = false;
+  const closing = app.close().then(() => { closed = true; });
+  for (const deadline = Date.now() + 10_000; !closed && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(closed, true, 'Shutdown finished without the rest of the body.');
+  await closing;
+  await assert.rejects(stuck.finish(), 'The request was cut off.');
 });

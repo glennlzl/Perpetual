@@ -853,7 +853,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask];
-    // Once the work the requests waited on drains, the connections their replies left open are closed too.
-    closing=(async()=>{const results=await Promise.allSettled(draining);server.closeIdleConnections();results.push(...await Promise.allSettled([stopped]));await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
+    // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
+    // still unfinished a moment later, such as one whose body never arrives, is cut off.
+    closing=(async()=>{
+      const results=await Promise.allSettled(draining);server.closeIdleConnections();
+      const cut=setTimeout(()=>server.closeAllConnections(),2000);results.push(...await Promise.allSettled([stopped]));clearTimeout(cut);
+      await saves.idle();const failed=results.find(item=>item.status==='rejected');if(failed)throw failed.reason;})();return closing;
   }};
 }
