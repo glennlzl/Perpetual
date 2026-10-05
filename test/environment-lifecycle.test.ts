@@ -317,6 +317,27 @@ test('owned-target resolution canonicalizes loopback aliases and retains stale o
   assert.equal(manager.resolveTarget('http://localhost:50123/')?.status, 'destroyed');
 });
 
+test('an origin resolves to the twin that holds it over a deleted twin that used the same ports', async t => {
+  const release = deferred();
+  const { manager } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    if (environment.stageId === context.stageId) await release.promise;
+    return structuredClone(ready);
+  } });
+  t.after(() => release.resolve());
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const { environment: older } = await manager.create(context);
+  // Another stage's twin takes the free ports, becomes ready and is deleted while the first still prepares.
+  const { environment: newer } = await manager.create(gamma);
+  assert.equal((await manager.awaitIdle(newer.id)).status, 'ready');
+  await manager.destroy(gamma, newer.id);
+  assert.equal((await manager.awaitIdle(newer.id)).status, 'destroyed');
+  release.resolve();
+  assert.equal((await manager.awaitIdle(older.id)).status, 'ready');
+  assert.equal(manager.resolveTarget('http://localhost:50123/')?.id, older.id);
+});
+
 test('a ready twin runs from its source snapshot until deletion; a failed twin is cleaned up with it', async t => {
   let fail = false, keepTwin = false;
   const cleaned: string[] = [];

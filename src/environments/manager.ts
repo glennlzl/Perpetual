@@ -282,7 +282,9 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     resolveTarget(url: unknown) {
       const origin = applicationOrigin(url);
       if (!origin) return null;
-      const environment = state.environments.find(item => (item.origins || []).includes(origin));
+      // A deleted twin keeps its origins, but a twin that still holds resources owns them, as when it reuses freed ports.
+      const at = (item: EnvironmentRecord) => (item.origins || []).includes(origin);
+      const environment = state.environments.find(item => holdsResources(item) && at(item)) ?? state.environments.find(at);
       return environment ? structuredClone(publicEnvironment(environment)) : null;
     },
     markUsageUncertain(id: string, error: unknown) {
