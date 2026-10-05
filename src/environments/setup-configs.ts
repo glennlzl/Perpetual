@@ -46,7 +46,11 @@ function quoted(observe: Observation) {
 function capped(lines: string[], limit = SETUP_LIMITS.entries, indent = '') {
   return lines.length <= limit ? lines : [...lines.slice(0, limit), `${indent}- … ${lines.length - limit} more left out.`];
 }
-const joined = (values: string[], limit = SETUP_LIMITS.entries) => values.length <= limit ? values.join(', ') : `${values.slice(0, limit).join(', ')} and ${values.length - limit} more`;
+/** The first entries of a long list, each formatted, and how many it left out, which are never formatted. */
+function joined<Value>(values: Value[], format: (value: Value) => string, limit = SETUP_LIMITS.entries) {
+  const kept = values.slice(0, limit).map(format).join(', ');
+  return values.length <= limit ? kept : `${kept} and ${values.length - limit} more`;
+}
 
 /** The 1-based line of each offset in `text`. */
 export function lineNumbers(text: string) {
@@ -103,9 +107,10 @@ type Parsed = { value: unknown; positions: Positions };
 /**
  * A YAML document, refused when it does not parse; aliases expand at most 20 times. A repeated key is not refused, since
  * checking every key against the others takes time that grows with the square of their number: the last one counts.
+ * Errors are not formatted against the source, which takes as long for each of them; only the first is thrown.
  */
 function yaml(text: string): Parsed {
-  const document = parseDocument(text, { uniqueKeys: false });
+  const document = parseDocument(text, { uniqueKeys: false, prettyErrors: false });
   if (document.errors.length) throw document.errors[0];
   const positions: Positions = new Map();
   visitYaml(document, { Scalar(_key, node) { if (typeof node.value === 'string' && node.range) earliest(positions, node.value, node.range[0]); } });
@@ -217,12 +222,14 @@ export function dockerfile(text: string, observe: Observation = redact): SetupEv
     if (heredoc !== null) { if (rows[index].trim() === heredoc) heredoc = null; continue; }
     if (!rows[index].trim() || COMMENT.test(rows[index])) continue;
     const line = index + 1, pieces: string[] = [];
-    let current = rows[index];
-    while (CONTINUED.test(current) && index + 1 < rows.length) {
+    // Tested once for each line it holds, not again for each comment row inside the instruction.
+    let current = rows[index], continued = CONTINUED.test(current);
+    while (continued && index + 1 < rows.length) {
       index += 1;
       if (COMMENT.test(rows[index])) continue;
       pieces.push(current.replace(CONTINUED, ' '));
       current = rows[index];
+      continued = CONTINUED.test(current);
     }
     pieces.push(current);
     const match = /^\s*([A-Za-z]+)\s+([\s\S]*)$/.exec(pieces.join(''));
@@ -250,12 +257,12 @@ export function dockerfile(text: string, observe: Observation = redact): SetupEv
   return { lines: lines.length ? lines : ['- No instructions it reads.'], names: [...found].map(([name, line]) => ({ name, line })) };
 }
 
-/** A dev container command: a string, a list of arguments, or named commands that run in parallel. */
-function devCommand(value: unknown, quotes: ReturnType<typeof quoted>): string[] {
+/** A dev container command: a string, a list of arguments, or named commands that run in parallel, each one of those. */
+function devCommand(value: unknown, quotes: ReturnType<typeof quoted>, named = true): string[] {
   const { code, command } = quotes;
   if (typeof value === 'string') return [command(value)];
   if (Array.isArray(value)) return [command(strings(value).join(' '))];
-  return Object.entries(fields(value) ?? {}).flatMap(([name, item]) => devCommand(item, quotes).map(text => `${code(name)} ${text}`));
+  return named ? Object.entries(fields(value) ?? {}).flatMap(([name, item]) => devCommand(item, quotes, false).map(text => `${code(name)} ${text}`)) : [];
 }
 const LIFECYCLE = ['onCreateCommand', 'updateContentCommand', 'postCreateCommand', 'postStartCommand'];
 
@@ -273,7 +280,7 @@ export function devcontainer(text: string, observe: Observation = redact): Setup
   if (features.length) lines.push(`- Features: ${features.map(code).join(', ')}`);
   const ports = Array.isArray(config.forwardPorts) ? config.forwardPorts.filter(scalar).map(String) : [];
   if (ports.length) lines.push(`- Forwarded ports: ${names(ports)}`);
-  for (const key of LIFECYCLE) for (const item of devCommand(config[key], quotes)) lines.push(`- ${key}: ${item}`);
+  for (const key of LIFECYCLE) lines.push(...capped(devCommand(config[key], quotes).map(item => `- ${key}: ${item}`)));
   const containerEnv = keys(config.containerEnv), remoteEnv = keys(config.remoteEnv);
   if (containerEnv.length) lines.push(`- containerEnv: ${names(containerEnv)}`);
   if (remoteEnv.length) lines.push(`- remoteEnv: ${names(remoteEnv)}`);
@@ -293,10 +300,15 @@ function tableNames(value: unknown) {
   return keys(value);
 }
 
-/** Commands, directories, settings and variable names anywhere in a parsed deploy manifest. */
+/**
+ * Commands, directories, settings and variable names anywhere in a parsed deploy manifest. A line past the entries the
+ * evidence keeps is only counted, as an empty line, since formatting each entry's whole path would take time that grows
+ * with their number times the path's length.
+ */
 function manifestEntries(value: unknown, path: string, lines: string[], found: string[], quotes: ReturnType<typeof quoted>, depth = 0) {
   if (depth > SETUP_LIMITS.depth) return;
   const { code, command, names } = quotes;
+  const add = (line: () => string) => { lines.push(lines.length < SETUP_LIMITS.entries ? line() : ''); };
   if (Array.isArray(value)) {
     value.forEach((item, index) => { const name = fields(item)?.name; manifestEntries(item, `${path}[${typeof name === 'string' ? name : index}]`, lines, found, quotes, depth + 1); });
     return;
@@ -306,11 +318,11 @@ function manifestEntries(value: unknown, path: string, lines: string[], found: s
     if (ENVIRONMENT_KEY.test(key) && (Array.isArray(child) || fields(child))) {
       const list = tableNames(child);
       found.push(...list);
-      if (list.length) lines.push(`- ${code(at)}: ${names(list)}`);
+      if (list.length) add(() => `- ${code(at)}: ${names(list)}`);
     } else if (PROCESSES_KEY.test(key) && fields(child)) {
-      for (const [process, item] of Object.entries(fields(child)!)) if (typeof item === 'string') lines.push(`- ${code(`${at}.${process}`)}: ${command(item)}`);
-    } else if ((COMMAND_KEY.test(key) || DIRECTORY_KEY.test(key)) && strings(child).length) lines.push(`- ${code(at)}: ${strings(child).map(command).join(', ')}`);
-    else if (SETTING_KEY.test(key) && scalar(child)) lines.push(`- ${code(at)}: ${code(String(child))}`);
+      for (const [process, item] of Object.entries(fields(child)!)) if (typeof item === 'string') add(() => `- ${code(`${at}.${process}`)}: ${command(item)}`);
+    } else if ((COMMAND_KEY.test(key) || DIRECTORY_KEY.test(key)) && strings(child).length) add(() => `- ${code(at)}: ${strings(child).map(command).join(', ')}`);
+    else if (SETTING_KEY.test(key) && scalar(child)) add(() => `- ${code(at)}: ${code(String(child))}`);
     else if (child !== null && typeof child === 'object') manifestEntries(child, at, lines, found, quotes, depth + 1);
   }
 }
@@ -365,12 +377,12 @@ export function supabaseConfig(text: string, observe: Observation = redact): Set
   if (!config) return { lines: ['- Could not be read.'], names: [] };
   const lines: string[] = [], found: [string, string][] = [];
   references(config, '', found);
-  if (found.length) lines.push(`- Variables from env(): ${joined(found.map(([path, name]) => `${code(path)} ${word(name)}`))}`);
+  if (found.length) lines.push(`- Variables from env(): ${joined(found, ([path, name]) => `${code(path)} ${word(name)}`)}`);
   const functions = Object.entries(fields(config.functions) ?? {});
-  if (functions.length) lines.push(`- Functions in config: ${joined(functions.map(([name, value]) => {
+  if (functions.length) lines.push(`- Functions in config: ${joined(functions, ([name, value]) => {
     const settings = Object.entries(fields(value) ?? {}).filter(([, setting]) => scalar(setting)).map(([key, setting]) => `${word(key)} ${code(String(setting))}`);
     return `${code(name)}${settings.length ? ` (${settings.join(', ')})` : ''}`;
-  }))}`);
+  })}`);
   const seed = fields(fields(config.db)?.seed);
   if (seed) lines.push(`- Seed: ${seed.enabled === false ? 'disabled' : 'enabled'}${strings(seed.sql_paths).length ? `, ${strings(seed.sql_paths).map(code).join(', ')}` : ''}`);
   const auth = fields(config.auth);

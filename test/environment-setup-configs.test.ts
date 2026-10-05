@@ -163,6 +163,18 @@ test('a devcontainer.json that builds its image or runs compose files gives them
   assert.deepEqual(devcontainer('{ "dockerComposeFile": ["../compose.yml", "compose.dev.yml"], "service": "app" }').lines, ['- Compose files: `../compose.yml`, `compose.dev.yml`, service `app`']);
 });
 
+test('long lists of manifest entries, env() references and named commands keep their first entries and say how many more', () => {
+  const vercel = deployManifest('vercel.json', JSON.stringify({ crons: Object.fromEntries(Array.from({ length: 45 }, (_, index) => [`job${index}`, { buildCommand: `npm run job${index}` }])) }));
+  assert.equal(vercel.lines.length, 41);
+  assert.deepEqual([vercel.lines[0], vercel.lines[40]], ['- `crons.job0.buildCommand`: `npm run job0`', '- … 5 more left out.']);
+  const config = supabaseConfig(`[x]\n${Array.from({ length: 42 }, (_, index) => `k${index} = "env(KEY_${index})"`).join('\n')}\n`);
+  assert.match(config.lines[0], /^- Variables from env\(\): `x\.k0` KEY_0, .*`x\.k39` KEY_39 and 2 more$/);
+  // Named commands are one level deep, as the dev container spec allows.
+  assert.deepEqual(devcontainer(JSON.stringify({ postStartCommand: { db: 'pnpm db:up', nested: { inner: 'pnpm inner' } } })).lines, ['- postStartCommand: `db` `pnpm db:up`']);
+  const named = devcontainer(JSON.stringify({ postCreateCommand: Object.fromEntries(Array.from({ length: 41 }, (_, index) => [`c${index}`, 'pnpm build'])) })).lines;
+  assert.deepEqual([named.length, named[40]], [41, '- … 1 more left out.']);
+});
+
 test('a name’s line is where the file declares or references it, not a comment or step that mentions it first', () => {
   const { names } = workflow([
     '# DATABASE_URL comes from the service below.', 'jobs:', '  test:', '    runs-on: ubuntu-latest', '    steps:', '      - name: Check DATABASE_URL and API_TOKEN',
@@ -195,8 +207,10 @@ test('a key that is not one plain word is quoted on one line, so a file cannot a
 });
 
 test('each reader takes time in proportion to its file, however the file is crafted', () => {
-  const MB = 1024 * 1024;
-  const fill = (unit: string, head = '', tail = '') => head + unit.repeat(Math.ceil((MB - head.length - tail.length) / unit.length)) + tail;
+  const MB = 1024 * 1024, KB = 1024;
+  const fill = (unit: string, head = '', tail = '', size = MB) => head + unit.repeat(Math.ceil((size - head.length - tail.length) / unit.length)) + tail;
+  const nested = (depth: number) => { let value: unknown = 'echo a'; for (let index = 0; index < depth; index += 1) value = { [`n${index}`]: value, [`m${index}`]: 'echo b' }; return value; };
+  const commands = (count: number, entry: (index: number) => string, separator: string) => Array.from({ length: count }, (_, index) => entry(index)).join(separator);
   const numbered = (make: (index: number) => string, separator = '\n') => { const parts: string[] = []; for (let index = 0, size = 0; size < MB; index += 1) { parts.push(make(index)); size += parts.at(-1)!.length + 1; } return parts.join(separator); };
   // Each was quadratic or worse: a name looked up across the whole file, a growing instruction tested again for each of
   // its lines, a pattern that rescans from every unclosed quote or expression, and YAML's check of every key against
@@ -212,6 +226,14 @@ test('each reader takes time in proportion to its file, however the file is craf
     ['a dev container with 100,000 variables', () => devcontainer(`{ "containerEnv": { ${numbered(index => `"KEY_${index}": "v"`, ',')} } }`)],
     ['a turbo.json with 100,000 variables', () => turbo(`{ "globalEnv": [${numbered(index => `"KEY_${index}"`, ',')}] }`)],
     ['a Supabase config with 100,000 references', () => supabaseConfig(`[x]\n${numbered(index => `k${index} = "env(KEY_${index})"`)}`)],
+    // A YAML error formatted against the whole source, a long instruction tested again for each comment row inside it,
+    // and a long key or deep names formatted again for every entry beneath them, each in a file the reader takes.
+    ['a workflow of tags that do not parse', () => assert.throws(() => workflow(fill('!a ', '', '', 256 * KB)))],
+    ['a workflow of quotes that do not parse', () => assert.throws(() => workflow(fill('"', '', '', 256 * KB)))],
+    ['a Dockerfile whose continued line is followed by 65,536 comment rows', () => dockerfile(`RUN ${'\\a'.repeat(32 * KB)}\\\n${'#\n'.repeat(64 * KB)}`)],
+    ['a deploy manifest whose 100 KB key holds 9,000 commands', () => deployManifest('vercel.json', `{"${'k'.repeat(100 * KB)}":{${commands(9000, index => `"c${index}Cmd":"x"`, ',')}}}`)],
+    ['a Supabase config whose 100 KB table holds 9,000 references', () => supabaseConfig(`[${'k'.repeat(100 * KB)}]\n${commands(9000, index => `r${index} = "env(A${index})"`, '\n')}\n`)],
+    ['a dev container whose commands are named 1,500 deep', () => devcontainer(JSON.stringify({ postCreateCommand: nested(1500) }))],
   ];
   for (const [name, read] of cases) {
     const started = performance.now();
