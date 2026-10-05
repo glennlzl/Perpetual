@@ -86,6 +86,8 @@ export interface EnvironmentTwin {
   health(options: TwinCall): Promise<{ status: string; containers: Container[] }>;
   logs(options: TwinCall & { service?: string; tail?: number }): Promise<string>;
   destroy(options: TwinCall & { inputs?: Record<string, InputValues> }): Promise<unknown>;
+  /** Why Docker cannot build a twin now, or null when it can; a twin without the check is taken as able. */
+  available?(): Promise<string | null>;
 }
 /** The OpenRouter model an agent writes a twin config with; the key stays in memory. */
 export interface AuthoringModel { apiKey: string; model: string; escalationModel?: string }
@@ -291,6 +293,11 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     // too short to be a credential in place, as its copy of the source does.
     const knownValues = () => [model.apiKey, ...knownSecrets], authorSecrets = () => hiddenFromAuthor(knownValues());
     try {
+      // Every attempt builds its config's twin, so an engine that cannot build one, such as Docker not running, ends the
+      // creation before the first paid attempt.
+      const unavailable = await twin.available?.();
+      if (unavailable) throw new Error(unavailable);
+      check();
       // Protect the first observation as well as build feedback. Reading stored inputs never provisions a service.
       values = await readInputs(environment.plan);
       check();

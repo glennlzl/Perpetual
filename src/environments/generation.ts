@@ -117,9 +117,9 @@ export interface GenerationSteps<Result> {
 /**
  * Runs the loop until an attempt's twin counts as ready: resolves its config, the prepared result and how many attempts
  * it took. After the last failed attempt it rejects with a GenerationFailure, and the last twin is left for the caller's
- * usual failure cleanup. A cancellation, or an agent that cannot run, ends the loop at once; running out of time does
- * not. Its log, in `logs` of the result and of each rejection, holds every attempt's output and each failed attempt's
- * feedback, all redacted.
+ * usual failure cleanup. A cancellation, an agent that cannot run, or a preparation that fails without naming a part of
+ * the config ends the loop at once; running out of time does not. Its log, in `logs` of the result and of each
+ * rejection, holds every attempt's output and each failed attempt's feedback, all redacted.
  */
 export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, hide, cancelled }: GenerationSteps<Result>) {
   let text = draft, notes = feedback;
@@ -155,6 +155,9 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
         } catch (error) {
           if (cancelled() || error instanceof Error && 'cleanupIncomplete' in error && error.cleanupIncomplete === true) throw error instanceof Error ? withLogs(error) : error;
           const { step: at, ...found } = await diagnose(built, error);
+          // A failure that names no part of the config, such as Docker's own, is not the config's to fix: generation ends
+          // with it rather than paying for another attempt, and leaves no draft.
+          if (!found.subject) throw withLogs(error instanceof Error ? error : new Error(String(error)));
           failure = { ...found, heading: `preparing the twin failed at "${at}"`, error: String((error as Error).message ?? error) };
         }
       }

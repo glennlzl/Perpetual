@@ -427,6 +427,21 @@ test('Health fails a twin whose Compose service container is gone, however healt
     { status: 'failed', final: true, error: 'Stopped: database removed.' });
 });
 
+test('The engine check runs one bounded docker version and says why Docker cannot build a twin', async () => {
+  const calls: { file: string; args: string[]; timeoutMs?: number }[] = [];
+  const engine = (reply: () => Promise<{ stdout: string; stderr?: string }>) => createTwinRuntime({ owner: 'owner-1', services, exec: async (file, args, options) => {
+    calls.push({ file, args, timeoutMs: options?.timeoutMs });
+    return reply();
+  } });
+  assert.equal(await engine(async () => ({ stdout: '27.3.1\n', stderr: '' })).available(), null);
+  assert.deepEqual(calls, [{ file: 'docker', args: ['version', '--format', '{{.Server.Version}}'], timeoutMs: 15_000 }]);
+  const daemon = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
+  assert.equal(await engine(async () => { throw Object.assign(new Error('Command failed: docker version'), { code: 1, stdout: '', stderr: `${daemon}\n` }); }).available(), `Docker is not available. ${daemon}`);
+  assert.equal(await engine(async () => { throw Object.assign(new Error('Twin command exceeded its 15-second limit.'), { timedOut: true }); }).available(), 'Docker is not available. It did not answer within 15 seconds.');
+  assert.equal(await engine(async () => { throw new Error('docker could not start.'); }).available(), 'Docker is not available. docker could not start.');
+  assert.equal(await engine(async () => ({ stdout: '\n' })).available(), 'Docker is not available. Its engine reported no version.');
+});
+
 test('Destroy takes Compose down with volumes, then tears services down in reverse setup order', async t => {
   let failDown = false;
   const { runtime, calls, prepare, dataDir, dir } = await setup(args => { if (failDown && args.includes('down')) throw Object.assign(new Error('x'), { stderr: `busy ${KEY}` }); return {}; });
