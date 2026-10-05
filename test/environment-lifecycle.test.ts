@@ -204,6 +204,11 @@ test('a creation first deletes the stage’s earlier twin that still holds resou
   // Docker restarted: the monitor fails the twin, which still owns its containers, ports and snapshot.
   await manager.tick();
   assert.deepEqual([manager.summaries(context.key)[0].step, holdsResources(manager.summaries(context.key)[0])], ['Unhealthy', true]);
+  // A creation refused for its config deletes nothing.
+  await manager.savePlan(context, { services: {}, apps: {} });
+  await assert.rejects(manager.create(context), /Add an app/);
+  assert.deepEqual([destroyed, manager.summaries(context.key).map(item => item.status)], [[], ['failed']]);
+  await manager.savePlan(context, plan);
   const second = await createReady(manager);
   assert.deepEqual(destroyed, [first.id]);
   assert.deepEqual(manager.summaries(context.key).map(item => [item.id, item.status]), [[second.id, 'ready'], [first.id, 'destroyed']]);

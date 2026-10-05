@@ -344,11 +344,6 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       admitted.set(context.key, (admitted.get(context.key) ?? 0) + 1);
       const record = () => { if (recorded) return; recorded = true; const left = (admitted.get(context.key) ?? 1) - 1; if (left) admitted.set(context.key, left); else admitted.delete(context.key); };
       try {
-        for (const item of previous) {
-          await manager.destroy(context, item.id);
-          const result = await manager.awaitIdle(item.id);
-          if (result.status !== 'destroyed') throw new Error(result.error || 'The previous twin could not be deleted.');
-        }
         const saved = owns ? await planFor(context) : await repairPlan(context), stored = configOf(saved), generated = isGenerated(saved);
         // Only a person's saved config selects the app explicitly. A detected or agent-generated plan must still
         // establish runtime coverage, including when a gate or a restart reuses it.
@@ -364,7 +359,13 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         // A person's saved config is theirs to fix. When detection found no app, an agent writes the config on a person's
         // Create with an OpenRouter model, which is what the person can do.
         if (plan && !Object.keys(plan.apps).length) throw new Error(selectionReviewed ? 'Add an app before creating this environment.'
-          : `No app was detected. ${generate || !await authoringModel() ? 'Add an OpenRouter API key in Settings' : 'Create the environment'} so Perpetual can write the twin config.`);
+          : `No app was detected. ${generate || !await authoringModel().catch(() => null) ? 'Add an OpenRouter API key in Settings' : 'Create the environment'} so Perpetual can write the twin config.`);
+        // The stage's earlier twins go only once this creation goes ahead, so a refused one leaves them as they are.
+        for (const item of previous) {
+          await manager.destroy(context, item.id);
+          const result = await manager.awaitIdle(item.id);
+          if (result.status !== 'destroyed') throw new Error(result.error || 'The previous twin could not be deleted.');
+        }
         // Generating a twin config, or building a generated one, reads the checkout while it prepares, for its evidence
         // and its failure's draft, so a gate does not move the source meanwhile. A repair gate reads its own checkout.
         environment = { id, scope, pipelineKey: context.key, stageId: context.stageId, repoPath: context.scan.repo.path, sourceBranch: context.scan.repo.branch || null, sourceRevision: context.scan.repo.sha || null, ...(context.repair ? { repair: context.repair } : {}), ...(plan ? { plan } : {}), status: 'queued', step: 'Queued', services: [], apps: [], createdAt: now(), ...(generation || builtGenerated ? { readsCheckout: true } : {}) };
