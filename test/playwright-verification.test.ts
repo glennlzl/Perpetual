@@ -290,7 +290,7 @@ test('a draft verified under older checks must be verified again before its code
   assert.deepEqual(await ran(9),[CHECK_VERSION,'passed']);
 });
 
-for(const checkVersion of [undefined,1,2,3]){
+for(const checkVersion of [undefined,1,2,3,4]){
   test(`an approval with ${checkVersion===undefined?'unversioned':`version ${checkVersion}`} control evidence stays historical until explicit reuse and verification`,async t=>{
     const f=await setup(t);
     await f.manager.saveCases(f.context,[{...journey,selected:true}]);

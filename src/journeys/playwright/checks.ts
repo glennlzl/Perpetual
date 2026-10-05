@@ -35,9 +35,10 @@ export type FixtureEvent =
  * The version of what the fixture's reviewed checks read. A verification's attempts and an approval record it, so approved
  * code must be verified again when those semantics change. 1: text checks read visible text. 2: they also read
  * what the application put in visible form fields. 3: a caught control requires a fresh persistence read.
- * 4: declared search controls never supply stored-result text evidence.
+ * 4: declared search controls never supply stored-result text evidence. 5: a text check finds its value only where
+ * it stands on its own (textPattern).
  */
-export const CHECK_VERSION = 4;
+export const CHECK_VERSION = 5;
 
 // Named fixture steps keep checks private and report sign-in as one action and reload readiness as a wait.
 export const STEPS = { checks: 'Perpetual reviewed checks', signIn: 'Perpetual sign-in', reloadReady: 'Perpetual reload readiness' };
@@ -70,6 +71,27 @@ export function numberAfter(text: string, label: string, adjacent = false): Read
   if (!match || adjacent && /[\p{L}\p{N}]/u.test(text.slice(end, match.index))) return null;
   const [, sign, whole, fraction] = match, other = /^(?:[.,'’]\d|[kKMB](?![\p{L}\p{N}]))/u.test(text.slice(match.index + match[0].length));
   return { value: other ? NaN : Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end, own: Boolean(alone) };
+}
+
+// Scripts written without spaces between words, in which a value may stand within a longer run of letters.
+const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
+// What a text check skips, as Playwright's text matching does: zero-width spaces and soft hyphens anywhere, and more
+// whitespace where the value has a space.
+const SKIP = '[\\u200b\\u00ad]*', SPACE = '\\s[\\s\\u200b\\u00ad]*', WORD = '[\\p{L}\\p{N}]';
+/**
+ * How a text check finds its value from check version 5, in visible text through getByText and in form fields alike:
+ * ignoring case and runs of whitespace, and only where the value stands on its own. Right beside an edge of the value
+ * that is a letter, digit or combining mark, the page shows no letter or digit, so Paid is not found in Unpaid nor INV-7
+ * in INV-70. An edge in a script written without spaces between words needs no boundary, so 已支付 is found in
+ * 订单已支付成功, and neither does an edge that is punctuation.
+ */
+export function textPattern(value: string): RegExp {
+  const chars = [...squash(value.replace(/[\u200b\u00ad]/g, ''))];
+  const bounded = (char = '') => /[\p{L}\p{M}\p{N}]/u.test(char) && !UNSPACED.test(char);
+  // Any other character than a letter or digit is written as its code point: Playwright passes a Unicode pattern on
+  // unescaped, and a quote or >> in it would end the selector.
+  const body = chars.map(char => char === ' ' ? SPACE : /[\p{L}\p{N}]/u.test(char) ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`).join(SKIP);
+  return new RegExp(`${bounded(chars[0]) ? `(?<!${WORD}${SKIP})` : ''}${body}${bounded(chars.at(-1)) ? `(?!${SKIP}${WORD})` : ''}`, 'iu');
 }
 
 const originOf = (url: string) => { try { const { protocol, origin } = new URL(url); return ['http:', 'https:'].includes(protocol) ? origin : null; } catch { return null; } };

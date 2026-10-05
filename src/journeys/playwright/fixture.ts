@@ -5,7 +5,7 @@
 import { test as base, errors, type BrowserContext, type Page, type Request } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
+import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive, textPattern } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads } from './control.ts';
@@ -41,7 +41,7 @@ if (SIGN_IN_URL && !sameOrigin(SIGN_IN_URL, env.PERPETUAL_TARGET_URL!)) throw ne
 const TOKEN = env.PERPETUAL_RUN_TOKEN ?? '';
 if (!RUN_TOKEN.test(TOKEN)) throw new Error('The run token is unreadable.');
 // Code approved under an earlier check version runs with the checks its control run was caught with: before version 2,
-// text checks read no form field.
+// text checks read no form field, and before version 5 they found their text within longer words too.
 const CHECKS = Number(env.PERPETUAL_CHECK_VERSION ?? CHECK_VERSION);
 if (!Number.isInteger(CHECKS) || CHECKS < 1 || CHECKS > CHECK_VERSION) throw new Error('The check version is unreadable.');
 const VIEWPORT = { width: 1280, height: 800 }, FRAME_MS = 333, POLL_MS = 200, SIGN_IN_MS = 20000, FORM_MS = 2000;
@@ -91,13 +91,17 @@ function markEdits(key: string) {
   Object.defineProperty(window, Symbol.for(key), { value: edited });
   for (const type of ['input', 'change']) window.addEventListener(type, event => { const target = event.composedPath()[0]; if (target) edited.add(target); }, true);
 }
+// What holds looks for: the text, from version 5 the source of the pattern that finds it, the edit marks' key, the check
+// version, and whether it reads form fields rather than visible text getByText found.
+type Wanted = [text: string, pattern: string | null, key: string, version: number, fields: boolean];
 // Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
-// matches: ignoring case and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
+// matches: ignoring case and runs of whitespace, and from version 5 by its pattern, only where the text stands on its
+// own. A text field or text area holds its value, a select its selected options' labels. A password
 // field is never read, nor a field edited in the current document, nor any field of a document the browser returned to
 // through history, into which it restores what was typed before. Without the marks, no field is read. Visible text the
 // journey typed into an editing host of the current document is no more what the application kept, so it is not read.
 // From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
-function holds(nodes: Element[], [text, key, version, fields]: [string, string, number, boolean]) {
+function holds(nodes: Element[], [text, pattern, key, version, fields]: Wanted) {
   const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
   // Playwright pierces open shadow roots, so an exclusion must follow their hosts too.
   const up = (node: Element) => { const root = node.getRootNode(); return node.assignedSlot || node.parentElement || (root instanceof ShadowRoot ? root.host : null); };
@@ -115,19 +119,22 @@ function holds(nodes: Element[], [text, key, version, fields]: [string, string, 
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
   const normal = (value: string) => value.replace(/\u200b/g, '').replace(/\s+/g, ' ').trim().toLowerCase(), wanted = normal(text);
+  const own = pattern === null ? null : new RegExp(pattern, 'iu'), found = (value: string) => own ? own.test(value) : normal(value).includes(wanted);
   const TEXT_FIELDS = ['text', 'search', 'email', 'url', 'tel', 'number'];
   const held = (node: Element) => node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label)
     : node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement && TEXT_FIELDS.includes(node.type) ? [node.value] : [];
-  return nodes.some(node => !edited.has(node) && held(node).some(value => normal(value).includes(wanted)));
+  return nodes.some(node => !edited.has(node) && held(node).some(found));
 }
 // Text a person sees on the page: visible text, or what the application put in a visible form field, as a saved value is
-// often shown. text-absent passes exactly when this is false.
+// often shown. text-absent passes exactly when this is false. From version 5, both find the text only where it stands on
+// its own, and each element's text, as each field's value, is judged on its own.
 async function shows(page: Page, text: string) {
-  const nodes = page.getByText(text).filter({ visible: true });
+  const pattern = CHECKS >= 5 ? textPattern(text) : null, lookFor = (fields: boolean): Wanted => [text, pattern?.source ?? null, EDITED, CHECKS, fields];
+  const nodes = page.getByText(pattern ?? text).filter({ visible: true });
   // A textarea's server-rendered query is textContent too; exclude search controls from both observation paths.
-  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, [text, EDITED, CHECKS, false] as [string, string, number, boolean])) return true;
+  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, lookFor(false))) return true;
   if (CHECKS < 2) return false;
-  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, [text, EDITED, CHECKS, true] as [string, string, number, boolean]);
+  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, lookFor(true));
 }
 
 async function observe(page: Page, check: Check, captures: Captures): Promise<Observation> {

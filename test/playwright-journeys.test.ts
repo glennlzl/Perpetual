@@ -77,6 +77,10 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/freeze')return send(page('Freeze','<h1>Freeze</h1><button onclick="setTimeout(()=>{for(;;){}},100)">Freeze</button>'));
       // Rows whose labels end with another row's label.
       if(url.pathname==='/cart')return send(page('Cart','<h1>Cart</h1><table><tr><td>Subtotal</td><td>$10.00</td></tr><tr><td>Shipping</td><td>$2.00</td></tr><tr><td>Total</td><td>$12.00</td></tr></table><p>Unpaid invoices 7</p><p>Paid invoices 3</p><p>Balance 1&#8239;240</p>'));
+      // Statuses whose words hold shorter ones, in elements with no space between them, a Chinese sentence, and a field
+      // and a select the application filled.
+      if(url.pathname==='/statuses')return send(page('Statuses',`<p>Invoice INV-70 Unpaid</p><p>Inactive</p><p>订单已支付成功</p><p>Copy "Q3 report" &gt;&gt; 'Archive' (1/2)</p>
+        <label>Card <input value="Prepaid card"></label><label>Seat <select><option selected>Deactivated</option></select></label>`),{'content-type':'text/html; charset=utf-8'});
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -663,6 +667,26 @@ test('a number is read after its label standing on its own, never after a longer
   const balance={...cart,steps:[{...cart.steps[0],checks:[{type:'read-number' as const,label:'Balance',name:'balance'}]}]};
   const failed=(await runSpec(target,code,{item:balance})).find(event=>event.type==='journey-step'&&event.status!=='running') as RunEvent&{checks?:{passed:boolean;error?:string}[]};
   assert.deepEqual([failed?.status,failed?.checks?.map(check=>[check.passed,check.error])],['failed',[[false,'The number after this label is in an unsupported format.']]]);
+});
+
+test('a text check finds its value only where it stands on its own, in visible text and form fields alike',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  // Values at the start and the end of an element, within a Chinese sentence, between quotes, and in a field and a select.
+  const own=['Invoice INV-70','Unpaid','已支付',`"Q3 report" >> 'Archive' (1/2)`,'prepaid card','Deactivated'];
+  // Values the page and its fields show only within longer words.
+  const within=['Paid','Active','INV-7','Paid card','Activated'];
+  const statuses={...journey,id:'statuses',steps:[{id:'open-statuses',title:'Open the invoice statuses',checks:own.map(value=>({type:'text-visible' as const,value}))}],
+    assertions:within.flatMap(value=>[{type:'text-visible' as const,value},{type:'text-absent' as const,value}])};
+  const code=`import { test } from 'perpetual';\ntest('Statuses', async ({ page, journey }) => {\n  await journey.milestone('open-statuses', async () => {\n    await page.goto('/statuses');\n  });\n});\n`;
+  validateJourneySpec(code,statuses);
+  const events=await runSpec(target,code,{item:statuses}),step=events.find(event=>event.type==='journey-step'&&event.status!=='running');
+  assert.deepEqual([step?.status,step?.evidence],['completed',`Reviewed checks passed: ${own.map(value=>`Text visible “${value}”`).join('; ')}.`]);
+  assert.deepEqual(events.at(-1)?.result?.assertions.map(item=>item.passed),within.flatMap(()=>[false,true]));
+  // Code approved under check version 4 keeps its checks: they find a value within longer words too.
+  const older=await runSpec(target,code,{item:statuses,checkVersion:4});
+  assert.deepEqual(ended(older),['open-statuses:completed']);
+  assert.deepEqual(older.at(-1)?.result?.assertions.map(item=>item.passed),within.flatMap(()=>[true,false]));
 });
 
 test('the Chromium preflight checks the build a journey launches, not the full browser',{timeout:60000},async()=>{

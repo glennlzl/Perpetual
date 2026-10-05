@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {writeJourneyWorkspace} from '../src/journeys/playwright/runtime.ts';
 import {caseHash,signsIn,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
-import {CHECK_VERSION,navigationAllowed,numberAfter,paymentAllowed,stripeLive} from '../src/journeys/playwright/checks.ts';
+import {CHECK_VERSION,navigationAllowed,numberAfter,paymentAllowed,stripeLive,textPattern} from '../src/journeys/playwright/checks.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 import type {BrowserCase} from '../src/business/browser-cases.ts';
@@ -221,6 +221,24 @@ test('the fixture reads numbers after their label and guards navigation and paym
   for(const [url,expected] of [['http://127.0.0.1:3010/billing',true],['https://checkout.stripe.com/c/pay/cs_test_a1',true],['https://billing.stripe.com/p/session/test_YWNj',true],['https://buy.stripe.com/test_aEU5kD',true],
     ['https://checkout.stripe.com/c/pay/cs_live_a1',false],['https://checkout.stripe.com/c/pay/cs_live_a1?next=/test_x#cs_test_',false],['https://checkout.stripe.com/c/pay/cs_live_a1/cs_test_a1',false],
     ['https://billing.stripe.com/p/session/live_YWNj',false],['https://buy.stripe.com/aEU5kD',false],['https://stripe.com/',false],['https://stripe.com.evil.test/',true]] as const)assert.equal(paymentAllowed(url),expected,url);
+});
+
+test('a text check finds its value where it stands on its own, ignoring case and runs of whitespace',()=>{
+  const finds=(text:string,value:string)=>textPattern(value).test(text);
+  // Beside an edge that is a letter or digit: the start or end of the text, whitespace or punctuation. An edge that is
+  // punctuation needs no boundary, and zero-width spaces and soft hyphens are skipped, as Playwright skips them.
+  for(const [text,value] of [['Status: Paid','paid'],['Paid in full','PAID'],['(Paid)','Paid'],['INV-7.','INV-7'],['Total:42','Total:'],['Сумма: Оплачено','оплачено'],['결제 완료','결제'],
+    ['QA\n  k3m9x2qa saved','QA k3m9x2qa'],['QA \u200b k3m9x2qa','QA k3m9x2qa'],['Rechnungs\u00adbetrag offen','Rechnungsbetrag'],['Copy "Q3 report" >> \'Archive\' (1/2)','"Q3 report" >> \'Archive\' (1/2)']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  for(const [text,value] of [['Unpaid','Paid'],['Inactive','Active'],['INV-70','INV-7'],['Paid2','Paid'],['Subtotal:42','Total:'],['Неоплачено','Оплачено'],['결제완료','결제'],
+    ['Un\u00adpaid','paid'],['QAk3m9x2qa','QA k3m9x2qa']] as const)
+    assert.equal(finds(text,value),false,`${value} in ${text}`);
+  // An edge in a script written without spaces between words needs no boundary; a Latin or digit edge beside one does.
+  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  for(const [text,value] of [['Pro版','Pro'],['共42元','42元'],['已支付Paid','Paid']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
+  // Playwright passes a Unicode pattern on unescaped: no quote or >> may end its selector.
+  assert.doesNotMatch(String(textPattern('"a" >> \'b\' `c`')),/["'`]|>>/);
 });
 
 // A manager whose Playwright runtime records its launches and replays scripted events.
