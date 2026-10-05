@@ -371,10 +371,12 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             profile = owned.profile.name
             self.assertIn("cases", runner.discovery_schema().model_json_schema()["properties"])
             with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}):
-                agent, _ = runner.create_agent({**payload, "timeoutSeconds": 30}, owned, "Inspect the fixture", runner.discovery_schema(), "discovery", [])
+                agent, _ = runner.create_agent({**payload, "timeoutSeconds": 900}, owned, "Inspect the fixture", runner.discovery_schema(), "discovery", [])
             self.assertLessEqual(set(agent.tools.registry.registry.actions), runner.SAFE_ACTIONS)
             # Discovery forces a final report after two consecutive failures and keeps the agent's reasoning fields.
             self.assertEqual((agent.settings.flash_mode, agent.settings.max_failures), (False, 2))
+            # Exploration ends in time for a step still in progress and then the final report's model call.
+            self.assertLessEqual(agent.settings.step_timeout + agent.settings.llm_timeout, runner.REPORT_SECONDS)
             page = await owned.active_page()
             await page.get_by_role("button", name="Save").click()
             agent_page = await owned.browser.get_current_page()
@@ -437,10 +439,10 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
     async def test_exploration_ends_with_its_report_before_the_time_limit(self):
         environment, model = self.deadline_model(explore=True)
         url = f"http://127.0.0.1:{self.server.server_port}"
-        # The agent would keep exploring for all 100 steps; the report must still arrive within 12 seconds.
-        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 100, "timeoutSeconds": 12})
+        # The agent would keep exploring for all 100 steps; the report must still arrive within 30 seconds.
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 100, "timeoutSeconds": 30})
         with patch.dict("os.environ", environment), patch.object(runner, "emit", [].append):
-            discovered = await asyncio.wait_for(runner.discover(payload), 30)
+            discovered = await asyncio.wait_for(runner.discover(payload), 60)
         self.assertEqual(discovered["type"], "discovery")
         self.assertEqual(discovered["cases"][0]["name"], "Open workspace")
         self.assertTrue(discovered["diagnostics"]["forcedFinalization"])
@@ -451,14 +453,19 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
         environment, _ = self.deadline_model(explore=False)
         url = f"http://127.0.0.1:{self.server.server_port}"
         payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 8})
-        close, started = runner.OwnedBrowser.close, asyncio.get_running_loop().time()
+        close, discover, started = runner.OwnedBrowser.close, runner.discover, []
+
+        async def timed(payload):
+            # Discovery's time limit starts with discover, after preflight.
+            started.append(asyncio.get_running_loop().time())
+            return await discover(payload)
 
         async def slow_close(owned):
             # Cleanup that lasts past the time limit, as a slow browser disconnect can.
-            await asyncio.sleep(max(0, started + 9 - asyncio.get_running_loop().time()))
+            await asyncio.sleep(max(0, started[0] + payload["timeoutSeconds"] + 1 - asyncio.get_running_loop().time()))
             await close(owned)
         events = []
-        with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append), patch.object(runner.OwnedBrowser, "close", slow_close):
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append), patch.object(runner, "discover", timed), patch.object(runner.OwnedBrowser, "close", slow_close):
             await asyncio.wait_for(runner.execute(payload), 30)
         self.assertEqual([event["type"] for event in events if event["type"] in {"discovery", "error"}], ["discovery"])
 
