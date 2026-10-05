@@ -321,7 +321,7 @@ test('the first unmet prerequisite is primary and each disabled action lists eve
 test('blocked actions stay focusable Buttons with their own Tooltip; readiness hides once met', async () => {
   const { readFile } = await import('node:fs/promises');
   const panel = await readFile(new URL('../client/src/BrowserTestingPanel.tsx', import.meta.url), 'utf8');
-  for (const action of ['generate', 'run']) assert.match(panel, new RegExp(`<BlockedButton reason=\\{toolbar\\.blockers\\.${action}${action === 'run' ? ' \\|\\| runBlocked' : ''}\\} size="sm" variant=\\{emphasis\\('${action}'\\)\\}`));
+  for (const action of ['generate', 'run']) assert.match(panel, new RegExp(`<BlockedButton reason=\\{toolbar\\.blockers\\.${action}\\} size="sm" variant=\\{emphasis\\('${action}'\\)\\}`));
   assert.match(panel, /<BlockedButton reason=\{toolbar\.blockers\.add\} size="sm" variant="outline"/);
   // A narrow inspector keeps the three actions and their labels on one filled row; a label that cannot fit takes a full row.
   assert.match(panel, /<div className="test-toolbar @container flex flex-wrap items-center gap-2">\s*<div className="flex flex-wrap items-center gap-2 @max-md:w-full">/);

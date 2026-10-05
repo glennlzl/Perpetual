@@ -45,6 +45,21 @@ test('scoped reviewed cases run without Docker and require matching immutable as
   assert.equal((await f.manager.view({...f.context,stageId:'gamma'})).cases.length,0);
 });
 
+test('a person runs an unselected reviewed journey by naming it, without selecting it, and nothing else may',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  await f.manager.saveCases(f.context,[{...scenario,selected:false}]);
+  // The gate runs the saved selection, which is empty, and a journey it names is refused.
+  await assert.rejects(f.manager.run(f.context,{}),/Choose 1–30/);
+  await assert.rejects(f.manager.run(f.context,{caseIds:[scenario.id]}),/Review and select each case/);
+  const {run}=await f.manager.run(f.context,{caseIds:[scenario.id]},manual);
+  assert.equal((await completed(f,run.id)).run.status,'passed');
+  assert.deepEqual(run.caseIds,[scenario.id]);
+  assert.equal((await f.manager.view(f.context)).cases[0].selected,false,'Running it saves no selection.');
+  // A journey that needs review stays refused when a person names it.
+  await f.manager.saveCases(f.context,[{...scenario,selected:false,needsReview:true}]);
+  await assert.rejects(f.manager.run(f.context,{caseIds:[scenario.id]},manual),/Review each case before running/);
+});
+
 test('results survive public run history, changed case drafts and controller restart',async t=>{
   const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:false}]}}]);
   const approved={...scenario,expectedOutcomes:['Workspace is visible','Delivery reaches the test inbox']};

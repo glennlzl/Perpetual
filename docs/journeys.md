@@ -66,7 +66,7 @@ A fresh browser context resets cookies and storage, not database rows or externa
 5. Select reviewed journeys and run them. The run dialog's **Test account** offers the twin's test accounts (the first by default), a manually entered account, or none; without twin accounts, **Use test account** takes a manually entered one. Entered values stay in the dialog for one request. Each journey runs its approved code or, in a person's run, its current draft when no approved code is current; the gate runs approved code only. Running needs Playwright's Chromium and code for every chosen journey, not a model. Closing the live viewer does not cancel the run; **Cancel run** does.
 6. Read the result. The reviewed checks run inside each journey; a journey with no check or final assertion stays **Needs review**.
 
-Running one unselected journey temporarily selects it. Its panel restores that choice after the stage is idle; a failed save keeps the restoration pending and offers **Restore selection**, without running the journey again. The tab remembers only the repository, stage and case IDs across a reload, and resumes restoration when the panel opens. This is tab-owned recovery, not controller-owned state: restore or deselect the journey before closing the tab. Later saved selection changes take precedence.
+**Run** in one reviewed journey's actions menu runs that journey whether or not it is selected. The request names it, and the controller runs it without saving a selection, so the [journey gate](gate.md) still runs only the saved selection.
 
 **External sites allowed in runs** reviews exact dependency origins, such as a payment sandbox or a local mail inbox. Public origins require HTTPS; local application hosts may use HTTP under the same target restrictions. The controller's port, internal and metadata addresses, credentials, paths and queries remain refused. Adding an origin permits navigation during code generation and runs; it never authorizes writes in a control run or expands read-only discovery's origins.
 
@@ -280,7 +280,7 @@ The main routes are below. Every request is scoped to `repoPath` and a Sandbox `
 | `POST /api/browser/draft` | `description`: one draft from a description. |
 | `POST /api/browser/transcribe` | A dictated recording. |
 | `POST /api/browser/discover` | Starts discovery; optional `replaceCaseIds`, `credentials` or `accountId`. |
-| `POST /api/browser/run` | Optional `caseIds`, `concurrency`, `credentials` or `accountId`. |
+| `POST /api/browser/run` | Optional `caseIds` (reviewed journeys, selected or not; without them, the selected ones), `concurrency`, `credentials` or `accountId`. |
 | `POST /api/browser/skip` | `id`, `caseId` |
 | `POST /api/browser/stop` | `id` |
 | `GET /api/browser/runs/:id` | Full run progress. |

@@ -729,8 +729,10 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(mode==='run'){
         const available=state.cases[scope]||[],ids=input.caseIds??available.filter(c=>c.selected&&!c.needsReview).map(c=>c.id);
         if(!Array.isArray(ids)||!ids.length||ids.length>30||new Set(ids).size!==ids.length)throw new Error('Choose 1–30 distinct reviewed cases.');
-        // A verification attempt runs its one reviewed case, selected or not.
-        cases=ids.map(id=>{const item=available.find(c=>c.id===id);if(!item||item.needsReview||!item.selected&&!options.verification)throw new Error('Review and select each case before running.');return item;});
+        // A person's run and a verification attempt run the reviewed cases they name, selected or not, and change no
+        // selection; anything else, such as the gate, runs only selected cases.
+        const named=Boolean(options.manual||options.verification);
+        cases=ids.map(id=>{const item=available.find(c=>c.id===id);if(!item||item.needsReview||!item.selected&&!named)throw new Error(named?'Review each case before running.':'Review and select each case before running.');return item;});
         cases=validateBrowserCases(cases,{draft:false});
       }
       // What each journey runs, kept in memory for this run; a journey without code is settled without a browser.
