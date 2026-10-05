@@ -585,6 +585,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       catch (error) { recoveryError = text(error); }
       if (closed) return;
       const current = managed();
+      // Work under way for another branch of this pipeline stops, its pull request kept: that branch is no longer
+      // watched, shown or verified. A rerun follows its own repository, as after any change of source.
+      if (current) for (const repair of state.repairs) {
+        if (repair.key !== current.key || repair.branch === current.branch || !ACTIVE.includes(repair.status) || repair.status === 'rerunning') continue;
+        controllers.get(repair.id)?.controller.abort();
+        await settle(repair, 'needs-person', `Interrupted when the pipeline switched to ${current.branch}.`);
+      }
       if (!current && !state.repairs.some(repair => repair.status === 'rerunning')) return;
       const connection = await github.connection();
       if (closed) return;

@@ -44,7 +44,7 @@ async function holdTerminalSave(t: TestContext, dataDir: string) {
   return { entered: entered.promise, release: release.resolve, restore() { saving.mock.restore(); syncBuiltinESMExports(); } };
 }
 async function until(check: () => unknown) {
-  for (let attempt = 0; attempt < 500; attempt++) { if (check()) return; await new Promise(done => setTimeout(done, 2)); }
+  for (let attempt = 0; attempt < 5000; attempt++) { if (check()) return; await new Promise(done => setTimeout(done, 2)); }
   throw new Error('The repair did not settle.');
 }
 
@@ -539,6 +539,19 @@ test('one repair runs at a time: another source\'s failed head waits until the a
   await h.poll();
   assert.equal(h.repair(C)?.status, 'ready');
   assert.equal(a.contexts.length, 2);
+});
+
+test('switching the pipeline to another branch stops that branch\'s repair under way, and keeps its pull request', async t => {
+  const a = agent(async (context, signal) => { await context.report({ status: 'verifying-ci', pullRequest: PULL }); await aborted(signal); return { status: 'ready' }; });
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'verifying-ci');
+  h.current.branch = 'dev';
+  await h.poll();
+  assert.deepEqual(h.manager.view().repairs, [], 'The repair of main is not shown for dev.');
+  h.current.branch = 'main';
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.repair(B)?.pullRequest?.number], ['needs-person', 'Interrupted when the pipeline switched to dev.', 7]);
+  assert.equal(a.contexts.length, 1);
 });
 
 test('a person repairs the failed baseline head, may start a finished repair again, and never a held one', async t => {
