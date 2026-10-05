@@ -2,7 +2,7 @@
 // journey's actions; the reviewed checks come from the approved case snapshot at run time, so a spec can
 // neither write nor weaken them. The run's token, journey.run, only fills in a reviewed check's {run}. Events reach the
 // controller through ./reporter.ts.
-import { test as base, errors, type Page, type Request } from '@playwright/test';
+import { test as base, errors, type BrowserContext, type Page, type Request } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
@@ -148,9 +148,35 @@ function unjudged(page: Page | undefined, guard: Guard) {
   return page.url() !== 'about:blank' && navigationAllowed(page.url(), allowed) ? null : 'The current page is outside approved origins.';
 }
 
-// Checks that also hold on a page whose data has not arrived yet, an absent text or a placeholder number, pass only on
-// an observation made once the page's network was idle.
-const SETTLED = new Set<Check['type']>(['text-absent', 'read-number', 'compare-number']);
+// Checks that also hold on a page whose data has not arrived yet, an absent text or a placeholder number, pass only when
+// observed again after the page had no request in flight for QUIET_MS: a new document, a route change within one or a
+// refetch can each still be bringing the data.
+const SETTLED = new Set<Check['type']>(['text-absent', 'read-number', 'compare-number']), QUIET_MS = 500;
+// Each page's requests in flight, and when one last started or ended.
+const traffic = new WeakMap<Page, { open: Set<Request>; at: number }>();
+function trackRequests(context: BrowserContext) {
+  const owner = (request: Request) => { try { return request.frame().page(); } catch { return undefined; } };
+  const update = (request: Request, open: boolean) => {
+    const page = owner(request);
+    if (!page) return;
+    let item = traffic.get(page);
+    if (!item) traffic.set(page, item = { open: new Set(), at: 0 });
+    if (open) item.open.add(request); else item.open.delete(request);
+    item.at = Date.now();
+  };
+  context.on('request', request => update(request, true));
+  context.on('requestfinished', request => update(request, false));
+  context.on('requestfailed', request => update(request, false));
+}
+// Whether the page has no request in flight for QUIET_MS from now, before the deadline: a request it started just before
+// is reported within that time.
+async function quiet(page: Page, deadline: number) {
+  for (const since = Date.now(); !page.isClosed() && Date.now() < deadline; await wait(POLL_MS / 4)) {
+    const item = traffic.get(page);
+    if (!item?.open.size && Date.now() - Math.max(since, item?.at ?? 0) >= QUIET_MS) return true;
+  }
+  return false;
+}
 // Why a page that no observation can read, as a crashed page or one whose main thread is blocked, stops the journey.
 const UNCHECKED = 'The current page could not be checked.', OBSERVE_GRACE_MS = 5000;
 // A browser call on such a page can wait without end, so an observation gets until the deadline and a grace period.
@@ -170,10 +196,9 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
       // at the deadline judged nothing, so the journey stops for review rather than failing the check.
       const result = await bounded(observe(target!, judged, captures), deadline).catch(() => null);
       if (!result && Date.now() >= deadline) return { stop: UNCHECKED };
-      // A document whose network was already idle resolves at once; one still loading its data is observed again once
-      // it is idle, or judged as it is at the deadline.
+      // Such a check is observed again once the page went quiet, or judged as it is at the deadline.
       const settle = result?.passed === true && !late && !settled && SETTLED.has(check.type);
-      if (settle && (settled = await target!.waitForLoadState('networkidle', { timeout: Math.max(1, deadline - Date.now()) }).then(() => true, () => false))) continue;
+      if (settle && (settled = await quiet(target!, deadline))) continue;
       if (result && !settle && (result.passed || result.final || late)) {
         // A passed read-number check always observed its number.
         if (check.type === 'read-number' && result.passed) captures[check.name] = result.observed!;
@@ -288,6 +313,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     const guard: Guard = { refused: null }, stop = (reason: string) => { broken = true; return halt(reason); };
     // A refused top-level document stops the journey for review; a refused frame only stays empty.
     const refuse = (url: string, top: boolean) => { const reason = refusal(url, top); if (reason && top) guard.refused ||= reason; return reason; };
+    trackRequests(context);
     // Playwright's routes see only the first request of a redirect chain, so each page also pauses every document hop
     // over CDP. Routes still cover a popup's first request, which precedes its page's CDP session, keep live Stripe
     // resources out of every frame, and in a control run answer every write, a form's submission included.
