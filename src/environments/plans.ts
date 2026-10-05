@@ -280,7 +280,7 @@ export async function snapshotSource(repoPath: string, destination: string) {
     for (const entry of entries) {
       const name = join(directory, entry.name), path = name.split(sep).join('/');
       if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink() || ignored.has(entry.isDirectory() ? `${path}/` : path)
-        || (BUILD_OUTPUT.has(entry.name) && !directory.split(sep).includes('src'))
+        || (BUILD_OUTPUT.has(entry.name) && entry.isDirectory() && !directory.split(sep).includes('src'))
         || (PRIVATE_NAME.test(entry.name) && (!entry.isFile() || !SOURCE_MODULE.test(entry.name)))) continue;
       const original = join(root, name), output = join(target, name);
       if (entry.isDirectory()) { await mkdir(output, { mode: 0o700 }); await walk(name); continue; }

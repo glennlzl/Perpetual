@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { APP_PORT, detectEnvironmentConfig, snapshotSource } from '../src/environments/plans.ts';
+import { APP_PORT, detectEnvironmentConfig, snapshotKeeps, snapshotSource } from '../src/environments/plans.ts';
 import { validateTwinConfig } from '../src/twin/index.ts';
 import { scanRepository } from '../src/scanner.ts';
 
@@ -342,6 +342,17 @@ test('source snapshot preserves credential-named modules and build routes inside
   for (const name of modules) assert.equal(await readFile(path.join(destination, 'src', name), 'utf8'), 'export const marker = "application";', name);
   for (const name of ['frontend/src/routes/dist/route.ts', 'frontend/src/routes/coverage/route.ts']) assert.match(await readFile(path.join(destination, name), 'utf8'), /source route/);
   for (const name of [...protectedFiles, 'build/generated.js', 'frontend/dist/generated.js', 'coverage/report.json']) await assert.rejects(readFile(path.join(destination, name)), { code: 'ENOENT' }, name);
+});
+
+test('the snapshot leaves out build output folders but keeps files named build, dist or coverage, as snapshotKeeps says', async t => {
+  const files = { 'package.json': '{}', 'script/build': '#!/bin/sh\nnpm run compile\n', 'tools/dist': 'release notes\n', 'coverage': 'thresholds\n',
+    'build/generated.js': 'output', 'packages/ui/dist/index.js': 'output' };
+  const { root, repoPath } = await fixture(t, files);
+  const destination = path.join(root, 'snapshot');
+  await snapshotSource(repoPath, destination);
+  const kept = await filesIn(destination);
+  assert.deepEqual(kept, ['coverage', 'package.json', 'script/build', 'tools/dist']);
+  assert.deepEqual(Object.keys(files).filter(snapshotKeeps).sort(), kept, 'The gate’s checkout check counts the files the snapshot copies.');
 });
 
 test('snapshot refuses ordinary in-repository destinations and oversized files', async t => {
