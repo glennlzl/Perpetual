@@ -9,8 +9,8 @@ export type Operator = CompareNumberCheck['op'];
 /** How a check fared on the page: observed is the number it read, resolved the text it looked for when that held {run}. */
 export type Evaluation = { passed: boolean; observed?: number; resolved?: string; error?: string };
 export type EvaluatedCheck<C extends Check = Check> = C & Evaluation;
-/** The first number after a label, and how far after it that number starts. */
-export type Reading = { value: number; gap: number };
+/** The first number after a label, how far after it that number starts, and whether the label stood on its own there. */
+export type Reading = { value: number; gap: number; own: boolean };
 /** Numbers read-number checks captured so far, by name. */
 export type Captures = Record<string, number>;
 /** The approved case snapshot a journey runs against, as far as it reads it: the controller writes it from the reviewed case. */
@@ -49,19 +49,23 @@ const squash = (value: string) => value.split(/\s+/).filter(Boolean).join(' ');
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
- * The first number after a visible label, { value, gap }, or null: 1,240, 1240.5, -3 or $12.00.
+ * The first number after a visible label, { value, gap, own }, or null: 1,240, 1240.5, -3 or $12.00.
  * adjacent: only separators may sit between them, so an ancestor's sibling text is never read.
+ * The label is read where it stands on its own, not within a longer word (Total, not the end of Subtotal), else where it
+ * first occurs, as in scripts that write words without spaces; own says which.
  */
 export function numberAfter(text: string, label: string, adjacent = false): Reading | null {
   text = squash(text); label = squash(label);
-  const found = label ? new RegExp(escape(label), 'iu').exec(text) : null;
-  if (!found) return null;
-  const end = found.index + found[0].length;
+  const found = label ? [...text.matchAll(new RegExp(escape(label), 'giu'))] : [];
+  const alone = found.find(item => !/[\p{L}\p{N}]$/u.test(text.slice(0, item.index)) && !/^[\p{L}\p{N}]/u.test(text.slice(item.index + item[0].length)));
+  const at = alone ?? found[0];
+  if (!at) return null;
+  const end = at.index + at[0].length;
   NUMBER.lastIndex = end;
   const match = NUMBER.exec(text);
   if (!match || adjacent && /[\p{L}\p{N}]/u.test(text.slice(end, match.index))) return null;
   const [, sign, whole, fraction] = match;
-  return { value: Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end };
+  return { value: Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end, own: Boolean(alone) };
 }
 
 const originOf = (url: string) => { try { const { protocol, origin } = new URL(url); return ['http:', 'https:'].includes(protocol) ? origin : null; } catch { return null; } };

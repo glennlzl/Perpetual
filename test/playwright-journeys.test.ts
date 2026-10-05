@@ -73,6 +73,8 @@ function application({persist=true}:{persist?:boolean}={}){
       // A page whose own scripts break what every reviewed check reads, and one whose main thread stops once a button is clicked.
       if(url.pathname==='/unreadable')return send(page('Unreadable','<h1>Unreadable</h1><label>Kept <input value=Kept></label><script>Element.prototype.matches=()=>{throw new Error(\'Unreadable\');};</script>'));
       if(url.pathname==='/freeze')return send(page('Freeze','<h1>Freeze</h1><button onclick="setTimeout(()=>{for(;;){}},100)">Freeze</button>'));
+      // Rows whose labels end with another row's label.
+      if(url.pathname==='/cart')return send(page('Cart','<h1>Cart</h1><table><tr><td>Subtotal</td><td>$10.00</td></tr><tr><td>Shipping</td><td>$2.00</td></tr><tr><td>Total</td><td>$12.00</td></tr></table><p>Unpaid invoices 7</p><p>Paid invoices 3</p>'));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -641,6 +643,16 @@ test('a page no observation can read stops the journey for review within its che
     assert.deepEqual(events.at(-1)?.result,{caseId:item.id,assertions:[],stopCause:'action',error:'Action failed at “Open the page”: The current page could not be checked.'},path);
     assert.ok(Date.now()-started<60000,`${path} settled ${Date.now()-started} ms after it started, well within its time limit.`);
   }
+});
+
+test('a number is read after its label standing on its own, never after a longer word that ends with it',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const cart={...journey,id:'cart',steps:[{id:'open-cart',title:'Open the cart',checks:[{type:'read-number' as const,label:'Total',name:'total'},{type:'read-number' as const,label:'Paid invoices',name:'paid'}]}],assertions:[]};
+  const code=`import { test } from 'perpetual';\ntest('Cart', async ({ page, journey }) => {\n  await journey.milestone('open-cart', async () => {\n    await page.goto('/cart');\n  });\n});\n`;
+  validateJourneySpec(code,cart);
+  const step=(await runSpec(target,code,{item:cart})).find(event=>event.type==='journey-step'&&event.status!=='running');
+  assert.deepEqual([step?.status,step?.evidence],['completed','Reviewed checks passed: Total 12; Paid invoices 3.']);
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{

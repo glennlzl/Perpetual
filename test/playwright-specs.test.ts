@@ -187,18 +187,23 @@ test('an approval binds the spec hash to the reviewed contract, not to its name 
 });
 
 test('the fixture reads numbers after their label and guards navigation and payment pages',()=>{
-  assert.deepEqual(numberAfter('Credits 1,240 remaining','credits'),{value:1240,gap:1});
-  assert.deepEqual(numberAfter('Balance: $12.50','Balance'),{value:12.5,gap:2});
-  assert.deepEqual(numberAfter('Credits  −3','Credits'),{value:-3,gap:1});
-  assert.deepEqual(numberAfter('Credits - 120','Credits'),{value:120,gap:3},'A detached sign is a separator.');
+  assert.deepEqual(numberAfter('Credits 1,240 remaining','credits'),{value:1240,gap:1,own:true});
+  assert.deepEqual(numberAfter('Balance: $12.50','Balance'),{value:12.5,gap:2,own:true});
+  assert.deepEqual(numberAfter('Credits  −3','Credits'),{value:-3,gap:1,own:true});
+  assert.deepEqual(numberAfter('Credits - 120','Credits'),{value:120,gap:3,own:true},'A detached sign is a separator.');
   assert.equal(numberAfter('No credits here','Seats'),null);
   for(const [text,value] of [['Credits: 1240.5 left',1240.5],['CREDITS\n\n42 remaining of 100',42],['Credits used 12, 13 left',12],['Plan 2 Credits 7',7]] as const)assert.equal(numberAfter(text,'Credits')?.value,value,text);
   for(const text of ['Credits','40 Credits',''])assert.equal(numberAfter(text,'Credits'),null,text);
   // An ancestor's text includes following siblings, so only separators may precede its number.
   for(const [text,value] of [['Credits: $12.00',12],['Credits — (−3)',-3],['1,240 credits\nSeats 3',null],['Credits used 12',null],['Billing Credits Plan 2',null]] as const)assert.equal(numberAfter(text,'Credits',true)?.value??null,value,text);
-  assert.deepEqual(numberAfter('Seats 7 tokens','Seats',true),{value:7,gap:1});
+  assert.deepEqual(numberAfter('Seats 7 tokens','Seats',true),{value:7,gap:1,own:true});
   assert.equal(numberAfter('Seats left today 3','Seats',true),null);
-  assert.deepEqual(numberAfter('Seats left today 3','Seats'),{value:3,gap:12});
+  assert.deepEqual(numberAfter('Seats left today 3','Seats'),{value:3,gap:12,own:true});
+  // A label within a longer word is read only where the text never shows it on its own, as a script without spaces does.
+  assert.deepEqual(numberAfter('Subtotal $10.00 Shipping $2.00 Total $12.00','Total'),{value:12,gap:1,own:true});
+  assert.deepEqual(numberAfter('Unpaid invoices 7 Paid invoices 3','paid invoices',true),{value:3,gap:1,own:true});
+  assert.deepEqual(numberAfter('Subtotal $10.00','Total',true),{value:10,gap:1,own:false});
+  assert.deepEqual(numberAfter('税込合計 1200','合計'),{value:1200,gap:1,own:false});
   const allowed=new Set(['http://127.0.0.1:3000']);
   assert.equal(navigationAllowed('http://127.0.0.1:3000/settings',allowed),true);assert.equal(navigationAllowed('about:blank',allowed),true);
   assert.equal(navigationAllowed('https://example.com/',allowed),false);assert.equal(navigationAllowed('javascript:alert(1)',allowed),false);

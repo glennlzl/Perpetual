@@ -68,15 +68,18 @@ function halt(error: string) { emit({ type: 'journey-stop', error }); return new
 const refusal = (url: string, top: boolean) => !navigationAllowed(url, allowed) ? NAVIGATION : (top ? !paymentAllowed(url) : stripeLive(url)) ? PAYMENT : null;
 const topLevel = (request: Request) => { try { return !request.frame().parentFrame(); } catch { return false; } };
 
-// The number shown right after a visible label: the nearest ancestor, then the nearest number, wins.
+// The number shown right after a visible label: a label standing on its own wins over one within a longer word, as
+// Total over Subtotal, then the nearest ancestor, then the nearest number.
 async function readNumber(page: Page, label: string) {
-  let nodes = page.getByText(label.trim()).filter({ visible: true });
+  let nodes = page.getByText(label.trim()).filter({ visible: true }), within: number | null = null;
   for (let depth = 0; depth < 4; depth++) {
     const found = (await nodes.allInnerTexts()).slice(0, 20).map((text, order) => ({ order, hit: numberAfter(text, label, depth > 0) })).filter((item): item is { order: number; hit: Reading } => item.hit !== null);
-    if (found.length) return found.sort((a, b) => a.hit.gap - b.hit.gap || a.order - b.order)[0].hit.value;
+    const best = found.sort((a, b) => Number(b.hit.own) - Number(a.hit.own) || a.hit.gap - b.hit.gap || a.order - b.order)[0];
+    if (best?.hit.own) return best.hit.value;
+    within ??= best?.hit.value ?? null;
     nodes = nodes.locator('xpath=..');
   }
-  return null;
+  return within;
 }
 
 // A field's value is what the application kept only while nothing else set it. Before the application's scripts run,
