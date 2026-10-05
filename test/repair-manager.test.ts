@@ -469,6 +469,23 @@ test('a ready repair is superseded, and its pull request closed, only once a new
   assert.deepEqual(closed, [h.repair(B)?.id]);
 });
 
+// A docs-only commit can pass while the workflow that failed never ran at it, such as one with a paths filter.
+test('a newer passing head where the failed workflow did not run keeps the fix and its pull request open', async t => {
+  const closed: string[] = [];
+  const h = await harness(t, { steps: agent(async context => { await context.report({ pullRequest: PULL }); return { status: 'ready' }; }, { async close(repair) { closed.push(repair.id); } }).steps });
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  h.github.head = C;
+  h.github.runs[C] = [run('3', C, 'success', { path: LINT })];
+  await h.poll();
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, closed], ['ready', []], 'Nothing showed the branch fixed.');
+  h.github.head = D;
+  h.github.runs[D] = [run('4', D, 'success'), run('5', D, 'success', { path: LINT })];
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, closed], ['superseded', [h.repair(B)?.id]], 'A head where it passed retires the fix.');
+});
+
 test('a ready repair whose pull request a person merged is recorded as merged once a newer head passes, never superseded', async t => {
   const h = await harness(t, { steps: agent(async context => { await context.report({ pullRequest: PULL }); return { status: 'ready' }; }, { async close() { return { state: 'merged', mergeCommit: E }; } }).steps });
   await h.failHead([run('2', B, 'failure')]);

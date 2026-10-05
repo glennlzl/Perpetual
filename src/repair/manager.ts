@@ -516,7 +516,9 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     if (!completed) return;
     if (completed.passed) {
       passing.set(current.key, sha);
-      const retired = stale();
+      // A repair is retired only once each workflow whose failure it fixes passed at this head; one that did not run
+      // here, such as one its paths filter skipped, has not shown the branch fixed, so the fix stays open.
+      const retired = stale().filter(repair => repair.runs.every(item => !item.path || latest.some(run => run.path === item.path && passedRun(run))));
       for (const repair of retired) retire(repair, sha);
       if (retired.length) await persist();
       closeQueued();
