@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReleaseGitHub } from '../src/releases/github.ts';
@@ -241,4 +241,30 @@ test('current deployment can be older than the recent history display limit',asy
   assert.equal(restored.recent.length,20);assert.equal(restored.recent.some(record=>record.id===first.id),false);
   assert.equal(restored.current?.id,first.id);assert.equal(restored.canDeploy,false);
   await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);
+});
+
+test('beyond a thousand records the oldest finished ones go, keeping unresolved ones and the latest of each target',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-release-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const time='2026-01-01T00:00:00Z';
+  const stored=(index:number,{branch='main',environment='production',status='failed'}:{branch?:string;environment?:string;status?:string}={})=>{
+    const id=`release-${index}`,sha=index.toString(16).padStart(40,'0'),destination={...target,environment};
+    return {id,source:{...evidence().source!,branch,sha},target:destination,gates:[{...evidence().gates[0],sha}],workflow,record:{id,sha,...destination,status,createdAt:time,updatedAt:time}};
+  };
+  // The two oldest records: the only deployment to staging, and a deployment of another branch still unresolved.
+  const releases=[stored(1,{environment:'staging',status:'deployed'}),stored(2,{branch:'release',status:'queued'}),...Array.from({length:998},(_,index)=>stored(index+3))];
+  await mkdir(join(dataDir,'releases'),{mode:0o700});await writeFile(join(dataDir,'releases','state.json'),JSON.stringify({version:1,targets:{},releases}));
+  let current=evidence();
+  const manager=await createReleaseManager({dataDir,getEvidence:()=>structuredClone(current),github:{verifyTarget:async()=>workflow,verifyCommit:async()=>{},create:async()=>({deploymentId:'12',status:'queued'}),read:async()=>({deploymentId:'12',status:'deployed'})},pollInterval:0});
+  t.after(()=>manager.close());
+  const ids=async()=>(JSON.parse(await readFile(join(dataDir,'releases','state.json'),'utf8')).releases as {id:string}[]).map(entry=>entry.id);
+  await manager.configure(target);
+  const first=(await manager.deploy({sha:SHA,target})).current!;
+  let saved=await ids();
+  assert.deepEqual([saved.length,saved.slice(0,3),saved.at(-1)],[1000,['release-1','release-2','release-4'],first.id],'The oldest finished record of a target with newer records goes first.');
+  assert.equal((await manager.refresh()).current?.status,'deployed');
+  // The newest record of the main branch's production target is now the one just made, so the next oldest goes.
+  current=evidence();current.source!.sha=OTHER;current.gates[0].sha=OTHER;
+  const second=(await manager.deploy({sha:OTHER,target})).current!;
+  saved=await ids();
+  assert.deepEqual([saved.length,saved.slice(0,3),saved.slice(-2)],[1000,['release-1','release-2','release-5'],[first.id,second.id]]);
 });

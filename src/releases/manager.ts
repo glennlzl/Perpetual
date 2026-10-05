@@ -29,6 +29,26 @@ const active = (record: ReleaseRecord) => ['requesting', 'unknown', 'queued', 'd
 const sourceValid = (value: unknown): value is ReleaseSource => object(value) && bounded(value.key, 4096) && isRepository(value.repository) && bounded(value.branch) && typeof value.sha === 'string' && SHA.test(value.sha) && bounded(value.login);
 const gateValid = (value: unknown): value is ReleaseGate => object(value) && bounded(value.id) && bounded(value.stageId) && typeof value.sha === 'string' && SHA.test(value.sha) && bounded(value.context, 140) && ['passed','released'].includes(String(value.status)) && bounded(value.updatedAt) && (value.status !== 'released' || bounded(value.releasedBy) && bounded(value.releasedAt));
 const workflowValid = (value: unknown): value is ReleaseWorkflow => object(value) && bounded(value.defaultBranch) && ['defaultSha','workflowSha','defaultWorkflowSha'].every(key => typeof value[key] === 'string' && SHA.test(value[key]));
+// The release history keeps at most this many records.
+const HISTORY = 1000;
+/**
+ * Leaves room for one more record: the oldest finished records go first, while every unresolved record and the latest
+ * record of each target, by repository, branch and destination, stay.
+ */
+function prune(releases: StoredRelease[]): StoredRelease[] {
+  let excess = releases.length - (HISTORY - 1);
+  if (excess <= 0) return releases;
+  const targets = new Set<string>(), latest = new Set<StoredRelease>();
+  for (const entry of releases.toReversed()) {
+    const key = JSON.stringify([scope(entry.source), entry.target.environment, entry.target.productionEnvironment, entry.target.workflowPath]);
+    if (!targets.has(key)) { targets.add(key); latest.add(entry); }
+  }
+  return releases.filter(entry => {
+    if (excess <= 0 || active(entry.record) || latest.has(entry)) return true;
+    excess--;
+    return false;
+  });
+}
 
 export function releaseTarget(value: unknown): ReleaseTarget {
   if (!object(value) || !bounded(value.environment) || value.environment !== value.environment.trim() || typeof value.productionEnvironment !== 'boolean'
@@ -49,7 +69,7 @@ function publicRecord(record:ReleaseRecord):ReleaseRecord{
 function load(value: unknown): State {
   if (value === undefined) return {version:1,targets:{},releases:[]};
   const invalid = () => new Error('Release state is invalid. Preserve its directory for recovery.');
-  if (!object(value) || value.version !== 1 || !object(value.targets) || !Array.isArray(value.releases) || value.releases.length > 1000) throw invalid();
+  if (!object(value) || value.version !== 1 || !object(value.targets) || !Array.isArray(value.releases) || value.releases.length > HISTORY) throw invalid();
   const targets: Record<string, ReleaseTarget> = Object.create(null) as Record<string, ReleaseTarget>;
   for (const [key,target] of Object.entries(value.targets)) { if (!bounded(key,8192)) throw invalid(); targets[key]=releaseTarget(target); }
   for (const entry of value.releases) {
@@ -134,7 +154,7 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         await github.verifyCommit(source);await unchanged(before,target);
         const id=randomUUID(),time=new Date().toISOString(),entry:StoredRelease={id,source:structuredClone(source),target:structuredClone(target),gates:structuredClone(before.gates),workflow,
           record:{id,sha:source.sha,...target,status:'requesting',createdAt:time,updatedAt:time}};
-        await save(next=>{if(next.releases.length>=1000)throw new Error('Release history is full. Preserve its records before continuing.');next.releases.push(entry);});
+        await save(next=>{next.releases=prune(next.releases);if(next.releases.length>=HISTORY)throw new Error('Release history is full. Preserve its records before continuing.');next.releases.push(entry);});
         let remote:ReleaseRemote;
         try{remote=await github.create(entry);}catch(error){const refused=object(error)&&(error as {definitive?:unknown}).definitive===true;
           await update(id,{status:refused?'failed':'unknown',error:refused?'GitHub refused the deployment request. Check the workflow, permissions and required commit statuses.':'The deployment request outcome is unknown. Check its status before deploying again.'});return;
