@@ -3,7 +3,7 @@
 // computes the repository's facts once per generation from the source snapshot and runs nothing: the files git tracks,
 // or a walk when git cannot list them, and their top level; CI workflows, deploy manifests, Dockerfiles, dev containers
 // and turbo.json (./setup-configs.ts); each package's package manager, lockfiles and scripts, the dependencies a service
-// detects and the variable names its code reads;
+// detects and the variable names its code reads; bounded runtime URL-operation locations;
 // every variable name with the first line that reads or declares it and its role; example env files' names, SQL,
 // compose files and setup docs' headings. Then, for each attempt's twin.json, the work list comes first: each app's
 // unwired variables. It quotes setup commands and metadata alongside variable names and paths, redacting recognized
@@ -43,6 +43,8 @@ const ROLES: Role[] = ['runtime', 'script', 'test', 'tooling'];
 export interface VariableUse { name: string; file: string; line: number; role: Role }
 
 const SOURCE = /\.(?:[cm]?[jt]sx?|pyi?|vue|svelte|astro)$/i;
+// Unclassified text matches: locations to read, never a claim about a browser or callback's behavior.
+const URL_CONSTRUCTION = /\bnew\s+URL\s*\(/, REDIRECT = /\bredirect\s*\(/;
 // Tests read variables of their own; docs' code is never run.
 const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
 // Tooling and script folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/
@@ -339,11 +341,18 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     .sort((one, other) => ROLES.indexOf(one.role) - ROLES.indexOf(other.role));
   if (modules.length > MODULES.files) notes.push(`Only the first ${MODULES.files.toLocaleString('en-US')} of ${modules.length.toLocaleString('en-US')} source files were read, runtime code first.`);
   const reads: Read[] = [], specifiers = new Map<string, string[]>(), runtime: VariableUse[] = [], functionReads = new Map<string, Set<string>>();
-  const functionUses = new Map<string, VariableUse[]>();
+  const functionUses = new Map<string, VariableUse[]>(), urlLines: string[] = [];
+  let omittedUrlLines = 0;
   for (const { file, role } of modules.slice(0, MODULES.files)) {
     const text = await read(file, MODULES.bytes);
     if (text === null) continue;
     const found = variableReads(text), folder = functionOf(file);
+    if (role === 'runtime') for (const [index, line] of text.split(/\r?\n/).entries()) {
+      const kinds = [URL_CONSTRUCTION.test(line) ? 'URL construction' : '', REDIRECT.test(line) ? 'redirect' : ''].filter(Boolean);
+      if (!kinds.length) continue;
+      if (urlLines.length < EVIDENCE_LIMITS.list) urlLines.push(`- ${at(file, index + 1)}: ${kinds.join(', ')}`);
+      else omittedUrlLines += 1;
+    }
     for (const { name, line } of found) uses.push({ name, file, line, role });
     if (role === 'runtime' && found.length) {
       if (folder) {
@@ -518,6 +527,8 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     sections: [
       { title: 'CI workflows', lines: workflowLines, build: true },
       { title: 'Deploy manifests', lines: deployLines, build: true },
+      { title: 'URL operations', lines: urlLines.length ? ['Unclassified text matches in runtime source; read these locations to audit public origins. No source contents or URL values; not an exhaustive callback inventory or proof of behavior.', '', ...urlLines,
+        ...(omittedUrlLines ? [`- … ${omittedUrlLines} more matching source lines left out.`] : [])] : [] },
       { title: 'Dockerfiles', lines: dockerLines, build: true },
       { title: 'Dev containers', lines: devcontainerLines, build: true },
       { title: 'turbo.json', lines: turboLines, build: true },
