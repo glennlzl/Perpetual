@@ -50,6 +50,8 @@ const LOCK_TIMEOUT = 15_000;
 const GUEST_PORTS = { api: 8000, desktop: 6080 };
 const tcp = (port: number) => `${port}/tcp`;
 const PUBLISHED_PORTS = Object.values(GUEST_PORTS).map(tcp);
+// Failures that leave the local engine unconsulted, so they say nothing about a sandbox's container.
+const UNCONSULTED = new Set(['DOCKER_UNAVAILABLE', 'DOCKER_REMOTE_UNSUPPORTED', 'DOCKER_CONTEXT_INVALID', 'DOCKER_CONTEXT_MISMATCH', 'DOCKER_LINUX_REQUIRED']);
 
 class SandboxError extends Error {
   declare code: string;
@@ -512,7 +514,10 @@ export async function destroySandbox({ dataDir, id }: { dataDir?: unknown; id?: 
       return await saveRecord(store, { ...retained, status: 'destroyed', apiUrl: null, desktopUrl: null, destroyedAt: new Date().toISOString() });
     } catch (error) {
       const failure = error instanceof SandboxError ? error : new SandboxError('Sandbox deletion failed.', 'SANDBOX_CLEANUP_FAILED');
-      record = await saveRecord(store, { ...record, status: 'cleanup_failed', apiUrl: null, desktopUrl: null, cleanupError: failure.message });
+      // A cleanup already confirmed through Docker stays confirmed when the local engine cannot be consulted again.
+      if (!(['destroyed', 'failed'].includes(record.status) && UNCONSULTED.has(failure.code))) {
+        record = await saveRecord(store, { ...record, status: 'cleanup_failed', apiUrl: null, desktopUrl: null, cleanupError: failure.message });
+      }
       failure.sandboxId = record.id;
       failure.record = record;
       throw failure;
