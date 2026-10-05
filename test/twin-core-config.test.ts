@@ -36,8 +36,16 @@ test('An install step is normalized like an app directory and command', () => {
     [{ install: { directory: 'web' } }, /install\.command must be a non-empty command/],
     [{ install: { directory: '../outside', command: 'npm ci' } }, /install\.directory must stay inside/],
     [{ install: { command: 'npm ci' }, apps: { install: { start: 'x', port: 1 } } }, /App "install" has the same name as the install step/],
+    // Every twin with an app copies its source in a step of this name.
+    [{ apps: { source: { start: 'x', port: 1 } } }, /App "source" has the same name as the step that copies the source; rename the app\./],
   ];
   for (const [input, error] of cases) assert.throws(() => validate(input), error);
+});
+
+test('An app gets its port as PORT: an env PORT can only repeat it', () => {
+  assert.deepEqual(validate({ apps: { web: { start: 'x', port: 3000, env: { PORT: 3000 } } } }).apps.web.env, { PORT: '3000' });
+  // Its health check probes port, which an app listening elsewhere would never answer.
+  assert.throws(() => validate({ apps: { web: { start: 'x', port: 3000, env: { PORT: '8080' } } } }), { message: 'apps.web.env.PORT must be 3000, the app\'s port; set port instead.' });
 });
 
 test('Setup order follows service placeholders and keeps config order otherwise', () => {
@@ -95,10 +103,14 @@ test('Commands hold no placeholders: they read the variables that service option
     [{ apps: { ...base.apps, api: { ...base.apps.api, start: 'node server.js --db {{database.DATABASE_URL}}' } } }, 'apps.api.start'],
     [{ apps: { ...base.apps, web: { ...base.apps.web, build: 'pnpm build {{nope}}' } } }, 'apps.web.build'],
     [{ install: { command: 'npm ci && echo {{apps.web.url}}' } }, 'install.command'],
-    [{ fixtures: [{ service: 'database', query: "insert into t values ('{{apps.web.url}}')" }] }, 'fixtures[0].query'],
     [{ fixtures: [{ service: 'jobs', command: 'pnpm seed {{redis.REDIS_URL}}' }] }, 'fixtures[0].command'],
   ];
   for (const [patch, where] of cases) assert.throws(() => validate({ ...base, ...patch }), { message: `${where} holds a placeholder; placeholders go in service options and app env, and a command reads the variables they fill as $VARIABLE.` }, where);
+  // psql gets inline SQL as written, so the refusal says how to store braces rather than to read a variable.
+  assert.throws(() => validate({ ...base, fixtures: [{ service: 'database', query: "insert into templates (body) values ('Hi {{first_name}}')" }] }),
+    { message: "fixtures[0].query holds a placeholder; inline SQL reads no twin value, so write literal braces apart, as '{' || '{name}}' does for {{name}}." });
+  assert.equal(validate({ ...base, fixtures: [{ service: 'database', query: "insert into templates (body) values ('Hi {' || '{first_name}}')" }] }).fixtures[0].query,
+    "insert into templates (body) values ('Hi {' || '{first_name}}')");
   // Shell syntax with single braces stays a command.
   assert.equal(validate({ ...base, install: { command: 'npm ci && echo ${HOME} {a,b}' } }).install?.command, 'npm ci && echo ${HOME} {a,b}');
 });

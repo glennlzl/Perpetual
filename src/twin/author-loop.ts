@@ -36,6 +36,7 @@ export const CHANGE_APPROACH = 'This is the same error as your last writes. Chan
 /** What the loop says on stderr when the model's provider stops it, before the provider's own error. */
 export const PROVIDER_STOPPED = 'The twin config author stopped: the model provider returned an error.';
 const STOPPED = 'The twin config author was stopped.', TIMED_OUT = 'The twin config author reached its time limit.';
+export const CONTEXT_FULL = 'The twin config author filled the model\'s context window.';
 const CONFIG_CREDENTIAL = `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.`;
 
 type Stream = 'stdout' | 'stderr';
@@ -246,6 +247,16 @@ function providerError(error: unknown, hide: (text: string) => string) {
   return JSON.stringify({ code, message: message(cause.message) });
 }
 
+/**
+ * Whether the provider refused a request longer than the model's context window, as the history the loop keeps grows to
+ * be: no refusal of the model, so a fresh attempt may well fit.
+ */
+function contextFull(error: unknown) {
+  const cause = RetryError.isInstance(error) ? error.lastError : error;
+  return APICallError.isInstance(cause) && cause.statusCode === 400
+    && /maximum context length|context[_ ]length[_ ]exceeded|context window|prompt is too long|exceeds the maximum number of tokens/i.test(cause.message);
+}
+
 /** Tokens and, when OpenRouter reports it, the cost of every model call so far, one a step. */
 type Usage = { steps: number; input: number; output: number; cost: number | null };
 function counted(usage: Usage, { usage: { inputTokens, outputTokens }, providerMetadata }: Pick<LanguageModelCallEndEvent, 'usage' | 'providerMetadata'>) {
@@ -280,6 +291,8 @@ export interface LoopOptions {
 export async function authorLoop({ workspace, prompt, model, services = registry, secrets = [], signal, timeoutMs = TIME_LIMIT_MS, print = (line, stream) => { process[stream].write(`${line}\n`); } }: LoopOptions): Promise<number> {
   const hidden = secrets.filter(Boolean), hide = hideValues(hidden, { preserveLines: true });
   const protect = (value: unknown) => redact(hide(value));
+  // EVIDENCE.md quotes values the controller observed one by one: its own `NAME: file:line` lines are not credential assignments.
+  const protectEvidence = (value: unknown) => redact(hide(value), { names: false });
   const say = (line: string, stream: Stream = 'stdout') => print(protect(line), stream);
   const root = await realpath(join(workspace, 'project')), text = (file: string) => readFile(file, 'utf8').catch(() => null);
   const [instructions, evidence, feedback, factsText] = await Promise.all([text(join(root, INSTRUCTIONS)), text(join(root, EVIDENCE)), text(join(root, FEEDBACK)), text(join(workspace, FACTS))]);
@@ -289,9 +302,10 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   const work = facts && { ...facts, services };
   let written = false, repeated = { error: '', count: 0 };
 
-  const file = join(root, CONFIG);
+  const file = join(root, CONFIG), evidenceFile = join(root, EVIDENCE);
   // Editable config keeps its exact templates and ordinary values. A credential literal needs a reference, never a rewritten draft.
   const observe: Observations = { text: protect, file: (path, text) => {
+    if (path === evidenceFile) return protectEvidence(text);
     if (path !== file) return protect(text);
     if (hasSecretLiteral(text, hidden)) throw new Error(CONFIG_CREDENTIAL);
     return text;
@@ -347,7 +361,7 @@ export async function authorLoop({ workspace, prompt, model, services = registry
   const timeout = AbortSignal.timeout(timeoutMs), usage: Usage = { steps: 0, input: 0, output: 0, cost: null };
   try {
     await generateText({
-      model, tools, instructions: protect(`${instructions}\n\n${evidence}`), prompt: protect(feedback === null ? prompt : `${prompt}\n\n${feedback}`),
+      model, tools, instructions: `${protect(instructions)}\n\n${protectEvidence(evidence)}`, prompt: protect(feedback === null ? prompt : `${prompt}\n\n${feedback}`),
       stopWhen: [isStepCount(STEPS), hasToolCall('done')],
       abortSignal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       // Reasoning and its provider metadata carry over from step to step as the provider returned them: nothing here
@@ -371,6 +385,8 @@ export async function authorLoop({ workspace, prompt, model, services = registry
     // A model that does not write when it must ends its attempt as one at its step limit does: with what it wrote.
     if (ToolChoiceViolationError.isInstance(error)) { say(`✗ write_config: the model wrote nothing at step ${FORCED_WRITE_STEP}, when it had to.`); return 0; }
     if (signal?.aborted) { say(STOPPED, 'stderr'); return 1; }
+    // An attempt whose history outgrew the model's context ends as one at its step limit does: with what it wrote.
+    if (contextFull(error)) { say(CONTEXT_FULL); return 0; }
     say(PROVIDER_STOPPED, 'stderr');
     say(`Error: ${oneLine(providerError(error, protect), ERROR_LINE_CHARS)}`, 'stderr');
     return 1;

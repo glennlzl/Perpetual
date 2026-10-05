@@ -65,7 +65,7 @@ const attempt = (number: number) => `Attempt ${number} of 4`;
  * `loop` runs the author loop's harness with a scripted model instead of the fake OpenCode: its steps are the model's,
  * and each call the model receives is logged to `loopLog`.
  */
-async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop, settings }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[]; settings?: { escalationModel?: string } } = {}) {
+async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop, settings, secret = SECRET }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[]; settings?: { escalationModel?: string }; secret?: string } = {}) {
   const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-generation-')));
   const repo = join(dataDir, 'repo'), home = join(dataDir, 'home'), scriptFile = join(dataDir, 'script.json'), log = join(dataDir, 'author.jsonl');
   const loopScript = join(dataDir, 'loop.json'), loopLog = join(dataDir, 'loop.jsonl');
@@ -82,11 +82,13 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
   // The steps the fake twin reports before it fails, and the containers its health reads.
   const twinState = { logs: '', fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'],
     containers: [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'exited', health: null, exitCode: 1 }] as { name: string; state: string; health: string | null; exitCode?: number }[] };
-  const calls = { prepare: [] as TwinConfig[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
+  // repositories: the repository each twin was prepared for, whose package cache it shares; none for a cache of its own.
+  const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
   const twin: EnvironmentTwin = {
-    async prepare({ config, onStep = () => {} }) {
+    async prepare({ config, repository, onStep = () => {} }) {
       const plan = validateTwinConfig(config, { services: { ...registry, ...services } });
       calls.prepare.push(plan);
+      calls.repositories.push(repository);
       for (const step of twinState.steps) await onStep(step);
       const failure = twinState.fail(calls.prepare.length);
       if (failure) throw new Error(failure);
@@ -100,7 +102,7 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     async destroy() { calls.destroy += 1; return { status: 'destroyed' }; },
   };
   // OpenCode is the fake in place of its command; the loop keeps its own, with the scripted model's fixture as its module.
-  const runtime = createEnvironmentRuntime({ services, twin, inputs: async () => ({ payments: { PAYMENTS_KEY: SECRET } }),
+  const runtime = createEnvironmentRuntime({ services, twin, inputs: async () => ({ payments: { PAYMENTS_KEY: secret } }),
     authorHarness: loop ? { name: LOOP, harness: scriptedLoopHarness(loopScript, loopLog) } : AUTHOR_HARNESSES.opencode,
     author: options => authorTwinConfig({ ...options, env: { PATH: process.env.PATH, HOME: home }, timeoutMs, cleanupGraceMs: 1000,
       ...(loop ? {} : { harness: ({ model: requested, prompt }: { model: string; prompt: string }) => ({ command: process.execPath, args: [fake, scriptFile, log, prompt, requested] }) }) }) });
@@ -413,6 +415,24 @@ web  | Error: missing SESSION_SECRET
   assert.deepEqual((await f.saved()).drafts, {});
   assert.equal((await lines(f.log)).length, 2);
   assert.ok(!JSON.stringify(await f.saved()).includes(KEY));
+});
+
+test('a short supplied value stays in the evidence and feedback an author reads, as in its copy of the source', async t => {
+  // A local model server's placeholder key stored as a secret input: no credential, and ordinary text besides.
+  const plain = { services: {}, apps: { web: { ...app, env: { SIGN_IN_URL: 'http://127.0.0.1:43999/' } } } };
+  const f = await fixture(t, { secret: 'test', script: [{ write: plain }, { write: plain }] });
+  await mkdir(join(f.repo, 'test'));
+  await writeFile(join(f.repo, 'test', 'setup.mjs'), 'export const url = process.env.FIXTURE_URL;\n');
+  f.twinState.fail = prepared => prepared === 1 ? `Web: npm test failed in test/setup.mjs with ${KEY}` : prepared === 3 ? 'Web: npm test failed in test/setup.mjs' : null;
+  assert.equal((await f.create()).status, 'ready');
+  const [first, second] = await lines(f.log);
+  assert.match(first.evidence, /`test\/setup\.mjs:1`/);
+  assert.match(second.feedback!, /^Web: npm test failed in test\/setup\.mjs with \[redacted\]$/m, 'A credential is still hidden.');
+  // A saved generated config whose rebuild fails leaves the next author the same feedback.
+  const gate = await f.manager.create(f.context);
+  assert.equal((await f.manager.awaitIdle(gate.environment.id)).status, 'failed');
+  const [draft] = Object.values((await f.saved()).drafts) as { feedback: string }[];
+  assert.match(draft.feedback, /^Web: npm test failed in test\/setup\.mjs$/m);
 });
 
 test('a saved config’s rebuild counts as ready only when every app answers, as a generation’s does', async t => {
@@ -816,6 +836,18 @@ test('a repair gate of a detected stage builds the plan detected from the pull r
   assert.equal((await f.create()).status, 'ready');
   const calls = await lines(f.log);
   assert.deepEqual([calls.length, calls[4].draft, calls[4].feedback], [5, before.drafts[scope].text, before.drafts[scope].feedback]);
+});
+
+test('a repair gate’s twin builds with a package cache of its own, while the stage’s other twins share the repository’s', async t => {
+  const f = await fixture(t, { model: false });
+  // A person's twin and a target-branch gate's rebuild build the repository's own code.
+  assert.equal((await f.create()).status, 'ready');
+  const gate = await f.manager.create(f.context);
+  assert.equal((await f.manager.awaitIdle(gate.environment.id)).status, 'ready');
+  // A repair gate's builds a pull request head no person has reviewed.
+  const { environment } = await f.manager.create(await repairGate(f));
+  assert.equal((await f.manager.awaitIdle(environment.id)).status, 'ready');
+  assert.deepEqual(f.calls.repositories, [f.context.key, f.context.key, undefined]);
 });
 
 test('a repair gate of a stage without a plan yet detects one from the pull request checkout and saves none', async t => {

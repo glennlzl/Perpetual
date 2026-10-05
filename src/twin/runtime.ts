@@ -5,14 +5,14 @@ import { access, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, posix, resolve } from 'node:path';
 import YAML from 'yaml';
-import { APPS, ID, INSTALL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
-import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, SOURCE, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
+import { APPS, ID, INSTALL, SOURCE, SQL_URL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
+import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, OWN_CACHE_VOLUME, PACKAGE_CACHE_ENV, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, cacheMount, composeTwin, formatEnv, hostUrl, portKey, repositoryCache, variables } from './compose.ts';
 import { missingInputs } from './inputs.ts';
 import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
 import type { HostPorts, ResolvedService } from './compose.ts';
 import type { CommandOutput, InputValues, ServiceContext, ServiceHealthContainer, ServiceOutputs, TwinServices } from './registry.ts';
-import { failureText, hide, redact as redactSecrets } from '../redaction.ts';
+import { failureText, hide, openBlock, redact as redactSecrets } from '../redaction.ts';
 import { diagnosticText } from '../environments/diagnostics.ts';
 import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
@@ -29,8 +29,6 @@ const TWIN = 'twin';
 /** Per-machine state a service shares across twins, e.g. one self-hosted instance. */
 const SHARED = 'twin-services';
 const TWIN_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-/** SQL fixtures run psql against this variable of their service. */
-export const SQL_URL = 'DATABASE_URL';
 const SQL_CLIENT = 'postgres:17-alpine';
 const SECRET_NAME = /secret|token|passw|private|credential|key$/i;
 /** Read by the docker CLI itself, so never passed through its environment. */
@@ -46,14 +44,17 @@ export type ExecOptions = { env?: Record<string, string>; cwd?: string; signal?:
 export type Exec = (file: string, args: string[], options?: ExecOptions) => Promise<CommandOutput>;
 export type IsFree = (port: number) => Promise<boolean>;
 const COMMAND_TIMEOUT_MS = 15 * 60_000, CLEANUP_TIMEOUT_MS = 120_000, READ_TIMEOUT_MS = 20_000, LOG_LIMIT = 32_000;
-/** Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown. */
+/**
+ * Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown, so a CLI killed
+ * after ignoring its stop signal, as `docker run` does while its guest ignores it, leaves no cleanup once its group is gone.
+ */
 export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutMs = COMMAND_TIMEOUT_MS, outputLimitBytes = 64 * 1024 * 1024, onOutput } = {}) => {
   signal?.throwIfAborted();
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('A twin command needs a positive time limit.');
   const output = { stdout: '', stderr: '' };
-  let outputLimited = false;
-  const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000,
-    unavailable: `${file} could not start.`, onOutput(chunk, stream) {
+  let outputLimited = false, exitCode: number | undefined;
+  const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000, groupOnly: true,
+    unavailable: `${file} could not start.`, onLifecycle(event) { if (event.name === 'worker-exit') exitCode = event.code; }, onOutput(chunk, stream) {
       output[stream] += chunk;
       if (Buffer.byteLength(output.stdout) + Buffer.byteLength(output.stderr) > outputLimitBytes) {
         outputLimited = true; output.stdout = ''; output.stderr = '';
@@ -68,7 +69,8 @@ export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutM
   catch (error) {
     const detail = error as Error & { timedOut?: true; cleanupIncomplete?: true };
     const message = outputLimited ? 'Twin command output exceeded its size limit; output discarded.' : signal?.aborted ? String(signal.reason?.message || 'Twin command stopped.') : detail.timedOut ? `Twin command exceeded its ${timeoutMs / 1000}-second limit.` : detail.message.replaceAll('Browser runtime', 'Twin command').replaceAll('Browser operation', 'Twin command');
-    throw Object.assign(new Error(message), outputLimited ? { stdout: '', stderr: '' } : output, ...(detail.timedOut ? [{ timedOut: true }] : []), ...(detail.cleanupIncomplete ? [{ cleanupIncomplete: true }] : []));
+    throw Object.assign(new Error(message), outputLimited ? { stdout: '', stderr: '' } : output, ...(detail.timedOut ? [{ timedOut: true }] : []), ...(detail.cleanupIncomplete ? [{ cleanupIncomplete: true }] : []),
+      ...(exitCode ? [{ code: exitCode }] : []));
   } finally { signal?.removeEventListener('abort', stop); }
 };
 
@@ -202,6 +204,14 @@ const reserveSharedPort = (dataDir: string, key: string, current: unknown, { sta
   return port;
 });
 
+/** The services a plain `up` starts: those of the twin's compose.yaml outside a profile, as the install and the source copy are. */
+async function upServices(file: string) {
+  const invalid = 'Invalid twin compose file; its services could not be read.', info = await lstat(file);
+  if (!info.isFile() || info.size > STATE_LIMIT) fail(invalid);
+  const services = fields(fields(YAML.parse(await readFile(file, 'utf8')))?.services) ?? fail(invalid);
+  return Object.keys(services).filter(name => fields(services[name])?.profiles === undefined);
+}
+
 const parsePs = (stdout: unknown): ComposePs[] => {
   const text = String(stdout).trim();
   if (!text) return [];
@@ -231,8 +241,10 @@ function inspectedHealth(stdout: string, expected: ServiceHealthContainer[]): Co
   return containers;
 }
 
+/** The state of a Compose service whose container is gone, as a prune removes a stopped one: it never comes back by itself. */
+const REMOVED = 'removed';
 const overall = (containers: ContainerStatus[]): TwinHealth['status'] => !containers.length ? 'stopped'
-  : containers.some(item => ['exited', 'dead'].includes(item.state) || item.health === 'unhealthy') ? 'failed'
+  : containers.some(item => ['exited', 'dead', REMOVED].includes(item.state) || item.health === 'unhealthy') ? 'failed'
   : containers.every(item => item.state === 'running' && [null, 'healthy'].includes(item.health)) ? 'ready' : 'starting';
 
 export function createTwinRuntime({ exec = execCommand, services = registry, isFree = portFree, portBase = PORT_BASE, appImage = APP_IMAGE, owner }: {
@@ -260,7 +272,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       ...(output ? { onOutput(chunk: string, stream: 'stdout' | 'stderr') {
         lines[stream] += chunk;
         const end = lines[stream].lastIndexOf('\n');
-        if (end >= 0) { output(redactSecrets(redact(lines[stream].slice(0, end + 1)))); lines[stream] = lines[stream].slice(end + 1); }
+        // A private key's lines can come in several chunks: they wait for the end of its block, or of the stream.
+        if (end >= 0 && !openBlock(lines[stream].slice(0, end + 1))) { output(redactSecrets(redact(lines[stream].slice(0, end + 1)))); lines[stream] = lines[stream].slice(end + 1); }
         // A CLI without newlines cannot retain unlimited memory or reveal partial secrets.
         if (lines[stream].length > LOG_LIMIT) lines[stream] = '';
       } } : {}) }); }
@@ -296,22 +309,26 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       run: (image, args, { env, mounts } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`),
         volumes: mounts === 'service-only' ? [`${dir}:${dir}:ro`] : [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.
-      exec: (file, args, { cwd = dir } = {}) => host(file, args, { cwd, redact }),
+      exec: (file, args, { cwd = dir, env } = {}) => host(file, args, { cwd, env, redact }),
       fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([AbortSignal.timeout(READ_TIMEOUT_MS), ...(operations.getStore()?.signal ? [operations.getStore()!.signal!] : []), ...(init?.signal ? [init.signal] : [])]) }),
     };
   }
 
   const sqlEnv = (fixture: TwinFixture, env: Record<string, string>) => ({ [SQL_URL]: env[SQL_URL] ?? fail(`${fixture.service} does not provide ${SQL_URL}, which SQL fixtures use.`) });
-  const loadFixture = (twin: Twin, fixture: TwinFixture, env: Record<string, string>, source: string, redact: Redact, workspace: boolean, image: string) => fixture.sql
+  const loadFixture = (twin: Twin, fixture: TwinFixture, env: Record<string, string>, source: string, redact: Redact, workspace: boolean, image: string, cache: string | undefined) => fixture.sql
     ? dockerRun(twin, SQL_CLIENT, ['sh', '-c', `exec psql "$${SQL_URL}" -v ON_ERROR_STOP=1 -f "$1"`, 'fixture', posix.join(WORKSPACE, fixture.sql)],
       { env: sqlEnv(fixture, env), volumes: [`${source}:${WORKSPACE}:ro`], redact })
     : fixture.query ? dockerRun(twin, SQL_CLIENT, ['sh', '-c', `exec psql "$${SQL_URL}" -v ON_ERROR_STOP=1 -c "$1"`, 'fixture', fixture.query], { env: sqlEnv(fixture, env), redact })
     // A command fixture runs where the install put the dependencies: the twin's workspace volume when it has one.
-    : dockerRun(twin, image, ['sh', '-c', appCommand(fixture.command)], { env: { ...PACKAGE_CACHE_ENV, ...env }, volumes: [workspace ? `${twin.project}_${WORKSPACE_VOLUME}:${WORKSPACE}` : `${source}:${WORKSPACE}`, PACKAGE_CACHE_MOUNT], workdir: WORKSPACE, redact });
+    : dockerRun(twin, image, ['sh', '-c', appCommand(fixture.command)], { env: { ...PACKAGE_CACHE_ENV, ...env }, volumes: [workspace ? `${twin.project}_${WORKSPACE_VOLUME}:${WORKSPACE}` : `${source}:${WORKSPACE}`, ...(cache ? [cacheMount(cache)] : [])], workdir: WORKSPACE, redact });
 
-  /** inputs: { <service id>: { <input name>: value } }, e.g. from createTwinInputs().values(). */
-  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, onStep = () => {} }: {
-    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; onStep?: (step: string) => unknown; signal?: AbortSignal;
+  /**
+   * inputs: { <service id>: { <input name>: value } }, e.g. from createTwinInputs().values(). repository: the identity of
+   * the repository the twin builds, whose twins share one package cache; without one, as for a pull request head no
+   * person has reviewed, the twin's cache is its own, empty and removed with it, so nothing it writes reaches a later twin.
+   */
+  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, repository, onStep = () => {} }: {
+    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; repository?: string; onStep?: (step: string) => unknown; signal?: AbortSignal;
   }) {
     const config = validateTwinConfig(input, { services });
     const invalid = serviceOptionErrors(config, { services });
@@ -391,13 +408,14 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
     }
 
-    const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage,
+    const cache = repository ? repositoryCache(repository) : undefined;
+    const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage, cache,
       services: Object.keys(config.services).map(serviceId => resolved[serviceId]), ports: state.ports });
     await writeStateFile(twin.env, formatEnv(result.env), { removeTemporary: true });
     await writeStateFile(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
     await save();
-    // The shared package cache outlives every twin; creating it again is a no-op.
-    if (result.compose.volumes?.[PACKAGE_CACHE] || config.fixtures.some(fixture => fixture.command)) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', PACKAGE_CACHE], { redact });
+    // A repository's package cache outlives every twin; creating it again is a no-op. A twin's own is Compose's to create.
+    if (cache && (result.compose.volumes?.[cache] || config.fixtures.some(fixture => fixture.command))) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', cache], { redact });
     // Repository code runs from the twin's workspace volume, filled once from the snapshot before anything uses it.
     const workspace = Boolean(result.compose.services[SOURCE]);
     if (workspace) {
@@ -438,15 +456,19 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await onStep('Installing dependencies');
       try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL), { redact }); }
       catch (error) {
-        // Package managers report on stdout or stderr, so keep the end of both.
-        const failed = error as Partial<ExecFileException>;
-        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`) || errorText(error);
-        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${output}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
+        // Package managers report on stdout or stderr, so keep the end of both. A time limit or Stop is the cause: it leads.
+        const failed = error as Partial<ExecFileException> & { timedOut?: true };
+        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
+        const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
+        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
       }
     }
+    // Command fixtures share the twin's package cache: the repository's, or the twin's own, which Compose made with the
+    // source copy. A twin without a workspace has no cache of its own, so a fixture's container keeps one, removed with it.
+    const fixtureCache = cache ?? (workspace ? `${twin.project}_${OWN_CACHE_VOLUME}` : undefined);
     for (const [index, fixture] of fixtures.entries()) {
       await onStep(`Loading fixture ${index + 1} of ${fixtures.length}`);
-      await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage));
+      await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage), fixtureCache);
     }
     if (names.length) {
       await onStep('Starting twin');
@@ -489,6 +511,9 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const containers = parsePs(stdout).map(item => ({ name: String(item.Service), state: String(item.State), health: typeof item.Health === 'string' && item.Health ? item.Health : null, exitCode: typeof item.ExitCode === 'number' ? item.ExitCode : null }));
     // A separate service stack cannot supply the twin's missing Compose containers.
     if (!containers.length) return { status: 'stopped', containers };
+    // Nor can the containers left supply a removed one, which is named so its environment says which service is gone.
+    const listed = new Set(containers.map(item => item.name));
+    containers.push(...(await upServices(twin.compose)).filter(name => !listed.has(name)).map(name => ({ name, state: REMOVED, health: null, exitCode: null })));
     // Blocked services have no resource record. A restarted controller reads the same owned names from the adapter.
     for (const record of state?.services ?? []) {
       const definition = services[record.id];
@@ -587,8 +612,14 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         if (ids.length) {
           await docker(['rm', '--force', ...ids], { redact });
           if ((await remaining()).length) fail('Owned containers are still present.');
+          // Compose only warns about a volume such a guest still mounted, so its down runs again now the guest is gone.
+          if (await exists(twin.compose)) await docker(composeArgs(twin, 'down', '--volumes', '--remove-orphans'), { redact });
         }
       } catch (error) { failures.push(`Owned containers: ${redact((error as Error).message)}`); }
+      try {
+        const { stdout } = await docker(['volume', 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${twin.project}`], { redact });
+        if (stdout.trim()) fail('The twin\'s volumes are still present.');
+      } catch (error) { failures.push(`Owned volumes: ${redact((error as Error).message)}`); }
     }
     if (failures.length) fail(`Twin cleanup failed; its files are kept for another attempt. ${failures.join(' ')}`);
     await rm(twin.dir, { recursive: true, force: true });

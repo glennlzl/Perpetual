@@ -37,6 +37,13 @@ export const FACTS = 'facts.json';
  */
 export const TOOL_OUTPUT = '~/.local/share/opencode/tool-output/*';
 export const MAX_CONFIG = 256 * 1024;
+/**
+ * No credential is shorter: a supplied value that is, such as `none` for a local model server, is a placeholder, and
+ * hiding it would rewrite ordinary text in the author's copy and refuse every draft that contains it.
+ */
+const MIN_SECRET = 8;
+/** The supplied values an author's observations hide, its evidence and feedback included: those long enough to be credentials. */
+export const hiddenFromAuthor = (values: Iterable<unknown>) => [...values].filter((value): value is string => typeof value === 'string' && value.length >= MIN_SECRET);
 /** An upper bound on the agent's tool calls in one attempt, besides its time limit. */
 export const STEPS = 100;
 /** One attempt's time limit. */
@@ -353,7 +360,8 @@ const authorFailure = (failure: RunFailure): AuthorFailure => Object.assign(new 
  */
 export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
   const abort = new AbortController();
-  const supplied = [apiKey, ...secrets], hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
+  const supplied = hiddenFromAuthor([apiKey, ...secrets]);
+  const hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
   let runner: OpencodeRunner | null = null;
   const promise = (async (): Promise<Authored> => {
     if (hasSecretLiteral(draft, supplied)) return { error: `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.` };
@@ -370,7 +378,8 @@ export function authorTwinConfig({ workspace, source, draft, evidence, facts, fe
       } });
     await redactSource(join(project, REPO), observation);
     await writeFile(join(project, INSTRUCTIONS), observation(twinInstructions(services)));
-    await writeFile(join(project, EVIDENCE), observation(evidence));
+    // The evidence quotes values it observed one by one: its own `NAME: file:line` lines are not credential assignments.
+    await writeFile(join(project, EVIDENCE), redact(hidden(evidence), { names: false }));
     if (feedback) await writeFile(join(project, FEEDBACK), observation(feedback));
     await writeFile(join(project, 'opencode.json'), `${JSON.stringify(authorConfig(model), null, 2)}\n`);
     await writeFile(join(project, CONFIG), draft, { mode: 0o600 });

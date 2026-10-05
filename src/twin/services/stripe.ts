@@ -1,4 +1,4 @@
-import { copyFile, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Json } from '../config.ts';
 import { optionText } from '../options.ts';
@@ -75,7 +75,11 @@ const fixtureNames = (value: Json | undefined) => plain(value) && plain(value.en
 async function fixtures(ctx: Context) {
   const env = join(ctx.dir, '.env'), value = ctx.options.fixtures;
   if (plain(value)) await writeFile(join(ctx.dir, FIXTURES), JSON.stringify(inlineFixtures(value)), { mode: 0o600 });
-  else await copyFile(join(ctx.source, relative(value, 'stripe fixtures')), join(ctx.dir, FIXTURES));
+  else {
+    const file = relative(value, 'stripe fixtures');
+    if (!await stat(join(ctx.source, file)).then(item => item.isFile(), () => false)) fail(`stripe.fixtures ${file} is not a file in the repository.`);
+    await copyFile(join(ctx.source, file), join(ctx.dir, FIXTURES));
+  }
   await writeFile(env, '', { mode: 0o600 });
   await ctx.run(CLI, ['fixtures', FIXTURES], { env: cliEnv(ctx) });
   return parseEnv(await readFile(env, 'utf8'));

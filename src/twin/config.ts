@@ -16,6 +16,12 @@ const SERVICES = 'services';
 const ENV = 'env';
 /** The optional install step apps share, e.g. one workspace install; no app may take its name. */
 export const INSTALL = 'install';
+/** The one-shot service that copies the source snapshot into the twin's workspace volume; no app may take its name. */
+export const SOURCE = 'source';
+/** The variable every app gets its port in. */
+export const PORT_VARIABLE = 'PORT';
+/** SQL fixtures run psql against this variable of their service. */
+export const SQL_URL = 'DATABASE_URL';
 const APP_URL = 'url';
 const PUBLIC_URL = 'publicUrl';
 export const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -63,6 +69,12 @@ function command(value: unknown, where: string) {
   if (typeof value !== 'string' || !value.trim()) fail(`${where} must be a non-empty command.`);
   if (HAS_PLACEHOLDER.test(value)) fail(`${where} holds a placeholder; placeholders go in service options and app env, and a command reads the variables they fill as $VARIABLE.`);
   return value.trim();
+}
+
+// Inline SQL goes to psql as written, which reads no twin variable: braces it stores are written apart.
+function inlineSql(value: unknown, where: string) {
+  if (typeof value === 'string' && HAS_PLACEHOLDER.test(value)) fail(`${where} holds a placeholder; inline SQL reads no twin value, so write literal braces apart, as '{' || '{name}}' does for {{name}}.`);
+  return command(value, where);
 }
 
 
@@ -132,7 +144,7 @@ export function setupOrder(config: Pick<TwinConfig, 'services'>) {
  * names a variable or port its described service does not declare: its standard variables, those its options add, and
  * its named ports. A variable known only at setup, as a repository file's, is checked then. Empty when all is valid.
  */
-export function serviceOptionErrors(config: Pick<TwinConfig, 'services'> & Partial<Pick<TwinConfig, 'apps'>>, { services = registry }: { services?: TwinServices } = {}): string[] {
+export function serviceOptionErrors(config: Pick<TwinConfig, 'services'> & Partial<Pick<TwinConfig, 'apps' | 'fixtures'>>, { services = registry }: { services?: TwinServices } = {}): string[] {
   const options = Object.entries(config.services).flatMap(([id, section]) => {
     const service = services[id], known = Object.keys(service?.describe?.options ?? {});
     const extra = service?.describe ? Object.keys(section).filter(name => !known.includes(name)) : [];
@@ -156,7 +168,13 @@ export function serviceOptionErrors(config: Pick<TwinConfig, 'services'> & Parti
   const credentials = generated.flatMap(name => Object.values(services).filter(service => service.id !== 'secrets'
     && [...(service.describe?.owns ?? []), ...(service.describe?.provides ?? []), ...(service.describe?.optionProvides?.(config.services[service.id] ?? {}) ?? [])].includes(name)).map(service =>
     `Generated secret ${name} belongs to ${service.title}; use {{${service.id}.${name}}} from that service instead of a random value.`));
-  return [...options, ...references, ...credentials];
+  // An SQL fixture runs against its service's DATABASE_URL, which that service's description says whether it provides.
+  const sql = (config.fixtures ?? []).flatMap((fixture, index) => {
+    const describe = services[fixture.service]?.describe, options = config.services[fixture.service] ?? {};
+    if (fixture.command !== undefined || !describe || [...describe.provides, ...describe.optionProvides?.(options) ?? []].includes(SQL_URL) || describe.setupProvides?.(options, SQL_URL)) return [];
+    return [`fixtures[${index}]: ${fixture.service} does not provide ${SQL_URL}, which SQL fixtures use.`];
+  });
+  return [...options, ...references, ...credentials, ...sql];
 }
 
 export function validateTwinConfig(input: unknown, { services = registry }: { services?: TwinServices } = {}): TwinConfig {
@@ -188,6 +206,7 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
     if (!ID.test(id)) fail(idError(`App id "${id}"`, id));
     if (Object.hasOwn(config.services, id)) fail(`App "${id}" has the same id as a service; rename the app.`);
     if (config.install && id === INSTALL) fail(`App "${id}" has the same name as the install step; rename the app.`);
+    if (id === SOURCE) fail(`App "${id}" has the same name as the step that copies the source; rename the app.`);
     if (!plain(app)) fail(`${where} must be an object.`);
     fields(app, FIELDS.app, where);
     if (typeof app.port !== 'number' || !Number.isInteger(app.port) || app.port < 1 || app.port > 65535) fail(`${where}.port must be the port the app listens on (1-65535).`);
@@ -197,6 +216,8 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
       if (!['string', 'number', 'boolean'].includes(typeof value)) fail(`${where}.env.${name} must be text.`);
       return [name, String(value)];
     }));
+    // An app listens on port, which it also gets as PORT: another PORT would leave its health check probing nothing.
+    if (Object.hasOwn(env, PORT_VARIABLE) && env[PORT_VARIABLE] !== String(app.port)) fail(`${where}.env.${PORT_VARIABLE} must be ${app.port}, the app's port; set port instead.`);
     config.apps[id] = { directory: relative(app.directory ?? '.', `${where}.directory`),
       ...(app.build == null ? {} : { build: command(app.build, `${where}.build`) }), start: command(app.start, `${where}.start`), port: app.port, env };
   }
@@ -209,7 +230,7 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
     // sql is a repository file; query is inline SQL kept with the twin config, so a twin needs no files in the product's repository.
     if (['sql', 'query', 'command'].filter(key => fixture[key] != null).length !== 1) fail(`${where} needs exactly one of sql, query or command.`);
     if (fixture.sql != null) return { service: fixture.service, sql: relative(fixture.sql, `${where}.sql`) };
-    if (fixture.query != null) return { service: fixture.service, query: command(fixture.query, `${where}.query`) };
+    if (fixture.query != null) return { service: fixture.service, query: inlineSql(fixture.query, `${where}.query`) };
     return { service: fixture.service, command: command(fixture.command, `${where}.command`) };
   });
   const check = (value: unknown, where: string) => {

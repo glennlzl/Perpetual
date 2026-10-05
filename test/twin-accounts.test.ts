@@ -48,9 +48,8 @@ test('A service creates its test accounts once its containers run, before fixtur
   const f = await setup(t);
   const result = await f.prepare(f.config([{ service: 'auth', command: 'pnpm seed' }]));
   assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Loading fixture 1 of 1', 'Starting twin']);
-  const [volume, copy, up, accounts, , all] = f.calls.map(compose);
-  assert.deepEqual(volume, ['volume', 'create', '--label', 'perpetual.shared=package-cache', 'perpetual-package-cache']);
-  assert.deepEqual(copy, ['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source']);
+  const [copy, up, accounts, , all] = f.calls.map(compose);
+  assert.deepEqual(copy,['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source']);
   assert.deepEqual(up, ['up', '--wait', 'auth']);
   assert.deepEqual(accounts.slice(0, 2), ['accounts', 'admin-key-fixture'], 'The hook sees the setup outputs.');
   assert.equal(typeof accounts[2], 'number');
@@ -68,14 +67,14 @@ test('Accounts come before the shared install, which comes before fixtures that 
   await f.prepare({ ...f.config([{ service: 'auth', command: 'pnpm seed' }]), install: { directory: '.', command: 'npm ci' } });
   assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Installing dependencies', 'Loading fixture 1 of 1', 'Starting twin']);
   const calls = f.calls.map(args => compose(args)[0] === 'accounts' ? 'accounts' : compose(args).includes('install') ? 'install' : String(args.at(-1)).endsWith('pnpm seed') ? 'fixture' : compose(args));
-  assert.deepEqual(calls, [['volume', 'create', '--label', 'perpetual.shared=package-cache', 'perpetual-package-cache'], ['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', 'install', 'fixture', ['up', '--wait']]);
+  assert.deepEqual(calls, [['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', 'install', 'fixture', ['up', '--wait']]);
 });
 
 test('Services start for their accounts even without fixtures or an install', async t => {
   const f = await setup(t);
   await f.prepare();
   assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Starting twin']);
-  assert.deepEqual(f.calls.map(args => compose(args)[0] === 'accounts' ? 'accounts' : compose(args)), [['volume', 'create', '--label', 'perpetual.shared=package-cache', 'perpetual-package-cache'], ['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', ['up', '--wait']]);
+  assert.deepEqual(f.calls.map(args => compose(args)[0] === 'accounts' ? 'accounts' : compose(args)), [['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', ['up', '--wait']]);
 });
 
 test('Passwords stay in the private twin state, where only account() reads them, and logs redact them', async t => {

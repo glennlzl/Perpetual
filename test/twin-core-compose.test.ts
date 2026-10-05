@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 import YAML from 'yaml';
 import { validateTwinConfig } from '../src/twin/config.ts';
-import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv } from '../src/twin/compose.ts';
+import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv, repositoryCache } from '../src/twin/compose.ts';
 import { services as fixtures } from './fixtures/twin/services.ts';
 import type { ResolvedService } from '../src/twin/compose.ts';
+import type { AddressInfo } from 'node:net';
 
 const SECRET = 'pk_test_secret_value';
 const ports = { 'apps.web': 43100, 'apps.api': 43101, 'database.sql': 43102, 'mail.smtp': 43103, 'mail.web': 43104 };
@@ -54,11 +58,13 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   const web = file.services.web;
   assert.equal(web.image, APP_IMAGE);
   assert.equal(web.working_dir, '/workspace/web');
-  // Apps run from the twin's workspace volume, which a one-shot service fills from the snapshot, and share one
-  // machine-wide package cache, external so tearing a twin down keeps it.
-  assert.deepEqual(web.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }]);
-  assert.deepEqual(file.volumes, { workspace: {}, 'perpetual-package-cache': { external: true } });
-  assert.deepEqual([file.services.source.volumes?.[0], file.services.source.command, file.services.source.profiles], [{ type: 'bind', source: '/data/source', target: '/snapshot', read_only: true }, ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
+  // Apps run from the twin's workspace volume, which a one-shot service fills from the snapshot. Without a repository,
+  // the twin keeps downloads in a package cache of its own, a volume of its project like the workspace, which the copy
+  // mounts too, so Compose creates it before anything else needs it.
+  assert.deepEqual(web.volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }]);
+  assert.deepEqual(file.volumes, { workspace: {}, 'package-cache': {} });
+  assert.deepEqual([file.services.source.volumes, file.services.source.command, file.services.source.profiles], [[{ type: 'bind', source: '/data/source', target: '/snapshot', read_only: true },
+    { type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }], ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
   assert.equal(web.environment?.npm_config_cache, '/perpetual-cache/npm');
   assert.equal(file.services.database.volumes, undefined);
   assert.deepEqual(web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
@@ -69,12 +75,40 @@ test('Compose output runs apps from the snapshot beside service containers on lo
   assert.deepEqual(apps, [{ id: 'web', url: 'http://127.0.0.1:43100', directory: 'web' }, { id: 'api', url: 'http://127.0.0.1:43101', directory: 'api' }]);
 });
 
+test('The twins of one repository share its package cache, named from a digest of the repository, which another repository never names', () => {
+  const cache = repositoryCache('github:acme/app:/');
+  assert.match(cache, /^perpetual-package-cache-[0-9a-f]{16}$/);
+  assert.equal(repositoryCache('github:acme/app:/'), cache, 'The same repository keeps reusing it.');
+  assert.notEqual(repositoryCache('github:acme/billing:/'), cache);
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config, services: [database, mail, payments], ports, cache });
+  for (const app of ['web', 'api']) assert.deepEqual(file.services[app].volumes, [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: cache, target: '/perpetual-cache' }], app);
+  // External, so tearing the twin down keeps it for the repository's next twin. The runtime creates it, not the copy.
+  assert.deepEqual(file.volumes, { workspace: {}, [cache]: { external: true } });
+  assert.deepEqual(file.services.source.volumes?.map(volume => volume.source), ['/data/source', 'workspace']);
+  // A twin without a repository, as a repair gate's, never mounts a repository's cache.
+  assert.equal(YAML.stringify(compose([database, mail, payments]).compose).includes('perpetual-package-cache'), false);
+});
+
+test('An app\'s health check counts a redirect as an answer without following it, as the controller\'s check does', async t => {
+  // The app's home page sends the browser elsewhere, here to a port nothing listens on.
+  const server = createServer((_request, response) => { response.writeHead(302, { location: 'http://127.0.0.1:1/' }); response.end(); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const { port } = server.address() as AddressInfo;
+  const twin = validateTwinConfig({ apps: { web: { start: 'npm start', port } } }, { services: fixtures });
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: twin, services: [], ports: { 'apps.web': 43100 } });
+  const [form, command, ...args] = file.services.web.healthcheck!.test;
+  assert.deepEqual([form, command], ['CMD', 'node']);
+  // The probe itself, run where the app listens: it exits 0 when the app answers below 500.
+  await promisify(execFile)(process.execPath, args);
+});
+
 test('A shared install is a one-shot service that a plain up never starts', () => {
   const shared = validateTwinConfig({ ...structuredClone(config), install: { directory: '.', command: 'pnpm install --frozen-lockfile' } }, { services: fixtures });
   const { compose: file, apps } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: shared, services: [database, mail, payments], ports });
   assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'install', 'web', 'api', 'source']);
   assert.deepEqual(file.services.install, {
-    image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'perpetual-package-cache', target: '/perpetual-cache' }],
+    image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }],
     command: ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
     extra_hosts: ['host.docker.internal:host-gateway'], labels: { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' },
     logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },
@@ -131,6 +165,21 @@ test('Secrets appear only in .env, which Compose reads without interpolation', (
   assert.equal(file.services.web.environment?.PAYMENTS_KEY, '${WEB__PAYMENTS_KEY}');
   assert.equal(file.services['payments-listener'].environment?.PAYMENTS_KEY, '${PAYMENTS_LISTENER__PAYMENTS_KEY}');
   assert.equal(formatEnv({ A: 'p$x${Y}"q"\\end', B: 'one\ntwo' }), 'A="p\\$x\\${Y}\\"q\\"\\\\end"\nB="one\\ntwo"\n');
+});
+
+test('Directories reach Compose literally, so it never fills them from the controller environment', () => {
+  const twin = validateTwinConfig({ install: { directory: 'i${GH_TOKEN}', command: 'npm ci' }, apps: { web: { directory: 'x${GH_TOKEN:-none}', start: 'npm start', port: 3000 } } }, { services: fixtures });
+  const worker = { id: 'jobs', fidelity: 'actual', status: 'ready', env: {}, containers: [{ name: 'worker', image: 'jobs/worker:2.0', directory: 'w$HOME' }] } satisfies ResolvedService;
+  const { compose: file } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: twin, services: [worker], ports: { 'apps.web': 43100 } });
+  // In a Compose file a lone $ starts interpolation; $$ is a literal dollar.
+  assert.deepEqual([file.services.install.working_dir, file.services.web.working_dir, file.services['jobs-worker'].working_dir],
+    ['/workspace/i$${GH_TOKEN}', '/workspace/x$${GH_TOKEN:-none}', '/workspace/w$$HOME']);
+});
+
+test('An app named like a property every object has is no service container', () => {
+  const id: string = 'constructor', named = validateTwinConfig({ apps: { [id]: { start: 'node app.js', port: 3000 } } }, { services: fixtures });
+  const { compose: file } = composeTwin({ project: 'p', owner: 'o', environment: 'e', source: '/s', config: named, services: [], ports: { [`apps.${id}`]: 43100 } });
+  assert.deepEqual(file.services[id].ports, ['127.0.0.1:43100:3000']);
 });
 
 test('Unknown variables and names in mappings are reported', () => {
