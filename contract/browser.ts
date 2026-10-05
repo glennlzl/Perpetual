@@ -26,8 +26,11 @@ export interface BlockedRequest { method: string; url: string }
 export type ControlBlockedTransport = ({ kind: 'http'; method: string; url: string } | { kind: 'socket'; transport: 'websocket' }) & { afterRead: boolean };
 export interface BrowserConfig {
   targetUrl: string; signInUrl: string; scope: string; requirements: string; maxSteps: number;
-  journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[]; readOnlyRequests?: ReadOnlyRequest[];
+  journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[]; readOnlyRequests?: ReadOnlyRequest[]; callbackBindings?: ApplicationCallbackBinding[];
 }
+export interface ApplicationCallbackBinding { applicationId: string; hostname: 'localhost' | '127.0.0.1' }
+export interface CallbackApplication { applicationId: string; origin: string }
+export interface CallbackReview { application: CallbackApplication | null; error?: string }
 export interface BrowserPreparation { environmentId: string; status: string; createdAt: string; targetUrl?: string; runId?: string; error?: string; completedAt?: string }
 export interface BrowserDiscovery { cases: BrowserCase[]; summary: string; authenticated: boolean }
 export interface BrowserAnalysis extends BrowserDiscovery { createdAt: string; sourceRevision: string | null; error?: string }
@@ -56,13 +59,13 @@ export interface RunProgress { revision?: number; cases: CaseProgress[] }
 export type SummaryCaseProgress = Omit<CaseProgress, 'actions'>;
 export interface SummaryProgress { revision?: number; cases: SummaryCaseProgress[] }
 /** Older verification attempts predate independently versioned checks. */
-export interface Verification { id: string; hash: string; caseHash: string; checkVersion?: number; readPolicy?: string; attempt: number; control: boolean }
+export interface Verification { id: string; hash: string; caseHash: string; checkVersion?: number; readPolicy?: string; callbackPolicy?: string; attempt: number; control: boolean }
 /** Public run projection; historical status strings are kept. Ownership scopes, credentials and approvedCases are private. */
 export interface PublicRun {
   id: string; stageId: string; mode: 'run' | 'discover'; status: string; createdAt: string; startedAt?: string; completedAt?: string;
   targetUrl: string; sourceRevision: string | null; caseIds: string[]; caseSummaries: CaseSummary[]; progress?: RunProgress; results?: JourneyResult[]; error?: string; blockedRequests?: BlockedRequest[];
   engine?: 'playwright' | 'browser-use'; concurrency?: number; effectiveConcurrency?: number; concurrencyLimit?: ConcurrencyLimit; specHashes?: Record<string, string>;
-  environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; frameUpdatedAt?: string; frameCapturedAt?: string;
+  environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; frameUpdatedAt?: string; frameCapturedAt?: string; callbackPolicy?: string; callbackOrigins?: string[];
 }
 /** Source polling omits code hashes and discovery, and includes progress only for active and latest runs. */
 export type RunSummary = Omit<PublicRun, 'progress' | 'specHashes' | 'discovery'> & { progress?: SummaryProgress };
@@ -80,4 +83,5 @@ export interface SpecCodeReply { authoring?: import('./authoring.ts').AuthoringR
 export interface BrowserSummaryReply { cases: BrowserCase[]; specs: JourneySpecs; runs: RunSummary[]; preparation: BrowserPreparation | null }
 export interface BrowserViewReply extends Omit<BrowserSummaryReply, 'runs'> {
   config: BrowserConfig; runs: PublicRun[]; analysis: BrowserAnalysis | null; accounts: EnvironmentAccount[]; capabilities: BrowserCapabilities;
+  callbacks?: CallbackReview;
 }
