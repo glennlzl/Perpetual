@@ -37,6 +37,14 @@ test('a matrix version is the one in the failed job\'s name, and a version file 
   assert.equal(versionFromFile('node', 'package.json', '{"engines":{"node":">=20"}}'), null);
 });
 
+// asdf lists tools alphabetically, so another tool's line often comes first.
+test('.tool-versions is read on the tool\'s own line, never another tool\'s', () => {
+  const tools = '# toolchain\ngolang 1.22.1\nnodejs 20.11.0 18.19.0 # fallbacks\npython 3.12.1\n';
+  assert.deepEqual([versionFromFile('node', '.tool-versions', tools), versionFromFile('python', 'web/.tool-versions', tools), versionFromFile('go', '.tool-versions', tools)], ['20.11.0', '3.12.1', '1.22.1']);
+  assert.equal(versionFromFile('node', '.tool-versions', 'golang 1.22.1\npython 3.12.1\n'), null, 'A file without the tool names no version, so the image keeps its default tag.');
+  assert.equal(boxImage({ tool: 'node', version: versionFromFile('node', '.tool-versions', 'golang 1.22.1\n') }), 'node:lts-bookworm');
+});
+
 test('the failed step\'s run command and working directory are read by name, or by GitHub\'s default name', () => {
   assert.deepEqual(failingStep(workflow(NODE), 'Test', ['Typecheck']), {
     job: 'Test', step: 'Typecheck', run: 'npm run typecheck', workingDirectory: 'web', toolchain: { tool: 'node', version: '22', file: null },

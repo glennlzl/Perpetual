@@ -35,11 +35,21 @@ export function boxImage(toolchain: Pick<Toolchain, 'tool' | 'version'> | null |
   return `${IMAGES[toolchain.tool]}:${version || FALLBACK[toolchain.tool]}-bookworm`;
 }
 
-/** A version file's version: .nvmrc, .node-version, .python-version, .tool-versions' first line, or go.mod's go line. */
+// How .tool-versions (asdf, mise) names each tool at the start of its line.
+const TOOL_LINE: Record<Toolchain['tool'], RegExp> = { node: /^(?:nodejs|node)\s+/i, python: /^python\s+/i, go: /^(?:golang|go)\s+/i };
+
+/**
+ * A version file's version: .nvmrc, .node-version or .python-version's first line, the tool's own line of
+ * .tool-versions (its first version, as it may list fallbacks), or go.mod's go line.
+ */
 export function versionFromFile(tool: Toolchain['tool'], file: string, content: string) {
   if (tool === 'go' && /(?:^|\/)go\.mod$/.test(file)) return toolVersion(tool, /^go\s+(\S+)/m.exec(content)?.[1]);
-  const line = content.split(/\r?\n/).map(value => value.trim()).find(value => value && !value.startsWith('#')) ?? '';
-  return toolVersion(tool, line.replace(/^(?:nodejs|node|python|golang|go)\s+/i, ''));
+  const lines = content.split(/\r?\n/).map(value => value.trim()).filter(value => value && !value.startsWith('#'));
+  if (/(?:^|\/)\.tool-versions$/.test(file)) {
+    const line = lines.find(value => TOOL_LINE[tool].test(value));
+    return line ? toolVersion(tool, line.replace(TOOL_LINE[tool], '').split(/\s+/)[0]) : null;
+  }
+  return toolVersion(tool, (lines[0] ?? '').replace(/^(?:nodejs|node|python|golang|go)\s+/i, ''));
 }
 
 // A job's name as GitHub reports it: its name or id, with matrix values in parentheses; a reusable workflow's jobs
