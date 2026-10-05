@@ -123,6 +123,33 @@ test('environment plans are isolated by active source and Sandbox stage', async 
   assert.deepEqual((await f.view(f.beta)).body.plan, edited);
 });
 
+test('a source change deletes the outgoing source’s twins, and a rescan of the same source keeps them', async t => {
+  const destroyed: string[] = [];
+  const runtime: ManagedRuntime = {
+    async prepareEnvironment({environment, onUpdate}) { await onUpdate({sandboxId: environment.id}); return {status: 'ready', services: [], apps: [{id: 'web', url: 'http://host.docker.internal:50123'}]}; },
+    async destroySandbox({environment}) { destroyed.push(environment.id); }, environmentHealth: async () => ({status: 'ready'}), environmentLogs: async () => '',
+  };
+  const f = await controller(t, runtime);
+  await f.post('plan', f.beta, {plan: plan()});
+  const id = String((await f.post('create', f.beta)).body.environment.id);
+  const status = async () => (await f.view(f.beta)).body.environments.find(item => item.id === id)?.status;
+  const until = async (done: () => Promise<boolean> | boolean, what: string) => {
+    for (const deadline = Date.now() + 10_000; !await done();) {
+      assert.ok(Date.now() < deadline, what);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  await until(async () => await status() === 'ready', 'The twin becomes ready.');
+  // The same checkout scanned again is the same source: its twin stays through the controller's next passes.
+  await f.scan(f.repos[0]);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.equal(destroyed.length, 0);
+  await f.scan(f.repos[1]);
+  await until(() => destroyed.includes(id), 'The outgoing source’s twin is deleted.');
+  await f.scan(f.repos[0]);
+  await until(async () => await status() === 'destroyed', 'Its record says it was deleted.');
+});
+
 test('Stop is scoped and accepted before its owned cleanup completes', async t => {
   let entered!: () => void, releaseCleanup!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; }), cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });

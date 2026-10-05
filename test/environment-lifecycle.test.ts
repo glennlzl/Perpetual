@@ -405,6 +405,56 @@ test('a removed stage’s twin config, the scan it was detected from and its dra
   assert.deepEqual([Object.keys(saved.plans), saved.detected, saved.drafts], [[scopeId(gamma)], {}, {}]);
 });
 
+test('the twins of a pipeline the active source left are deleted once free, and a creation under way is stopped', async t => {
+  const entered = deferred(), cleaned: string[] = [], failing = new Set<string>();
+  let active: string | null = context.key;
+  const stage = (stageId: string) => ({ ...context, stageId });
+  const { manager, usage } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate, signal }) => {
+      await onUpdate({ sandboxId: environment.id });
+      // Gamma's creation is under way until it is stopped.
+      if (environment.stageId === 'gamma') {
+        entered.resolve();
+        await new Promise((_resolve, reject) => { if (signal?.aborted) reject(signal.reason); else signal?.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+      }
+      return structuredClone(ready);
+    },
+    destroySandbox: async ({ environment }) => { if (failing.has(environment.id)) throw new Error('compose down failed'); cleaned.push(environment.id); },
+  }, { activeKey: () => active });
+  for (const id of ['gamma', 'delta', 'epsilon', 'zeta']) await manager.savePlan(stage(id), plan);
+  const readyIn = async (stageId: string) => { const { environment } = await manager.create(stage(stageId)); return (await manager.awaitIdle(environment.id)).id; };
+  const beta = (await createReady(manager)).id, delta = await readyIn('delta'), epsilon = await readyIn('epsilon'), zeta = await readyIn('zeta');
+  // Epsilon's cleanup failed, a journey run holds delta, and a stage removal holds zeta.
+  failing.add(epsilon);
+  await manager.destroy(stage('epsilon'), epsilon);
+  assert.equal((await manager.awaitIdle(epsilon)).status, 'cleanup_failed');
+  failing.clear();
+  const releaseRun = usage.acquire(stage('delta'), { environmentId: delta, operation: 'browser-run' });
+  const removal = usage.beginRemoval(stage('zeta'), [zeta]);
+  const { environment: { id: gamma } } = await manager.create(stage('gamma'));
+  await entered.promise;
+  // The active source keeps its twins.
+  await manager.tick();
+  assert.deepEqual(cleaned, []);
+  // Another source becomes active.
+  active = 'github:acme/app:/';
+  await manager.tick();
+  assert.deepEqual([(await manager.awaitIdle(beta)).status, (await manager.awaitIdle(gamma)).status], ['destroyed', 'failed']);
+  assert.equal((await manager.awaitIdle(gamma)).step, 'Stopped', 'The creation under way is stopped and cleans up its twin.');
+  const statuses = () => Object.fromEntries(manager.summaries(context.key).map(item => [item.id, item.status]));
+  assert.deepEqual([statuses()[delta], statuses()[epsilon], statuses()[zeta]], ['ready', 'cleanup_failed', 'ready']);
+  // The run ends, and the next pass deletes its twin; the removal deletes its own.
+  releaseRun();
+  await manager.tick();
+  assert.equal((await manager.awaitIdle(delta)).status, 'destroyed');
+  assert.deepEqual(cleaned.sort(), [beta, gamma, delta].sort());
+  usage.endRemoval(removal);
+  // While no source is active, nothing is deleted.
+  active = null;
+  await manager.tick();
+  assert.equal(statuses()[zeta], 'ready');
+});
+
 test('owned-target resolution canonicalizes loopback aliases and retains stale ownership after deletion', async t => {
   const { manager } = await fixture(t);
   const environment = await createReady(manager);

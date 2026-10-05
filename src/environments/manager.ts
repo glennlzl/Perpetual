@@ -140,11 +140,12 @@ function loadedEnvironment({ twinsToken, activeOperation, desktopUrl, serviceOri
 /**
  * Context is the caller's stage context, which the manager hands back to onReady as it was given. authoringModel is
  * the model that writes a detected stage's twin config when a person creates its environment; null leaves the detected
- * plan as it is.
+ * plan as it is. activeKey is the pipeline of the active source, whose twins are the only ones kept: null while there is
+ * none, or while it changes.
  */
-export async function createEnvironmentManager<Context extends EnvironmentContext = EnvironmentContext>({ dataDir, onReady, usage = createEnvironmentUsage(), runtime = defaultRuntime, interruptedEnvironmentIds = [], authoringModel = () => appSettingsModel(dataDir) }: {
+export async function createEnvironmentManager<Context extends EnvironmentContext = EnvironmentContext>({ dataDir, onReady, usage = createEnvironmentUsage(), runtime = defaultRuntime, interruptedEnvironmentIds = [], authoringModel = () => appSettingsModel(dataDir), activeKey = () => null }: {
   dataDir: string; onReady?: (context: Context, environment: PublicEnvironment) => unknown; usage?: EnvironmentUsage;
-  runtime?: ManagedRuntime; interruptedEnvironmentIds?: string[]; authoringModel?: () => Promise<AuthoringModel | null>;
+  runtime?: ManagedRuntime; interruptedEnvironmentIds?: string[]; authoringModel?: () => Promise<AuthoringModel | null>; activeKey?: () => string | null;
 }) {
   // Resolved to its real path, so system aliases such as /tmp and /var never reach owned snapshot
   // destinations; snapshotSource still rejects an explicitly linked destination.
@@ -223,6 +224,22 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     if (!dropped.size) return;
     state.environments = state.environments.filter(item => !dropped.has(item));
     for (const { id } of dropped) for (const beats of [healthChecks, healthFailures, healthResults, healthSkips]) beats.delete(id);
+  }
+  // A source change leaves the outgoing source's twins, which nothing shows any more: each that holds resources is
+  // deleted once it is free, and one being created is stopped, its creation cleaning it up. One whose cleanup failed
+  // waits for a person, as it would on its own source, and one a stage removal holds for that removal.
+  async function retireOthers() {
+    const active = activeKey();
+    if (!active) return;
+    for (const environment of [...state.environments]) {
+      if (closed) return;
+      if (environment.pipelineKey === active || !holdsResources(environment) || environment.status === 'cleanup_failed') continue;
+      const stage = { key: environment.pipelineKey, stageId: environment.stageId };
+      try {
+        if (creations.has(environment.id)) await manager.cancel(stage, environment.id);
+        else if (!jobs.has(environment.id) && !usage.isBusy(environment.id)) await manager.destroy(stage, environment.id);
+      } catch { /* In use, or its stage is being removed: a later pass tries again. */ }
+    }
   }
   function setPlan(scope: string, value: EnvironmentPlan) {
     const previous = state.plans[scope];
@@ -534,6 +551,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       if (closed || ticking) return;
       ticking = true;
       try {
+      await retireOthers();
       for (const environment of state.environments) {
         if (closed) break;
         if ((environment.status !== 'ready' && !canRecoverHealth(environment)) || Date.now() - (healthChecks.get(environment.id) || 0) < 30000) continue;

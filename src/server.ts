@@ -227,7 +227,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // `twin` lets tests supply provisioning's docker and git email; no container runs for them.
   const twinInputs=createTwinInputs({dataDir:await realpath(dataDir),...twin});
   const twinsReady=createReadiness();
-  environments=await createEnvironmentManager<StageContext>({dataDir,usage,...runtimes,interruptedEnvironmentIds:browser.interruptedEnvironmentIds(),onReady:(context,environment)=>browser.prepareEnvironment(context,environment,{isCurrent:()=>isPreparationSourceCurrent(context)}).finally(()=>twinsReady.done(environment.id))});
+  // Only the active source's twins are kept: a source change leaves the outgoing source's to be deleted.
+  environments=await createEnvironmentManager<StageContext>({dataDir,usage,...runtimes,interruptedEnvironmentIds:browser.interruptedEnvironmentIds(),activeKey:()=>!sourceBusy&&state.scan?pipelineKey(state):null,onReady:(context,environment)=>browser.prepareEnvironment(context,environment,{isCurrent:()=>isPreparationSourceCurrent(context)}).finally(()=>twinsReady.done(environment.id))});
   onCleanup(()=>environments.close());
   const saves=createSaveQueue();
   let tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
