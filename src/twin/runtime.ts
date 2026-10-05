@@ -316,6 +316,21 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     };
   }
 
+  /**
+   * Runs a one-shot Compose service once, as the install and each app's build are: a command of its own, so it has its own
+   * time limit and exit code. Package managers and builds report on stdout or stderr, so its error keeps the end of both;
+   * a time limit or Stop is the cause, so it leads.
+   */
+  async function oneShot(twin: Twin, service: string, what: string, redact: Redact) {
+    try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', service, 'run', '--rm', '--no-TTY', service), { redact }); }
+    catch (error) {
+      const failed = error as Partial<ExecFileException> & { timedOut?: true };
+      const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
+      const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
+      throw Object.assign(new Error(redact(`${what} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
+    }
+  }
+
   const sqlEnv = (fixture: TwinFixture, env: Record<string, string>) => ({ [SQL_URL]: env[SQL_URL] ?? fail(`${fixture.service} does not provide ${SQL_URL}, which SQL fixtures use.`) });
   const loadFixture = (twin: Twin, fixture: TwinFixture, env: Record<string, string>, source: string, redact: Redact, workspace: boolean, image: string, cache: string | undefined) => fixture.sql
     ? dockerRun(twin, SQL_CLIENT, ['sh', '-c', `exec psql "$${SQL_URL}" -v ON_ERROR_STOP=1 -f "$1"`, 'fixture', posix.join(WORKSPACE, fixture.sql)],
@@ -424,12 +439,15 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await onStep('Loading source');
       await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
     }
-    // Service containers that run repository code, like apps, wait for the install; the others start first.
-    const names = Object.keys(result.compose.services).filter(name => name !== INSTALL && name !== SOURCE);
+    // Service containers that run repository code, like apps, wait for the install; the others start first. One-shot
+    // services, the install, the source copy and the builds, never start with them.
+    const oneShots = new Set([INSTALL, SOURCE, ...result.builds.map(build => build.service)]);
+    const names = Object.keys(result.compose.services).filter(name => !oneShots.has(name));
     const serviceNames = names.filter(name => !Object.hasOwn(config.apps, name) && !result.workspace.includes(name));
     const fixtures = config.fixtures.filter(fixture => resolved[fixture.service].status === 'ready');
     const withAccounts = state.services.filter(record => services[record.id].accounts);
-    if ((fixtures.length || config.install || withAccounts.length) && serviceNames.length) {
+    // Builds, like fixtures, may read the services, such as a page rendered from the database while it builds.
+    if ((fixtures.length || config.install || withAccounts.length || result.builds.length) && serviceNames.length) {
       await onStep('Starting services');
       await docker(composeArgs(twin, 'up', '--wait', ...serviceNames), { redact });
     }
@@ -454,16 +472,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     }
     // Command fixtures, such as seed scripts, run with the workspace dependencies the install provides.
     if (config.install) {
-      const { directory, command } = config.install;
       await onStep('Installing dependencies');
-      try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL), { redact }); }
-      catch (error) {
-        // Package managers report on stdout or stderr, so keep the end of both. A time limit or Stop is the cause: it leads.
-        const failed = error as Partial<ExecFileException> & { timedOut?: true };
-        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
-        const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
-        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
-      }
+      await oneShot(twin, INSTALL, `Install "${config.install.command}" in ${config.install.directory}`, redact);
     }
     // Command fixtures share the twin's package cache: the repository's, or the twin's own, which Compose made with the
     // source copy. A twin without a workspace has no cache of its own, so a fixture's container keeps one, removed with it.
@@ -471,6 +481,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     for (const [index, fixture] of fixtures.entries()) {
       await onStep(`Loading fixture ${index + 1} of ${fixtures.length}`);
       await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage), fixtureCache);
+    }
+    // Each app's build runs once, in config order, after the install and fixtures and before any app starts; its output
+    // stays in the workspace the app starts from.
+    for (const build of result.builds) {
+      await onStep(`Building ${build.app}`);
+      await oneShot(twin, build.service, `Build "${build.command}" of app ${build.app}`, redact);
     }
     if (names.length) {
       await onStep('Starting twin');

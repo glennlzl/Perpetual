@@ -145,19 +145,20 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
 
   /**
    * Where a failed preparation stopped: a service's setup or the test accounts, when the twin names that service as the
-   * one that failed; the install or a fixture by its step; and otherwise the container most likely to have caused it,
-   * which stopped (build) or never became healthy (healthy), with its app's or service's commands. A failure that names
-   * none of these, such as Docker's own, has no subject.
+   * one that failed; the install, an app's build or a fixture by its step; and otherwise the container most likely to
+   * have caused it, which stopped (build) or never became healthy (healthy), with its app's or service's commands. A
+   * failure that names none of these, such as Docker's own, has no subject.
    */
   async function diagnose({ dataDir, id, config, step, error }: { dataDir: string; id: string; config: TwinConfig; step: string; error: unknown }): Promise<Diagnosis> {
     const containers = await twinContainers(dataDir, id), message = String((error as Error)?.message ?? error);
     // The twin prefixes a service's own failure with its title; the step alone also covers the controller's work after it.
     const service = Object.keys(config.services).find(item => services[item] && message.startsWith(`${services[item].title}:`));
-    const fixture = /^Loading fixture (\d+) of (\d+)$/.exec(step);
+    const fixture = /^Loading fixture (\d+) of (\d+)$/.exec(step), built = /^Building (.+)$/.exec(step)?.[1];
     let found: Pick<Diagnosis, 'stage' | 'subject'> = { stage: 'build' }, named: string[] = [];
     if (step.startsWith('Setting up ') || step === 'Creating test accounts') {
       found = { stage: step === 'Creating test accounts' ? 'account' : 'build', ...(service ? { subject: `Service ${code(service)}` } : {}) };
     } else if (step === 'Installing dependencies' && config.install) found = { stage: 'build', subject: `Install in ${code(config.install.directory)}: ${code(config.install.command)}` };
+    else if (built !== undefined && Object.hasOwn(config.apps, built)) found = { stage: 'build', subject: appSubject(config, built) };
     else if (fixture) {
       // Fixtures of blocked services are skipped, so the step's numbers name the config's fixture only when none was.
       const item = Number(fixture[2]) === config.fixtures.length ? config.fixtures[Number(fixture[1]) - 1] : undefined;
