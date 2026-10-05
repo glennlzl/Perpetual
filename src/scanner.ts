@@ -68,9 +68,14 @@ async function manifests(root: string) {
 
 async function gitValue(root: string, args: string[]) {
   try {
-    const { stdout } = await gitReadOnly(root, args, { timeout: 2000, maxBuffer: 16 * 1024 });
+    const { stdout } = await gitReadOnly(root, args, { timeout: 10_000, maxBuffer: 16 * 1024 });
     return stdout.trim() || null;
-  } catch { return null; }
+  } catch (error) {
+    // Git's own exit, as for a detached HEAD, no commit, no origin or no repository, means the value is absent. A git
+    // that timed out or never ran gave no answer, and a scan without it would lose the commit it describes.
+    if (typeof (error as { code?: unknown }).code === 'number') return null;
+    throw new Error('Could not read the repository\'s branch and commit. Try again.');
+  }
 }
 
 function safeRemote(remote: string | null) {

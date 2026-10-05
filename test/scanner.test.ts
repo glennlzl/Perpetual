@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -152,6 +152,20 @@ test('returns read-only git identity without remote credentials', async t => {
   assert.equal(scan.repo.branch, 'feature/demo');
   assert.equal(scan.repo.remote, 'https://github.com/org/repo.git');
   assert.doesNotMatch(JSON.stringify(scan), /credential-do-not-output|someone|token=hidden/);
+});
+
+test('a git that gives no answer fails the scan instead of erasing its branch and commit', async t => {
+  const root = await fixture(t, { 'package.json': { name: 'app' } });
+  // A git killed before it answers, as a timeout leaves it.
+  const bin = await fixture(t, { git: '#!/bin/sh\nkill -KILL $$\n' });
+  await chmod(path.join(bin, 'git'), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${saved}`;
+  t.after(() => { process.env.PATH = saved; });
+  await assert.rejects(scanRepository(root), /Could not read the repository's branch and commit/);
+  await writeFile(path.join(bin, 'git'), '#!/bin/sh\necho "fatal: not a git repository" >&2\nexit 128\n');
+  const { repo } = await scanRepository(root);
+  assert.deepEqual([repo.branch, repo.sha, repo.remote], [null, null, null], 'Git answering that there is no repository leaves them absent.');
 });
 
 test('withholds guessed install commands for unrelated nested packages without a root workspace', async t => {
