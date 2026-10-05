@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSandbox, destroySandbox, inspectSandbox, listSandboxes } from '../src/sandbox/cua.ts';
+import { createSandbox, destroySandbox, inspectSandbox, listSandboxes, sandboxMcpCommand } from '../src/sandbox/cua.ts';
 
 // A docker CLI stand-in for one owned desktop on a local socket. It keeps its engine's state in state.json; no container
 // starts. Its computer-server is a local HTTP server that answers the readiness check.
@@ -86,4 +86,22 @@ test('destroying a sandbox again while Docker is unreachable keeps its confirmed
   assert.deepEqual([records.get(failed.id)?.status, records.get(failed.id)?.cleanupError], ['failed', undefined]);
   await engine.set({ down: false });
   assert.equal((await inspectSandbox({ dataDir, id: created.id })).status, 'destroyed');
+});
+
+test('the guest Driver check says what failed', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const { id } = await createSandbox({ dataDir });
+  for (const [exec, message] of [
+    [{ stderr: 'Error response from daemon: unable to find user perpetual: no matching entries in passwd file', code: 126 }, /^The guest has no user perpetual\./],
+    [{ stdout: 'cua-driver 0.27.0\n' }, /^The guest has cua-driver 0\.27\.0\. Install Cua Driver 0\.28\.2 /],
+    [{ stderr: 'OCI runtime exec failed: exec failed: unable to start container process: exec: "/usr/local/bin/cua-driver": stat /usr/local/bin/cua-driver: no such file or directory: unknown', code: 127 }, /^Install Cua Driver 0\.28\.2 /],
+    // The desktop stopped after its inspection.
+    [{ stderr: 'Error response from daemon: container is not running', code: 1 }, /^The guest Driver check failed\./],
+  ] as const) {
+    await engine.set({ exec });
+    await assert.rejects(sandboxMcpCommand({ dataDir, id, user: 'perpetual' }), { message }, JSON.stringify(exec));
+  }
+  await engine.set({ exec: { stdout: 'cua-driver 0.28.2\n' } });
+  const invocation = await sandboxMcpCommand({ dataDir, id });
+  assert.deepEqual(invocation.args.slice(-3), [(await listSandboxes({ dataDir }))[0].containerId, '/usr/local/bin/cua-driver', 'mcp']);
 });

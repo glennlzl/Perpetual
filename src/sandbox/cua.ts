@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import { localDockerEnvironment } from '../process.ts';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -110,12 +110,20 @@ export async function sandboxMcpCommand({dataDir, id, driverPath = '/usr/local/b
   // No host Driver and no user-supplied container identifiers are accepted.
   const args = ['--host', sandbox.dockerHost!, 'exec', '-i', '--user', user,
     '--env', 'CUA_DRIVER_PERMISSION_MODE=standard', sandbox.containerId!, driverPath];
+  const install = `Install Cua Driver ${CUA_VERSIONS.guestDriver} at the selected path inside the guest image. Host Driver fallback is disabled.`;
+  let version: string;
   try {
-    const {stdout} = await execute('docker', [...args, '--version'], {env: dockerEnvironment(), timeout: 15000, maxBuffer: 16384});
-    if (stdout.trim() !== `cua-driver ${CUA_VERSIONS.guestDriver}`) throw new Error('Version mismatch');
-  } catch {
-    throw new Error(`Install Cua Driver ${CUA_VERSIONS.guestDriver} at the selected path inside the guest image. Host Driver fallback is disabled.`);
+    ({stdout: version} = await execute('docker', [...args, '--version'], {env: dockerEnvironment(), timeout: 15000, maxBuffer: 16384}));
+  } catch (error) {
+    const failure = error as ExecFileException;
+    if (failure.killed) throw new Error('The guest Driver check timed out. Inspect the sandbox, then retry.');
+    if (/unable to find user|no matching entries in passwd/i.test(String(failure.stderr))) throw new Error(`The guest has no user ${user}. Choose --user with a guest username or UID.`);
+    // docker exec exits 126 or 127 when the guest cannot run the Driver path.
+    if (failure.code === 126 || failure.code === 127) throw new Error(install);
+    throw new Error('The guest Driver check failed. Inspect the sandbox, then retry.');
   }
+  version = version.trim();
+  if (version !== `cua-driver ${CUA_VERSIONS.guestDriver}`) throw new Error(/^cua-driver [\w.+-]{1,40}$/.test(version) ? `The guest has ${version}. ${install}` : install);
   return {command: 'docker', args: [...args, 'mcp']};
 }
 
