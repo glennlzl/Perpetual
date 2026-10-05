@@ -22,7 +22,7 @@ const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: 'p
 type HttpError = Error & { statusCode?: number };
 type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean> };
 const run = (id: string, sha: string, conclusion: string | null, { status = conclusion ? 'completed' : 'in_progress', attempt = 1, path = CI, branch = 'main', event = 'push' } = {}): WorkflowRun =>
-  ({ id, workflowId: '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
+  ({ id, workflowId: path === LINT ? '8' : '7', name: 'CI', path, event, status, conclusion, attempt, sha, branch, url: `https://github.com/owner/app/actions/runs/${id}`, createdAt: null, startedAt: null, updatedAt: null, jobs: [] });
 // A failed run as the view names it.
 const shown = (id: string, path = CI) => ({ id, name: 'CI', path, url: `https://github.com/owner/app/actions/runs/${id}` });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -129,6 +129,15 @@ test('a head whose runs passed opens nothing and is not read again; runs without
   assert.deepEqual(h.manager.view().repairs, []);
   assert.deepEqual(h.calls.runs, [A, B], 'The baseline is read once, and the passing head once.');
   assert.equal(a.contexts.length, 0);
+});
+
+test('a head is judged by the latest run of each workflow, as Build admission reads it: a newer run that passed clears an older failure', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  await h.failHead([run('2', B, 'failure'), run('3', B, 'success', { event: 'workflow_dispatch' })]);
+  await h.poll();
+  assert.deepEqual([h.manager.view().repairs, h.manager.view().head?.failed, a.contexts.length], [[], [], 0]);
+  await assert.rejects(h.manager.repair({ runId: '2' }), (error: HttpError) => error.statusCode === 409 && error.message === 'Choose a failed workflow run.');
 });
 
 test('configuration failures need a person with the reason, and never rerun or reach the agent', async t => {

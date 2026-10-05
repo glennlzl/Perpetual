@@ -5,7 +5,7 @@ import { failureText, redact } from '../redaction.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 import { SHA, short } from '../gate/rules.ts';
 import type { BranchHead, BranchHeadInput } from '../gate/github.ts';
-import type { WorkflowRun } from '../github-runs.ts';
+import { latestBranchBuildRuns, type WorkflowRun } from '../github-runs.ts';
 import type { FailedJob, GitHubFailure, PullRequestRead } from './github.ts';
 import { branchRuns, completedRuns, failedRun, passedRun, triage } from './triage.ts';
 
@@ -508,8 +508,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     if (!stale().length && passing.get(current.key) === sha) return;
     const { runs } = await github.runs({ repository: current.repository, sha, login });
     if (closed) return;
-    failing.set(current.key, { branch: current.branch, login, sha, runs: branchRuns(runs, current.branch).filter(failedRun).slice(0, 20).map(runOf) });
-    const completed = completedRuns(runs, current.branch);
+    // The latest run of each workflow is the build to judge, as Build admission reads it: an older failure of a
+    // workflow does not defeat its newer run that passed.
+    const latest = latestBranchBuildRuns(runs, sha, current.branch);
+    failing.set(current.key, { branch: current.branch, login, sha, runs: latest.filter(failedRun).slice(0, 20).map(runOf) });
+    const completed = completedRuns(latest, current.branch);
     if (!completed) return;
     if (completed.passed) {
       passing.set(current.key, sha);
@@ -636,7 +639,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
         // A repair of a commit the head moved past while its runs were read would be superseded at once.
         const latestHead = heads.get(current.key);
         if (latestHead?.branch !== head.branch || latestHead.login !== head.login || latestHead.sha !== head.sha) throw conflict(`The head of ${current.branch} moved. Reload the pipeline.`);
-        const id = String(runId), own = branchRuns(runs, current.branch), failed = own.filter(failedRun);
+        const id = String(runId), own = branchRuns(runs, current.branch), failed = latestBranchBuildRuns(runs, head.sha, current.branch).filter(failedRun);
         if (!failed.some(run => run.id === id)) {
           throw conflict(!runs.some(run => run.id === id) ? `This run is not at the head of ${current.branch}.` : own.some(run => run.id === id) ? 'Choose a failed workflow run.' : `This run is not a build of ${current.branch}.`);
         }
