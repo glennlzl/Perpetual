@@ -36,6 +36,7 @@ export const CHANGE_APPROACH = 'This is the same error as your last writes. Chan
 /** What the loop says on stderr when the model's provider stops it, before the provider's own error. */
 export const PROVIDER_STOPPED = 'The twin config author stopped: the model provider returned an error.';
 const STOPPED = 'The twin config author was stopped.', TIMED_OUT = 'The twin config author reached its time limit.';
+export const CONTEXT_FULL = 'The twin config author filled the model\'s context window.';
 const CONFIG_CREDENTIAL = `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.`;
 
 type Stream = 'stdout' | 'stderr';
@@ -246,6 +247,16 @@ function providerError(error: unknown, hide: (text: string) => string) {
   return JSON.stringify({ code, message: message(cause.message) });
 }
 
+/**
+ * Whether the provider refused a request longer than the model's context window, as the history the loop keeps grows to
+ * be: no refusal of the model, so a fresh attempt may well fit.
+ */
+function contextFull(error: unknown) {
+  const cause = RetryError.isInstance(error) ? error.lastError : error;
+  return APICallError.isInstance(cause) && cause.statusCode === 400
+    && /maximum context length|context[_ ]length[_ ]exceeded|context window|prompt is too long|exceeds the maximum number of tokens/i.test(cause.message);
+}
+
 /** Tokens and, when OpenRouter reports it, the cost of every model call so far, one a step. */
 type Usage = { steps: number; input: number; output: number; cost: number | null };
 function counted(usage: Usage, { usage: { inputTokens, outputTokens }, providerMetadata }: Pick<LanguageModelCallEndEvent, 'usage' | 'providerMetadata'>) {
@@ -374,6 +385,8 @@ export async function authorLoop({ workspace, prompt, model, services = registry
     // A model that does not write when it must ends its attempt as one at its step limit does: with what it wrote.
     if (ToolChoiceViolationError.isInstance(error)) { say(`✗ write_config: the model wrote nothing at step ${FORCED_WRITE_STEP}, when it had to.`); return 0; }
     if (signal?.aborted) { say(STOPPED, 'stderr'); return 1; }
+    // An attempt whose history outgrew the model's context ends as one at its step limit does: with what it wrote.
+    if (contextFull(error)) { say(CONTEXT_FULL); return 0; }
     say(PROVIDER_STOPPED, 'stderr');
     say(`Error: ${oneLine(providerError(error, protect), ERROR_LINE_CHARS)}`, 'stderr');
     return 1;

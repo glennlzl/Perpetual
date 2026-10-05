@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import aiPackage from 'ai/package.json' with { type: 'json' };
 import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
-import { CHANGE_APPROACH, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
+import { CHANGE_APPROACH, CONTEXT_FULL, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
 import { OPENCODE } from '../src/agents/opencode.ts';
 import type { Harness } from '../src/agents/opencode.ts';
 import { evidenceText, repositoryFacts } from '../src/environments/evidence.ts';
@@ -492,6 +492,15 @@ test('a long provider error is redacted before it is clipped, so its Error: line
   const { code: status, message } = JSON.parse(stderr[1].replace(/^Error: /, '')) as { code: number; message: string };
   assert.deepEqual([status, message], [402, `${'x'.repeat(ERROR_MESSAGE_CHARS - 5)}[REDA…`]);
   assert.ok(!stderr.some(line => line.includes(KEY.slice(0, 5))));
+});
+
+test('a history that outgrows the model’s context ends the attempt with what it wrote, not as a refusal', async t => {
+  const overflow = { error: { status: 400, message: 'This endpoint\'s maximum context length is 200000 tokens. However, you requested about 250000 tokens.' } };
+  const { job } = await attempt(t, [{ calls: [write(valid)] }, overflow]);
+  const written = await job.promise;
+  assert.equal(written.error, undefined);
+  assert.equal(written.text, valid);
+  assert.deepEqual(written.logs?.split('\n'), ['✓ write_config', CONTEXT_FULL, 'Usage: 1 step, 100 input tokens, 20 output tokens.']);
 });
 
 test('provider errors protect credential shapes before clipping without a supplied secret value', async t => {
