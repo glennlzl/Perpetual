@@ -31,6 +31,7 @@ MilestoneCheck =
 ## Independent milestone checks
 
 - The fixture evaluates a step's checks itself, on the live page, after the step's actions, each waiting up to 10 seconds for its condition. The checks come from the approved case snapshot; journey code contains none and never supplies an observed value.
+- `text-absent`, `read-number` and `compare-number` also hold on a page whose data has not arrived yet, so they pass only on an observation made once the current document's network was idle, or at the 10-second limit for a page that never goes idle.
 - Before judging the page, the fixture replaces every `{run}` in a check with the run's token. Under [check version](../journeys.md#check-version) 2, `text-visible` also reads visible text fields, text areas and selects the application filled, never a password field or a field the journey edited on the current page, nor visible text inside an editable region (`contenteditable`) the journey edited there; `text-absent` passes exactly when `text-visible` would fail.
 - `read-number` finds visible elements whose own text contains `label`, walks up at most 3 ancestors, and parses the first number after the label. Since an ancestor's text includes its siblings, only separators (no letters or digits) may sit between the label and the number. It accepts `1,240`, `1240.5`, `-3` and `$12.00`, and fails if it finds no number. Captured values are kept per case.
 - `compare-number` reads the value the same way and compares it with the named capture.

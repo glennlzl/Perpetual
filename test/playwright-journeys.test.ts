@@ -29,7 +29,7 @@ const page=(title:string,body:string)=>`<!doctype html><title>${title}</title><b
 // does, and a message sent over it after that.
 const SOCKET="const SOCKET_URL=location.origin.replace('http','ws')+'/socket',socket=new WebSocket(SOCKET_URL),open=new Promise(resolve=>socket.addEventListener('open',()=>{socket.send(JSON.stringify({type:'hello'}));resolve();})),say=message=>open.then(()=>socket.send(JSON.stringify(message)));";
 function application({persist=true}:{persist?:boolean}={}){
-  const state={name:'Original Name',body:'Original body',credits:10,notes:0,failRename:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
+  const state={name:'Original Name',body:'Original body',credits:10,notes:0,items:[] as string[],failRename:false,failDelete:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
   const server=http.createServer((req,res)=>{
     const url=new URL(req.url!,'http://app'),signedIn=/session=1/.test(req.headers.cookie||'');hosts.add(req.headers.host);
     if(req.method!=='GET')posts.push(`${req.method} ${url.pathname}`);
@@ -63,6 +63,13 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/compose'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.body=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/compose')return send(page('Compose',`<h1>Compose</h1><div id=editor contenteditable role=textbox aria-label=Body>${state.body}</div><button id=save>Save</button>
         <script>save.onclick=()=>fetch('/compose',{method:'POST',body:editor.textContent}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+      // Items the page lists from a request it makes once loaded, answered 400 ms later. A broken delete answers like a working one.
+      if(url.pathname==='/items'&&req.method==='POST'){state.items.push(body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/items/delete'&&req.method==='POST'){if(!state.failDelete)state.items=state.items.filter(item=>item!==body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/items/list')return void setTimeout(()=>{res.writeHead(200,{'content-type':'text/html'});res.end(state.items.map(item=>`<li><span>${item}</span> <button>Delete</button></li>`).join(''));},400);
+      if(url.pathname==='/items')return send(page('Items',`<h1>Items</h1><label>Title <input id=title></label><button id=add>Add</button><ul id=list></ul>
+        <script>const load=()=>fetch('/items/list').then(r=>r.text()).then(html=>{list.innerHTML=html;});add.onclick=()=>fetch('/items',{method:'POST',body:title.value}).then(load);
+        list.onclick=event=>{if(event.target.tagName==='BUTTON')fetch('/items/delete',{method:'POST',body:event.target.closest('li').querySelector('span').textContent}).then(load);};load();</script>`));
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -587,6 +594,37 @@ test('a text check never reads what the journey typed into an editable region',{
   f.app.state.failRename=false;
   const events=await runSpec(target,composeSpec(reload),{item:composed}),seen=events.find(event=>event.type==='journey-step'&&event.stepId==='see'&&event.status!=='running');
   assert.deepEqual([seen?.status,f.app.state.body],['completed',seen?.evidence?.match(/“(Body [a-z0-9]{8})”/)?.[1]]);
+});
+
+// A journey that adds an item, deletes it and reopens the list, whose items arrive after the page has loaded.
+const listed={id:'listed',name:'Add and delete an item',goal:'Add an item, delete it and see it gone.',isolation:'shared',selected:true,needsReview:false,
+  steps:[{id:'add',title:'Add an item',checks:[{type:'text-visible',value:'Item {run}'}]},{id:'delete',title:'Delete the item',checks:[{type:'text-absent',value:'Item {run}'}]}],
+  preconditions:[],expectedOutcomes:['The deleted item is no longer listed.'],assertions:[]} satisfies Omit<BrowserCase,'evidence'>;
+const listSpec=`import { test } from 'perpetual';
+test('Add and delete an item', async ({ page, journey }) => {
+  await journey.milestone('add', async () => {
+    await page.goto('/items');
+    await page.getByLabel('Title').fill(\`Item \${journey.run}\`);
+    await Promise.all([page.waitForResponse('**/items'), page.getByRole('button', { name: 'Add' }).click()]);
+    await page.goto('/items');
+  });
+  await journey.milestone('delete', async () => {
+    await Promise.all([page.waitForResponse('**/items/delete'), page.getByRole('listitem').filter({ hasText: \`Item \${journey.run}\` }).getByRole('button', { name: 'Delete' }).click()]);
+    await page.goto('/items');
+  });
+});
+`;
+
+test('an absent text is judged once the reopened page has loaded its data, so a broken delete fails',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  validateJourneySpec(listSpec,listed);
+  f.app.state.failDelete=true;
+  assert.deepEqual(ended(await runSpec(target,listSpec,{item:listed})),['add:completed','delete:failed'],'The item is listed again once the reopened list arrives.');
+  assert.equal(f.app.state.items.length,1);
+  f.app.state.failDelete=false;
+  assert.deepEqual(ended(await runSpec(target,listSpec,{item:listed})),['add:completed','delete:completed']);
+  assert.equal(f.app.state.items.length,1,'Only the broken delete kept its item.');
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{

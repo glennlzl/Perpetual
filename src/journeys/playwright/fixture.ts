@@ -144,12 +144,16 @@ function unjudged(page: Page | undefined, guard: Guard) {
   return page.url() !== 'about:blank' && navigationAllowed(page.url(), allowed) ? null : 'The current page is outside approved origins.';
 }
 
+// Checks that also hold on a page whose data has not arrived yet, an absent text or a placeholder number, pass only on
+// an observation made once the page's network was idle.
+const SETTLED = new Set<Check['type']>(['text-absent', 'read-number', 'compare-number']);
+
 // Actions return before the page settles, so a check waits for its condition up to the check timeout. A page no check
 // can judge stops the journey for review instead, at once after a refused navigation, else once the timeout passes.
 // The page is judged by the check with the run's token in place of {run}; the result keeps the check as written.
 async function verify<C extends Check>(page: () => Page | undefined, check: C, captures: Captures, timeout: number, guard: Guard, record?: (page: Page) => (check: EvaluatedCheck) => void): Promise<{ stop: string } | EvaluatedCheck<C>> {
   const deadline = Date.now() + timeout, judged = resolveCheck(check, TOKEN), filled = checkTemplate(check).includes(RUN) ? { resolved: checkTemplate(judged) } : {};
-  for (;;) {
+  for (let settled = false;;) {
     const target = page(), reason = unjudged(target, guard), late = Date.now() >= deadline;
     if (reason && (guard.refused || late)) return { stop: reason };
     if (!reason) {
@@ -157,7 +161,11 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
       let result: Observation;
       // Browser errors can contain page text; keep only a fixed reason. A page is judgeable only while it is open.
       try { result = await observe(target!, judged, captures); } catch { result = { passed: false, error: 'The current page could not be checked.' }; }
-      if (result.passed || result.final || late) {
+      // A document whose network was already idle resolves at once; one still loading its data is observed again once
+      // it is idle, or judged as it is at the deadline.
+      const settle = result.passed && !late && !settled && SETTLED.has(check.type);
+      if (settle && (settled = await target!.waitForLoadState('networkidle', { timeout: Math.max(1, deadline - Date.now()) }).then(() => true, () => false))) continue;
+      if (!settle && (result.passed || result.final || late)) {
         // A passed read-number check always observed its number.
         if (check.type === 'read-number' && result.passed) captures[check.name] = result.observed!;
         const { final: _final, ...evaluated } = result;
@@ -166,6 +174,7 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
         return complete;
       }
     }
+    settled = false;
     await wait(POLL_MS);
   }
 }
