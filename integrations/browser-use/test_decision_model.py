@@ -10,7 +10,7 @@ from browser_use.llm.messages import UserMessage
 from pydantic import BaseModel, Field
 
 from decision_model import DecisionChatOpenAI
-from runner import model_failure_kind
+from runner import model_failure_kind, safe_error
 
 
 class Decision(BaseModel):
@@ -108,6 +108,19 @@ class DecisionProtocol(unittest.IsolatedAsyncioTestCase):
                     await self.invoke(reply)
                 self.assertEqual(model_failure_kind(caught.exception), "invalid_output")
                 self.assertNotIn("Another decision", str(caught.exception))
+                self.assertEqual(safe_error(caught.exception), "The model returned an invalid browser decision. Choose a model with reliable function calling.")
+
+    async def test_unreachable_and_slow_providers_reach_the_ui_as_their_cause(self):
+        for failure, message in [(httpx.ConnectError("connection refused"), "Could not connect to the model provider. Check the model endpoint and network."),
+                                 (httpx.ReadTimeout("read timed out"), "The model provider timed out. Retry or choose a faster model.")]:
+            def serve(request):
+                raise failure
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+                model = DecisionChatOpenAI(model="fixture", api_key="fixture-only-key", base_url="https://model.example.test/v1", http_client=client, max_retries=0, max_completion_tokens=8192)
+                with self.subTest(message=message), self.assertRaises(ModelProviderError) as caught:
+                    await model.ainvoke([UserMessage(content="Observe the actual page")], output_format=Decision)
+            self.assertEqual(safe_error(caught.exception), message)
 
     async def test_truncation_is_never_accepted_even_when_arguments_parse(self):
         reply = response()

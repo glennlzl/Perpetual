@@ -308,6 +308,28 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await page.get_by_text("Balance").count(), 1)
         self.assertIn((self.server.server_port, "/credits"), REQUESTS)
 
+    async def test_an_unreachable_application_and_a_missing_report_are_named(self):
+        import socket
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        unreachable = f"http://127.0.0.1:{closed.getsockname()[1]}"
+        closed.close()
+        with self.assertRaises(runner.InputError) as caught:
+            async with runner.OwnedBrowser({"mode": "discover", "targetUrl": unreachable + "/", "allowedOrigins": [unreachable]}, [].append):
+                pass
+        self.assertEqual(runner.safe_error(caught.exception), "The application could not be opened: net::ERR_CONNECTION_REFUSED.")
+
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 2, "timeoutSeconds": 30})
+
+        async def ended_without_report(agent, **_):
+            # As when Browser Use cancels every model call at its own timeout: no report and no model error.
+            return agent.history
+        with patch.dict("os.environ", {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": url}), patch.object(runner, "emit", [].append), patch("browser_use.Agent.run", ended_without_report):
+            with self.assertRaises(runner.InputError) as caught:
+                await runner.discover(payload)
+        self.assertEqual(runner.safe_error(caught.exception), "The agent did not produce a valid discovery result.")
+
     async def test_tools_have_no_files_shell_or_evaluate(self):
         tools = runner.safe_tools(runner.discovery_schema())
         names = set(tools.registry.registry.actions)

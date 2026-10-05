@@ -411,7 +411,7 @@ class OwnedBrowser:
             lines = endpoint_file.read_text().splitlines()
             port = int(lines[0])
             if not 1 <= port <= 65535:
-                raise RuntimeError("Invalid owned browser endpoint.")
+                raise InputError("Invalid owned browser endpoint.")
             self.browser = Browser(
                 cdp_url=f"http://127.0.0.1:{port}", is_local=False, keep_alive=True,
                 user_data_dir=self.profile.name, downloads_path=str(Path(self.profile.name) / "downloads"),
@@ -428,7 +428,12 @@ class OwnedBrowser:
                 await self.track_page(page)
             self.stream_task = asyncio.create_task(self.stream_frames())
             page = await self.active_page()
-            await page.goto(self.payload["targetUrl"], wait_until="domcontentloaded")
+            try:
+                await page.goto(self.payload["targetUrl"], wait_until="domcontentloaded")
+            except PlaywrightError as error:
+                # Only Chromium's fixed network error code is kept, never the address or the page.
+                code = re.search(r"net::ERR_[A-Z_]+", str(error))
+                raise InputError(f"The application could not be opened: {code.group(0)}." if code else "The application could not be opened. Check that it is running at the target URL.") from None
             return self
         except BaseException:
             await self.close()
@@ -526,7 +531,7 @@ class OwnedBrowser:
             self.guard_error = True
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(page.close(), 3)
-            raise RuntimeError("Browser navigation guard could not be attached.")
+            raise InputError("Browser navigation guard could not be attached.")
 
     async def track_new_page(self, page):
         try:
@@ -546,7 +551,7 @@ class OwnedBrowser:
             return selected
         pages = [page for page in self.context.pages if not page.is_closed()]
         if not pages:
-            raise RuntimeError("The agent closed all browser pages.")
+            raise InputError("The agent closed all browser pages.")
         return pages[-1]
 
     async def stream_frames(self):
@@ -930,7 +935,7 @@ async def discover(payload):
         if not output:
             if owned.model_error:
                 raise InputError(owned.model_error)
-            raise RuntimeError("The agent did not produce a valid discovery result.")
+            raise InputError("The agent did not produce a valid discovery result.")
         cases, summary = accepted_proposals(payload, output.cases, output.summary)
         # Authenticated means an actual sign-in exchange succeeded, not that an account was supplied.
         return {"type": "discovery", "cases": cases, "summary": summary, "diagnostics": copy.deepcopy(owned.diagnostics), "authenticated": owned.auth_exchanges > 0}
@@ -963,6 +968,8 @@ def safe_error(error):
         return "The model response was truncated. Choose a model with a larger output limit."
     if any(isinstance(item, TimeoutError) for item in chain):
         return "Browser task exceeded its time limit."
+    if any(type(item).__name__ in {"DecisionProtocolError", "ValidationError"} for item in chain):
+        return "The model returned an invalid browser decision. Choose a model with reliable function calling."
     if any(type(item).__name__ == "ModelProviderError" for item in chain):
         return "The model provider rejected the request. Check credits and model access, or choose another model."
     return f"Browser task failed ({type(chain[0]).__name__})."
