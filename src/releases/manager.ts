@@ -110,10 +110,12 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         if(own(source).some(entry=>entry.source.sha===source.sha&&same(entry.target,target)&&entry.record.status==='deployed'))throw conflict('This commit is already deployed to this target.');
         const workflow=await github.verifyTarget(source,target);if(!workflowValid(workflow))throw new Error('Deployment workflow evidence is invalid.');
         await unchanged(before,target);
+        // The read-only preflight runs before the request is saved, so a stop during it never leaves a request whose
+        // outcome is uncertain: only one saved right before its POST can be.
+        await github.verifyCommit(source);await unchanged(before,target);
         const id=randomUUID(),time=new Date().toISOString(),entry:StoredRelease={id,source:structuredClone(source),target:structuredClone(target),gates:structuredClone(before.gates),workflow,
           record:{id,sha:source.sha,...target,status:'requesting',createdAt:time,updatedAt:time}};
         await save(next=>{if(next.releases.length>=1000)throw new Error('Release history is full. Preserve its records before continuing.');next.releases.push(entry);});
-        try{await github.verifyCommit(source);await unchanged(before,target);}catch(error){await update(id,{status:'failed',error:failureText(error,500)});throw error;}
         let remote:ReleaseRemote;
         try{remote=await github.create(entry);}catch(error){const refused=object(error)&&(error as {definitive?:unknown}).definitive===true;
           await update(id,{status:refused?'failed':'unknown',error:refused?'GitHub refused the deployment request. Check the workflow, permissions and required commit statuses.':'The deployment request outcome is unknown. Check its status before deploying again.'});return;

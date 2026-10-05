@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReleaseManager, type ReleaseEvidence, type ReleaseGitHub, type ReleaseRequest } from '../src/releases/manager.ts';
@@ -122,6 +122,20 @@ test('fresh remote Build or branch refusal prevents deployment despite cached ga
   const f=await fixture(t);await f.manager.configure(target);
   Object.assign(f.options.github,{verifyCommit:async()=>{throw new Error('The branch head changed.');}});
   await assert.rejects(f.manager.deploy({sha:SHA,target}),/branch head changed/);assert.equal(f.requests.length,0);
+});
+
+test('a stop during the read-only preflight leaves no request to recover as uncertain',async t=>{
+  const checking=deferred<void>(),hold=deferred<void>();
+  const f=await fixture(t,{verifyCommit:async()=>{checking.resolve();await hold.promise;}});
+  await f.manager.configure(target);const deploying=f.manager.deploy({sha:SHA,target});await checking.promise;
+  try{
+    // What a hard stop at this moment leaves on disk.
+    const copy=await mkdtemp(join(tmpdir(),'perpetual-release-'));t.after(()=>rm(copy,{recursive:true,force:true}));
+    await cp(join(f.dataDir,'releases'),join(copy,'releases'),{recursive:true});
+    const restarted=await createReleaseManager({...f.options,dataDir:copy});t.after(()=>restarted.close());
+    const view=await restarted.view();assert.deepEqual([view.current,view.canDeploy],[null,true]);
+  }finally{hold.resolve();await deploying;}
+  assert.equal(f.requests.length,1);
 });
 
 test('restart recovers an interrupted request as unknown and only reads the remote receipt',async t=>{
