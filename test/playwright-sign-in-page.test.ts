@@ -235,20 +235,29 @@ test('a journey that fails while signing in leaves no file holding the account',
   // A sign-in form that keeps what was typed and never signs in, until the journey's time limit, and one whose password
   // field is disabled once the email is typed, so the password cannot be entered.
   const fields='<label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>';
+  // A sign-in page's identifier step whose field turns disabled just after journey.signIn() finds the form: the page
+  // disables it once the form search has checked its visibility, so the search finds it editable, but the username
+  // cannot be entered.
+  const identifier='<form method=post action=/identify><label>Email <input type=email name=email autocomplete=username></label><button type=submit>Continue</button></form>'
+    +'<script>const field=document.querySelector("input"),visible=Element.prototype.checkVisibility;Element.prototype.checkVisibility=function(...options){if(this===field)queueMicrotask(()=>{field.disabled=true;});return visible.apply(this,options);};</script>';
+  // Each landing page, whether it is also the stage's sign-in page (only there is an identifier step accepted), the
+  // journey's time limit, and what the journey reports.
   const forms=[
-    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email></label>${fields}`,8,{stopCause:'deadline'}],
-    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email oninput="this.form.password.disabled=true"></label>${fields}`,40,{stopCause:'action',error:'The test account could not be entered.'}],
+    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email></label>${fields}`,false,8,{stopCause:'deadline'}],
+    [`<form onsubmit="event.preventDefault()"><label>Email <input type=email name=email oninput="this.form.password.disabled=true"></label>${fields}`,false,40,{stopCause:'action',error:'The test account could not be entered.'}],
+    [identifier,true,40,{stopCause:'action',error:'The test account could not be entered.'}],
   ] as const;
-  await Promise.all(forms.map(async([landing,timeoutSeconds,expected])=>{
+  await Promise.all(forms.map(async([landing,signInPage,timeoutSeconds,expected])=>{
     const app=await served(t,{landing});
     // The workspace, config and environment a journey process gets, kept after Playwright exits so its files can be read.
     const workspace=await mkdtemp(join(tmpdir(),'perpetual-failed-journey-'));t.after(()=>rm(workspace,{recursive:true,force:true}));
     const config=await writeJourneyWorkspace(workspace,{item:journey,targetUrl:app.url,timeoutSeconds,video:false});
     await writeFile(join(workspace,'journey.spec.mjs'),spec);
-    const env=journeyEnvironment(process.env,workspace,{hash:specHash(spec),targetUrl:app.url,allowedOrigins:[new URL(app.url).origin],credentials:account,events:false});
+    const env=journeyEnvironment(process.env,workspace,{hash:specHash(spec),targetUrl:app.url,allowedOrigins:[new URL(app.url).origin],credentials:account,events:false,...(signInPage?{signInUrl:app.url}:{})});
     const stdout=await new Promise<string>(resolve=>execFile(process.execPath,[PLAYWRIGHT_CLI,'test','--config',config],{cwd:workspace,env},(_error,out)=>resolve(String(out))));
     const facts=stdout.split('\n').filter(line=>line.startsWith('{"type":"result"')).map(line=>JSON.parse(line).result);
     assert.deepEqual(facts.map(({stopCause,error})=>({stopCause,...(error?{error}:{})})),[expected],landing);
+    assert.deepEqual(app.posts,[],'No sign-in request reached the application.');
     const files=(await readdir(workspace,{recursive:true,withFileTypes:true})).filter(entry=>entry.isFile()).map(entry=>join(entry.parentPath,entry.name));
     assert.ok(files.some(file=>file.includes(join(workspace,'output'))),'Playwright wrote its output for the failed test.');
     for(const file of files){const text=await readFile(file,'utf8');assert.ok(!text.includes(account.username)&&!text.includes(account.password),file);}
