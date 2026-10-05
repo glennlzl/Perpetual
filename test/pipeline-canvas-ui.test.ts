@@ -163,3 +163,32 @@ test('a changed gate verdict reads the release at once, so Deploy follows it bet
   await expect(deploy).toBeEnabled();
   assert.deepEqual(pageErrors, []);
 });
+
+test('a source reload a gate asks for runs after a pipeline change saves, and a failed one offers Try again', { timeout: 60000 }, async t => {
+  let pipeline = withBeta(), scanned = sha, failState = false;
+  const write = Promise.withResolvers<void>(); t.after(() => write.resolve());
+  const { page, refresh, open } = await openApp(t, async (path, request) => {
+    if (path === '/api/state') return failState ? { status: 503, json: { error: 'The controller is restarting.' } } : { json: { ...pipelineState(pipeline), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha: scanned }, delivery: { source: [], build: [], production: [] } } } };
+    if (path === '/api/gate') return { json: { repoPath, sha: scanned, stages: {}, production: null } };
+    if (path === '/api/pipeline/action') { await write.promise; pipeline = applyPipelineAction(pipeline, request.postDataJSON()); return { json: { pipeline } }; }
+  });
+  await open();
+  // The Source card by its node, since a confirmation in progress hides the canvas from role queries.
+  const source = page.locator('.react-flow__node[data-id="source"]');
+  await expect(source.getByText('aaaaaaa', { exact: true })).toBeVisible();
+  // A pause is saving when the gate reports that it moved the managed source to the next commit.
+  await page.getByRole('button', { name: 'Pause transition from Beta to Production', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Pause transition', exact: true }).click();
+  scanned = 'b'.repeat(40);
+  await refresh('/api/gate', '/build/src/lib/stage-gate.ts', 'gateChanges');
+  await expect(source.getByText('aaaaaaa', { exact: true })).toBeVisible();
+  write.resolve();
+  await expect(source.getByText('bbbbbbb', { exact: true })).toBeVisible();
+  // A reload that fails says so with Try again, which reads the moved source.
+  failState = true; scanned = 'c'.repeat(40);
+  await refresh('/api/gate', '/build/src/lib/stage-gate.ts', 'gateChanges');
+  await expect(page.getByRole('alert')).toContainText('The controller is restarting.');
+  failState = false;
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(source.getByText('ccccccc', { exact: true })).toBeVisible();
+});

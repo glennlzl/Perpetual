@@ -11,8 +11,11 @@ import type { ScanRepo } from './App';
 
 const ICONS: Record<string, LucideIcon> = { idle: CircleDashed, passed: CircleCheck, failed: CircleX, blocked: CircleAlert };
 
-/** The gate view for the scanned source; onSourceMoved runs when the controller moved it to another commit. */
-export function useStageGates(repo: ScanRepo | null | undefined, onSourceMoved: () => Promise<void>) {
+/**
+ * The gate view for the scanned source; onSourceMoved runs when the controller moved it to another commit, and again a
+ * second later while it reports that it could not reload yet, such as while a pipeline change saves.
+ */
+export function useStageGates(repo: ScanRepo | null | undefined, onSourceMoved: () => Promise<boolean>) {
   const [view, setView] = useState<GateView | null>(null);
   const path = repo?.path;
   useEffect(() => {
@@ -25,7 +28,13 @@ export function useStageGates(repo: ScanRepo | null | undefined, onSourceMoved: 
   const moved = sourceMoved(view, repo);
   const reload = useRef(onSourceMoved);
   reload.current = onSourceMoved;
-  useEffect(() => { if (moved) void reload.current(); }, [moved]);
+  useEffect(() => {
+    if (!moved) return undefined;
+    let stopped = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = async () => { if (!await reload.current() && !stopped) timer = setTimeout(attempt, 1000); };
+    void attempt();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [moved]);
   return view?.repoPath === path ? view : null;
 }
 
