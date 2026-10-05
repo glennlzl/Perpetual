@@ -128,8 +128,9 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before checking deployments.');
         const pending=own(before.source).filter(entry=>active(entry.record)||entry.source.sha===before.source!.sha).slice(-20);
         for(const entry of pending){
-          // The current account must match the one which requested this deployment.
-          if(entry.source.login!==before.source.login)continue;
+          // The current account must match the one which requested this deployment; an unresolved one names that account.
+          if(entry.source.login!==before.source.login){const other=`Requested by ${entry.source.login}. Connect GitHub as that account to check its status.`;
+            if(active(entry.record)&&entry.record.error!==other)await update(entry.id,{error:other});continue;}
           try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
             if(remote)await update(entry.id,{...remote,error:undefined});
           }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');

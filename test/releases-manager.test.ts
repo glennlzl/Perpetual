@@ -114,6 +114,15 @@ test('an unresolved deployment prevents changing destinations or deploying a new
   await assert.rejects(f.manager.deploy({sha:OTHER,target}),/unresolved/);assert.equal(f.requests.length,1);
 });
 
+test('an unresolved deployment requested by another account names that account instead of being skipped silently',async t=>{
+  let reads=0;const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status:'queued'};}});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const other=evidence();other.source!.login='reviewer';f.setEvidence(other);
+  const view=await f.manager.refresh();
+  assert.equal(reads,0,'Only the requesting account reads the deployment.');
+  assert.deepEqual([view.current?.status,view.current?.error,view.canDeploy],['queued','Requested by owner. Connect GitHub as that account to check its status.',false]);
+});
+
 test('a stale confirmation cannot deploy to a destination changed by another tab',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.configure({...target,environment:'other'});
   const confirmed={sha:SHA,target};await assert.rejects(f.manager.deploy(confirmed),/target changed/);assert.equal(f.requests.length,0);
