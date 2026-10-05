@@ -459,9 +459,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // A paused recording stream would otherwise hold shutdown open.
   const videoStreams=new Set<ServerResponse>();
   const reply=(res: ServerResponse,status: number,data: unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
+  // A body over its limit is still read to its end and discarded, so its client gets the refusal and the connection stays
+  // usable; one that runs on past this many more bytes is cut off, and its connection closed.
+  const DISCARDED=16*1024*1024;
   async function body(req: IncomingMessage,limit=65536): Promise<RequestInput> {
     const chunks: Buffer[]=[];let size=0;
-    for await(const chunk of req){size+=chunk.length;if(size>limit)throw new Error('Request exceeds the allowed size.');chunks.push(chunk);}
+    for await(const chunk of req){size+=chunk.length;if(size<=limit)chunks.push(chunk);else if(size>limit+DISCARDED)break;}
+    if(size>limit)throw new Error('Request exceeds the allowed size.');
     const content=Buffer.concat(chunks).toString('utf8');
     const input: unknown=content?JSON.parse(content):{};
     // A JSON null or scalar has no fields: reject it here instead of failing on its first field.
@@ -826,7 +830,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         const input=await body(req);return reply(res,200,createPreviewPlan(state.scan,input.environment||'alpha'));
       }
       return reply(res,404,{error:'Not found.'});
-    } catch(error) {const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});}
+    } catch(error) {
+      // A body cut off before its end would stall the connection's next request: close the connection instead.
+      if(req.destroyed)res.shouldKeepAlive=false;
+      const statusCode=(error as HttpError).statusCode??400;return reply(res,[404,409,502].includes(statusCode)?statusCode:400,{error:failureText(error,1000)});
+    }
   });
   onCleanup(()=>server.listening?new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())):undefined);
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{listeningPort=(server.address() as AddressInfo).port;resolve();});});
