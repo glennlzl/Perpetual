@@ -177,7 +177,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     if (!checked && !skipped) return value;
     return { ...value, health: { ...(checked ? { checkedAt: iso(checked.at), ok: checked.ok, consecutiveFailures: healthFailures.get(item.id) || 0 } : {}), ...(skipped ? { skippedInUseAt: iso(skipped) } : {}) } };
   }
-  function skipHealth(id: string) { if (!((healthSkips.get(id) || 0) >= (healthChecks.get(id) || 0))) healthSkips.set(id, Date.now()); }
+  // A skip is recorded when none is, the environment's first due check included, or the last one is older than the last check.
+  function skipHealth(id: string) { const last = healthSkips.get(id); if (last === undefined || last < (healthChecks.get(id) || 0)) healthSkips.set(id, Date.now()); }
   const serialized = () => JSON.stringify(state);
   function budget() { if (Buffer.byteLength(serialized()) > 30 * 1024 * 1024) throw new Error('Local metadata storage is full. Export your history and choose a new data directory.'); }
   function persist() { return saves.run(async () => { retainDiagnostics(state.environments); budget(); await writeStateFile(file, serialized()); }); }
