@@ -59,6 +59,13 @@ test('Service options are checked as each service reads them, with placeholders 
   assert.deepEqual(serviceOptionErrors({ services: { database: { anything: true } } }, { services: fixtures }), []);
 });
 
+test('An SQL fixture is refused when the config is saved unless its service provides DATABASE_URL', () => {
+  const config = validateTwinConfig({ services: { redis: {}, postgres: {}, supabase: {} }, fixtures: [
+    { service: 'redis', query: 'select 1' }, { service: 'postgres', query: 'select 1' }, { service: 'supabase', sql: 'seed.sql' }, { service: 'redis', command: 'npm run seed' },
+  ] });
+  assert.deepEqual(serviceOptionErrors(config), ['fixtures[0]: redis does not provide DATABASE_URL, which SQL fixtures use.']);
+});
+
 test('A placeholder names a variable and a port its service declares, so a typo is refused when the config is saved', () => {
   const config = (servicesConfig: object, env: Record<string, string>) => validateTwinConfig({ services: servicesConfig, apps: { web: { start: 'npm start', port: 3000, env } } });
   const services = { postgres: {}, supabase: { functions: { env: { HOOK_SECRET: '{{secrets.HOOK_SECRET}}' } } }, secrets: { names: ['HOOK_SECRET', 'SESSION_SECRET'] }, emulate: { services: ['github'] }, stripe: { fixtures: 'billing/stripe.json' } };

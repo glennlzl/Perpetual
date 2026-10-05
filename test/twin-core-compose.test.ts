@@ -142,6 +142,12 @@ test('Directories reach Compose literally, so it never fills them from the contr
     ['/workspace/i$${GH_TOKEN}', '/workspace/x$${GH_TOKEN:-none}', '/workspace/w$$HOME']);
 });
 
+test('An app named like a property every object has is no service container', () => {
+  const id: string = 'constructor', named = validateTwinConfig({ apps: { [id]: { start: 'node app.js', port: 3000 } } }, { services: fixtures });
+  const { compose: file } = composeTwin({ project: 'p', owner: 'o', environment: 'e', source: '/s', config: named, services: [], ports: { [`apps.${id}`]: 43100 } });
+  assert.deepEqual(file.services[id].ports, ['127.0.0.1:43100:3000']);
+});
+
 test('Unknown variables and names in mappings are reported', () => {
   const broken = validateTwinConfig({ services: { mail: {} }, apps: { web: { start: 'x', port: 1, env: { A: '{{mail.NOPE}}' } } } }, { services: fixtures });
   assert.throws(() => composeTwin({ project: 'p', owner: 'o', environment: 'e', source: '/s', config: broken, services: [mail], ports: { ...ports, 'apps.web': 1 } }),

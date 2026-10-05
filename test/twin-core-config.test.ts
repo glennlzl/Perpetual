@@ -36,8 +36,16 @@ test('An install step is normalized like an app directory and command', () => {
     [{ install: { directory: 'web' } }, /install\.command must be a non-empty command/],
     [{ install: { directory: '../outside', command: 'npm ci' } }, /install\.directory must stay inside/],
     [{ install: { command: 'npm ci' }, apps: { install: { start: 'x', port: 1 } } }, /App "install" has the same name as the install step/],
+    // Every twin with an app copies its source in a step of this name.
+    [{ apps: { source: { start: 'x', port: 1 } } }, /App "source" has the same name as the step that copies the source; rename the app\./],
   ];
   for (const [input, error] of cases) assert.throws(() => validate(input), error);
+});
+
+test('An app gets its port as PORT: an env PORT can only repeat it', () => {
+  assert.deepEqual(validate({ apps: { web: { start: 'x', port: 3000, env: { PORT: 3000 } } } }).apps.web.env, { PORT: '3000' });
+  // Its health check probes port, which an app listening elsewhere would never answer.
+  assert.throws(() => validate({ apps: { web: { start: 'x', port: 3000, env: { PORT: '8080' } } } }), { message: 'apps.web.env.PORT must be 3000, the app\'s port; set port instead.' });
 });
 
 test('Setup order follows service placeholders and keeps config order otherwise', () => {

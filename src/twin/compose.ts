@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { APPS, INSTALL, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
+import { APPS, INSTALL, PORT_VARIABLE, SOURCE, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
 import { relative } from './paths.ts';
 import { loopbackCommand } from './loopback.ts';
 import { containerLogging } from './logging.ts';
@@ -32,13 +32,11 @@ const CACHE = '/perpetual-cache';
 // Each manager's documented cache location. pnpm needs its store named: on another filesystem than the
 // project it would otherwise make one at the project's root, inside the workspace.
 export const PACKAGE_CACHE_ENV = { COREPACK_HOME: `${CACHE}/corepack`, npm_config_cache: `${CACHE}/npm`, npm_config_store_dir: `${CACHE}/pnpm-store`, XDG_CACHE_HOME: `${CACHE}/xdg-cache`, YARN_CACHE_FOLDER: `${CACHE}/yarn`, BUN_INSTALL_CACHE_DIR: `${CACHE}/bun` };
-/** The one-shot service that copies the source snapshot into the twin's workspace volume. */
-export const SOURCE = 'source';
+// The config names these, so its validation keeps every app off them.
+export { PORT_VARIABLE, SOURCE };
 /** The twin's own volume holding its source, dependencies and build output; removed with the twin. */
 export const WORKSPACE_VOLUME = 'workspace';
 export const PACKAGE_CACHE_MOUNT = `${PACKAGE_CACHE}:${CACHE}`;
-/** The variable every app gets its port in. */
-export const PORT_VARIABLE = 'PORT';
 const SERVICE_HEALTH = { interval: '2s', timeout: '5s', retries: 90 };
 const APP_HEALTH = { interval: '5s', timeout: '5s', retries: 3, start_period: '30m' };
 
@@ -146,7 +144,7 @@ export function composeTwin({ project, owner, environment: id, source, config, s
   for (const service of ready) for (const [variable, value] of Object.entries(provided[service.id])) (offered[variable] ??= new Map()).set(service.id, value);
   const apps: { id: string; url: string; directory: string }[] = [];
   for (const [appId, app] of Object.entries(config.apps)) {
-    if (compose.services[appId]) fail(`App "${appId}" has the same name as a service container; rename the app.`);
+    if (Object.hasOwn(compose.services, appId)) fail(`App "${appId}" has the same name as a service container; rename the app.`);
     const automatic: Record<string, string> = {};
     for (const [variable, sources] of Object.entries(offered)) {
       if (Object.hasOwn(app.env, variable)) continue;

@@ -5,8 +5,8 @@ import { access, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, posix, resolve } from 'node:path';
 import YAML from 'yaml';
-import { APPS, ID, INSTALL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
-import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, SOURCE, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
+import { APPS, ID, INSTALL, SOURCE, SQL_URL, addressText, fail, leaveOutBlocked, placeholders, resolvePlaceholders, serviceOptionErrors, setupOrder, validateTwinConfig } from './config.ts';
+import { APP_IMAGE, nodeImage, HOST, HOST_GATEWAY, LABELS, LOOPBACK, PACKAGE_CACHE, PACKAGE_CACHE_ENV, PACKAGE_CACHE_MOUNT, WORKSPACE, WORKSPACE_VOLUME, addressKey, addressUrl, appCommand, composeTwin, formatEnv, hostUrl, portKey, variables } from './compose.ts';
 import { missingInputs } from './inputs.ts';
 import { services as registry } from './registry.ts';
 import type { JsonObject, TwinFixture } from './config.ts';
@@ -29,8 +29,6 @@ const TWIN = 'twin';
 /** Per-machine state a service shares across twins, e.g. one self-hosted instance. */
 const SHARED = 'twin-services';
 const TWIN_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-/** SQL fixtures run psql against this variable of their service. */
-export const SQL_URL = 'DATABASE_URL';
 const SQL_CLIENT = 'postgres:17-alpine';
 const SECRET_NAME = /secret|token|passw|private|credential|key$/i;
 /** Read by the docker CLI itself, so never passed through its environment. */
