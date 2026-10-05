@@ -8,22 +8,27 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
-import { createReleasePoller, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import { createReleasePoller, gatesReleasable, releaseChanges, releaseForSource, releaseRequest, type ReleaseConfirmation } from '@/lib/production-release';
+import type { GateView } from '../../contract/gate.ts';
 import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
 type FocusFallback = Parameters<typeof useReturnFocus>[0];
 
 /**
- * One visible-page poller for the source, shared by the Production card and its Badge. `gateKey` names the journey gates'
- * verdicts, which decide whether Deploy is allowed, so a changed verdict reads the release at once.
+ * One visible-page poller for the source, shared by the Production card and its Badge. The journey gates decide whether
+ * Deploy is allowed, so a changed verdict or report error reads the release at once, and while they allow the scanned
+ * commit the release is read again soon until it allows it too.
  */
-export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined, gateKey = '') {
+export function useReleases(repoPath: string | null | undefined, scannedSha: string | null | undefined, gates: GateView | null = null) {
   const sha = scannedSha ?? null;
   const [read, setRead] = useState<{ repoPath: string; sha: string | null; view: ReleaseReply | null; error: string | null } | null>(null);
   const refresh = useRef<(() => void) | null>(null);
+  const ready = useRef(false);
+  ready.current = gatesReleasable(gates, sha);
+  const gateKey = JSON.stringify([gates?.production, Object.values(gates?.stages ?? {}).map(gate => [gate.sha, gate.status, gate.statusError])]);
   useEffect(() => {
     if (!repoPath) return undefined;
-    const poller = createReleasePoller({ repoPath, controller: api,
+    const poller = createReleasePoller({ repoPath, controller: api, gatesReady: () => ready.current,
       onChange: view => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && JSON.stringify(previous.view) === JSON.stringify(view) ? previous : { repoPath, sha, view, error: null }),
       onError: error => setRead(previous => previous?.repoPath === repoPath && previous.sha === sha && previous.error === error ? previous : { repoPath, sha, view: previous?.repoPath === repoPath && previous.sha === sha ? previous.view : null, error }),
     });
@@ -31,8 +36,8 @@ export function useReleases(repoPath: string | null | undefined, scannedSha: str
     const unsubscribe = releaseChanges.subscribe(() => poller.refresh());
     return () => { refresh.current = null; unsubscribe(); poller.stop(); };
   }, [repoPath, sha]);
-  const gates = useRef(gateKey);
-  useEffect(() => { if (gates.current !== gateKey) { gates.current = gateKey; refresh.current?.(); } }, [gateKey]);
+  const verdicts = useRef(gateKey);
+  useEffect(() => { if (verdicts.current !== gateKey) { verdicts.current = gateKey; refresh.current?.(); } }, [gateKey]);
   return read && read.repoPath === repoPath && read.sha === sha ? { view: releaseForSource(read.view, repoPath, sha), error: read.error } : { view: null, error: null };
 }
 

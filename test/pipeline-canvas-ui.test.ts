@@ -166,6 +166,25 @@ test('a changed gate verdict reads the release at once, so Deploy follows it bet
   assert.deepEqual(pageErrors, []);
 });
 
+test('Deploy follows the passed gates\' commit statuses reaching GitHub, which change no gate verdict', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
+  let reported = false, releaseReads = 0;
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(pipeline) };
+    if (path === '/api/gate') return { json: { repoPath, sha, stages: { [beta]: { id: 'gate-1', stageId: beta, sha, status: 'passed', detectedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } }, production: { status: 'ready', sha } } satisfies GateReply };
+    if (path === '/api/releases') { releaseReads++; return { json: { ...release, target, canDeploy: reported, blockedReason: reported ? null : 'Every Sandbox gate must pass or be explicitly released and reported for this commit.' } satisfies ReleaseReply }; }
+  });
+  await open();
+  const deploy = page.getByRole('button', { name: 'Deploy', exact: true });
+  await expect(deploy).toBeDisabled();
+  const before = releaseReads;
+  reported = true;
+  await expect(deploy).toBeEnabled();
+  assert.ok(releaseReads > before);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a source reload a gate asks for runs after a pipeline or source change saves, also when Try again is pressed meanwhile', { timeout: 60000 }, async t => {
   let pipeline = withBeta(), scanned = sha, failState = false;
   const write = Promise.withResolvers<void>(), save = Promise.withResolvers<void>(); t.after(() => { write.resolve(); save.resolve(); });

@@ -1,3 +1,4 @@
+import type { GateView } from '../../../contract/gate.ts';
 import type { ReleaseRecord, ReleaseReply, ReleaseTarget, ReleaseView } from '../../../contract/releases.ts';
 import type { Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
@@ -37,20 +38,31 @@ export const releaseChanges = {
 export const releasePending = (view: ReleaseReply | null | undefined) => ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
 
 /**
+ * Whether the journey gates allow a release of the scanned commit as far as the page can read them: Production is Ready
+ * there, and every stage's gate passed or was released there without a report error. Each gate then reports its commit
+ * status to GitHub, which the release requires and the gate view does not show.
+ */
+export const gatesReleasable = (gates: GateView | null | undefined, sha: string | null | undefined) => Boolean(sha && gates?.production?.sha === sha
+  && Object.values(gates.stages).every(gate => gate.sha === sha && ['passed', 'released'].includes(gate.status) && !gate.statusError));
+/** Whether Deploy waits only for those reports: the gates allow the commit and a target is set, but the release does not allow it yet. */
+export const releaseAwaitingGates = (view: ReleaseReply | null | undefined, gatesReady: boolean) => gatesReady && Boolean(view?.target) && !view?.canDeploy && view?.current?.status !== 'deployed';
+
+/**
  * Source-bound reads clear stale deployment eligibility when the controller cannot be read. Each read checks the GitHub
- * session, so the release is read every `activeDelay` only while it is pending and otherwise every `idleDelay`; a
+ * session, so the release is read every `activeDelay` only while it is pending or awaits the gates' reports, given
+ * `gatesReady` (see gatesReleasable), and otherwise every `idleDelay`. A failed read keeps the last view's cadence; a
  * refresh reads it at once.
  */
-export function createReleasePoller({ repoPath, controller, onChange, onError, activeDelay = 3000, idleDelay = 60000, document = globalThis.document, timers = globalThis }: { repoPath: string; controller: Controller; onChange: (view: ReleaseReply | null) => void; onError?: (message: string | null) => void; activeDelay?: number; idleDelay?: number; document?: PageVisibility | null; timers?: Timers }) {
-  let pending = false;
-  return createVisiblePoller({ document, timers, interval: () => pending ? activeDelay : idleDelay,
+export function createReleasePoller({ repoPath, controller, onChange, onError, gatesReady = () => false, activeDelay = 3000, idleDelay = 60000, document = globalThis.document, timers = globalThis }: { repoPath: string; controller: Controller; onChange: (view: ReleaseReply | null) => void; onError?: (message: string | null) => void; gatesReady?: () => boolean; activeDelay?: number; idleDelay?: number; document?: PageVisibility | null; timers?: Timers }) {
+  let last: ReleaseReply | null = null;
+  return createVisiblePoller({ document, timers, interval: () => releasePending(last) || releaseAwaitingGates(last, gatesReady()) ? activeDelay : idleDelay,
     async read() {
       const reply = await controller(`/api/releases?${new URLSearchParams({ repoPath })}`) as ReleaseReply;
       if (reply?.repoPath !== repoPath) throw new Error('The source changed. Reload the pipeline.');
       return reply;
     },
     onResult(result) {
-      pending = result.ok && releasePending(result.value);
+      if (result.ok) last = result.value;
       onChange(result.ok ? result.value : null);
       onError?.(result.ok ? null : result.error instanceof Error ? result.error.message : 'Release status unavailable. Check status to retry.');
     },

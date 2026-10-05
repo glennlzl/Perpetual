@@ -451,8 +451,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const build = useMemo(() => watchedBuildSummary(github), [github]);
   const buildStatus = useMemo(() => watchedBuildStatus(github, buildReadError), [github, buildReadError]);
   const deployments = useGitHubDeployments(scan?.repo?.path, sha, githubSource);
-  const gateVerdicts = JSON.stringify([gates?.production?.status, Object.values(gates?.stages ?? {}).map(gate => [gate.sha, gate.status])]);
-  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha, gateVerdicts);
+  const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha, gates);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
   const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
