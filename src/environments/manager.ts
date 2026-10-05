@@ -330,8 +330,9 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       // Only a creation for the stage's own source owns its plan and draft.
       const scope = scopeId(context), owns = context.repair === undefined;
       if (scopesBusy.has(scope) || state.environments.some(item => item.scope === scope && IN_PROGRESS.includes(item.status))) throw conflict('This stage already has an environment operation in progress.');
-      const previous = state.environments.filter(item => item.scope === scope && holdsResources(item));
-      if (state.environments.filter(item => holdsResources(item) && !previous.includes(item)).length >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
+      // Creates admitted but not yet recorded count too, or creates admitted together would all pass the same count.
+      const previous = state.environments.filter(item => item.scope === scope && holdsResources(item)), admissions = [...admitted.values()].reduce((sum, count) => sum + count, 0);
+      if (state.environments.filter(item => holdsResources(item) && !previous.includes(item)).length + admissions >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
       const id = randomUUID(), release = usage.acquire(context, { environmentId: id, operation: 'create' });
       // Set before any closure uses it; admission failures before that only compare against it.
       let queued = false, environment!: EnvironmentRecord, directoryCreated = false, recorded = false;

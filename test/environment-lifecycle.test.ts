@@ -252,6 +252,22 @@ test('a stage at the local limit can replace its own twin, and another stage can
   assert.equal(manager.summaries(context.key).filter(holdsResources).length, 8);
 });
 
+test('creates admitted together count toward the local limit before their environments are recorded', async t => {
+  const { manager } = await fixture(t);
+  const stages = Array.from({ length: 9 }, (_, index) => ({ ...context, stageId: `stage-${index}` }));
+  for (const stage of stages) await manager.savePlan(stage, plan);
+  for (const stage of stages.slice(0, 7)) {
+    const { environment } = await manager.create(stage);
+    assert.equal((await manager.awaitIdle(environment.id)).status, 'ready');
+  }
+  // Seven twins hold resources, and two stages create at once: only one fits.
+  const [created, refused] = await Promise.allSettled([manager.create(stages[7]), manager.create(stages[8])]);
+  assert.deepEqual([created.status, refused.status], ['fulfilled', 'rejected']);
+  assert.match(String(refused.status === 'rejected' && refused.reason), /local limit: eight/);
+  assert.equal(created.status === 'fulfilled' && (await manager.awaitIdle(created.value.environment.id)).status, 'ready');
+  assert.equal(manager.summaries(context.key).filter(holdsResources).length, 8);
+});
+
 test('failed plan validation releases create admission', async t => {
   const { manager, usage } = await fixture(t);
   await manager.savePlan(context, { services: { mailpit: {} } });
