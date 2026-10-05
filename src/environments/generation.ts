@@ -1,4 +1,4 @@
-// A detected stage's twin config, written by an agent and verified by building the twin (docs/SANDBOX.md, "Generated
+// A detected stage's twin config, written by an agent and verified by building the twin (docs/twins.md, "Generated
 // twin config"). The controller owns the loop: at most four attempts, each authored (../twin/authoring.ts), validated,
 // then prepared as the environment's real twin, which counts only when it is ready, every app answers on its address and,
 // when a service can, a test account exists. Why an attempt failed is the next attempt's feedback, staged and redacted:

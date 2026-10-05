@@ -109,7 +109,7 @@ export const authoringPrompt = (feedback: boolean) => feedback
   ? `The previous twin config failed; ${FEEDBACK} says why. The draft is already in ${CONFIG}. Start from ${FEEDBACK}, the unwired variables and the CI and deploy evidence in ${EVIDENCE}; fix ${CONFIG} for the application in ${REPO}/ within your first few steps, then refine it, following ${INSTRUCTIONS}.`
   : `The draft is already in ${CONFIG}. Start from the unwired variables and the CI and deploy evidence in ${EVIDENCE}; edit ${CONFIG} for the application in ${REPO}/ within your first few steps, then refine it, following ${INSTRUCTIONS}.`;
 
-/** TWIN.md: the twin config format and rules (docs/SANDBOX.md), and the catalog of the services a config may use. */
+/** TWIN.md: the twin config format and rules (docs/twins.md), and the catalog of the services a config may use. */
 export function twinInstructions(services: TwinServices = registry) {
   return `# Writing a twin config
 
