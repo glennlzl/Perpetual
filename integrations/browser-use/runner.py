@@ -377,14 +377,20 @@ class OwnedBrowser:
         self.diagnostics = {"modelCalls": 0, "modelFailures": {"timeout": 0, "invalid_output": 0, "provider": 0, "other": 0}, "stepsWithoutActions": 0, "forcedFinalization": False, "actionCount": 0, "modelMs": 0, "inputTokens": 0, "outputTokens": 0}
 
     async def __aenter__(self):
-        from playwright.async_api import async_playwright
+        from playwright.async_api import Error as PlaywrightError, async_playwright
         from browser_use import Browser
         self.profile = tempfile.TemporaryDirectory(prefix="perpetual-browser-")
         try:
             self.playwright = await async_playwright().start()
-            self.context = await self.playwright.chromium.launch_persistent_context(
-                user_data_dir=self.profile.name, headless=True, viewport=VIEWPORT, accept_downloads=False,
-                service_workers="block", chromium_sandbox=True, args=list(CHROMIUM_ARGS))
+            try:
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=self.profile.name, headless=True, viewport=VIEWPORT, accept_downloads=False,
+                    service_workers="block", chromium_sandbox=True, args=list(CHROMIUM_ARGS))
+            except PlaywrightError as error:
+                # The sandbox stays on. Playwright's message, which holds no page data, only chooses the advice.
+                if "sandbox" in str(error).lower():
+                    raise InputError("Chromium could not start its sandbox. Run Perpetual as a user other than root, and on Linux allow unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor.") from None
+                raise InputError("Chromium could not start. Install it and its system libraries with integrations/browser-use/.venv/bin/python -m playwright install --with-deps chromium.") from None
             self.context.set_default_timeout(8000)
             self.context.set_default_navigation_timeout(20000)
             # Context interception catches a popup's very first request, before

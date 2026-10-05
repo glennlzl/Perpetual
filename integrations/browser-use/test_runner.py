@@ -181,6 +181,39 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("--host-resolver-rules=MAP host.docker.internal 127.0.0.1", launched["args"])
         self.assertIn("--remote-debugging-address=127.0.0.1", launched["args"])
 
+    def test_a_chromium_that_cannot_start_says_what_to_fix_and_keeps_its_sandbox(self):
+        import asyncio
+        from playwright.async_api import Error
+        launched = []
+
+        for logs, advice in [
+            # Playwright's report when the host refuses the sandbox, such as Ubuntu 23.10+ without unprivileged user namespaces.
+            ("Chromium sandboxing failed!\n================================\nTo avoid the sandboxing issue, do either of the following:", "allow unprivileged user namespaces"),
+            ("/home/user/.cache/ms-playwright/chromium-1243/chrome-linux/chrome: error while loading shared libraries: libnss3.so", "install --with-deps chromium"),
+        ]:
+            class Chromium:
+                async def launch_persistent_context(self, **options):
+                    launched.append(options)
+                    raise Error("BrowserType.launch_persistent_context: Failed to launch the browser process.\nBrowser logs:\n" + logs)
+
+            class Playwright:
+                chromium = Chromium()
+
+                async def stop(self):
+                    pass
+
+            class Starter:
+                async def start(self):
+                    return Playwright()
+
+            with self.subTest(advice=advice), patch("playwright.async_api.async_playwright", Starter), self.assertRaises(self.runner.InputError) as caught:
+                asyncio.run(self.runner.OwnedBrowser({"mode": "discover"}, emit_event=[].append).__aenter__())
+            message = self.runner.safe_error(caught.exception)
+            self.assertIn("Chromium could not start", message)
+            self.assertIn(advice, message)
+            self.assertNotIn("Browser logs", message)
+        self.assertTrue(launched and all(options["chromium_sandbox"] is True for options in launched))
+
     def test_one_invalid_proposal_does_not_discard_a_paid_discovery(self):
         class Proposal:
             def __init__(self, **value):
