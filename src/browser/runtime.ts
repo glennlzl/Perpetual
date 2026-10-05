@@ -18,7 +18,7 @@ export type WorkerError=Error&{cleanupIncomplete?:true;timedOut?:true};
 export type WorkerJob<T=void>={promise:Promise<T>;cancel():void};
 /** Supervisor-owned facts; child diagnostics use a separate, untrusted callback. Neither carries error text. */
 export type WorkerLifecycle={name:'worker-start'|'worker-stop'|'worker-signal'|'worker-exit'|'worker-close'|'worker-done'|'worker-diagnostic-truncated';reason?:'cancel'|'deadline'|'protocol'|'consumer'|'descendants';signal?:string;code?:number;failed?:boolean;cleanupIncomplete?:boolean;timedOut?:boolean};
-export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];errorSecrets?:unknown[];unavailable?:string;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
+export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];errorSecrets?:unknown[];unavailable?:string;groupOnly?:boolean;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
   // A worker speaks the event protocol, or only prints output.
   &({onEvent:(event:WorkerEvent)=>void;onOutput?:undefined}|{onOutput:(chunk:string,stream:WorkerStream)=>void;onEvent?:undefined});
 /** What a browser worker reads on its stdin: its mode and that mode's inputs. */
@@ -64,8 +64,9 @@ export function workerTimeoutMs({mode,timeoutSeconds}:{mode?:string;timeoutSecon
  * process group is joined before completion: descendants still running settleMs after the worker exits count as
  * owned processes remaining. stopSignal asks it to clean up before the group is killed.
  * With onOutput, the process speaks no event protocol: its stdout and stderr chunks go to onOutput, and a zero exit completes it.
+ * groupOnly says the process owns nothing but its group, so a forced kill leaves cleanup incomplete only while the group lives on.
  */
-export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],errorSecrets=[],unavailable='Browser runtime is unavailable.'}:SuperviseWorkerOptions):WorkerJob {
+export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],errorSecrets=[],unavailable='Browser runtime is unavailable.',groupOnly=false}:SuperviseWorkerOptions):WorkerJob {
   const child=spawn(command,args,{stdio:onDiagnostic?['pipe','pipe','pipe','pipe']:['pipe','pipe','pipe'],env,cwd,detached:process.platform!=='win32'}) as ChildProcessWithoutNullStreams;
   const lifecycle=(event:WorkerLifecycle)=>{try{onLifecycle?.(event);}catch{/* Evidence cannot interfere with supervision. */}};
   lifecycle({name:'worker-start'});
@@ -93,7 +94,7 @@ export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,
     if(settled||killTimer)return;terminalError ||= new Error(message);lifecycle({name:'worker-stop',reason});lifecycle({name:'worker-signal',signal:stopSignal});try{child.kill(stopSignal);}catch{}
     // Python closes its agent, Chromium and driver with separate 10-second bounds,
     // after up to 5 seconds finishing recordings. Give those cleanups time before killing the owned process group.
-    killTimer=setTimeout(()=>{forcedAt=Date.now();cleanupIncomplete=true;terminalError=new Error(`${terminalError?.message||'Browser operation stopped.'} Cleanup incomplete after forced termination; an owned browser or temporary profile may remain.`);signal('SIGKILL');},cleanupGraceMs);killTimer.unref();
+    killTimer=setTimeout(()=>{forcedAt=Date.now();if(!groupOnly){cleanupIncomplete=true;terminalError=new Error(`${terminalError?.message||'Browser operation stopped.'} Cleanup incomplete after forced termination; an owned browser or temporary profile may remain.`);}signal('SIGKILL');},cleanupGraceMs);killTimer.unref();
   }
   const promise=new Promise<void>((resolve,reject)=>{
     function done(error:unknown){if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);lifecycle({name:'worker-done',failed:Boolean(error),cleanupIncomplete,timedOut});error?reject(Object.assign(new Error(failure(error)),cleanupIncomplete?{cleanupIncomplete:true}:{},timedOut?{timedOut:true}:{})):resolve();}

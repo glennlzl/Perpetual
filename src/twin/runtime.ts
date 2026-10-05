@@ -46,13 +46,16 @@ export type ExecOptions = { env?: Record<string, string>; cwd?: string; signal?:
 export type Exec = (file: string, args: string[], options?: ExecOptions) => Promise<CommandOutput>;
 export type IsFree = (port: number) => Promise<boolean>;
 const COMMAND_TIMEOUT_MS = 15 * 60_000, CLEANUP_TIMEOUT_MS = 120_000, READ_TIMEOUT_MS = 20_000, LOG_LIMIT = 32_000;
-/** Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown. */
+/**
+ * Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown, so a CLI killed
+ * after ignoring its stop signal, as `docker run` does while its guest ignores it, leaves no cleanup once its group is gone.
+ */
 export const execCommand: Exec = async (file, args, { env, cwd, signal, timeoutMs = COMMAND_TIMEOUT_MS, outputLimitBytes = 64 * 1024 * 1024, onOutput } = {}) => {
   signal?.throwIfAborted();
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('A twin command needs a positive time limit.');
   const output = { stdout: '', stderr: '' };
   let outputLimited = false;
-  const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000,
+  const job = superviseWorker({ command: file, args, cwd, env: { ...process.env, ...env }, timeoutMs, cleanupGraceMs: 5000, groupOnly: true,
     unavailable: `${file} could not start.`, onOutput(chunk, stream) {
       output[stream] += chunk;
       if (Buffer.byteLength(output.stdout) + Buffer.byteLength(output.stderr) > outputLimitBytes) {

@@ -11,6 +11,22 @@ test('a twin command deadline stops the process instead of waiting for its work 
   await assert.rejects(execCommand(process.execPath, ['-e', 'setTimeout(()=>{},500)'], { timeoutMs: 40 }), { timedOut: true });
 });
 
+test('a twin command killed after ignoring its stop signal leaves no cleanup once its process group is gone', async () => {
+  let pid = 0;
+  const started = Date.now();
+  await assert.rejects(execCommand(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});console.log(process.pid);setInterval(()=>{},1000)'], {
+    timeoutMs: 1000, onOutput: chunk => { pid ||= Number(chunk.trim()); } }), (error: Error & { timedOut?: true; cleanupIncomplete?: true }) => {
+    assert.equal(error.message, 'Twin command exceeded its 1-second limit.');
+    assert.equal(error.timedOut, true);
+    // Its Docker resources belong to the twin's teardown; the process group was all it owned.
+    assert.equal(error.cleanupIncomplete, undefined);
+    return true;
+  });
+  assert.ok(Date.now() - started >= 5000, 'The command outlived its stop signal and was killed.');
+  assert.ok(pid > 0);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
+
 test('cancelling a twin command waits for its process to exit', async () => {
   const controller = new AbortController();
   let pid = 0;
