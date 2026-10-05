@@ -238,6 +238,7 @@ test('a failed first connection keeps Connect GitHub, while a failed pipeline re
   const empty = page.getByRole('main');
   await expect(empty.getByRole('heading', { name: 'Connect your GitHub', exact: true })).toBeVisible();
   await expect(empty.getByRole('button')).toHaveCount(1);
+  await expect(empty.getByRole('button', { name: 'Connect GitHub', exact: true }).locator('.brand-mark')).toHaveCount(1);
   await empty.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
   await page.getByRole('dialog', { name: 'Connect GitHub', exact: true }).getByRole('button', { name: 'Continue as acme', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Source', exact: true });
