@@ -18,7 +18,7 @@ export type JourneyFacts = { caseId: string; assertions: { passed?: unknown }[];
 type ChannelEvent = { caseId?: unknown; type?: unknown; status?: unknown; stepId?: unknown; assertions?: unknown; error?: unknown; eligible?: unknown; lifecycle?: unknown; feedback?: unknown };
 
 // Journey actions by Playwright step title; fixture reads stay private while explicit readiness waits are visible.
-const ACTIONS: [RegExp, string][] = [[/^Navigate\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag)\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear)\b/, 'input'], [/^Press\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^Hover\b/, 'hover'], [/^Scroll\b/, 'scroll'], [/^Wait for (?:timeout|URL|navigation|load state)\b/i, 'wait']];
+const ACTIONS: [RegExp, string][] = [[/^(?:Navigate|Go forward)\b/, 'navigate'], [/^Reload\b/, 'reload_page'], [/^Go back\b/, 'go_back'], [/^(?:Click|Double click|Tap|Check|Uncheck|Set checked|Drag|Mouse (?:down|up))\b/, 'click'], [/^(?:Fill|Type|Press sequentially|Clear|Insert)\b/, 'input'], [/^(?:Press|Key (?:down|up))\b/, 'send_keys'], [/^Select option\b/, 'select_option'], [/^(?:Hover|Mouse move)\b/, 'hover'], [/^(?:Scroll|Mouse wheel)\b/, 'scroll'], [/^Focus\b/, 'focus'], [/^Blur\b/, 'blur'], [/^Wait for (?:timeout|URL|navigation|load state|selector)\b/i, 'wait']];
 const FORWARDED = new Set<unknown>(['frame', 'journey-step']);
 const plain = (value: unknown) => String(value || '').replace(/\u001b\[[0-9;]*m/g, '').replace(/^\s*Error:\s*/, '');
 
@@ -53,7 +53,8 @@ export default class JourneyReporter implements Reporter {
     this.diagnosticBytes += Buffer.byteLength(line);
     try { writeSync(3, line); } catch { /* A missing/full diagnostic pipe must not affect Playwright. */ }
   }
-  sendActions() { this.write({ type: 'case', caseId: this.approved.id, actions: this.actions.slice(-150) }); }
+  // The latest actions, and how many there were in all.
+  sendActions() { this.write({ type: 'case', caseId: this.approved.id, actions: this.actions.slice(-150), actionCount: this.actions.length }); }
   onBegin() { this.sendActions(); }
   onStdOut(chunk: string | Buffer) {
     this.buffer += String(chunk);
