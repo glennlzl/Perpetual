@@ -39,5 +39,9 @@ test('release API scopes requests to the current managed repository and requires
   assert.equal((await post('/api/releases/deploy', { repoPath: '/another/source', sha: SHA })).status, 409);
   assert.equal((await post('/api/releases/deploy', { repoPath: dir, sha: SHA }, false)).status, 403);
   assert.equal((await post('/api/releases/configure', { repoPath: dir, target: { environment: 'preview' } })).status, 400);
+  // Abandon names one release of the current source, and needs the launch token like every write.
+  assert.deepEqual(await post('/api/releases/abandon', { repoPath: dir, id: 'release-elsewhere' }), { status: 404, body: { error: 'Release not found.' } });
+  assert.equal((await post('/api/releases/abandon', { repoPath: dir, id: 'release-elsewhere' }, false)).status, 403);
+  assert.equal((await post('/api/releases/abandon', { repoPath: '/another/source', id: 'release-elsewhere' })).status, 409);
   assert.equal((await fetch(`${app.url}/api/releases?repoPath=other`)).status, 409);
 });

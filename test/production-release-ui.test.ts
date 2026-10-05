@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -14,7 +14,7 @@ const target = { environment: 'production', productionEnvironment: true, workflo
 const release = (extra: Partial<ReleaseReply> = {}): ReleaseReply => ({ repoPath, sha: A, target, canDeploy: true, blockedReason: null, current: null, unresolved: null, recent: [], ...extra });
 
 // Mount the Production controls and update only their public props, as the App's release poll does.
-test('Production asks for a target without explanatory copy and deploys only the confirmed commit and target', { timeout: 60000 }, async t => {
+async function mount(t: TestContext) {
   const entry = `
     import React from 'react'; import {createRoot} from 'react-dom/client';
     import {ProductionRelease} from '/src/ProductionRelease.tsx'; import '/src/index.css';
@@ -44,6 +44,11 @@ test('Production asks for a target without explanatory copy and deploys only the
     await page.evaluate(detail => window.dispatchEvent(new CustomEvent('fixture:release', { detail })), { repoPath, view });
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   };
+  return { page, posts, pageErrors, render };
+}
+
+test('Production asks for a target without explanatory copy and deploys only the confirmed commit and target', { timeout: 60000 }, async t => {
+  const { page, posts, pageErrors, render } = await mount(t);
 
   // Without a target, Configure deployment is the next step; neither the card nor the dialog explains it.
   await render(release({ target: null, canDeploy: false, blockedReason: 'Configure a deployment target.' }));
@@ -80,5 +85,32 @@ test('Production asks for a target without explanatory copy and deploys only the
   await confirm.getByRole('button', { name: 'Deploy', exact: true }).click();
   await expect(confirm).toHaveCount(0);
   assert.deepEqual(posts.at(-1), { path: '/api/releases/deploy', body: { repoPath, sha: A, target } });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('an unresolved release offers Abandon, which a person confirms for that exact release', { timeout: 60000 }, async t => {
+  const { page, posts, pageErrors, render } = await mount(t);
+  const at = '2026-01-01T00:00:00Z', blockedReason = 'A deployment is unresolved. Check its status or abandon it before deploying again.';
+  const earlier = { id: 'release-0', sha: B, ...target, status: 'deploying' as const, logUrl: 'https://ci.example.test/runs/7', createdAt: at, updatedAt: at };
+  // An earlier commit's release, still deploying after the source moved on, keeps its logs and blocks Deploy.
+  await render(release({ canDeploy: false, blockedReason, unresolved: earlier }));
+  await expect(page.getByRole('link', { name: 'Logs', exact: true })).toHaveAttribute('href', earlier.logUrl);
+  await expect(page.getByRole('button', { name: 'Deploy', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Abandon', exact: true }).click();
+  const confirm = page.getByRole('alertdialog');
+  await expect(confirm.getByRole('heading')).toHaveText('Abandon deployment bbbbbbb?');
+  // One that ended meanwhile is not abandoned, and no other release takes its place.
+  for (const changed of [release({ recent: [{ ...earlier, status: 'deployed' }] }), release({ canDeploy: false, blockedReason, unresolved: { ...earlier, id: 'release-2' } })]) {
+    await render(changed);
+    await expect(confirm.getByRole('button', { name: 'Abandon', exact: true })).toBeDisabled();
+    await expect(confirm.getByRole('alert')).toBeVisible();
+  }
+  await render(release({ canDeploy: false, blockedReason, unresolved: earlier }));
+  await confirm.getByRole('button', { name: 'Abandon', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  assert.deepEqual(posts, [{ path: '/api/releases/abandon', body: { repoPath, id: 'release-0' } }]);
+  // A release that ended offers nothing to abandon.
+  await render(release({ current: { ...earlier, id: 'release-1', sha: A, status: 'failed' } }));
+  await expect(page.getByRole('button', { name: 'Abandon', exact: true })).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });

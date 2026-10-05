@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReleasePoller, gatesReleasable, releaseBadge, releaseForSource, releaseRequest, shownRelease } from '../client/src/lib/production-release.ts';
+import { abandonRequest, createReleasePoller, gatesReleasable, releaseAbandonable, releaseBadge, releaseForSource, releaseRequest, shownRelease } from '../client/src/lib/production-release.ts';
 import type { GateView, StageGate } from '../contract/gate.ts';
 import type { ReleaseRecord, ReleaseReply, ReleaseView } from '../contract/releases.ts';
 import type { PageVisibility, Timers } from '../client/src/lib/utils.ts';
@@ -30,6 +30,19 @@ test('only recorded deployment work spins; an unknown result remains unresolved 
   assert.equal(releaseBadge({ ...record('failed'), error: 'The deployment workflow failed.' })?.hint, 'The deployment workflow failed.');
   assert.equal(releaseBadge(record('deployed'))?.sha, 'ccccccc');
   assert.equal(releaseBadge(null), null);
+});
+
+test('an abandoned release reads Abandoned with who abandoned it, and Abandon stays bound to the confirmed release', () => {
+  assert.deepEqual(releaseBadge({ ...record('abandoned'), abandonedBy: 'owner' }), { label: 'Abandoned', tone: 'idle', active: false, hint: 'Abandoned by owner', sha: 'ccccccc' });
+  for (const status of ['unknown', 'queued', 'deploying'] as const) assert.equal(releaseAbandonable(record(status)), true, status);
+  for (const status of ['requesting', 'deployed', 'failed', 'inactive', 'abandoned'] as const) assert.equal(releaseAbandonable(record(status)), false, status);
+  assert.equal(releaseAbandonable(null), false);
+  const confirmed = { id: 'release-1', sha: SHA, environment: 'production' };
+  assert.deepEqual(abandonRequest(view({ current: record('queued') }), confirmed), { id: 'release-1' });
+  assert.deepEqual(abandonRequest(view({ current: record('failed'), unresolved: { ...record('deploying'), id: 'release-0' } }), { ...confirmed, id: 'release-0' }), { id: 'release-0' }, 'An earlier commit\'s unresolved release.');
+  assert.equal(abandonRequest(view({ current: record('deployed') }), confirmed), null, 'It ended meanwhile.');
+  assert.equal(abandonRequest(view({ current: { ...record('queued'), id: 'release-2' } }), confirmed), null, 'Another release is never abandoned in its place.');
+  assert.equal(abandonRequest(null, confirmed), null);
 });
 
 test('a deployment confirmation remains bound to the reviewed commit and target across polling', () => {

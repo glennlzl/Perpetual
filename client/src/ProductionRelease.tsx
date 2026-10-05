@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { ExternalLink, RefreshCw, Rocket, Settings2 } from 'lucide-react';
+import { Ban, ExternalLink, RefreshCw, Rocket, Settings2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
-import { createReleasePoller, gatesReleasable, releaseChanges, releaseForSource, releaseRequest, shownRelease, type ReleaseConfirmation } from '@/lib/production-release';
+import { abandonRequest, createReleasePoller, gatesReleasable, releaseAbandonable, releaseChanges, releaseForSource, releaseRequest, shownRelease, type ReleaseAbandonment, type ReleaseConfirmation } from '@/lib/production-release';
 import type { GateView } from '../../contract/gate.ts';
 import type { ReleaseReply, ReleaseTarget } from '../../contract/releases.ts';
 
@@ -88,19 +88,37 @@ function DeployDialog({ confirmation, view, pending, disabled, error, onClose, o
   </AlertDialog>;
 }
 
+// Ends an unresolved release in Perpetual only, after a person confirms that exact release.
+function AbandonDialog({ confirmation, view, pending, disabled, error, onClose, onAbandon, focusFallback }: {
+  confirmation: ReleaseAbandonment; view: ReleaseReply | null; pending: boolean; disabled: boolean; error: string;
+  onClose: () => void; onAbandon: (request: NonNullable<ReturnType<typeof abandonRequest>>) => void; focusFallback?: FocusFallback;
+}) {
+  const returnFocus = useReturnFocus(focusFallback);
+  const request = abandonRequest(view, confirmation);
+  return <AlertDialog open onOpenChange={open => { if (!open && !pending) onClose(); }}>
+    <AlertDialogContent onCloseAutoFocus={returnFocus}>
+      <AlertDialogHeader><AlertDialogTitle>Abandon deployment {confirmation.sha.slice(0, 7)}?</AlertDialogTitle><AlertDialogDescription className="break-words">Perpetual stops following this deployment to <strong>{confirmation.environment}</strong> and allows another. GitHub keeps its record.</AlertDialogDescription></AlertDialogHeader>
+      {!request && <p role="alert" className="text-sm text-destructive">The deployment changed. Close and review it again.</p>}
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      <AlertDialogFooter><AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={disabled || pending || !request} onClick={event => { event.preventDefault(); if (request) onAbandon(request); }}>{pending ? 'Abandoning…' : 'Abandon'}</AlertDialogAction></AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>;
+}
+
 /** Explicit deployment controls; the server rechecks the confirmed SHA's Build and journey gates. */
 export function ProductionRelease({ repoPath, view, readError, disabled = false }: { repoPath?: string; view: ReleaseReply | null | undefined; readError?: string | null; disabled?: boolean }) {
   const controls = useRef<HTMLDivElement>(null);
   const focusFallback = () => controls.current?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? null;
   const [configure, setConfigure] = useState(false);
   const [confirmation, setConfirmation] = useState<ReleaseConfirmation | null>(null);
+  const [abandoning, setAbandoning] = useState<ReleaseAbandonment | null>(null);
   const [pending, setPending] = useState(''), [error, setError] = useState('');
   const current = view && view.repoPath === repoPath ? view : null;
   const target = current?.target;
   // The release the stage Badge shows, an earlier commit's while it is unresolved, with its deployment and logs.
   const shown = shownRelease(current);
   if (!repoPath) return null;
-  async function act(operation: 'deploy' | 'refresh', input: Record<string, unknown> = {}) {
+  async function act(operation: 'deploy' | 'refresh' | 'abandon', input: Record<string, unknown> = {}) {
     if (pending) return false;
     setPending(operation); setError('');
     try { await api(`/api/releases/${operation}`, { repoPath, ...input }); releaseChanges.notify(); return true; }
@@ -111,10 +129,11 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
   return <div ref={controls} className="nodrag nopan flex w-80 max-w-full min-w-0 flex-wrap gap-2 [overflow-wrap:anywhere]">
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked || !current} onClick={() => { setError(''); setConfigure(true); }}><Settings2 />{target ? 'Deployment target' : 'Configure deployment'}</Button>
     <Button className="text-xs" variant="ghost" size="sm" disabled={locked} onClick={() => act('refresh')}><RefreshCw />{pending === 'refresh' ? 'Checking…' : 'Check status'}</Button>
+    {shown && releaseAbandonable(shown) && <Button className="text-xs" variant="ghost" size="sm" disabled={locked} onClick={() => { setError(''); setAbandoning({ id: shown.id, sha: shown.sha, environment: shown.environment }); }}><Ban />Abandon</Button>}
     {target && <Button className="text-xs" variant="outline" size="sm" disabled={locked || !current?.canDeploy || !current.sha} onClick={() => { if (current?.sha && current.target) { setError(''); setConfirmation({ sha: current.sha, target: { ...current.target } }); } }}><Rocket />Deploy</Button>}
     {shown?.url && <Button asChild className="text-xs" variant="link" size="sm"><a href={shown.url} target="_blank" rel="noopener noreferrer">Open deployment<ExternalLink /></a></Button>}
     {shown?.logUrl && <Button asChild className="text-xs" variant="link" size="sm"><a href={shown.logUrl} target="_blank" rel="noopener noreferrer">Logs<ExternalLink /></a></Button>}
-    {!confirmation && error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
+    {!confirmation && !abandoning && error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
     {readError && <p role="alert" className="basis-full break-words text-xs text-destructive">{readError}</p>}
     {!readError && !current && <p role="status" className="basis-full text-xs text-muted-foreground">Loading release status…</p>}
     {/* Why a configured target cannot be deployed yet; without one, Configure deployment is the next step. */}
@@ -122,5 +141,7 @@ export function ProductionRelease({ repoPath, view, readError, disabled = false 
     {configure && <TargetDialog repoPath={repoPath} target={target || null} onClose={() => setConfigure(false)} focusFallback={focusFallback} />}
     {confirmation && <DeployDialog confirmation={confirmation} view={current} pending={pending === 'deploy'} disabled={locked} error={error}
       onClose={() => { setConfirmation(null); setError(''); }} onDeploy={async request => { if (await act('deploy', request)) setConfirmation(null); }} focusFallback={focusFallback} />}
+    {abandoning && <AbandonDialog confirmation={abandoning} view={current} pending={pending === 'abandon'} disabled={locked} error={error}
+      onClose={() => { setAbandoning(null); setError(''); }} onAbandon={async request => { if (await act('abandon', request)) setAbandoning(null); }} focusFallback={focusFallback} />}
   </div>;
 }

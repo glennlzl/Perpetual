@@ -11,7 +11,8 @@ export interface ReleaseGate { id: string; stageId: string; sha: string; context
 export interface ReleaseEvidence { source: ReleaseSource | null; ready: boolean; reason?: string; gates: ReleaseGate[] }
 export interface ReleaseWorkflow { defaultBranch: string; defaultSha: string; workflowSha: string; defaultWorkflowSha: string }
 export interface ReleaseRequest { id: string; source: ReleaseSource; target: ReleaseTarget; gates: ReleaseGate[]; workflow: ReleaseWorkflow }
-export interface ReleaseRemote { deploymentId: string; status: 'queued' | 'deploying' | 'deployed' | 'failed' | 'inactive'; statusId?: string; url?: string; logUrl?: string }
+/** A deployment as GitHub reports it; error says why it ended without a status of its own, such as when GitHub no longer has it. */
+export interface ReleaseRemote { deploymentId: string; status: 'queued' | 'deploying' | 'deployed' | 'failed' | 'inactive'; statusId?: string; url?: string; logUrl?: string; error?: string }
 export interface ReleaseGitHub {
   verifyTarget(source: ReleaseSource, target: ReleaseTarget): Promise<ReleaseWorkflow>;
   verifyCommit(source: ReleaseSource): Promise<void>;
@@ -23,6 +24,7 @@ interface State { version: 1; targets: Record<string, ReleaseTarget>; releases: 
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const bounded = (value: unknown, max = 255): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
+const UNRESOLVED = 'A deployment is unresolved. Check its status or abandon it before deploying again.';
 const scope = (source: ReleaseSource) => JSON.stringify([source.key, source.repository.toLowerCase(), source.branch]);
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 const active = (record: ReleaseRecord) => ['requesting', 'unknown', 'queued', 'deploying'].includes(record.status);
@@ -63,8 +65,8 @@ function evidenceReason(evidence: ReleaseEvidence): string | null {
   return null;
 }
 function publicRecord(record:ReleaseRecord):ReleaseRecord{
-  const {id,sha,environment,productionEnvironment,workflowPath,status,createdAt,updatedAt,deploymentId,statusId,url,logUrl,error}=record;
-  return {id,sha,environment,productionEnvironment,workflowPath,status,createdAt,updatedAt,...(deploymentId?{deploymentId}:{}),...(statusId?{statusId}:{}),...(url?{url}:{}),...(logUrl?{logUrl}:{}),...(error?{error:failureText(error,500)}:{})};
+  const {id,sha,environment,productionEnvironment,workflowPath,status,createdAt,updatedAt,deploymentId,statusId,url,logUrl,error,abandonedBy}=record;
+  return {id,sha,environment,productionEnvironment,workflowPath,status,createdAt,updatedAt,...(deploymentId?{deploymentId}:{}),...(statusId?{statusId}:{}),...(url?{url}:{}),...(logUrl?{logUrl}:{}),...(error?{error:failureText(error,500)}:{}),...(abandonedBy?{abandonedBy}:{})};
 }
 function load(value: unknown): State {
   if (value === undefined) return {version:1,targets:{},releases:[]};
@@ -76,9 +78,9 @@ function load(value: unknown): State {
     if (!object(entry) || !bounded(entry.id) || !sourceValid(entry.source) || !workflowValid(entry.workflow) || !Array.isArray(entry.gates) || !entry.gates.length || entry.gates.some(gate=>!gateValid(gate)) || !object(entry.record)) throw invalid();
     const record=entry.record, target=releaseTarget(entry.target);
     if (record.id !== entry.id || record.sha !== entry.source.sha || record.environment !== target.environment || record.workflowPath !== target.workflowPath || record.productionEnvironment !== target.productionEnvironment
-      || !['requesting','unknown','queued','deploying','deployed','failed','inactive'].includes(String(record.status)) || !bounded(record.createdAt) || !bounded(record.updatedAt)
+      || !['requesting','unknown','queued','deploying','deployed','failed','inactive','abandoned'].includes(String(record.status)) || !bounded(record.createdAt) || !bounded(record.updatedAt)
       || ['deploymentId','statusId'].some(key=>record[key]!==undefined&&(typeof record[key]!=='string'||!/^\d+$/.test(record[key])))
-      || ['url','logUrl','error'].some(key=>record[key]!==undefined&&!bounded(record[key],4096))) throw invalid();
+      || ['url','logUrl','error'].some(key=>record[key]!==undefined&&!bounded(record[key],4096)) || record.abandonedBy!==undefined&&!bounded(record.abandonedBy)) throw invalid();
   }
   return {version:1,targets,releases:value.releases as unknown as StoredRelease[]};
 }
@@ -105,7 +107,7 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
     const pending=history.findLast(entry=>active(entry.record)&&entry!==selected),unresolved=pending?publicRecord(pending.record):null;
     let blockedReason=evidenceReason(evidence);
     if(!blockedReason&&!target)blockedReason='Configure a deployment target.';
-    if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason='A deployment is unresolved. Check its status before deploying again.';
+    if(!blockedReason&&source&&own(source).some(entry=>active(entry.record)))blockedReason=UNRESOLVED;
     if(!blockedReason&&current?.status==='deployed'&&target&&same(target,{environment:current.environment,productionEnvironment:current.productionEnvironment,workflowPath:current.workflowPath}))blockedReason='This commit is already deployed to this target.';
     if(!blockedReason&&(busy||closed))blockedReason=closed?'The controller is shutting down.':'A release operation is in progress.';
     return {sha:source?.sha??null,target:target?structuredClone(target):null,canDeploy:!blockedReason,blockedReason,current,unresolved,recent};
@@ -119,15 +121,17 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   const update=(id:string,changes:Partial<ReleaseRecord>)=>save(next=>{const entry=next.releases.find(item=>item.id===id);if(!entry)throw new Error('Release record is unavailable.');Object.assign(entry.record,changes,{updatedAt:new Date().toISOString()});});
   // A read that finds nothing new writes nothing, so observation can tell that GitHub has nothing new to report.
   const differs=(record:ReleaseRecord,changes:Partial<ReleaseRecord>)=>Object.entries(changes).some(([key,value])=>record[key as keyof ReleaseRecord]!==value);
-  // Reads the scope's unresolved releases from GitHub and, with all, its other releases at the current commit too. The
-  // connected account reads each one, whichever account requested it: a read changes nothing on GitHub, and the
-  // deployment it finds must match the release's identifier, commit, environment and deployment ID.
+  // Reads the scope's unresolved releases from GitHub and, with all, its other releases at the current commit too, except
+  // those a person abandoned. The connected account reads each one, whichever account requested it: a read changes
+  // nothing on GitHub, and the deployment it finds must match the release's identifier, commit, environment and
+  // deployment ID.
   const reconcile=(all:boolean)=>exclusive(async()=>{
     const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before checking deployments.');
-    const pending=own(before.source).filter(entry=>active(entry.record)||all&&entry.source.sha===before.source!.sha).slice(-20);
+    const pending=own(before.source).filter(entry=>active(entry.record)||all&&entry.source.sha===before.source!.sha&&entry.record.status!=='abandoned').slice(-20);
     for(const entry of pending){
       try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
-        if(remote&&differs(entry.record,{...remote,error:undefined}))await update(entry.id,{...remote,error:undefined});
+        const changes=remote&&{...remote,error:remote.error};
+        if(changes&&differs(entry.record,changes))await update(entry.id,changes);
       }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');
         const message=failureText(error,500)||'Could not confirm the deployment status. Check the connection and try again.';
         if(entry.record.error!==message)await update(entry.id,{error:message});}
@@ -137,7 +141,7 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
     view,
     async configure(input:unknown){
       await exclusive(async()=>{const target=releaseTarget(input),before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before configuring a deployment.');
-        if(own(before.source).some(entry=>active(entry.record)))throw conflict('A deployment is unresolved. Check its status before changing the target.');
+        if(own(before.source).some(entry=>active(entry.record)))throw conflict('A deployment is unresolved. Check its status or abandon it before changing the target.');
         await github.verifyTarget(before.source,target);await unchanged(before);await save(next=>{next.targets[scope(before.source!)]=target;});
       });return view();
     },
@@ -148,7 +152,7 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
         if(!target)throw conflict('Configure a deployment target.');
         if(input?.sha!==source.sha)throw conflict('The selected commit changed. Reload the pipeline.');
         if(!same(releaseTarget(input?.target),target))throw conflict('The deployment target changed. Review and confirm it again.');
-        if(own(source).some(entry=>active(entry.record)))throw conflict('A deployment is unresolved. Check its status before deploying again.');
+        if(own(source).some(entry=>active(entry.record)))throw conflict(UNRESOLVED);
         if(own(source).some(entry=>entry.source.sha===source.sha&&same(entry.target,target)&&entry.record.status==='deployed'))throw conflict('This commit is already deployed to this target.');
         const workflow=await github.verifyTarget(source,target);if(!workflowValid(workflow))throw new Error('Deployment workflow evidence is invalid.');
         await unchanged(before,target);
@@ -166,6 +170,19 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
       });return view();
     },
     async refresh(){await reconcile(true);return view();},
+    /**
+     * A person ends an unresolved request of the connected source, which Perpetual then no longer reads, so Deploy and
+     * Configure are available again. Nothing changes on GitHub.
+     */
+    async abandon(input:{id?:unknown}){
+      await exclusive(async()=>{
+        const before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before abandoning a deployment.');
+        const entry=own(before.source).find(item=>item.id===input?.id);
+        if(!entry)throw Object.assign(new Error('Release not found.'),{statusCode:404});
+        if(!active(entry.record))throw conflict('This deployment is no longer unresolved. Reload the pipeline.');
+        await update(entry.id,{status:'abandoned',abandonedBy:before.source.login,error:undefined});
+      });return view();
+    },
     async close(){closed=true;clearInterval(timer);await inFlight?.catch(()=>{});await saves.idle();},
   };
   // Background observation reads only unresolved releases, and backs off from the poll interval to a minute while GitHub

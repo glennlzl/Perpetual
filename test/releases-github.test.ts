@@ -85,6 +85,29 @@ test('reconciliation observes only the matching deployment and real status, disc
   assert.equal(seen.some(endpoint=>endpoint.includes('/deployments/11/statuses')),false);
 });
 
+test('a deployment GitHub no longer has ends its release, once the repository itself answers',async()=>{
+  const notFound=()=>Object.assign(new Error('failed'),{stderr:'gh: Not Found (HTTP 404)'});
+  const ended={deploymentId:'12',status:'failed',error:'The deployment no longer exists on GitHub.'};
+  let readable=true;const seen:string[]=[];
+  const deleted=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;seen.push(endpoint);
+    assert.equal(args[args.indexOf('--method')+1],'GET');
+    if(endpoint==='repos/acme/app'&&readable)return reply({default_branch:'main'});
+    throw notFound();}});
+  assert.deepEqual(await deleted.read({...input,deploymentId:'12'}),ended);
+  assert.deepEqual(seen,['repos/acme/app/deployments/12','repos/acme/app']);
+  // GitHub answers 404 for a repository the account cannot read as well: that ends nothing.
+  readable=false;
+  await assert.rejects(deleted.read({...input,deploymentId:'12'}),/Could not read the GitHub deployment/);
+  // A deployment removed between its read and its statuses' ends the same way.
+  const removed=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    if(endpoint.includes('/statuses'))throw notFound();
+    return reply(endpoint==='repos/acme/app'?{default_branch:'main'}:deployment);}});
+  assert.deepEqual(await removed.read({...input,deploymentId:'12'}),ended);
+  // Any other failure leaves the release as it is.
+  const unavailable=createReleaseGitHub({run:async()=>{throw Object.assign(new Error('failed'),{stderr:'gh: Server Error (HTTP 502)'});}});
+  await assert.rejects(unavailable.read({...input,deploymentId:'12'}),/Could not read the GitHub deployment/);
+});
+
 test('known deployment identity cannot silently switch to another deployment ID',async()=>{
   const github=createReleaseGitHub({run:async()=>reply({...deployment,id:13})});
   await assert.rejects(github.read({...input,deploymentId:'12'}),/does not match/);
