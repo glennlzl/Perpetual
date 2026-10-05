@@ -50,26 +50,39 @@ const caseOf=(current:JourneyCodeSnapshot,id:unknown)=>{
 const attemptsOf=(current:JourneyCodeSnapshot,id:string)=>current.runs.filter((run):run is VerificationRun&{verification:Verification}=>run.verification?.id===id).sort((a,b)=>a.verification.attempt-b.verification.attempt);
 const noticed=(run:VerificationRun,caseId:string,result:JourneyResult)=>Boolean(run.progress?.cases.find(item=>item.id===caseId)?.steps?.some(step=>step.status==='failed')||result.assertions?.some(item=>item.passed===false&&item.reached!==false));
 
+const UNSUPPORTED_CODE='Unsupported journey code state.',hex=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+const strings=(value:unknown)=>Array.isArray(value)&&value.every(item=>typeof item==='string');
+// Stored code always names its hash and reviewed case; anything else in the private state file was damaged or edited.
+function storedCode<T>(value:T):T{
+  if(value!==null&&value!==undefined&&(!isRecord(value)||typeof value.code!=='string'||!hex(value.hash)||!hex(value.caseHash)))throw new Error(UNSUPPORTED_CODE);
+  return value;
+}
+// A verification counts only as a checkpoint writes it; another record verified nothing, and the draft stays unverified.
+function checkpointed(draft:StoredSpec|null|undefined):StoredSpec|null{
+  const value:unknown=draft?.verification;
+  if(!draft)return null;
+  if(value===undefined||isRecord(value)&&typeof value.id==='string'&&Number.isInteger(value.checkVersion)&&['passed','failed','cancelled'].includes(value.status as string)
+    &&Number.isInteger(value.passes)&&(value.passes as number)>=0&&(value.passes as number)<=3&&[null,'caught','missed'].includes(value.control as string|null)&&strings(value.runIds)
+    &&(value.error===undefined||typeof value.error==='string')&&(value.readPolicy===undefined||typeof value.readPolicy==='string'))return draft;
+  const {verification:_verification,...kept}=draft;return kept;
+}
+
 /** Recover older code formats without granting an approval that never named a whole verification. */
 export function restoreJourneyCode(value:{specs:unknown;generationFailures:unknown},cases:readonly BrowserCase[],diagnostic:(value:unknown,limit?:number)=>string):JourneyCodeState{
   if(!isRecord(value.specs)||!isRecord(value.generationFailures))throw new Error('Unsupported code generation failure state.');
-  const specs={...value.specs} as Record<string,CaseSpecs|LegacySpec>;
-  for(const [caseId,spec] of Object.entries(specs)){
-    if(typeof (spec as Partial<LegacySpec>|null)?.code==='string'){
-      const {approvedAt,approvedRunId,...kept}=spec as LegacySpec;specs[caseId]={approved:null,draft:kept};
-    }else{
-      const pair=spec as CaseSpecs;
-      if(pair.approved&&(!Array.isArray(pair.approved.approvedRunIds)||pair.approved.approvedRunIds.length!==4)){
-        const {approvedAt,approvedRunIds,...kept}=pair.approved;specs[caseId]={approved:null,draft:pair.draft??kept};
-      }
-    }
-  }
+  const specs=Object.fromEntries(Object.entries(value.specs).map(([caseId,spec]):[string,CaseSpecs]=>{
+    if(!isRecord(spec))throw new Error(UNSUPPORTED_CODE);
+    if(typeof spec.code==='string'){const {approvedAt,approvedRunId,...kept}=storedCode(spec as unknown as LegacySpec);return [caseId,{approved:null,draft:checkpointed(kept)}];}
+    const pair=spec as unknown as CaseSpecs,approved=storedCode(pair.approved),draft=checkpointed(storedCode(pair.draft));
+    if(approved&&(!strings(approved.approvedRunIds)||approved.approvedRunIds.length!==4)){const {approvedAt,approvedRunIds,...kept}=approved;return [caseId,{approved:null,draft:draft??kept}];}
+    return [caseId,{...pair,draft}];
+  }));
   const generationFailures=Object.fromEntries(Object.entries(value.generationFailures).flatMap(([id,failure])=>{
     if(!isRecord(failure)||typeof failure.caseHash!=='string'||!/^[a-f0-9]{64}$/.test(failure.caseHash)||typeof failure.error!=='string'||failure.rejected!==undefined&&typeof failure.rejected!=='string')throw new Error('Unsupported code generation failure state.');
     const item=cases.find(item=>item.id===id);
     return item&&caseHash(item)===failure.caseHash?[[id,{caseHash:failure.caseHash,error:diagnostic(failure.error),...(failure.rejected?{rejected:diagnostic(failure.rejected,20000)}:{})}]]:[];
   }));
-  return {specs:specs as Record<string,CaseSpecs>,generationFailures};
+  return {specs,generationFailures};
 }
 
 /** Compose a case replacement with the manager's case/analysis save, so code disappears in that same transaction. */

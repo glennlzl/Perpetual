@@ -302,6 +302,21 @@ test('code approved without a verification, as a stored single spec was, loads a
   await assert.rejects(f.manager.approveSpec(f.context,{caseId:legacy.id,hash:specHash(code('Legacy'))}),{statusCode:409,message:'Verify this code first: it needs three passing runs and a caught control run.'});
 });
 
+test('damaged stored code refuses to load, and a stored verification in another shape verifies nothing',async t=>{
+  const f=await fixture(t);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8')),scope=Object.keys(stored.cases)[0];
+  const code=spec(),saved={code,hash:specHash(code),caseHash:caseHash(journey),savedAt:'2026-09-24T08:00:00.000Z'},open=()=>createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.playwright});
+  for(const entry of [null,'code',{approved:null,draft:{...saved,hash:'forged'}},{approved:{...saved,code:42,approvedRunIds:['a','b','c','d']},draft:null}]){
+    await writeFile(file,JSON.stringify({...stored,specs:{[scope]:{[journey.id]:entry}}}));
+    await assert.rejects(open(),/Unsupported journey code state/,JSON.stringify(entry));
+  }
+  // A passed verification whose runs are no list of run IDs, as no checkpoint writes it, approves nothing.
+  await writeFile(file,JSON.stringify({...stored,specs:{[scope]:{[journey.id]:{approved:null,draft:{...saved,verification:{id:'forged',checkVersion:CHECK_VERSION,status:'passed',passes:3,control:'caught',runIds:'abcd'}}}}}}));
+  const manager=await open();t.after(()=>manager.close());
+  assert.deepEqual((await manager.view(f.context)).specs[journey.id],{draft:{hash:saved.hash,stale:false}});
+  await assert.rejects(manager.approveSpec(f.context,{caseId:journey.id,hash:saved.hash}),{statusCode:409});
+});
+
 test('saved code is a draft beside the approved code, approved by exact hash after its verification, discarded alone, made stale by case edits and removed with its case',async t=>{
   let events=noticing;
   const f=await fixture(t,{events:input=>events(input)});
