@@ -1410,9 +1410,46 @@ test('legacy merged history without its clone still recovers Docker ownership be
   const restarted = await harness(t, { dataDir: h.dataDir, steps: next.steps });
   restarted.manager.start(); await restarted.manager.idle();
   assert.deepEqual([recovered, next.contexts.length], [1, 0]);
-  assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.status, repair.merged, repair.cleanup]), [['merged', E, { status: 'failed', reason: 'Docker list failed' }]]);
+  assert.deepEqual((await restarted.saved()).repairs.map(repair => [repair.status, repair.merged, repair.cleanup]), [['merged', E, undefined]], 'The sweep\'s failure holds new repairs without marking history as owning what it may not.');
+  assert.match(restarted.manager.view().watchError ?? '', /cleanup must finish before another repair can start\. Docker list failed/);
   failed = false; await restarted.poll();
   assert.deepEqual([recovered, next.contexts.length, (await restarted.saved()).repairs[0].cleanup], [2, 0, undefined]);
+});
+
+// A machine without Docker: a repair that needed a person at triage, or whose agent step could not start, made no box.
+test('history that never made a box needs no Docker sweep at a start', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  const base = { key: KEY, repository: 'owner/app', branch: 'main', login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', runs: [], createdAt: at, updatedAt: at };
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [
+    { ...base, id: 'triaged', sha: B, status: 'needs-person', reason: 'VERCEL_TOKEN is required', category: 'configuration' },
+    { ...base, id: 'unstarted', sha: C, status: 'needs-person', reason: 'Install Docker to repair builds.', category: 'build', startedAt: at },
+  ] }));
+  let recoveries = 0;
+  const h = await harness(t, { dataDir, steps: agent(undefined, { async recover() { recoveries++; throw new Error('Docker unavailable'); }, async cleanup() {} }).steps });
+  h.github.runs[A] = [run('1', A, 'failure')];
+  await h.poll();
+  assert.deepEqual([recoveries, h.manager.view().watchError, h.manager.view().head?.failed, (await h.saved()).repairs.map(repair => repair.cleanup)], [0, undefined, [shown('1')], [undefined, undefined]]);
+});
+
+test('a startup sweep that fails holds new repairs, while heads and pull requests are still followed', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
+  await mkdir(join(dataDir, 'repairs'));
+  const at = '2026-09-25T09:00:00.000Z';
+  await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'fixed', key: KEY, repository: 'owner/app', branch: 'main', sha: B, login: 'developer', checkoutPath: '/c', rootDirectory: '/', trigger: 'push', status: 'ready', runs: [{ id: '2', name: 'CI', path: CI, attempt: 1, url: null }], pullRequest: PULL, createdAt: at, updatedAt: at }] }));
+  let failed = true;
+  const a = agent(undefined, { async recover() { if (failed) throw new Error('Docker unavailable'); }, async cleanup() {}, async state() { return { state: 'merged', mergeCommit: C }; } });
+  const h = await harness(t, { dataDir, steps: a.steps });
+  h.github.head = C;
+  h.github.runs[C] = [run('3', C, 'failure')];
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.merged, h.calls.heads.length, h.manager.view().head?.failed], ['merged', C, 1, []], 'The head is read and a person\'s merge followed; no Repair is offered while the sweep holds.');
+  assert.match(h.manager.view().watchError ?? '', /cleanup must finish before another repair can start\. Docker unavailable/);
+  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409);
+  failed = false;
+  await h.poll();
+  assert.deepEqual([h.manager.view().watchError, h.manager.view().head?.failed, a.contexts.length], [undefined, [shown('3')], 0]);
 });
 
 test('cleanup held by another source stays visible and withholds Repair until cleanup succeeds', async t => {

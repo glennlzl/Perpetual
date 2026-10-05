@@ -121,6 +121,9 @@ export const retryable = (status: RepairStatus) => !ACTIVE.includes(status) && s
 // leaves an interrupted one's open. A newer passing head supersedes each of them.
 const KEPT: readonly RepairStatus[] = ['ready', 'failed', 'needs-person', 'cancelled'];
 const kept = (repair: Repair) => Boolean(repair.pullRequest) && KEPT.includes(repair.status);
+// A repair whose agent step may have made a box: one at work or holding cleanup, or one that recorded an attempt, a
+// push, a pull request or a merge. One that ended at triage, or whose agent step could not start, made none.
+const mayOwn = (repair: Repair) => PROGRESS.has(repair.status) || Boolean(repair.cleanup || repair.attempts?.length || repair.pushed || repair.pullRequest || repair.merged);
 const MERGED = 'Merged on GitHub.';
 const NO_AGENT = 'Automatic repair is unavailable. Fix the failure in a pull request.';
 const LIMIT = 100;
@@ -202,10 +205,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   // Work the controller stopped during is never resumed: a restart starts no paid work, and its pull request stays open.
   // One whose pull request merged before the restart is merged.
   const directories = (await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name);
-  // Older controllers could lose a terminal repair's host directory before confirming its Docker cleanup.
-  let recovering = Boolean(steps.recover && (state.repairs.length || directories.length));
+  // Older controllers could lose a terminal repair's host directory before confirming its Docker cleanup. History that
+  // never made a box needs no sweep, so a controller without Docker is not held by it.
+  let recovering = Boolean(steps.recover && (state.repairs.some(mayOwn) || directories.length));
   if (steps.cleanup) for (const repair of state.repairs) {
-    if (ACTIVE.includes(repair.status) || directories.includes(repair.id)) repair.cleanup ??= { status: 'pending' };
+    if (ACTIVE.includes(repair.status) && mayOwn(repair) || directories.includes(repair.id)) repair.cleanup ??= { status: 'pending' };
   }
   for (const repair of state.repairs) {
     if (!ACTIVE.includes(repair.status)) continue;
@@ -290,7 +294,8 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
         }
         recovering = false;
       } catch (error) {
-        if (steps.cleanup) for (const repair of state.repairs) repair.cleanup = { status: 'failed', reason: text(error) };
+        // The sweep's own failure holds new repairs; only repairs that hold cleanup record it.
+        if (steps.cleanup) for (const repair of state.repairs) if (repair.cleanup) repair.cleanup = { status: 'failed', reason: text(error) };
         await persist();
         throw error;
       }
@@ -555,9 +560,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   function check() {
     if (closed) return Promise.resolve();
     checking ??= Promise.resolve().then(async () => {
-      // Cleanup can recover without a connected source; only it clears its earlier failure.
+      // Cleanup can recover without a connected source; only it clears its earlier failure. A sweep that failed holds new
+      // repairs (busy), while heads, reruns and pull requests are still followed.
       try { await cleanupOutstanding(); recoveryError = null; }
-      catch (error) { recoveryError = text(error); return; }
+      catch (error) { recoveryError = text(error); }
       if (closed) return;
       const current = managed();
       if (!current && !state.repairs.some(repair => repair.status === 'rerunning')) return;
