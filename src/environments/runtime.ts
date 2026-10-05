@@ -4,7 +4,7 @@ import { createTwinInputs, createTwinRuntime, services as registry } from '../tw
 import { createBrowserModelSettings } from '../browser/model.ts';
 import { destroySandbox as destroyGuest } from '../sandbox/cua-local.ts';
 import { privateWorkspace } from '../agents/opencode.ts';
-import { authorTwinConfig, selectedAuthorHarness, type AuthorHarness } from '../twin/authoring.ts';
+import { authorTwinConfig, hiddenFromAuthor, selectedAuthorHarness, type AuthorHarness } from '../twin/authoring.ts';
 import { HOST, LOOPBACK } from '../twin/compose.ts';
 import { redactor } from '../twin/runtime.ts';
 import { failureText, redact } from '../redaction.ts';
@@ -237,8 +237,10 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       const failure: StagedFailure = unready ?? (checked.error !== undefined ? { stage: 'valid', heading: 'twin.json is not a valid twin config', error: checked.error }
         : { ...await diagnose({ dataDir, id: environment.id, config: checked.config, step, error }), heading: `preparing the twin failed at "${step}"`, error: error.message });
       if (failure.stage !== 'valid' && !failure.subject) return null;
-      const facts = await repositoryFacts({ source, checkout: repoPath, packages, draft: text, services, secrets: knownSecrets }).catch(() => null);
-      const hide = (value: string) => redact(redactor(knownSecrets)(value));
+      // The next author reads this feedback: it hides what the author's copy of the source does.
+      const secrets = hiddenFromAuthor(knownSecrets);
+      const facts = await repositoryFacts({ source, checkout: repoPath, packages, draft: text, services, secrets }).catch(() => null);
+      const hide = (value: string) => redact(redactor(secrets)(value));
       return { text, feedback: feedbackText({ title: 'The saved twin config', failure, unwired: facts ? unwiredSummary(facts, text) : [], hide }) };
     }
     if (!generate) {
@@ -279,7 +281,9 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     let authoredModel = model.model;
     let evidence = '';
     const attempts: AttemptOutcome[] = [];
-    const authorSecrets = () => [model.apiKey, ...knownSecrets];
+    // The twin's logs hide every value seen; what the author reads, its evidence and feedback included, leaves a placeholder
+    // too short to be a credential in place, as its copy of the source does.
+    const knownValues = () => [model.apiKey, ...knownSecrets], authorSecrets = () => hiddenFromAuthor(knownValues());
     try {
       // Protect the first observation as well as build feedback. Reading stored inputs never provisions a service.
       values = await readInputs(environment.plan);
@@ -311,7 +315,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
           let captured: string;
           try { captured = await twin.logs({ dataDir, id: environment.id }); }
           catch (error) { captured = `Environment logs unavailable: ${failureText(error, 600)}`; }
-          evidence = diagnosticText(redactor(authorSecrets())([evidence, captured].filter(Boolean).join('\n\n')));
+          evidence = diagnosticText(redactor(knownValues())([evidence, captured].filter(Boolean).join('\n\n')));
           try { await onUpdate({ logs: evidence }); }
           catch (error) { evidence = diagnosticText(`${evidence}\nEvidence could not be saved before cleanup: ${failureText(error, 600)}`); }
           await twin.destroy({ dataDir, id: environment.id, inputs: await readInputs(config) });

@@ -42,6 +42,8 @@ export const MAX_CONFIG = 256 * 1024;
  * hiding it would rewrite ordinary text in the author's copy and refuse every draft that contains it.
  */
 const MIN_SECRET = 8;
+/** The supplied values an author's observations hide, its evidence and feedback included: those long enough to be credentials. */
+export const hiddenFromAuthor = (values: Iterable<unknown>) => [...values].filter((value): value is string => typeof value === 'string' && value.length >= MIN_SECRET);
 /** An upper bound on the agent's tool calls in one attempt, besides its time limit. */
 export const STEPS = 100;
 /** One attempt's time limit. */
@@ -330,7 +332,7 @@ const authorFailure = (failure: RunFailure): AuthorFailure => Object.assign(new 
  */
 export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
   const abort = new AbortController();
-  const supplied = [apiKey, ...secrets].filter(value => typeof value === 'string' && value.length >= MIN_SECRET);
+  const supplied = hiddenFromAuthor([apiKey, ...secrets]);
   const hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
   let runner: OpencodeRunner | null = null;
   const promise = (async (): Promise<Authored> => {
