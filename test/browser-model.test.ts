@@ -124,6 +124,27 @@ test('draft effort uses cached catalog capabilities and never guesses support fr
   assert.deepEqual(await createOpenRouterModelCatalog().draftReasoning('vendor/low'),{exclude:true},'An unavailable catalog retains provider defaults rather than guessing an unsupported effort');
 });
 
+test('a failed catalog refresh serves the last catalog and its efforts, without models that have expired since',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-01T00:00:00Z')});
+  let available=true,calls=0;
+  const model=(id:string,extra:Record<string,unknown>={})=>({id,name:id,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],...extra});
+  t.mock.method(globalThis,'fetch',async()=>{
+    calls++;if(!available)throw new Error('Catalog unavailable');
+    return Response.json({data:[model('vendor/kept',{reasoning:{supported_efforts:['low','medium']}}),model('vendor/retiring',{expiration_date:'2026-10-01T00:30:00Z'})]});
+  });
+  const catalog=createOpenRouterModelCatalog(),listed=async()=>(await catalog.view()).models.map(item=>item.id);
+  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring']);
+  available=false;t.mock.timers.tick(10*60*1000);
+  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring'],'Settings can still be saved.');
+  assert.equal(calls,2);
+  t.mock.timers.tick(30*1000);await listed();
+  assert.equal(calls,2,'A failed refresh is tried again a minute later, not on every read.');
+  t.mock.timers.tick(25*60*1000);
+  assert.deepEqual(await listed(),['vendor/kept'],'A model that expired meanwhile is no longer offered.');
+  assert.deepEqual([await catalog.generationReasoning('vendor/kept'),await catalog.draftReasoning('vendor/kept')],[{effort:'medium'},{effort:'low',exclude:true}]);
+  await assert.rejects(createOpenRouterModelCatalog().view(),/Could not load OpenRouter models/,'Without an earlier catalog nothing is served.');
+});
+
 test('journey code generation enables medium reasoning only when the catalog explicitly supports it',async t=>{
   let calls=0;
   t.mock.method(globalThis,'fetch',async()=>{

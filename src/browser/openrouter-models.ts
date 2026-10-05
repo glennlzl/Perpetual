@@ -6,7 +6,7 @@ const CATALOG_URL=`${OPENROUTER_BASE_URL}/models`;
 export const DEFAULT_MODEL='openai/gpt-5.4-mini';
 /** Strong coding models a build repair escalates to, in order of preference; the first the catalog has is the default. */
 export const ESCALATION_MODELS=['anthropic/claude-sonnet-5','openai/gpt-6','anthropic/claude-sonnet-4.6','openai/gpt-5.4','google/gemini-3-pro-preview'];
-const CACHE_TTL_MS=5*60*1000;
+const CACHE_TTL_MS=5*60*1000,RETRY_MS=60*1000;
 const CATALOG_LIMIT=8*1024*1024;
 
 type CatalogModel={id:string;name:string;expiration_date?:unknown;reasoning?:unknown};
@@ -26,7 +26,7 @@ function eligible(model:unknown,time:number):model is CatalogModel{
 
 export function createOpenRouterModelCatalog(){
   let cached:OpenRouterModel[]|null=null,expiresAt=0,pending:Promise<OpenRouterModel[]>|null=null;
-  let lowEffort=new Set<string>(),mediumEffort=new Set<string>();
+  let lowEffort=new Set<string>(),mediumEffort=new Set<string>(),expirations=new Map<string,number>();
   async function fetchModels():Promise<{models:OpenRouterModel[];validUntil:number}>{
     try{
       // This public catalog request never receives saved credentials or model settings.
@@ -36,23 +36,29 @@ export function createOpenRouterModelCatalog(){
       for await(const chunk of response.body){size+=chunk.length;if(size>CATALOG_LIMIT)throw new Error('Oversized catalog.');chunks.push(chunk);}
       const payload:unknown=JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if(!isRecord(payload)||!Array.isArray(payload.data))throw new Error('Invalid catalog.');
-      const time=Date.now(),unique=new Map<string,OpenRouterModel>(),supportsLow=new Set<string>(),supportsMedium=new Set<string>();let validUntil=time+CACHE_TTL_MS;
+      const time=Date.now(),unique=new Map<string,OpenRouterModel>(),supportsLow=new Set<string>(),supportsMedium=new Set<string>(),expires=new Map<string,number>();let validUntil=time+CACHE_TTL_MS;
       for(const model of payload.data)if(eligible(model,time)){
         unique.set(model.id,{id:model.id,name:model.name.trim(),provider:model.id.split('/')[0]});
         const efforts=isRecord(model.reasoning)?model.reasoning.supported_efforts:undefined;
         if(efforts===null||(Array.isArray(efforts)&&efforts.includes('low')))supportsLow.add(model.id);
         if(Array.isArray(efforts)&&efforts.includes('medium'))supportsMedium.add(model.id);
-        if(model.expiration_date)validUntil=Math.min(validUntil,Date.parse(String(model.expiration_date)));
+        if(model.expiration_date){expires.set(model.id,Date.parse(String(model.expiration_date)));validUntil=Math.min(validUntil,expires.get(model.id)!);}
       }
       const models=[...unique.values()].sort((a,b)=>a.provider.localeCompare(b.provider)||a.name.localeCompare(b.name)||a.id.localeCompare(b.id));
       if(!models.length)throw new Error('Empty catalog.');
-      lowEffort=supportsLow;mediumEffort=supportsMedium;
+      lowEffort=supportsLow;mediumEffort=supportsMedium;expirations=expires;
       return {models,validUntil};
     }catch{throw Object.assign(new Error('Could not load OpenRouter models. Try again.'),{statusCode:502});}
   }
   async function load():Promise<OpenRouterModel[]>{
     if(cached&&expiresAt>Date.now())return cached;
-    pending ||= fetchModels().then(({models,validUntil})=>{cached=models;expiresAt=validUntil;return models;}).finally(()=>{pending=null;});
+    pending ||= fetchModels().then(({models,validUntil})=>{cached=models;expiresAt=validUntil;return models;},error=>{
+      // A refresh that fails serves the last catalog, and its efforts, without the models that have expired since, and is
+      // tried again a minute later.
+      const time=Date.now(),kept=cached?.filter(model=>!((expirations.get(model.id)??Infinity)<=time));
+      if(!kept?.length)throw error;
+      cached=kept;expiresAt=Math.min(time+RETRY_MS,...kept.map(model=>expirations.get(model.id)??Infinity));return kept;
+    }).finally(()=>{pending=null;});
     return pending;
   }
   return {
