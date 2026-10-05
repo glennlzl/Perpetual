@@ -19,16 +19,19 @@ function lookups(path: string, name: string) {
 type Manifest = { engines: { node: string }; dependencies: Record<string, string>; devDependencies: Record<string, string> };
 const manifest = async () => JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as Manifest;
 const major = (range: string) => Number(/\d+/.exec(range)?.[0]);
+const minor = (range: string) => /\d+\.\d+/.exec(range)?.[0];
 
 test('Node types match the oldest Node the controller supports, so typecheck refuses a newer API it lacks', async () => {
   const { engines, devDependencies } = await manifest();
-  assert.equal(major(devDependencies['@types/node']), major(engines.node));
+  // A matching major alone let 24.19 types pass code that the supported 24.12 lacks at run time.
+  assert.equal(minor(devDependencies['@types/node']), minor(engines.node));
   assert.match(devDependencies['@types/node'], /^\d+\.\d+\.\d+$/, 'Pinned exactly.');
 });
 
 test('the client merges class names with one engine: cn, which the utils alias re-exports for registry components', async () => {
-  const { dependencies } = await manifest();
-  assert.deepEqual(['clsx', 'tailwind-merge'].filter(name => Object.hasOwn(dependencies, name)), []);
+  const { dependencies, devDependencies } = await manifest();
+  // The client's packages are devDependencies, since Vite bundles them.
+  assert.deepEqual(['clsx', 'tailwind-merge'].filter(name => Object.hasOwn(dependencies, name) || Object.hasOwn(devDependencies, name)), []);
   assert.match(await readFile(new URL('../client/src/lib/utils.ts', import.meta.url), 'utf8'), /^export \{ cn \} from 'cn';$/m);
 });
 
