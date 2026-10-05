@@ -65,8 +65,8 @@ export interface StageHandle {
 interface StageEntry {
   id: string; generation: number; listeners: Set<() => void>; observers: Record<Resource, number>; revisions: Record<Resource, number>; reading: Record<Resource, number>;
   draftRevisions: Record<string, number>; view: StageView; handle?: StageHandle;
-  /** When the stage's action error and poll error appeared, by the workspace's error clock. */
-  errorAt: { action: number; poll: number };
+  /** When the stage's action error and each resource's poll error appeared, by the workspace's error clock. */
+  errorAt: Record<'action' | Resource, number>;
 }
 export type TestWorkspace = ReturnType<typeof createTestWorkspace>;
 
@@ -105,7 +105,9 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 // source-scoped state; observing never starts discovery or test execution.
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
-  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], errorClock = 0, foreignReplies = 0;
+  let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], foreignReplies = 0;
+  // Errors are ordered by this clock. The page shows none from before the viewer last dismissed them.
+  let errorClock = 0, sourceErrorAt = 0, dismissedAt = 0;
   let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
   let pipelineChanges: { input: PipelineAction }[] = [], pipelineQueue: Promise<unknown> = Promise.resolve();
   // The source pipeline's stage ids once known. A stage it no longer lists was deleted: its reads are not made and
@@ -121,13 +123,20 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     listed = new Set(pipeline.stages.map(stage => stage?.id));
     pruneDrafts(source.path, [...listed]);
   }
-  // The latest stage error, so an older action's failure never hides a later failure or poll error of any stage.
+  // The latest stage error since the last dismissal, so an older action's failure never hides a later failure or poll
+  // error of any stage, and a dismissed one does not return when a later one clears.
   function latestError() {
-    let error = '', at = 0;
+    let error = '', at = dismissedAt;
     for (const value of entries.values()) if (!gone(value)) {
-      for (const [text, time] of [[value.view.error, value.errorAt.action], [value.view.pollError, value.errorAt.poll]] as const) if (text && time > at) { error = text; at = time; }
+      const { view, errorAt } = value;
+      for (const [text, time] of [[view.error, errorAt.action], [view.pollErrors.browser, errorAt.browser], [view.pollErrors.environment, errorAt.environment]] as const) if (text && time > at) { error = text; at = time; }
     }
     return error;
+  }
+  // A changed source error is a new one, so an earlier dismissal does not hide it.
+  function setSourceError(message: string) {
+    if (message && message !== sourceError) sourceErrorAt = ++errorClock;
+    sourceError = message;
   }
   function publish(entry?: StageEntry) {
     if (disposed) return;
@@ -139,7 +148,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       busyStages: [...entries].filter(([, value]) => value.view.pending).map(([id]) => id),
       previews,
       branch: source?.branch || '',
-      error: sourceError || latestError(),
+      error: sourceError && sourceErrorAt > dismissedAt ? sourceError : latestError(),
     };
     if (sameEntries(next.browserTests, snapshot.browserTests)) next.browserTests = snapshot.browserTests;
     const keep = <K extends 'environments' | 'busyStages'>(key: K) => { if (sameItems(next[key], snapshot[key])) next[key] = snapshot[key]; };
@@ -158,7 +167,9 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     entry.view = { ...entry.view, ...patch };
     entry.view.pollError = entry.view.pollErrors.browser || entry.view.pollErrors.environment;
     if (entry.view.error && entry.view.error !== before.error) entry.errorAt.action = ++errorClock;
-    if (entry.view.pollError && entry.view.pollError !== before.pollError) entry.errorAt.poll = ++errorClock;
+    for (const resource of ['browser', 'environment'] as const) {
+      if (entry.view.pollErrors[resource] && entry.view.pollErrors[resource] !== before.pollErrors[resource]) entry.errorAt[resource] = ++errorClock;
+    }
     publish(entry);
   }
   // Only saved definitions prune stage drafts. Pending preferences overlay that definition, in click order.
@@ -199,7 +210,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   }
   function ensure(id: string): StageEntry {
     if (!entries.has(id)) entries.set(id, {
-      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {}, errorAt: { action: 0, poll: 0 },
+      id, generation, listeners: new Set(), observers: { browser: 0, environment: 0 }, revisions: { browser: 0, environment: 0 }, reading: { browser: 0, environment: 0 }, draftRevisions: {}, errorAt: { action: 0, browser: 0, environment: 0 },
       view: { browser: browserView(), environment: environmentView(), drafts: {}, dirty: {}, loading: { browser: true, environment: true }, pending: '', error: '', pollErrors: { browser: '', environment: '' }, pollError: '' },
     });
     return entries.get(id)!;
@@ -235,7 +246,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       // Another window can change the controller's source. One reply may race this window's own change, so a second
       // in a row that names another source says so instead of leaving the graph silently frozen.
       if (sourceKey(next.scan?.repo) !== identity) {
-        if (++foreignReplies > 1) { sourceError = 'The source changed. Reload the pipeline.'; publish(); }
+        if (++foreignReplies > 1) { setSourceError('The source changed. Reload the pipeline.'); publish(); }
         return;
       }
       foreignReplies = 0;
@@ -259,7 +270,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       publish();
       return next;
     } catch (failure) {
-      if (!disposed && ownGeneration === generation && request === summaryRevision) { sourceError = (failure as Error).message; publish(); }
+      if (!disposed && ownGeneration === generation && request === summaryRevision) { setSourceError((failure as Error).message); publish(); }
     }
   }
   // Polling pauses while the page is hidden and resumes as soon as it is visible.
@@ -368,6 +379,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     stage,
     refreshSource,
     changePipeline,
+    /** Hides the page's errors so far; a later failure, or one that recurs after it cleared, shows again. */
+    dismissError() { dismissedAt = errorClock; publish(); },
     activate(nextSource: { path?: string; branch?: string | null } | null | undefined, seed: SourceState = {}) {
       if (disposed) throw new Error('The test workspace is closed.');
       const nextIdentity = sourceKey(nextSource);

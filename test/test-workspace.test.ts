@@ -35,6 +35,40 @@ test('the page shows the latest stage error, so an earlier action failure never 
   assert.equal(workspace.getSnapshot().error, 'Journey no longer exists.');
 });
 
+test('a dismissed error stays hidden when a later one clears, and a failure after the dismissal shows even in the same words', async t => {
+  let readFails = false, sourceFails = false;
+  const unavailable = 'The local server is unavailable. Try reconnecting.';
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
+    if (path === '/api/state') { if (sourceFails) throw new Error(unavailable); return { scan: { repo: { path: '/repo', branch: 'main' } }, browserTests: {} }; }
+    if (path.startsWith('/api/browser/run')) throw new Error('Beta could not start its run.');
+    if (readFails) throw new Error('Beta could not be read.');
+    return { cases: [], runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate({ path: '/repo', branch: 'main' }, { browserTests: { beta: { cases: [], runs: [] } } });
+  const beta = workspace.stage('beta');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  workspace.dismissError();
+  assert.equal(workspace.getSnapshot().error, '');
+  // A newer poll failure shows. Once it is dismissed too and the stage reads again, the older action failure stays hidden.
+  readFails = true; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, 'Beta could not be read.');
+  workspace.dismissError();
+  readFails = false; await beta.refresh('browser');
+  assert.equal(workspace.getSnapshot().error, '', 'A dismissed action failure does not return.');
+  await assert.rejects(beta.perform('browser', 'run', tx => tx.post('run')), /could not start/);
+  assert.equal(workspace.getSnapshot().error, 'Beta could not start its run.', 'The same failure again is a new one.');
+  // A dismissed source failure stays hidden while it repeats, and shows again when it recurs after a clean read.
+  sourceFails = true; await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, unavailable);
+  workspace.dismissError();
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, '');
+  sourceFails = false; await workspace.refreshSource();
+  sourceFails = true; await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().error, unavailable);
+});
+
 const source = { path: '/project', branch: 'main' };
 const pipelineStages = (ids: string[]) => ids.map(id => ({ id, name: id, kind: id === 'source' ? 'source' : 'sandbox' }));
 

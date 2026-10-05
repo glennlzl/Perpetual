@@ -680,8 +680,7 @@ function PipelineApp() {
   // A failure the canvas reports, with the operation that can repeat it, if any.
   const [error, setFailure] = useState<CanvasFailure | null>(null);
   const setError = useCallback((message: string, retry: (() => void) | null = null) => setFailure(message ? { message, retry } : null), []);
-  // A poll failure the viewer dismissed stays hidden until that source of errors clears.
-  const [quietError, setQuietError] = useState('');
+  // An Autopilot poll failure the viewer dismissed stays hidden until it clears; the workspace keeps its own dismissal.
   const [quietAutopilotError, setQuietAutopilotError] = useState('');
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<PipelineDialog | null>(() => {
@@ -879,17 +878,15 @@ function PipelineApp() {
   // failures the viewer has not dismissed. Polls retry on their own, so only
   // the canvas's own operations offer Try again.
   const autopilotError = autopilot?.watchError || '';
-  useEffect(() => { if (!tests.error) setQuietError(''); }, [tests.error]);
   useEffect(() => { if (!autopilotError) setQuietAutopilotError(''); }, [autopilotError]);
-  const workspaceError = tests.error && tests.error !== quietError ? tests.error : '';
-  const pollError = workspaceError || (autopilotError !== quietAutopilotError ? autopilotError : '');
+  const pollError = tests.error || (autopilotError !== quietAutopilotError ? autopilotError : '');
   const canvasError = useMemo(() => error || (pollError ? { message: pollError, retry: null } : null), [error, pollError]);
   const retryError = useCallback(() => { const retry = error?.retry; setError(''); retry?.(); }, [error, setError]);
   const dismissError = useCallback(() => {
     if (error) setError('');
-    else if (workspaceError) setQuietError(workspaceError);
+    else if (tests.error) workspace.dismissError();
     else setQuietAutopilotError(autopilotError);
-  }, [error, setError, workspaceError, autopilotError]);
+  }, [error, setError, tests.error, workspace, autopilotError]);
 
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
