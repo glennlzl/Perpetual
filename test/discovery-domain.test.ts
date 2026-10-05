@@ -24,3 +24,22 @@ test('browser discovery prioritizes an unfamiliar product\'s primary pages witho
   for (const name of ['web/app/orders/new/page.tsx', 'api/routes/orders.ts', 'web/app/checkout/page.tsx']) assert.ok(names.includes(name), name);
   assert.ok(names.indexOf('web/app/orders/new/page.tsx') < names.indexOf('api/lib/helper-000.ts'));
 });
+
+test('a product route named like a tooling folder is sampled, while tooling, tests and retired plans stay out', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'discovery-aside-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const write = async (name: string, content: string) => { await mkdir(join(root, dirname(name)), { recursive: true }); await writeFile(join(root, name), content); };
+  const routes = ['agents', 'scripts', 'evals', 'tests', 'fixtures', 'archive'].map(area => `frontend/pages/${area}/index.tsx`);
+  for (const name of [...routes, 'app/agents/page.tsx', 'app/agents/[id]/page.tsx']) await write(name, `export function Page() { return "${name}"; }\n`);
+  await write('frontend/pages/login.tsx', 'export function Login() { return "Sign in"; }\n');
+  // Tooling at the root, a test folder without a page, and documentation beside a route stay out.
+  await write('scripts/seed.ts', 'export const seed = "SEED_SCRIPT";\n');
+  await write('agents/notes.md', 'AGENT_NOTES\n');
+  await write('src/test/java/acme/OrderTest.java', 'class OrderTest { String note = "JAVA_TEST"; }\n');
+  await write('backend/app/tests/test_orders.py', 'NOTE = "PYTHON_TEST"\n');
+  await write('frontend/pages/agents/README.md', 'ROUTE_NOTES\n');
+  await write('docs/superpowers/plans/old-plan.md', 'OLD_PLAN\n');
+  const context = await businessSourceContext(root, { scope: '' }), names = context.files.map(file => file.path);
+  for (const name of [...routes, 'app/agents/page.tsx', 'app/agents/[id]/page.tsx', 'frontend/pages/login.tsx']) assert.ok(names.includes(name), name);
+  assert.doesNotMatch(JSON.stringify(context), /SEED_SCRIPT|AGENT_NOTES|JAVA_TEST|PYTHON_TEST|ROUTE_NOTES|OLD_PLAN/);
+});

@@ -13,8 +13,14 @@ const MAX_FILES = 200;
 const MAX_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_MODEL_BYTES = 180 * 1024;
-const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'out', 'target', '__pycache__', '__tests__', 'test', 'tests', 'fixtures', '.next', '.nuxt', '.cache', '.perpetual']);
+const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'out', 'target', '__pycache__', '__tests__', '.next', '.nuxt', '.cache', '.perpetual']);
+// By convention these folders hold tests, fixtures, tooling or retired plans, yet a product route can have the same
+// name, such as app/agents/page.tsx. One at the repository root is skipped; below it, one is sampled only when it holds
+// a page itself, and never for its documentation.
+const ASIDE_DIRS = new Set(['test', 'tests', 'fixtures', 'archive', 'archives', 'archived', 'graveyard', 'deprecated', 'superpowers', 'agents', 'scripts', 'eval', 'evals']);
 const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.md', '.mdx']);
+const UI_FILE = /\.(?:jsx|tsx|html|htm)$/i;
+const sampled = (name: string) => SOURCE_EXTENSIONS.has(path.extname(name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(name);
 // Generic journey vocabulary shared by most products; nothing product-specific.
 const BILLING_PATH = /billing|payment|stripe|checkout|subscription|credit|wallet|refund/i;
 const ACTION_PATH = /(?:^|\/)(?:new|create|edit|run|submit|result)(?:\/|\.|-|$)/i;
@@ -55,7 +61,6 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
   const rootStat = await lstat(repoPath);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Repository source must be a regular directory.');
   const root = await realpath(repoPath), candidates: string[] = [], files: SourceFile[] = [], warnings: string[] = [];
-  const historicalDirectories = new Set(['archive', 'archives', 'archived', 'graveyard', 'deprecated', 'superpowers', 'agents', 'scripts', 'eval', 'evals']);
   const tokens = [...new Set(String(scope || '').toLowerCase().match(/[a-z0-9]{3,}/g) || [])].filter(token => !['the', 'and', 'for', 'with', 'test', 'tests', 'case', 'cases', 'user', 'users', 'work', 'from', 'this', 'that', 'should', 'through', 'using', 'into', 'when', 'then'].includes(token)).slice(0, 30);
   const score = (name: string) => {
     const normalized = name.toLowerCase();
@@ -72,16 +77,17 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
   const category = (name: string) => {
     if (/\.mdx?$/i.test(name)) return 'product';
     if (/(?:^|\/)(?:api|backend|server|routes)(?:\/|$)/i.test(name)) return 'api';
-    if (/\.(?:jsx|tsx|html|htm)$/i.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
+    if (UI_FILE.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
     return 'other';
   };
   let visited = 0, total = 0, limited = false;
-  const queue = [{ relative: '', depth: 0 }];
+  const queue = [{ relative: '', depth: 0, aside: false }];
   while (queue.length && visited < 5000) {
-    const { relative, depth } = queue.shift()!;
+    const { relative, depth, aside } = queue.shift()!;
     if (depth > 8) { limited = true; continue; }
     let entries;
     try { entries = await readdir(path.join(root, relative), { withFileTypes: true }); } catch { continue; }
+    if (aside && !entries.some(entry => entry.isFile() && sampled(entry.name) && UI_FILE.test(entry.name))) continue;
     entries.sort((a, b) => score(`${relative}/${b.name}`) - score(`${relative}/${a.name}`) || a.name.localeCompare(b.name));
     // A single generated/very wide directory cannot consume all traversal slots.
     if (entries.length > 512) limited = true;
@@ -89,8 +95,12 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       if (++visited > 5000) { limited = true; break; }
       const name = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink() || SECRET_PATH.test(name) || entry.name.startsWith('.') || /^(?:AGENTS|CLAUDE|GEMINI|SKILL)\.md$/i.test(entry.name)) continue;
-      if (entry.isDirectory()) { if (!SKIP_DIRS.has(entry.name) && !historicalDirectories.has(entry.name.toLowerCase())) queue.push({ relative: name, depth: depth + 1 }); continue; }
-      if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(entry.name)) candidates.push(name);
+      if (entry.isDirectory()) {
+        const named = ASIDE_DIRS.has(entry.name.toLowerCase());
+        if (!SKIP_DIRS.has(entry.name) && !(named && !relative)) queue.push({ relative: name, depth: depth + 1, aside: named });
+        continue;
+      }
+      if (entry.isFile() && sampled(entry.name) && !(aside && /\.mdx?$/i.test(entry.name))) candidates.push(name);
     }
   }
   if (queue.length) limited = true;
