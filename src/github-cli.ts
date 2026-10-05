@@ -96,7 +96,8 @@ export function githubFailureKind(error: unknown): GitHubFailureKind {
 /** The HTTP status gh printed for a request GitHub refused, such as `(HTTP 409)` or `HTTP 422:`, or null. */
 export function githubHttpStatus(error: unknown): number | null {
   const failure = error as { stderr?: unknown; message?: unknown } | null | undefined;
-  const match = /\bHTTP (\d{3})\b/i.exec(String(failure?.stderr || failure?.message || ''));
+  // As for the failure's kind: the command's own output, never execFile's message, which repeats its arguments.
+  const match = /\bHTTP (\d{3})\b/i.exec(String((typeof failure?.stderr === 'string' ? failure.stderr : failure?.message) || ''));
   return match ? Number(match[1]) : null;
 }
 

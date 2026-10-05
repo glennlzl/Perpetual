@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, notModified, parseGitHubResponse, runGitHub } from '../src/github-cli.ts';
+import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, hasNextPage, isRepository, notModified, parseGitHubResponse, runGitHub } from '../src/github-cli.ts';
 
 test('gh runs with its own configuration and none of the inherited git or debug settings', () => {
   const saved = { ...process.env };
@@ -77,6 +77,13 @@ test('a name or a local path that holds a refusal word never makes a failure Git
     // execFile's message repeats the command line; with no output there is no reply to read.
     Object.assign(new Error('Command failed: gh api repos/acme/sso-portal/pulls/7 --method PATCH'), { stderr: '' }),
   ]) assert.equal(githubFailureKind(error), 'other', JSON.stringify(error));
+});
+
+test('a refusal\'s HTTP status is read from the command\'s output, never from its command line', () => {
+  assert.deepEqual([githubHttpStatus({ stderr: 'gh: Conflict (HTTP 409)' }), githubHttpStatus({ stderr: 'HTTP 422: Validation Failed (https://api.github.com/repos/acme/app/pulls)' })], [409, 422]);
+  // execFile's message repeats the arguments, such as a pull request title that names a status.
+  assert.equal(githubHttpStatus(Object.assign(new Error('Command failed: gh api repos/acme/app/pulls -f title=Answer HTTP 409 on a stale head'), { stderr: '' })), null);
+  assert.equal(githubHttpStatus(new Error('HTTP 405: Method Not Allowed')), 405, 'An error that is not a command\'s has its message alone.');
 });
 
 test('runGitHub passes gh, the arguments, the environment and the limits to the runner it is given', async () => {
