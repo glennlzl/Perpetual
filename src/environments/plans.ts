@@ -73,7 +73,8 @@ const isFile = (path: string) => lstat(path).then(info => info.isFile(), () => f
 /** A repository's package.json is untrusted: only these fields are read, and each is checked where it is used. */
 type Manifest = Pick<PackageManifest, 'scripts' | 'packageManager'>;
 const fields = (value: unknown) => value !== null && typeof value === 'object' ? value as Record<string, unknown> : null;
-const readManifest = (root: string, directory: string): Promise<Manifest | null> => readLocal(root, posix.join(directory, 'package.json')).then(text => fields(JSON.parse(text)), () => null);
+// A manifest that cannot be read or parsed is not evidence.
+const readManifest = (root: string, directory: string): Promise<Manifest | null> => readLocal(root, posix.join(directory, 'package.json')).then(text => fields(JSON.parse(text))).catch(() => null);
 
 /**
  * Repository-relative files, without following links or entering skipped directories; `complete` is false when the

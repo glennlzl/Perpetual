@@ -186,6 +186,13 @@ test('detection reads no linked file and no evidence outside the repository', as
   assert.deepEqual(Object.keys(config.apps), ['service']);
 });
 
+test('a root manifest that does not parse is not evidence, and the scanned apps are still proposed', async t => {
+  for (const root of ['﻿{"name":"workspace"}', '{"name":"workspace",}', '<<<<<<< HEAD\n{"name":"workspace"}\n=======\n{"name":"other"}\n>>>>>>> branch\n']) {
+    const { repoPath } = await fixture(t, { 'package.json': root, 'apps/web/package.json': manifest('web', { express: '1.0.0' }, { start: 'node server.js' }) });
+    assert.deepEqual((await detect(repoPath)).apps, { 'service-apps-2fweb': { directory: 'apps/web', build: 'npm install', start: 'npm run start', port: APP_PORT } }, JSON.stringify(root));
+  }
+});
+
 test('a production launcher runs after its build and stays unbuilt in the source snapshot', async t => {
   const { root, repoPath } = await fixture(t, {
     'package.json': manifest('production', { vite: '1.0.0' }, { build: 'vite build', start: 'vite preview' }),
