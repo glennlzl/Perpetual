@@ -26,7 +26,8 @@ test('a health check that takes the previous twin during gate admission delays r
   const browser = {
     isActive: () => false, summary: () => ({ cases: [{ selected: true, needsReview: false }] }),
     view: async () => ({ config: { targetUrl: environments.summaries(context.key).find(item => item.status === 'ready')?.apps[0]?.url } }),
-    run: async () => { runs++; return { run: { id: 'journey-run' } }; },
+    // The browser admits the run against the environment the configured URL resolves to.
+    run: async () => { runs++; return { run: { id: 'journey-run', environmentId: environments.summaries(context.key).find(item => item.status === 'ready')?.id } }; },
     runProgress: async () => ({ run: { id: 'journey-run', status: 'passed', results: [{ status: 'passed' }] } }),
   };
   let ticking: Promise<void> | undefined, checkedOut = false;

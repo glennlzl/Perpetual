@@ -29,7 +29,7 @@ function fakes({ environments: list = [], created = { id: 'new', status: 'ready'
     isActive: () => false,
     summary: () => ({ cases }),
     async view() { return { config: { targetUrl: target } }; },
-    async run(ctx, input) { calls.push(`run ${JSON.stringify(input)}`); return { run: { id: 'run-1', status: 'queued' } }; },
+    async run(ctx, input) { calls.push(`run ${JSON.stringify(input)}`); return { run: { id: 'run-1', status: 'queued', environmentId: resolves } }; },
     async runProgress(ctx, id) { calls.push(`progress ${id}`); return { run: { id, status: runs[Math.min(polls++, runs.length - 1)] } }; },
   };
   return { calls, readiness, environments, browser };
@@ -132,7 +132,7 @@ test('a health lease on the rebuilt twin delays browser admission and starts the
   f.browser.run = async () => {
     const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
     started++; release();
-    return { run: { id: 'run-1' } };
+    return { run: { id: 'run-1', environmentId: 'new' } };
   };
   const running = steps(f).run(context, { id: 'new', status: 'ready' });
   const state = running.then(() => 'completed', () => 'failed');
@@ -152,7 +152,7 @@ test('a person\'s operation or a model settings save holding the stage delays br
     const hold = holds.shift();
     if (hold) throw stageHeld(hold);
     started++;
-    return { run: { id: 'run-1' } };
+    return { run: { id: 'run-1', environmentId: 'new' } };
   };
   assert.equal((await steps(f).run(context, { id: 'new', status: 'ready' })).status, 'passed');
   assert.deepEqual([holds, started], [[], 1]);
@@ -175,7 +175,7 @@ test('a gate waiting for a health lease refuses a target changed before browser 
   let started = 0;
   f.browser.run = async () => {
     const release = usage.acquire(context, { environmentId: 'new', operation: 'browser run' });
-    started++; release(); return { run: { id: 'run-1' } };
+    started++; release(); return { run: { id: 'run-1', environmentId: 'new' } };
   };
   const running = steps(f).run(context, { id: 'new', status: 'ready' });
   const rejected = assert.rejects(running, /application URL to the rebuilt twin/);
@@ -184,6 +184,16 @@ test('a gate waiting for a health lease refuses a target changed before browser 
   releaseHealth();
   await rejected;
   assert.equal(started, 0);
+});
+
+test('a run the browser admitted for another application never becomes the gate\'s verdict', async () => {
+  for (const environmentId of ['other', undefined]) {
+    const f = fakes();
+    // A person saved another application URL between the gate's check and the browser's admission.
+    f.browser.run = async () => ({ run: { id: 'run-1', ...(environmentId ? { environmentId } : {}) } });
+    await assert.rejects(steps(f).run(context, { id: 'new', status: 'ready' }), /application URL to the rebuilt twin/);
+    assert.deepEqual(f.calls, [], 'The run is never followed for a verdict.');
+  }
 });
 
 test('a run is refused when the application URL does not point at the rebuilt twin', async () => {
