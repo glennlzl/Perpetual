@@ -6,8 +6,8 @@ from urllib.parse import urlsplit, urlunsplit
 JSON_TYPE = re.compile(r'^application/json(?:\s*;\s*charset\s*=\s*"?utf-?8"?)?\s*$', re.I)
 
 def validate_read_requests(value, target):
-    if not isinstance(value, list) or len(value) > 10:
-        raise ValueError('Add at most 10 read-only POST requests.')
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError('Add at most 32 read-only POST requests.')
     result = []
     for rule in value:
         if not isinstance(rule, dict) or set(rule) != {'url', 'body'} or not isinstance(rule['url'], str) or (rule['body'] is not None and not isinstance(rule['body'], str)):

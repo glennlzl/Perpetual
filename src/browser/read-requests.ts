@@ -5,7 +5,7 @@ import type { ReadOnlyRequest, BlockedRequest } from '../../contract/browser.ts'
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** A person reviews one complete request and its body mode, never an endpoint prefix or an agent's assertion of safety. */
 export function validateReadRequests(value: unknown, targetUrl: string): ReadOnlyRequest[] {
-  if (!Array.isArray(value) || value.length > 10) throw new Error('Add at most 10 read-only POST requests.');
+  if (!Array.isArray(value) || value.length > 32) throw new Error('Add at most 32 read-only POST requests.');
   const found: ReadOnlyRequest[] = [];
   for (const item of value) {
     if (!record(item) || Object.keys(item).some(key => !['url', 'body'].includes(key))) throw new Error('Provide the URL and reviewed body mode of each read-only POST request.');

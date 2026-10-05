@@ -9,7 +9,7 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false } = {}) {
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false, readCount = 1, readBody = '{}' } = {}) {
   let value = 'Original', persist = true, writes = 0;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
@@ -26,7 +26,7 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
       if (req.url === '/save') { writes++; setTimeout(() => { if (persist) value = body; res.end('Saved'); }, responseWait ? 300 : 0); return; }
       if (req.url === '/read') { if(readRedirect){res.writeHead(307,{Location:'/save'});res.end();return;}res.end(value); return; }
       res.setHeader('Content-Type', 'text/html');
-      const readOptions=bodylessRead ? "{method:'POST'}" : "{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}";
+      const readOptions=bodylessRead ? "{method:'POST'}" : `{method:'POST',headers:{'Content-Type':'application/json'},body:${JSON.stringify(readBody)}}`;
       res.end(`<h1>Settings</h1><label>Name<input id=name></label><p id=kept>${postRead ? '' : value}</p><p id=loaded></p><p id=ack></p><p id=finished></p><button id=save>Save</button>
         ${popupRead ? `<p id=popup></p><button onclick="window.open('/popup')">Open reader</button>` : ''}<script>${postRead ? `fetch('/read',${readOptions}).then(async r=>{kept.textContent=await r.text();loaded.textContent=r.ok?'Read ready':'Unavailable';});` : ''}
         save.onclick=async()=>{const response=await fetch('/save',{method:'POST',body:document.querySelector('input').value});ack.textContent=response.ok?'Saved':'Unavailable';finished.textContent='Finished';};</script>`);
@@ -42,7 +42,7 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
     steps: [{ id: 'open', title: 'Open settings', checks: [{ type: 'text-visible', value: postRead ? 'Read ready' : 'Settings' }] },
       { id: 'save', title: 'Save workspace name', checks: [{ type: 'text-visible', value: reopen ? 'Name {run}' : 'Saved' }] }],
     expectedOutcomes: ['The new name is stored'] };
-  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60, ...(reviewedRead ? {readOnlyRequests:[{url:`http://127.0.0.1:${address.port}/read`,body:bodylessRead?null:'{}'}]} : {}) });
+  await manager.saveConfig(context, { targetUrl: `http://127.0.0.1:${address.port}/`, journeyTimeoutSeconds: 60, ...(reviewedRead ? {readOnlyRequests:Array.from({length:readCount},(_,index)=>({url:`http://127.0.0.1:${address.port}/read${index?`/${index}`:''}`,body:bodylessRead?null:readBody}))} : {}) });
   await manager.saveCases(context, [item]);
   const submit = responseWait ? "await Promise.all([page.waitForResponse('**/save'),page.getByRole('button',{name:'Save',exact:true}).click()]);"
     : "await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});";
@@ -91,6 +91,12 @@ test('a reviewed POST read keeps the blocked submission observable to a paired r
   const f=await setup(t,{reopen:true,postRead:true,responseWait:true,reviewedRead:true,bodylessRead:true,authenticated:true});
   assert.deepEqual(await f.verify(),{status:'passed',passes:3,control:'caught'});
   assert.equal(f.writes(),3,'Neither interception layer lets the control save.');
+});
+
+test('32 maximum-body reviewed reads reach real workers and preserve a caught control', {timeout:90000},async t=>{
+  const f=await setup(t,{reopen:true,postRead:true,responseWait:true,reviewedRead:true,readCount:32,readBody:JSON.stringify({value:'x'.repeat(4084)})});
+  assert.deepEqual(await f.verify(),{status:'passed',passes:3,control:'caught'});
+  assert.equal(f.writes(),3,'The large read policy does not permit the control write.');
 });
 
 test('blocking a read-only POST before the journey changes anything never counts as a caught control', { timeout: 90000 }, async t => {
