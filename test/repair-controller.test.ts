@@ -290,7 +290,7 @@ test('a Sandbox stage without reviewed journeys holds the fix at ready, reports 
   await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
   const ready = await c.finished('ready');
   const head = c.github.commits[0];
-  assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.steps.at(-1)?.status], ['Beta needs release: No reviewed journeys.', 'needs-review', 'waiting']);
+  assert.deepEqual([ready.repair.reason, change(ready.view)?.status, change(ready.view)?.steps.slice(3).map(step => step.status)], ['Beta needs release: No reviewed journeys.', 'needs-review', ['waiting', 'pending']], 'A gate that needs release verified nothing.');
   assert.equal(c.github.calls.some(args => args.includes('repos/owner/app/pulls/7/merge')), false, 'A stage without reviewed journeys never merges by itself.');
   const stored = await c.saved();
   assert.deepEqual(stored.gates?.map(item => [item.stageId, item.sha, item.status]), [['beta', head, 'needs-release']]);
