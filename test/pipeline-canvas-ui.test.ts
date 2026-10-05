@@ -312,3 +312,26 @@ test('deleting a stage asks first, follows the controller until it is removed, t
   await expect(page.getByRole('group', { name: 'Production', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
+
+test('the Pipeline opens with its navigation collapsed, zoom and Fit view only, and Production reporting a release before readiness', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
+  let releaseView: ReleaseReply = { ...release, target, canDeploy: true };
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(pipeline) };
+    if (path === '/api/gate') return { json: { repoPath, sha, stages: { [beta]: { id: 'gate-1', stageId: beta, sha, status: 'passed', detectedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } }, production: { status: 'ready', sha } } satisfies GateReply };
+    if (path === '/api/releases') return { json: releaseView };
+  });
+  await open();
+  await expect(page.locator('[data-slot="sidebar"][data-state]')).toHaveAttribute('data-state', 'collapsed');
+  await expect(page.locator('.canvas-toolbar').getByRole('button')).toHaveText(['', '', '']);
+  assert.deepEqual(await page.locator('.canvas-toolbar').getByRole('button').evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label'))), ['Zoom out', 'Zoom in', 'Fit view']);
+  // Production reads the gates' readiness until a requested deployment reports its own state for the commit.
+  const production = page.getByRole('group', { name: 'Production', exact: true });
+  await expect(production.getByText('Readyaaaaaaa', { exact: true })).toBeVisible();
+  releaseView = { ...releaseView, current: { id: 'release-1', sha, ...target, status: 'deploying', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } };
+  await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
+  await expect(production.getByText('Deployingaaaaaaa', { exact: true })).toBeVisible();
+  await expect(production.getByText('Readyaaaaaaa', { exact: true })).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
