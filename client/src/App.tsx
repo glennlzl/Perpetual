@@ -785,7 +785,9 @@ function PipelineApp() {
     await workspace.refreshSource();
   }, [workspace]);
   // A gate moved the managed source to another commit in place; the workspace and its drafts stay. False means the
-  // reload could not run while a pipeline or source change saved, so the gate hook tries it again.
+  // reload could not run while a pipeline or source change saved, so the gate hook tries it again. Try again after a
+  // failed reload starts that hook over, so it also waits out a change saving meanwhile.
+  const [scanRetry, setScanRetry] = useState(0);
   const refreshScan = useCallback(async (): Promise<boolean> => {
     if (mutation.current) return false;
     const source = workspace.stage('source');
@@ -794,10 +796,10 @@ function PipelineApp() {
       if (!source.isCurrent()) return true;
       if (mutation.current) return false;
       if (fresh.scan?.repo?.path === state.scan?.repo?.path && fresh.scan?.repo?.branch === state.scan?.repo?.branch) setState(fresh);
-    } catch (failure) { if (source.isCurrent()) setError((failure as Error).message, () => void refreshScan()); }
+    } catch (failure) { if (source.isCurrent()) setError((failure as Error).message, () => setScanRetry(value => value + 1)); }
     return true;
   }, [state.scan, workspace, setError]);
-  const gates = useStageGates(state.scan?.repo, refreshScan);
+  const gates = useStageGates(state.scan?.repo, refreshScan, scanRetry);
   const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
   // A failed refresh is the workspace's own poll error, which its next poll repeats.
   useEffect(() => {

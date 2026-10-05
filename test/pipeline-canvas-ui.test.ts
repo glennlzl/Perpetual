@@ -166,13 +166,17 @@ test('a changed gate verdict reads the release at once, so Deploy follows it bet
   assert.deepEqual(pageErrors, []);
 });
 
-test('a source reload a gate asks for runs after a pipeline change saves, and a failed one offers Try again', { timeout: 60000 }, async t => {
+test('a source reload a gate asks for runs after a pipeline or source change saves, also when Try again is pressed meanwhile', { timeout: 60000 }, async t => {
   let pipeline = withBeta(), scanned = sha, failState = false;
-  const write = Promise.withResolvers<void>(); t.after(() => write.resolve());
+  const write = Promise.withResolvers<void>(), save = Promise.withResolvers<void>(); t.after(() => { write.resolve(); save.resolve(); });
+  const github = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: repoPath };
   const { page, refresh, open } = await openApp(t, async (path, request) => {
     if (path === '/api/state') return failState ? { status: 503, json: { error: 'The controller is restarting.' } } : { json: { ...pipelineState(pipeline), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha: scanned }, delivery: { source: [], build: [], production: [] } } } };
     if (path === '/api/gate') return { json: { repoPath, sha: scanned, stages: {}, production: null } };
     if (path === '/api/pipeline/action') { await write.promise; pipeline = applyPipelineAction(pipeline, request.postDataJSON()); return { json: { pipeline } }; }
+    if (path === '/api/github/connection') return { json: { available: true, authenticated: true, connected: true, account: { login: 'acme', name: null }, source: github, localCheckout: null } };
+    if (path === '/api/github/branches') return { json: { branches: [{ name: 'main' }, { name: 'feature' }], nextPage: null, defaultBranch: 'main' } };
+    if (path === '/api/source/github') { await save.promise; return { status: 409, json: { error: 'Wait for the journey gate to finish.' } }; }
   });
   await open();
   // The Source card by its node, since a confirmation in progress hides the canvas from role queries.
@@ -186,12 +190,18 @@ test('a source reload a gate asks for runs after a pipeline change saves, and a 
   await expect(source.getByText('aaaaaaa', { exact: true })).toBeVisible();
   write.resolve();
   await expect(source.getByText('bbbbbbb', { exact: true })).toBeVisible();
-  // A reload that fails says so with Try again, which reads the moved source.
+  // A reload that fails says so with Try again. Pressed while a branch switch saves, it reads the moved source once the
+  // switch ends, here refused.
   failState = true; scanned = 'c'.repeat(40);
   await refresh('/api/gate', '/build/src/lib/stage-gate.ts', 'gateChanges');
   await expect(page.getByRole('alert')).toContainText('The controller is restarting.');
   failState = false;
+  await page.getByRole('combobox', { name: 'Switch branch: main', exact: true }).click();
+  await page.getByRole('option', { name: 'feature', exact: true }).click();
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(source.getByText('bbbbbbb', { exact: true })).toBeVisible();
+  save.resolve();
+  await expect(page.getByRole('alert')).toContainText('Wait for the journey gate to finish.');
   await expect(source.getByText('ccccccc', { exact: true })).toBeVisible();
 });
 
