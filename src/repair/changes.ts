@@ -6,7 +6,7 @@
 import { posix } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
-import { hasCredential } from '../redaction.ts';
+import { REDACTED, hasCredential } from '../redaction.ts';
 
 /** credentials names where credential text was added, as path:line of the new file, never the text. */
 export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[]; credentials: string[] }
@@ -18,6 +18,7 @@ export const REJECTED = {
   path: 'The change touches .git or a path outside the repository. Change files inside the repository only.',
   submodule: 'The change adds or moves a submodule. Change files inside the repository only.',
   delivery: 'The change touches CI or deployment configuration. A repair changes the code that fails, never how it is built or deployed.',
+  marker: `The change adds ${REDACTED}, which the tools show in place of hidden text and is never code. Keep the original text.`,
 };
 export const HELD = {
   tests: 'The change touches tests.',
@@ -126,7 +127,7 @@ export function pathRules(paths: readonly string[], deployFiles: readonly string
  */
 export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?: readonly string[] } = {}): ChangeCheck {
   const paths = new Set<string>(), rejected = new Set<string>(), gone = new Set<string>(), adds: { text: string; code: boolean; at: string }[] = [];
-  let added = 0, removed = 0, hunk = false, binary = false, code = false, file = '', number = 0;
+  let added = 0, removed = 0, hunk = false, binary = false, code = false, file = '', number = 0, marks = 0;
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       const named = headerPaths(line.slice(11));
@@ -136,8 +137,8 @@ export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?:
     }
     if (binary) continue;
     if (hunk) {
-      if (line.startsWith('+')) { added += 1; adds.push({ text: line.slice(1), code, at: `${file}:${number}` }); number += 1; continue; }
-      if (line.startsWith('-')) { removed += 1; gone.add(line.slice(1)); continue; }
+      if (line.startsWith('+')) { added += 1; marks += line.split(REDACTED).length - 1; adds.push({ text: line.slice(1), code, at: `${file}:${number}` }); number += 1; continue; }
+      if (line.startsWith('-')) { removed += 1; marks -= line.split(REDACTED).length - 1; gone.add(line.slice(1)); continue; }
       if (line.startsWith(' ')) { number += 1; continue; }
       if (line.startsWith('\\') || line === '') continue;
       hunk = false;
@@ -155,6 +156,9 @@ export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?:
   // Credential text is text the change adds: a line it also removes, as in a file it moves, was already there.
   const credentials = adds.filter(item => !gone.has(item.text) && hasCredential(item.text, { code: item.code })).map(item => item.at);
   if (credentials.length) rejected.add(REJECTED.credential);
+  // The redaction marker the agent's tools show in place of hidden text, copied into a file in place of code; a line
+  // that keeps a marker the file already held adds none.
+  if (marks > 0) rejected.add(REJECTED.marker);
   const listed = [...paths], rules = pathRules(listed, deployFiles);
   rules.rejected.forEach(reason => rejected.add(reason));
   const holds = [...rules.holds, ...(added + removed > SIZE_LIMIT ? [HELD.size] : [])];

@@ -44,6 +44,11 @@ test('credential text is named by path and line, and a line the change only move
   assert.deepEqual([moved.rejected, moved.credentials], [[], []], 'A moved file adds no text the repository did not hold.');
 });
 
+test('a change that adds the redaction marker in place of code is refused, and one keeping a marker the file held is not', () => {
+  assert.deepEqual(checkChanges(diff(file('src/auth.ts', ['  const token = [REDACTED];'], ['  const token = getToken(username);']))).rejected, [REJECTED.marker]);
+  assert.deepEqual(checkChanges(diff(file('src/mask.ts', ["export const mask = (value: string) => value ? '[REDACTED]' : '';"], ["export const mask = () => '[REDACTED]';"]))).rejected, []);
+});
+
 test('a path through .git, outside the repository or a submodule rejects the change', () => {
   assert.deepEqual(checkChanges(diff(file('.git/hooks/pre-push', ['#!/bin/sh']))).rejected, [REJECTED.path]);
   assert.deepEqual(checkChanges(diff(file('pkg/.GIT/config', ['x']))).rejected, [REJECTED.path], 'Case does not hide .git.');
