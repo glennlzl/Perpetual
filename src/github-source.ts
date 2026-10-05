@@ -377,7 +377,9 @@ export async function prepareGitHubSource({ repository, branch, rootDirectory = 
     const sha = stdout.trim();
     if (!/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(sha)) throw new GitHubSourceError('Git did not return a valid checkout commit. Reconnect the repository.');
     const scanPath = await scanDirectory(checkoutPath, root);
-    return { scanPath, checkoutPath, repository: selected, branch: selectedBranch, rootDirectory: root, sha };
+    // Saved as the checkout spells it: a case-insensitive file system also finds a root typed in another case.
+    const within = relative(checkoutPath, scanPath).split(sep).filter(Boolean);
+    return { scanPath, checkoutPath, repository: selected, branch: selectedBranch, rootDirectory: within.length ? `/${within.join('/')}` : '/', sha };
   } catch (error) {
     let cleanupFailed = false;
     if (ownedDirectory) try { await rm(ownedDirectory, { recursive: true, force: true }); } catch { cleanupFailed = true; }

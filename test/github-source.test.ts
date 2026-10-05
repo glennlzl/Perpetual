@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -100,4 +100,13 @@ test('a commit that removes the root directory never strands the copy before a c
   await rm(join(hub.dir, 'work/apps/web'), { recursive: true });
   await symlink('site', join(hub.dir, 'work/apps/web'));
   await assert.rejects(updateGitHubSource({ source, dataDir: hub.dataDir, sha: await hub.commit({}) }), /without symbolic links/);
+});
+
+test('a root directory typed in another letter case is saved as the checkout spells it', async t => {
+  const hub = await github(t, { 'repos/acme/app/branches/main': { name: 'main' } });
+  await hub.commit({ 'Backend/api/package.json': '{}\n' });
+  if (!await lstat(join(hub.dir, 'WORK')).then(() => true, () => false)) return t.skip('The file system distinguishes letter case.');
+  const source = await prepareGitHubSource({ repository: 'acme/app', branch: 'main', rootDirectory: '/backend/API', dataDir: hub.dataDir });
+  // A repair's host copy builds the scan path from the saved root, so the two must agree.
+  assert.deepEqual([source.rootDirectory, source.scanPath], ['/Backend/api', join(source.checkoutPath, 'Backend', 'api')]);
 });
