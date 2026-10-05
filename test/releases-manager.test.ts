@@ -148,6 +148,24 @@ test('a stop during the read-only preflight leaves no request to recover as unce
   assert.equal(f.requests.length,1);
 });
 
+test('a restarted controller observes an unresolved deployment in the background, less often while nothing changes',async t=>{
+  const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});await f.manager.close();
+  t.mock.timers.enable({apis:['setInterval']});
+  let reads=0,status:'queued'|'deployed'='queued';
+  const reopened=await createReleaseManager({...f.options,github:{...f.options.github,read:async()=>{reads++;return {deploymentId:'12',status};}},pollInterval:1000});
+  t.after(()=>reopened.close());
+  // One second of the controller's time, and the real time any write it starts needs.
+  const tick=async(count:number)=>{for(let index=0;index<count;index++){t.mock.timers.tick(1000);await new Promise(resolve=>setTimeout(resolve,20));}};
+  const file=join(f.dataDir,'releases','state.json');
+  await tick(1);assert.equal(reads,1,'Observation resumes without Check status.');
+  const stored=await readFile(file,'utf8');
+  await tick(10);assert.equal(reads,3,'Reads that find nothing new come less and less often.');
+  assert.equal(await readFile(file,'utf8'),stored,'A read that finds nothing new writes nothing.');
+  status='deployed';
+  for(const deadline=Date.now()+10_000;(await reopened.view()).current?.status!=='deployed';){assert.ok(Date.now()<deadline,'The reported status must arrive.');await tick(1);}
+  const settled=reads;await tick(5);assert.equal(reads,settled,'A resolved deployment is not read again in the background.');
+});
+
 test('restart recovers an interrupted request as unknown and only reads the remote receipt',async t=>{
   const f=await fixture(t);await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});await f.manager.close();
   const path=join(f.dataDir,'releases','state.json'),stored=JSON.parse(await readFile(path,'utf8'));
