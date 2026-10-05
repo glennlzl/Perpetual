@@ -8,10 +8,14 @@ type FrameMode = 'idle' | 'stream' | 'final' | 'done';
 interface FrameEntry {
   identity: string; source: FrameSource; subscribers: Map<object, { listener: () => void; interval: number }>; snapshot: FrameSnapshot; mode: FrameMode; terminal: boolean;
   revision: string | number | undefined; fetchedRevision: string | number | undefined; fetchedAt: number; request: AbortController | null; timer: ReturnType<typeof setTimeout> | undefined;
+  /** Failed fetches of a finished journey's last frame so far. */
+  retries: number;
 }
 export type FrameStore = ReturnType<typeof createFrameStore>;
 
 const EMPTY: FrameSnapshot = Object.freeze({ identity: '', url: '', error: '', receivedAt: 0, checkedAt: 0 });
+// A failed last frame is fetched again after 1, 2 and 4 seconds, then left until the page is shown again.
+const FINAL_RETRIES = 3;
 const streaming = (status: string | undefined) => ['running', 'skipping', 'cancelling'].includes(status ?? '');
 const modeOf = (status: string | undefined): FrameMode => streaming(status) ? 'stream' : ['queued', 'pending'].includes(status ?? '') ? 'idle' : 'final';
 export const frameIdentity = ({ repoPath = '', stageId = '', runId = '', caseId = '' }: Partial<FrameSource>) => JSON.stringify([repoPath, stageId, runId, caseId]);
@@ -32,7 +36,12 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
   function schedule(entry: FrameEntry) {
     clearTimeout(entry.timer); entry.timer = undefined;
     if (!entry.subscribers.size || entry.request || hidden() || ['idle', 'done'].includes(entry.mode)) return;
-    if (entry.mode === 'final') return void capture(entry);
+    if (entry.mode === 'final') {
+      const retry = entry.retries ? entry.fetchedAt + 1000 * 2 ** (entry.retries - 1) - Date.now() : 0;
+      if (retry <= 0) return void capture(entry);
+      entry.timer = setTimeout(() => schedule(entry), retry);
+      return;
+    }
     const interval = !reducedMotion() ? Math.min(...[...entry.subscribers.values()].map(item => item.interval)) : entry.fetchedRevision !== entry.revision ? reducedFloor : reducedInterval;
     const wait = entry.fetchedAt + interval - Date.now();
     if (wait <= 0) return void capture(entry);
@@ -46,7 +55,7 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
     catch (failure) { error = (failure as Error | null)?.message || 'Stream unavailable'; }
     if (entry.request !== request) { if (url) revokeUrl(url); return; }
     entry.request = null; entry.fetchedAt = Date.now(); entry.fetchedRevision = revision;
-    if (mode === 'final' && entry.mode === 'final') entry.mode = 'done';
+    if (mode === 'final' && entry.mode === 'final') { if (error && entry.retries < FINAL_RETRIES) entry.retries++; else entry.mode = 'done'; }
     const previous = entry.snapshot.url;
     entry.snapshot = { identity: entry.identity, url: url || previous, error, receivedAt: url ? entry.fetchedAt : entry.snapshot.receivedAt, checkedAt: entry.fetchedAt };
     if (url && previous) revokeUrl(previous);
@@ -64,7 +73,7 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
     subscribe(source: FrameSource, listener: () => void, { interval = 350, status, revision }: FrameProgress & { interval?: number } = {}) {
       const identity = frameIdentity(source);
       let entry = entries.get(identity);
-      if (!entry) { entry = { identity, source: { ...source }, subscribers: new Map(), snapshot: { ...EMPTY, identity }, mode: 'idle', terminal: false, revision, fetchedRevision: undefined, fetchedAt: -Infinity, request: null, timer: undefined }; entries.set(identity, entry); }
+      if (!entry) { entry = { identity, source: { ...source }, subscribers: new Map(), snapshot: { ...EMPTY, identity }, mode: 'idle', terminal: false, revision, fetchedRevision: undefined, fetchedAt: -Infinity, request: null, timer: undefined, retries: 0 }; entries.set(identity, entry); }
       const token = {};
       entry.subscribers.set(token, { listener, interval });
       update(entry, { status, revision });
@@ -73,7 +82,12 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
     },
     update(source: FrameSource, next: FrameProgress) { const entry = entries.get(frameIdentity(source)); if (entry) { update(entry, next); schedule(entry); } },
     getSnapshot: (source: FrameSource) => entries.get(frameIdentity(source))?.snapshot || EMPTY,
-    resume() { for (const entry of entries.values()) schedule(entry); },
+    resume() {
+      for (const entry of entries.values()) {
+        if (entry.mode === 'done' && entry.snapshot.error) { entry.mode = 'final'; entry.retries = 0; }
+        schedule(entry);
+      }
+    },
     size: () => entries.size,
   };
 }

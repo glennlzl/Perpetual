@@ -140,3 +140,28 @@ test('errors are reported without dropping the last frame', async t => {
   t.mock.timers.tick(350); await flush();
   assert.deepEqual([store.getSnapshot(source()).url, store.getSnapshot(source()).error], ['blob:1', 'Stream unavailable']);
 });
+test('a failed last frame is fetched again after 1, 2 and 4 seconds, and once more when the page is shown again', async t => {
+  let fail = true;
+  const { store, calls, state } = harness(t, { load: () => { if (fail) throw new Error('Stream unavailable'); return jpeg(); } });
+  store.subscribe(source('done'), () => {}, { status:'failed' });
+  await flush();
+  assert.equal(calls.length, 1);
+  t.mock.timers.tick(999); await flush();
+  assert.equal(calls.length, 1);
+  t.mock.timers.tick(1); await flush();
+  assert.equal(calls.length, 2);
+  t.mock.timers.tick(2000); await flush();
+  assert.equal(calls.length, 3);
+  t.mock.timers.tick(4000); await flush();
+  assert.equal(calls.length, 4);
+  t.mock.timers.tick(60000); await flush();
+  assert.equal(calls.length, 4, 'The retries are bounded.');
+  assert.equal(store.getSnapshot(source('done')).error, 'Stream unavailable');
+  fail = false; state.hidden = true; store.resume(); await flush();
+  assert.equal(calls.length, 4, 'A hidden page fetches nothing.');
+  state.hidden = false; store.resume(); await flush();
+  assert.equal(calls.length, 5);
+  assert.deepEqual([store.getSnapshot(source('done')).url, store.getSnapshot(source('done')).error], ['blob:1', '']);
+  t.mock.timers.tick(60000); store.resume(); await flush();
+  assert.equal(calls.length, 5, 'A fetched last frame is final.');
+});
