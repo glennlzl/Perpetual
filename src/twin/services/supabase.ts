@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { cp, lstat, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { basename, dirname, join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { relative } from '../paths.ts';
 import { bridgeSupabaseImportMaps } from '../supabase-import-maps.ts';
@@ -13,12 +14,17 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 // The CLI cannot run inside a container without the host Docker socket: `supabase start` creates the
 // stack's containers itself, and its docs require the socket bind-mounted for that case. Perpetual never
 // mounts the socket into a container, so the minimal alternative is the pinned npm release run as a host
-// process through `ctx.exec` (`npx supabase@<pin>`), with the Docker access the controller already uses
-// for `docker compose`. No installed host binary is used.
+// process through `ctx.exec`, with the Docker access the controller already uses for `docker compose`.
+// The release is an exact dependency of Perpetual, so package-lock.json locks it, its platform binary and
+// its own dependencies with their integrity hashes; nothing is fetched when a twin starts, and no other
+// installed host binary is used.
 //
 // DATABASE_URL preserves the local credentials reported by `supabase status`.
 // 2.118.0 includes supabase/cli#6505: prune overlapping Edge Runtime binds before its docker cp bootstrap.
-export const CLI = 'supabase@2.118.0';
+export const CLI_VERSION = '2.118.0';
+const CLI_MISSING = `Supabase CLI ${CLI_VERSION} is not installed: run npm run setup in Perpetual.`;
+/** The launcher would run whatever binary this names in place of the locked one, so it is always cleared. */
+const BINARY_OVERRIDE = 'SUPABASE_CLI_BINARY_OVERRIDE';
 const MOUNT_CHECK_IMAGE = 'node:24-bookworm-slim';
 /** directory: the repository's supabase directory; functions and users are checked where they are used. */
 type Options = { directory?: Json; functions?: Json; users?: Json };
@@ -57,7 +63,19 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
   return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
     .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
 }
-const cli = (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir, env });
+/**
+ * The installed CLI's launcher, which runs the platform binary of the same locked release; it refuses any other
+ * version, as a node_modules older than package.json would hold.
+ */
+export async function cliEntry() {
+  let manifest: string;
+  try { manifest = createRequire(import.meta.url).resolve('supabase/package.json'); } catch { throw new Error(CLI_MISSING); }
+  const { version, bin } = JSON.parse(await readFile(manifest, 'utf8')) as { version?: unknown; bin?: { supabase?: unknown } };
+  if (version !== CLI_VERSION || typeof bin?.supabase !== 'string') throw new Error(CLI_MISSING);
+  return join(dirname(manifest), bin.supabase);
+}
+const cli = async (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) =>
+  ctx.exec(process.execPath, [await cliEntry(), ...args], { cwd: ctx.dir, env: { [BINARY_OVERRIDE]: '', ...env } });
 const ENV_REFERENCE = /^env\((.*)\)$/; // a config.toml value the CLI fills from its own environment
 /** SUPABASE_ variables that set how the CLI itself runs, never what its stack holds: an image mirror, its home and telemetry. */
 const CLI_SETTINGS = new Set(['SUPABASE_INTERNAL_IMAGE_REGISTRY', 'SUPABASE_HOME', 'SUPABASE_TELEMETRY_DISABLED']);

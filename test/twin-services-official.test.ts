@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import supabase, { CLI as SUPABASE_CLI, setToml } from '../src/twin/services/supabase.ts';
+import { fileURLToPath } from 'node:url';
+import supabase, { CLI_VERSION as SUPABASE_VERSION, cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import { APP_IMAGE } from '../src/twin/compose.ts';
 import stripe, { CLI as STRIPE_CLI, EVENTS, SANDBOX_FAILED } from '../src/twin/services/stripe.ts';
 import { detectTwinConfig } from '../src/twin/detect.ts';
@@ -73,13 +74,14 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   ctx.outputs = await supabase.setup(ctx);
-  const workdir = join(ctx.dir, 'supabase');
+  const workdir = join(ctx.dir, 'supabase'), entry = await cliEntry();
+  // The installed release's own launcher, run with the controller's Node.
   assert.deepEqual(ctx.calls.filter(call => call.command).map(({ command, args }) => [command, ...args]), [
-    ['npx', '--yes', SUPABASE_CLI, 'stop', '--no-backup', '--project-id', 'perpetual-beta1'],
-    ['npx', '--yes', SUPABASE_CLI, 'start', '--workdir', workdir],
-    ['npx', '--yes', SUPABASE_CLI, 'status', '--output', 'env', '--workdir', workdir],
+    [process.execPath, entry, 'stop', '--no-backup', '--project-id', 'perpetual-beta1'],
+    [process.execPath, entry, 'start', '--workdir', workdir],
+    [process.execPath, entry, 'status', '--output', 'env', '--workdir', workdir],
   ]);
-  assert.match(SUPABASE_CLI, /^supabase@\d+\.\d+\.\d+$/);
+  assert.match(SUPABASE_VERSION, /^\d+\.\d+\.\d+$/);
   assert.ok(ctx.calls.every(({ args }) => !args.some(arg => SOCKET.test(arg))));
   assert.equal(ctx.calls[1].image, APP_IMAGE);
   assert.deepEqual(ctx.calls[1].options, { mounts: 'service-only' });
@@ -89,7 +91,8 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
 test('Supabase starts its stack with every env() name of its config.toml and SUPABASE_ setting unset, whatever the controller exports', async t => {
   // The controller's environment, as a developer's shell exports it: stack settings and a credential the CLI would take
   // over the config, and the CLI's own image mirror and telemetry choice, which stay.
-  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1' };
+  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1',
+    SUPABASE_CLI_BINARY_OVERRIDE: '/opt/acme/bin/supabase' };
   const exported = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('SUPABASE_')));
   for (const name of Object.keys(exported)) delete process.env[name];
   Object.assign(process.env, host);
@@ -107,10 +110,11 @@ additional_redirect_urls = ["env(REDIRECT_URL)", "http://127.0.0.1:3000"]
 token = "env(GH_TOKEN)"
 `);
   await supabase.setup(ctx);
-  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written.
-  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '' };
-  const cli = (name: string) => ctx.calls.find(call => call.command === 'npx' && call.args.includes(name));
-  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
+  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written. The launcher's
+  // binary override is always cleared, so the locked release runs.
+  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '', SUPABASE_CLI_BINARY_OVERRIDE: '' };
+  const cli = (name: string) => ctx.calls.find(call => call.command === process.execPath && call.args.includes(name));
+  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, { SUPABASE_CLI_BINARY_OVERRIDE: '' }]);
 });
 
 test('Supabase names its project directory before running the CLI when the repository has no project there', async () => {
@@ -185,7 +189,33 @@ test('Supabase teardown stops the twin project without a backup', async () => {
   const ctx = await context<SupabaseContext>();
   await supabase.teardown(ctx);
   assert.deepEqual(ctx.calls.map(({ command, args }) => [command, ...args]),
-    [['npx', '--yes', SUPABASE_CLI, 'stop', '--no-backup', '--project-id', 'perpetual-beta1']]);
+    [[process.execPath, await cliEntry(), 'stop', '--no-backup', '--project-id', 'perpetual-beta1']]);
+});
+
+test('The Supabase CLI is an exact dependency that package-lock.json locks with its platform binaries and dependencies', async () => {
+  const root = new URL('../', import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8')) as { dependencies: Record<string, string> };
+  const lock = JSON.parse(await readFile(new URL('package-lock.json', root), 'utf8')) as { packages: Record<string, { version?: string; integrity?: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }> };
+  assert.equal(manifest.dependencies.supabase, SUPABASE_VERSION, 'An exact version, never a range.');
+  const cli = lock.packages['node_modules/supabase'];
+  assert.equal(cli.version, SUPABASE_VERSION);
+  const binaries = Object.keys(cli.optionalDependencies ?? {});
+  assert.ok(binaries.length && binaries.every(name => name.startsWith('@supabase/cli-') && lock.packages[`node_modules/${name}`].version === SUPABASE_VERSION), 'The platform binaries are packages of the same release.');
+  // Every package the release installs, its own dependencies' dependencies included, is locked with an integrity hash.
+  const located = (from: string, name: string) => lock.packages[`${from}/node_modules/${name}`] ? `${from}/node_modules/${name}` : `node_modules/${name}`;
+  const seen = new Set<string>(), queue = ['node_modules/supabase'];
+  for (let path = queue.shift(); path !== undefined; path = queue.shift()) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const entry = lock.packages[path];
+    assert.match(entry?.integrity ?? '', /^sha512-/, path);
+    queue.push(...Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }).map(name => located(path!, name)));
+  }
+  assert.ok(seen.size > binaries.length + 1, 'The release\'s JavaScript dependencies are locked too.');
+  // The installed launcher runs, with no download.
+  const entry = await cliEntry();
+  assert.equal(entry, fileURLToPath(new URL('node_modules/supabase/dist/supabase.js', root)));
+  await stat(entry);
 });
 
 test('A long twin project gets a Supabase project id the CLI keeps whole, used by start and stop alike', async () => {
