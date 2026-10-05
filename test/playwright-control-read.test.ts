@@ -10,7 +10,7 @@ import { createPlaywrightRuntime } from '../src/journeys/playwright/runtime.ts';
 
 // Exercise the real fixture and controller. An acknowledgement is deliberately
 // independent of persistence, so a broken write can still return a successful reply.
-async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false, socketRead = false, readCount = 1, readBody = '{}' } = {}) {
+async function setup(t: TestContext, { reopen = false, postRead = false, responseWait = false, reviewedRead = false, bodylessRead = false, readRedirect = false, authenticated = false, popupRead = false, hashRoute = false, socketRead = false, readCount = 1, readBody = '{}' } = {}) {
   let value = 'Original', persist = true, writes = 0;
   const application = createServer((req, res) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
@@ -51,7 +51,7 @@ async function setup(t: TestContext, { reopen = false, postRead = false, respons
   await manager.saveCases(context, [item]);
   const submit = responseWait ? "await Promise.all([page.waitForResponse('**/save'),page.getByRole('button',{name:'Save',exact:true}).click()]);"
     : "await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByText('Finished',{exact:true}).waitFor({state:'visible'});";
-  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{" + (authenticated ? "await journey.signIn();" : "") + "});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);" + submit + (reopen ? 'await page.reload();' : '') + (socketRead ? "await page.getByText('Socket ready',{exact:true}).waitFor({state:'visible'});await page.getByRole('button',{name:'Refresh',exact:true}).click();" : '') + '});});';
+  const code = "import { test } from 'perpetual'; test('Rename workspace', async ({page,journey})=>{await journey.milestone('open',async()=>{" + (authenticated ? "await journey.signIn();" : "") + (hashRoute ? "await page.goto('/#/settings');" : "") + "});await journey.milestone('save',async()=>{await page.getByLabel('Name',{exact:true}).fill(`Name ${journey.run}`);" + submit + (reopen ? 'await page.reload();' : '') + (socketRead ? "await page.getByText('Socket ready',{exact:true}).waitFor({state:'visible'});await page.getByRole('button',{name:'Refresh',exact:true}).click();" : '') + '});});';
   const saved = await manager.saveSpec(context, { caseId: item.id, code }); const hash = saved.spec.draft!.hash;
   async function verify() {
     await manager.verifySpec(context, { caseId: item.id, hash, ...(authenticated?{credentials:{username:'viewer@example.test',password:'fixture-password'}}:{}) });
@@ -85,6 +85,11 @@ test('a fresh page read catches the blocked write and the approved journey detec
     assert.equal(report.run.status, 'failed'); return;
   }
   assert.fail('The gate run did not settle');
+});
+
+test('a fresh read of a hash-routed page catches the blocked write', { timeout: 90000 }, async t => {
+  const f = await setup(t, { reopen: true, hashRoute: true });
+  assert.deepEqual(await f.verify(), { status: 'passed', passes: 3, control: 'caught' });
 });
 
 test('a delayed submission settles before fresh readback and the blocked-write response still reaches independent checks', { timeout: 90000 }, async t => {

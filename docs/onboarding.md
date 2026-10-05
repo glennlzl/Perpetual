@@ -66,7 +66,7 @@ In the clone, `node src/cli.ts twin --repo <pipeline.repoPath>` prints JSON comp
 
 - `config.apps`: the apps the twin starts, and how.
 - `services`: each dependency Perpetual supplies, with its `fidelity` (`actual`: the real service; `official-sandbox`: the vendor's local mode or sandbox; `emulate`: vercel-labs/emulate, and `config.services.emulate.services` names the vendors) and the `evidence` that found it.
-- `unwired`: for each app, the variables its code reads that no service provides, with the file and line of the first read. Read those lines and name the integration behind each variable. The config agent gives a secret the app makes for itself a generated value, and another app's address its URL; a third-party API stays unsimulated, its variable empty, and a journey that reaches it ends blocked, never passed.
+- `unwired`: for each app, the variables its code reads that no service provides, with the file and line of the first read. Read those lines and name the integration behind each variable. The config agent gives a secret the app makes for itself a generated value, and another app's address its URL; a third-party API stays unsimulated, its variable empty, and a journey that reaches it fails or needs review, never passes.
 
 For each service with `inputs`:
 
@@ -74,7 +74,7 @@ For each service with `inputs`:
 
 - I enter them under the stage's **Services → Connect** once the environment exists.
 - Perpetual creates them for me, there too (offered when `provision` is true; for Stripe, a sandbox without an account).
-- Leave it: the service stays blocked, and a journey that reaches it ends blocked.
+- Leave it: the service stays blocked, and a journey that reaches it fails or needs review.
 
 Then:
 

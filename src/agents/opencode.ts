@@ -113,7 +113,8 @@ export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeou
     const { command, args, env: own } = harness({ model: `openrouter/${model}`, prompt, cwd, ...(agent ? { agent } : {}) });
     const childEnv = { ...env, ...own };
     let reportedRefusal: string | undefined;
-    const evidence = captureAuthoringEvidence(value => browserError(hide(String(value)), childEnv, Infinity), message => { reportedRefusal = openrouterRefusal(`Error: ${message}`); });
+    // The first refusal recognized is kept: a later, unrecognized error does not erase its guidance.
+    const evidence = captureAuthoringEvidence(value => browserError(hide(String(value)), childEnv, Infinity), message => { reportedRefusal ??= openrouterRefusal(`Error: ${message}`); });
     const captures = { stdout: { text: '', truncated: false }, stderr: { text: '', truncated: false } };
     const tail = (stream: 'stdout' | 'stderr') => {
       if (structuredOutput) return ''; // JSON tool results contain page contents and account data; only the allowlisted evidence leaves.

@@ -10,6 +10,7 @@ import {createBrowserManager} from '../src/browser/manager.ts';
 import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
 import {generateJourneySpec,generatePrompt,generationPlan,generationRules,opencodeHarness,repairPrompt,seedSpec} from '../src/journeys/playwright/generation.ts';
 import {caseHash,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
+import {toolName} from '../src/agents/authoring-evidence.ts';
 import {codeFor} from './fixtures/journey-code.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
@@ -19,8 +20,8 @@ import type {JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
 type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Events=(input:JourneyRunInput)=>WorkerEvent[];
 /** One run of the fake harness, as it logs what it saw (test/fixtures/fake-opencode.ts). */
-type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
-  generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown}};
+type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;instructions:string;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
+  generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown};hostFile?:{setups:boolean[];readLog:boolean;read:boolean}};
 type StoredState={specs:Record<string,Record<string,{approved:unknown;draft:{code:string;hash:string}}>>};
 
 // Code generation with a fake harness in place of OpenCode: no network, no key, no model.
@@ -143,6 +144,8 @@ test('grammar repair can read and write the rejected test but cannot repeat busi
   assert.ok(Object.keys(generation.agent.tools).some(name=>name.includes('browser_click')&&generation.agent.tools[name]));
   assert.equal(repair.agent.name,'perpetual-grammar-repair');
   assert.deepEqual(repair.agent.tools,{'*':false,read:true,'playwright-test*generator_setup_page':true,'playwright-test*generator_write_test':true});
+  // Authoring diagnostics name every tool either agent can call, as the pinned Playwright configures them.
+  for(const {agent} of [generation,repair])for(const [name,enabled] of Object.entries(agent.tools))if(enabled)assert.notEqual(toolName(name.replace(/^playwright-test\*/,'')),'unknown',name);
 });
 
 test('the generation rules keep navigation on the current run’s records',()=>{
@@ -174,10 +177,12 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   const workspace=dirname(call.cwd),run=join(workspace,'run');
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
+  assert.match(call.instructions,/The log's closing best practices are for ordinary Playwright tests and do not apply here: write no assertions and no variables\./,'The upstream log ends with advice the action-only grammar refuses.');
   assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
-  assert.deepEqual(call.mcp.slice(0,3),[process.execPath,fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url)),'run-test-mcp-server']);
-  assert.deepEqual(call.mcp.slice(3),['--headless','--config',join(run,'playwright.config.mjs')]);
+  // The test MCP server runs behind the filter that sets up only the workspace's seed.
+  assert.deepEqual(call.mcp.slice(0,6),[process.execPath,fileURLToPath(new URL('../src/journeys/playwright/mcp-guard.ts',import.meta.url)),'seed','seed.spec.mjs',await realpath(fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url))),'run-test-mcp-server']);
+  assert.deepEqual(call.mcp.slice(6),['--headless','--config',join(run,'playwright.config.mjs')]);
   // The only test folder under the project is where the spec is written; no project loads it.
   assert.deepEqual(call.config.projects,[{name:'seed',testDir:join(run,'seed'),testMatch:'seed.spec.mjs'},{name:'tests',testDir:join(call.cwd,'tests'),testIgnore:'**'}]);
   assert.deepEqual(call.modes,{config:0o444,seed:0o444,case:0o444,opencode:0o444,plan:0o444});
@@ -192,7 +197,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   assert.match(call.plan,/\*\*Steps:\*\*\n1\. Sign in and open Settings \(milestone id: open-settings\)\n2\. Save the display name \(milestone id: save-name\)\n/);
   for(const rule of ["`import { test } from 'perpetual';`",'exactly one `test("Rename the display name", async ({ page, journey }) => { … });`',"`await journey.milestone('<milestone id>', async () => { … });`",'Start the first milestone with `await journey.signIn();`','No variables, `expect` or other assertions',
     'When a step creates or changes data that a later check reads, type a value that includes `journey.run`, such as `` `QA ${journey.run}` ``, never a fixed literal that an earlier run may already have stored.',
-    'A check never reads a form field the journey typed into or chose on the current page, nor the fields of a page reached with `goBack` or `goForward`: to see a saved value in a field, reload or open the page again.','`journey.run` names no element or address in this journey, as no milestone follows one whose reviewed check shows or reads `{run}`: type it only with `fill`, `type` or `pressSequentially`.','`page.goto` takes a literal URL or path; `journey.run` never makes its address.',"Locate controls by names that stay the same across runs, apart from this run's own data where `journey.run` may name it: never by a fixed text this journey types or saves, nor by text an earlier run may have saved, such as a name shown in an account menu; when a control's name holds such text, use its stable part, such as a label, an email or a test id.",'Prefer role, label or id locators'])assert.ok(call.plan.includes(rule),rule);
+    'A check never reads a form field or editable region the journey typed into or chose on the current page, nor the fields of a page reached with `goBack` or `goForward`: to see a saved value in a field, reload or open the page again.','`journey.run` names no element or address in this journey, as no milestone follows one whose reviewed check shows or reads `{run}`: type it only with `fill`, `type` or `pressSequentially`.','`page.goto` takes a literal URL or path; `journey.run` never makes its address.',"Locate controls by names that stay the same across runs, apart from this run's own data where `journey.run` may name it: never by a fixed text this journey types or saves, nor by text an earlier run may have saved, such as a name shown in an account menu; when a control's name holds such text, use its stable part, such as a label, an email or a test id.",'Prefer role, label or id locators'])assert.ok(call.plan.includes(rule),rule);
   assert.ok(!call.plan.includes('Reviewed checks read'),'No reviewed check names {run}.');
   assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[],'The workspace is removed.');
   assert.ok(secretFree(stored)&&secretFree(await f.manager.view(f.context))&&secretFree(f.manager.summary(f.context))&&secretFree(await lines(f.log)));
@@ -606,7 +611,7 @@ test('code generation validates explicit account choices and can opt out of a tw
   }
   await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
   assert.equal((await settled(f))?.draft?.stale,false);
-  assert.equal(f.launches.length,0,'No sign-in seed is run when the person chooses no account.');
+  assert.deepEqual(f.launches.map(input=>[input.spec.code,input.credentials]),[[seedSpec(false),undefined]],'Without an account, the seed opens the application and signs in nowhere.');
 });
 
 test('generation keeps the entered account selected before runtime preflight awaits',async t=>{
@@ -684,7 +689,7 @@ test('a seed that cannot sign in stops the generation before the generator runs,
   assert.deepEqual([seed.mode,seed.spec.code,seed.spec.hash,seed.case.id,seed.credentials?.username,seed.signInUrl,seed.targetUrl,seed.timeoutSeconds,seed.blockWrites],
     ['run',seedSpec(true),specHash(seedSpec(true)),journey.id,'tester@example.com','http://localhost:3000/login','http://localhost:3000/',60,undefined]);
   assert.ok(secretFree(await f.manager.view(f.context)));
-  // Once the seed signs in, the generator runs; without a test account there is no seed to check.
+  // Once the seed signs in, the generator runs; without a test account the seed only opens the application.
   signedIn=true;
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.equal((await settled(f))?.draft?.stale,false);
@@ -692,7 +697,7 @@ test('a seed that cannot sign in stops the generation before the generator runs,
   f.environment.accounts=[];
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.equal((await settled(f))?.draft?.stale,false);
-  assert.deepEqual([f.launches.length,(await lines(f.log)).length],[2,2]);
+  assert.deepEqual([f.launches.length,(await lines(f.log)).length,f.launches[2].credentials],[3,2,undefined]);
 });
 
 test('cancelling a generation while its seed signs in stops the seed, and the generator never starts',{timeout:60000},async t=>{
@@ -791,6 +796,15 @@ test('the test MCP server’s seed signs in with the twin account on the sign-in
   await access(join(f.dataDir,'browser','generations')).then(async()=>assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[]));
 });
 
+test('the generator’s seed setup reads no file outside its workspace, whatever it names as the seed',{timeout:120000},async t=>{
+  // A prompt-injected generator names a file beside the controller's data as its seed, then reads the generator's log.
+  const f=await setup(t,{mode:'read-host'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.equal((await settled(f,journey.id,90))?.draft?.stale,false);
+  const [{hostFile}]=await lines(f.log);
+  assert.deepEqual(hostFile,{setups:[true,true,true],readLog:true,read:false},'Every setup naming another seed or project is refused, so the log holds nothing it read.');
+});
+
 test('a seed whose application does not open says so, never that the test account could not sign in',{timeout:120000},async t=>{
   const playwright=createPlaywrightRuntime();
   if(!(await playwright.capabilities()).browserInstalled)return t.skip('Chromium for Playwright is not installed.');
@@ -801,6 +815,10 @@ test('a seed whose application does not open says so, never that the test accoun
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.deepEqual(await settled(f,journey.id,90),{generation:{status:'failed',error:`The application could not be opened: page.goto: net::ERR_CONNECTION_REFUSED at ${url}`}});
   assert.equal((await lines(f.log)).length,0,'No model call was spent.');
+  // Without a test account the seed opens the application all the same, before any model call.
+  await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
+  assert.deepEqual(await settled(f,journey.id,90),{generation:{status:'failed',error:`The application could not be opened: page.goto: net::ERR_CONNECTION_REFUSED at ${url}`}});
+  assert.equal((await lines(f.log)).length,0,'No model call was spent without an account either.');
 });
 
 

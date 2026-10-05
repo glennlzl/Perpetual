@@ -325,6 +325,23 @@ test('JSON-mode structured provider errors retain fixed actionable refusal guida
 });
 
 
+test('a provider refusal keeps its guidance after a megabyte of tool output and after a later unrecognized error',async t=>{
+  const event=JSON.stringify({type:'error',error:{name:'APIError',data:{message:refusal,responseBody:'private provider payload'}}})+'\n';
+  const other=JSON.stringify({type:'error',error:{name:'UnknownError',data:{message:'Private session closed'}}})+'\n';
+  const snapshot=jsonTool().replace('Private page and account contents','Private page '+'x'.repeat(20000));
+  for(const [name,chunks] of [['long',[snapshot.repeat(60),event]],['later error',[event,other]]] as const)await t.test(name,async t=>{
+    await assert.rejects(capture(t,[...chunks],{exit:1,structuredOutput:true}),(error:RunFailure)=>{
+      assert.equal(error.message,advice);assert.equal(error.output,'');
+      assert.ok(!JSON.stringify(error).includes('private provider payload'));
+      return true;
+    });
+  });
+  // Past the bound, only error envelopes are read: the scanned facts stay limited.
+  const evidence=captureAuthoringEvidence(hide([]));evidence.write(snapshot.repeat(60)+jsonText(blockerText)+jsonFinish,'stdout');
+  const result=evidence.finish('completed');
+  assert.equal(result.eventsTruncated,true);assert.equal(result.reportedBlocker,undefined);assert.ok(result.events.length<=64);
+});
+
 test('authoring output hashes ignore stream chunk boundaries and event count is bounded',async t=>{
   const output=jsonTool().repeat(70)+jsonFinish;
   const first=await capture(t,[output]),second=await capture(t,[output.slice(0,177),output.slice(177)]);

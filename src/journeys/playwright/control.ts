@@ -25,6 +25,9 @@ const READ_REASONS: Record<ControlReadReason, string> = {
 /** Fixed observed reasons only; untrusted text can never become a diagnostic. */
 export const controlReadReasonText = (value: unknown): string | undefined => typeof value === 'string' && Object.hasOwn(READ_REASONS, value) ? READ_REASONS[value as ControlReadReason] : undefined;
 
+// Chromium reports a document's request without its fragment, while frame and page URLs keep it, as a hash route does.
+const unhashed = (url: string) => url.split('#')[0];
+
 /** A control failure needs a fresh document of the judged page, after its blocked change. */
 export function controlReads(context: BrowserContext, secrets?: Iterable<unknown>) {
   const known = [...(secrets ?? [])];
@@ -67,7 +70,7 @@ export function controlReads(context: BrowserContext, secrets?: Iterable<unknown
   const watch = (page: Page) => page.on('framenavigated', frame => {
     if (frame !== page.mainFrame()) return;
     const document = state(page).document;
-    if (document && frame.url() === document.request.url()) document.committed = true;
+    if (document && unhashed(frame.url()) === unhashed(document.request.url())) document.committed = true;
   });
   context.pages().forEach(watch); context.on('page', watch);
   const readProblem = (page: Page | undefined, document: Document | undefined): ControlReadReason | undefined => {
@@ -81,7 +84,7 @@ export function controlReads(context: BrowserContext, secrets?: Iterable<unknown
     if (!document.ok || !document.finished) return 'read-incomplete';
     if (!document.committed) return 'document-not-committed';
     if (document.epoch !== item.epoch) return 'blocked-after-read';
-    if (page.url() !== document.request.url()) return 'url-changed';
+    if (unhashed(page.url()) !== unhashed(document.request.url())) return 'url-changed';
   };
   const readable = (page: Page | undefined, document: Document | undefined) => readProblem(page, document) === undefined;
   function checkProblem(page: Page | undefined, check: EvaluatedCheck): ControlReadReason | undefined {

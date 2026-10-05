@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {createBrowserManager} from '../src/browser/manager.ts';
 import {writeJourneyWorkspace} from '../src/journeys/playwright/runtime.ts';
 import {caseHash,signsIn,specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
-import {CHECK_VERSION,navigationAllowed,numberAfter,paymentAllowed,stripeLive} from '../src/journeys/playwright/checks.ts';
+import {CHECK_VERSION,navigationAllowed,numberAfter,paymentAllowed,stripeLive,textPattern} from '../src/journeys/playwright/checks.ts';
 import type {BrowserManager,BrowserManagerOptions,BrowserStageContext,TargetEnvironment} from '../src/browser/manager.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 import type {BrowserCase} from '../src/business/browser-cases.ts';
@@ -30,7 +30,7 @@ test('a spec performs exactly the reviewed milestones in order, in a grammar of 
   // Comments, literals, options, regular expressions, nested locators, frames, the keyboard and the mouse.
   assert.ok(validateJourneySpec(actions('// Sign in first.','await journey.signIn();',"await page.goto('/settings');","await page.getByRole('button', { name: /Save/i, exact: true }).nth(-1).click();",
     "await page.locator('li').filter({ has: page.getByText('Pro'), hasText: `Plan` }).first().click({ force: true });","await page.frameLocator('iframe').getByLabel('Card').fill('4242');",
-    "await page.getByLabel('Plan').selectOption(['a', { label: 'b' }]);","await page.keyboard.press('Enter');","await page.mouse.wheel(0, 400);","await page.waitForURL('**/settings');"),journey));
+    "await page.getByLabel('Plan').selectOption(['a', { label: 'b' }]);","await page.keyboard.press('Enter');","await page.mouse.wheel(0, 400);","await page.waitForURL('**/settings');","await page.goto('/notes', { waitUntil: 'networkidle' });"),journey));
   const rejected:[string|undefined,RegExp][]=[
     [undefined,/at most 200 KB/],['',/at most 200 KB/],[spec(body()+`// ${'x'.repeat(200*1024)}`),/at most 200 KB/],[spec(body()+'\n  await page.reload(;'),/not valid JavaScript \(line 6\)/],
     [spec(body(),"import { test } from 'perpetual';\nimport fs from 'node:fs';"),/Import only the fixture/],[spec(body(),"import { test } from '@playwright/test';"),/Import only the fixture/],
@@ -55,6 +55,9 @@ test('a spec performs exactly the reviewed milestones in order, in a grammar of 
     [actions("await page.context().newPage();"),/is not an allowed/],[actions("await page.locator('input').setInputFiles('/etc/passwd');"),/setInputFiles is not an allowed/],
     [actions("await expect(page).toHaveURL('/x');"),/expect\(\)\.toHaveURL is not an allowed/],[actions("await test.step('x', async () => {});"),/test\.step is not an allowed/],
     [actions("await page.goto('javascript:document.body.remove()');"),/page\.goto takes a literal http\(s\) URL or path/],[actions("await page.goto('data:text/html,Renamed');"),/page\.goto takes/],
+    // An action that only checks it could act, or a page read before it has content, is no reviewed action.
+    [actions("await page.getByRole('button', { name: 'Delete' }).click({ trial: true });"),/trial and waitUntil: 'commit' are not allowed/],[actions("await page.goto('/notes', { waitUntil: 'commit' });"),/trial and waitUntil: 'commit' are not allowed/],
+    [actions("await page.reload({ 'waitUntil': `commit` });"),/trial and waitUntil: 'commit' are not allowed/],
     [actions("await page.waitForURL(url => true);"),/action arguments are literals/],[actions("await page.getByText(`${'x'}`).click();"),/action arguments are literals/],
     [actions("await page.getByRole('button', { ...{ name: 'Go' } }).click();"),/action arguments are literals/],[actions("await page.getByRole('button', { __proto__: { name: 'Go' } }).click();"),/action arguments are literals/],
     [actions("await page.getByRole('button', { name: globalThis.name }).click();"),/action arguments are literals/],
@@ -187,18 +190,29 @@ test('an approval binds the spec hash to the reviewed contract, not to its name 
 });
 
 test('the fixture reads numbers after their label and guards navigation and payment pages',()=>{
-  assert.deepEqual(numberAfter('Credits 1,240 remaining','credits'),{value:1240,gap:1});
-  assert.deepEqual(numberAfter('Balance: $12.50','Balance'),{value:12.5,gap:2});
-  assert.deepEqual(numberAfter('Credits  −3','Credits'),{value:-3,gap:1});
-  assert.deepEqual(numberAfter('Credits - 120','Credits'),{value:120,gap:3},'A detached sign is a separator.');
+  assert.deepEqual(numberAfter('Credits 1,240 remaining','credits'),{value:1240,gap:1,own:true});
+  assert.deepEqual(numberAfter('Balance: $12.50','Balance'),{value:12.5,gap:2,own:true});
+  assert.deepEqual(numberAfter('Credits  −3','Credits'),{value:-3,gap:1,own:true});
+  assert.deepEqual(numberAfter('Credits - 120','Credits'),{value:120,gap:3,own:true},'A detached sign is a separator.');
   assert.equal(numberAfter('No credits here','Seats'),null);
   for(const [text,value] of [['Credits: 1240.5 left',1240.5],['CREDITS\n\n42 remaining of 100',42],['Credits used 12, 13 left',12],['Plan 2 Credits 7',7]] as const)assert.equal(numberAfter(text,'Credits')?.value,value,text);
   for(const text of ['Credits','40 Credits',''])assert.equal(numberAfter(text,'Credits'),null,text);
   // An ancestor's text includes following siblings, so only separators may precede its number.
   for(const [text,value] of [['Credits: $12.00',12],['Credits — (−3)',-3],['1,240 credits\nSeats 3',null],['Credits used 12',null],['Billing Credits Plan 2',null]] as const)assert.equal(numberAfter(text,'Credits',true)?.value??null,value,text);
-  assert.deepEqual(numberAfter('Seats 7 tokens','Seats',true),{value:7,gap:1});
+  assert.deepEqual(numberAfter('Seats 7 tokens','Seats',true),{value:7,gap:1,own:true});
   assert.equal(numberAfter('Seats left today 3','Seats',true),null);
-  assert.deepEqual(numberAfter('Seats left today 3','Seats'),{value:3,gap:12});
+  assert.deepEqual(numberAfter('Seats left today 3','Seats'),{value:3,gap:12,own:true});
+  // A label within a longer word is read only where the text never shows it on its own, as a script without spaces does.
+  assert.deepEqual(numberAfter('Subtotal $10.00 Shipping $2.00 Total $12.00','Total'),{value:12,gap:1,own:true});
+  assert.deepEqual(numberAfter('Unpaid invoices 7 Paid invoices 3','paid invoices',true),{value:3,gap:1,own:true});
+  assert.deepEqual(numberAfter('Subtotal $10.00','Total',true),{value:10,gap:1,own:false});
+  // A digit beside the label, as adjacent inline elements leave it, is a number, never part of the label's word.
+  for(const [text,label,value] of [['Credits10','Credits',10],['Total:12','Total:',12],['Subtotal$10.00Total$12.00','Total',12]] as const)
+    assert.deepEqual(numberAfter(text,label,true),{value,gap:0,own:true},text);
+  assert.deepEqual(numberAfter('税込合計 1200','合計'),{value:1200,gap:1,own:false});
+  // A number another format continues is no number to compare: its first part is never read.
+  for(const text of ['Credits 1.240,50','Credits 12,5','Credits 1\'240','Credits 1’240','Credits 1\u00a0240','Credits 1\u202f240','Credits 1.2k','Credits 3M users','Credits 2B'])assert.ok(Number.isNaN(numberAfter(text,'Credits')?.value),text);
+  for(const [text,value] of [['Credits 1,240.50.',1240.5],['Credits 12, 13 left',12],['Credits 5GB',5],['Credits 5MB',5],['Credits 12 100',12],['Credits 10:30',10],['Credits 12.5%',12.5]] as const)assert.equal(numberAfter(text,'Credits')?.value,value,text);
   const allowed=new Set(['http://127.0.0.1:3000']);
   assert.equal(navigationAllowed('http://127.0.0.1:3000/settings',allowed),true);assert.equal(navigationAllowed('about:blank',allowed),true);
   assert.equal(navigationAllowed('https://example.com/',allowed),false);assert.equal(navigationAllowed('javascript:alert(1)',allowed),false);
@@ -207,6 +221,30 @@ test('the fixture reads numbers after their label and guards navigation and paym
   for(const [url,expected] of [['http://127.0.0.1:3010/billing',true],['https://checkout.stripe.com/c/pay/cs_test_a1',true],['https://billing.stripe.com/p/session/test_YWNj',true],['https://buy.stripe.com/test_aEU5kD',true],
     ['https://checkout.stripe.com/c/pay/cs_live_a1',false],['https://checkout.stripe.com/c/pay/cs_live_a1?next=/test_x#cs_test_',false],['https://checkout.stripe.com/c/pay/cs_live_a1/cs_test_a1',false],
     ['https://billing.stripe.com/p/session/live_YWNj',false],['https://buy.stripe.com/aEU5kD',false],['https://stripe.com/',false],['https://stripe.com.evil.test/',true]] as const)assert.equal(paymentAllowed(url),expected,url);
+});
+
+test('a text check finds its value where it stands on its own, ignoring case and runs of whitespace',()=>{
+  const finds=(text:string,value:string)=>textPattern(value).test(text);
+  // Beside an edge that is a letter or digit: the start or end of the text, whitespace or punctuation. An edge that is
+  // punctuation needs no boundary, zero-width spaces and soft hyphens are skipped, as Playwright skips them, and the
+  // value's other characters, as ( or +, stand for themselves.
+  for(const [text,value] of [['Status: Paid','paid'],['Paid in full','PAID'],['(Paid)','Paid'],['INV-7.','INV-7'],['Total:42','Total:'],['Сумма: Оплачено','оплачено'],['결제 완료','결제'],
+    ['QA\n  k3m9x2qa saved','QA k3m9x2qa'],['QA \u200b k3m9x2qa','QA k3m9x2qa'],['Rechnungs\u00adbetrag offen','Rechnungsbetrag'],['Copy "Q3 report" >> \'Archive\' (1/2)','"Q3 report" >> \'Archive\' (1/2)'],
+    ['Total (USD) 42','Total (USD)'],['Plan a+b','a+b']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  for(const [text,value] of [['Unpaid','Paid'],['Inactive','Active'],['INV-70','INV-7'],['Paid2','Paid'],['Subtotal:42','Total:'],['Неоплачено','Оплачено'],['결제완료','결제'],
+    ['Un\u00adpaid','paid'],['QAk3m9x2qa','QA k3m9x2qa'],['Plan aab','a+b']] as const)
+    assert.equal(finds(text,value),false,`${value} in ${text}`);
+  // A combining mark belongs to the character it follows: a dependent vowel sign or an accent continues a word, and a
+  // variation selector a symbol, which needs no boundary.
+  for(const [text,value] of [['कमी','कम'],['किताब','ताब'],['Cafe\u0301','Cafe']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
+  for(const [text,value] of [['यह किताब है','किताब'],['Cafe\u0301 au lait','Cafe\u0301'],['\u2714\ufe0fPaid','\u2714\ufe0f'],['\u2714\ufe0fPaid','Paid']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  // An edge in a script written without spaces between words needs no boundary, nor does a letter or digit beside such a
+  // script; beside a digit or a letter of a script written with spaces, a letter or digit edge does.
+  for(const [text,value] of [['订单已支付成功','已支付'],['订单已支付成功','支付成功'],['ログインしてください','ログイン'],['サーバーエラー','サーバー'],['ภาษาไทยง่าย','ไทย'],['共42元','42元'],['合計1,240円','1,240円'],['第3章','3'],['Pro版','Pro'],['已支付Paid','Paid'],['购买iPhone手机','iPhone']] as const)
+    assert.equal(finds(text,value),true,`${value} in ${text}`);
+  for(const [text,value] of [['42kg','42'],['3개','3'],['购买iPhones','iPhone'],['已Unpaid','Paid']] as const)assert.equal(finds(text,value),false,`${value} in ${text}`);
 });
 
 // A manager whose Playwright runtime records its launches and replays scripted events.
@@ -236,6 +274,18 @@ async function verified(f:Awaited<ReturnType<typeof fixture>>,hash:string){
   for(let i=0;i<400;i++){const verification=(await f.manager.view(f.context)).specs[journey.id]?.draft?.verification;if(verification?.status!=='running')return verification;await new Promise(resolve=>setTimeout(resolve,5));}
   throw new Error('verification did not finish');
 }
+
+test('a case whose ID names an inherited object member has no phantom code or generation failure',async t=>{
+  const f=await fixture(t),items=['constructor','toString'].map(id=>({...journey,id}));
+  await f.manager.saveCases(f.context,items);
+  assert.deepEqual((await f.manager.view(f.context)).specs,{});
+  for(const {id} of items)assert.deepEqual(await f.manager.specCode(f.context,{caseId:id}),{},id);
+  // Its own code is kept and read like any other case's.
+  const code=spec();
+  await f.manager.saveSpec(f.context,{caseId:'constructor',code});
+  assert.deepEqual(Object.keys((await f.manager.view(f.context)).specs),['constructor']);
+  assert.equal((await f.manager.specCode(f.context,{caseId:'constructor'})).draft?.code,code);
+});
 
 test('code approved without a verification, as a stored single spec was, loads as a draft that a gate does not run',async t=>{
   const code=(label:string)=>spec(body().replace("'Go'",`'${label}'`)),saved=(item:typeof journey,label:string)=>({code:code(label),hash:specHash(code(label)),caseHash:caseHash(item),savedAt:'2026-09-24T08:00:00.000Z'});
@@ -277,6 +327,21 @@ test('code approved without a verification, as a stored single spec was, loads a
   assert.deepEqual(f.launches.map(input=>[input.case.id,input.spec.hash]),[[verified.id,specHash(code('Verified'))]]);
   // The former approval is approved again only after its verification.
   await assert.rejects(f.manager.approveSpec(f.context,{caseId:legacy.id,hash:specHash(code('Legacy'))}),{statusCode:409,message:'Verify this code first: it needs three passing runs and a caught control run.'});
+});
+
+test('damaged stored code refuses to load, and a stored verification in another shape verifies nothing',async t=>{
+  const f=await fixture(t);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),stored=JSON.parse(await readFile(file,'utf8')),scope=Object.keys(stored.cases)[0];
+  const code=spec(),saved={code,hash:specHash(code),caseHash:caseHash(journey),savedAt:'2026-09-24T08:00:00.000Z'},open=()=>createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.playwright});
+  for(const entry of [null,'code',{approved:null,draft:{...saved,hash:'forged'}},{approved:{...saved,code:42,approvedRunIds:['a','b','c','d']},draft:null}]){
+    await writeFile(file,JSON.stringify({...stored,specs:{[scope]:{[journey.id]:entry}}}));
+    await assert.rejects(open(),/Unsupported journey code state/,JSON.stringify(entry));
+  }
+  // A passed verification whose runs are no list of run IDs, as no checkpoint writes it, approves nothing.
+  await writeFile(file,JSON.stringify({...stored,specs:{[scope]:{[journey.id]:{approved:null,draft:{...saved,verification:{id:'forged',checkVersion:CHECK_VERSION,status:'passed',passes:3,control:'caught',runIds:'abcd'}}}}}}));
+  const manager=await open();t.after(()=>manager.close());
+  assert.deepEqual((await manager.view(f.context)).specs[journey.id],{draft:{hash:saved.hash,stale:false}});
+  await assert.rejects(manager.approveSpec(f.context,{caseId:journey.id,hash:saved.hash}),{statusCode:409});
 });
 
 test('saved code is a draft beside the approved code, approved by exact hash after its verification, discarded alone, made stale by case edits and removed with its case',async t=>{

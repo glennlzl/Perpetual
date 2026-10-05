@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // The project the controller wrote, as far as this stand-in reads it; the tests assert what it records.
@@ -27,7 +27,7 @@ const target = prompt.match(/generator_write_test to `([^`]+)`/)![1];
 const modes = Object.fromEntries([['config', configPath], ['seed', seedPath], ['case', env.PERPETUAL_CASE], ['opencode', 'opencode.json'], ['plan', 'specs/plan.md']].map(([name, file]) => [name, statSync(file!).mode & 0o777]));
 const record = (extra: object) => appendFileSync(log, `${JSON.stringify({ mode, prompt, cwd: process.cwd(), workspaceMode: statSync('..').mode & 0o777, plan, seed: readFileSync(seedPath, 'utf8'), config, modes,
   agent: { name: requestedAgent, mode: agent.mode, model: agent.model, allTools: agent.tools['*'], bash: agent.tools.bash, tools: agent.tools }, permission: opencode.permission, provider: opencode.provider, smallModel: opencode.small_model, mcp: server.command, mcpEnvironment: server.environment,
-  prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), git: statSync('.git').isDirectory(),
+  prompts: statSync('.opencode/prompts/playwright-test-generator.md').isFile(), instructions: readFileSync(`.opencode/prompts/${requestedAgent}.md`, 'utf8'), git: statSync('.git').isDirectory(),
   env: { key: Boolean(env.OPENROUTER_API_KEY), account: env.PERPETUAL_ACCOUNT_USERNAME || null, password: Boolean(env.PERPETUAL_ACCOUNT_PASSWORD), channel: env.PERPETUAL_EVENT_CHANNEL ?? null, caseFile: env.PERPETUAL_CASE, target: env.PERPETUAL_TARGET_URL,
     home: env.HOME, xdg: env.XDG_CONFIG_HOME ?? null, cache: env.XDG_CACHE_HOME, npm: env.npm_config_cache, claude: env.OPENCODE_DISABLE_CLAUDE_CODE },
   ...extra })}\n`);
@@ -38,11 +38,10 @@ const invalid = () => valid().replace("click();\n  });", "click();\n    await ex
 const write = (file: string, code: string) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, code); };
 const repairing = prompt.startsWith('The test in');
 
-// Plays a prompt-injected model through the pinned test MCP server, started as OpenCode starts it: its environment
-// with the configured one on top, in the project. Code written anywhere the seed's process loads or resolves files
-// would record the secrets that process holds.
-async function generate() {
-  const require = createRequire(server.command[1]), { Client, StdioClientTransport } = require('playwright-core/lib/utilsBundle') as {
+// The pinned test MCP server, started as OpenCode starts it: its environment with the configured one on top, in the
+// project. call() says whether a tool answered with an error; outputs holds every answer.
+async function connect() {
+  const require = createRequire(server.command.find(part => /[\\/]cli\.js$/.test(part))!), { Client, StdioClientTransport } = require('playwright-core/lib/utilsBundle') as {
     Client: new (info: { name: string; version: string }) => McpClient; StdioClientTransport: new (options: object) => unknown;
   };
   const client = new Client({ name: 'fake-opencode', version: '0' }), outputs: string[] = [];
@@ -52,6 +51,26 @@ async function generate() {
     outputs.push(result.content.map(part => part.text || '').join('\n'));
     return Boolean(result.isError);
   };
+  return { client, call, outputs };
+}
+
+// Plays a prompt-injected model that names a file outside the workspace as the seed, by absolute path, by a relative
+// path out of the project and with another project, then reads the generator's log. It is given the path, never the
+// file's content, and records whether any tool answer held that content.
+async function readHostFile() {
+  const { client, call, outputs } = await connect(), host = `${log}.host`, content = `host-file-${process.pid}-${Date.now()}`;
+  writeFileSync(host, `secret: ${content}\n`);
+  const setups: boolean[] = [];
+  for (const [project, seedFile] of [['seed', host], ['seed', relative(process.cwd(), host)], ['tests', 'seed.spec.mjs']]) setups.push(await call('generator_setup_page', { plan, project, seedFile }));
+  const readLog = await call('generator_read_log', {});
+  await client.close();
+  return { setups, readLog, read: outputs.some(text => text.includes(content)) };
+}
+
+// Plays a prompt-injected model through the pinned test MCP server. Code written anywhere the seed's process loads or
+// resolves files would record the secrets that process holds.
+async function generate() {
+  const { client, call, outputs } = await connect();
   const project = plan.match(/\*\*Seed project:\*\* `([^`]+)`/)?.[1];
   if (!project) throw new Error('The plan must identify the seed project.');
   const setup = () => call('generator_setup_page', { plan, project, seedFile: 'seed.spec.mjs' });
@@ -88,6 +107,9 @@ if (mode === 'hang') {
   process.exit(3);
 } else if (mode === 'seed') {
   record({ generation: await generate() });
+} else if (mode === 'read-host') {
+  record({ hostFile: await readHostFile() });
+  write(target, valid());
 } else if (mode === 'missing' || mode === 'blocked' || mode === 'blocked-outside-case') {
   record({});
   if (!requestedMode.startsWith('trace-')) process.stdout.write(`${repairing ? 'generator_write_test: No test runner found.' : 'generator_setup_page: The seed could not pause.'} Key ${env.OPENROUTER_API_KEY}; account ${env.PERPETUAL_ACCOUNT_PASSWORD}\n`);

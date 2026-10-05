@@ -2,11 +2,11 @@
 // journey's actions; the reviewed checks come from the approved case snapshot at run time, so a spec can
 // neither write nor weaken them. The run's token, journey.run, only fills in a reviewed check's {run}. Events reach the
 // controller through ./reporter.ts.
-import { test as base, errors, type Page, type Request } from '@playwright/test';
+import { test as base, errors, type BrowserContext, type Page, type Request } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive } from './checks.ts';
+import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTemplate, checkText, navigationAllowed, numberAfter, paymentAllowed, resolveCheck, sameOrigin, stripeLive, textPattern } from './checks.ts';
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads, controlBlockerText } from './control.ts';
@@ -44,7 +44,7 @@ if (SIGN_IN_URL && !sameOrigin(SIGN_IN_URL, env.PERPETUAL_TARGET_URL!)) throw ne
 const TOKEN = env.PERPETUAL_RUN_TOKEN ?? '';
 if (!RUN_TOKEN.test(TOKEN)) throw new Error('The run token is unreadable.');
 // Code approved under an earlier check version runs with the checks its control run was caught with: before version 2,
-// text checks read no form field.
+// text checks read no form field, and before version 5 they found their text within longer words too.
 const CHECKS = Number(env.PERPETUAL_CHECK_VERSION ?? CHECK_VERSION);
 if (!Number.isInteger(CHECKS) || CHECKS < 1 || CHECKS > CHECK_VERSION) throw new Error('The check version is unreadable.');
 const VIEWPORT = { width: 1280, height: 800 }, FRAME_MS = 333, POLL_MS = 200, SIGN_IN_MS = 20000, FORM_MS = 2000;
@@ -61,7 +61,7 @@ const UNGUARDED = controlBlockerText('unguarded-transport')!, REPORT = '__perpet
 const SHARED_WORKER = controlBlockerText('shared-worker')!;
 // Why journey.signIn() found no sign-in form to fill.
 const NO_FORM = 'The application URL shows no sign-in form. Set the sign-in page.', NO_SIGN_IN_FORM = 'The sign-in page shows no sign-in form. Check the sign-in page.';
-const OFF_ORIGIN = 'The sign-in form is not on the application origin.';
+const OFF_ORIGIN = 'The sign-in form is not on the application origin.', UNENTERED = 'The test account could not be entered.';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // Only lines carrying the run's channel token are events; anything else a worker prints is ignored. Without a
 // channel, as while code is generated, nothing is reported.
@@ -72,62 +72,117 @@ function halt(error: string) { emit({ type: 'journey-stop', error }); return new
 const refusal = (url: string, top: boolean) => !navigationAllowed(url, allowed) ? NAVIGATION : (top ? !paymentAllowed(url) : stripeLive(url)) ? PAYMENT : null;
 const topLevel = (request: Request) => { try { return !request.frame().parentFrame(); } catch { return false; } };
 
-// The number shown right after a visible label: the nearest ancestor, then the nearest number, wins.
+// The number shown right after a visible label: a label standing on its own wins over one within a longer word, as
+// Total over Subtotal, then the nearest ancestor, then the nearest number.
 async function readNumber(page: Page, label: string) {
-  let nodes = page.getByText(label.trim()).filter({ visible: true });
+  let nodes = page.getByText(label.trim()).filter({ visible: true }), within: number | null = null;
   for (let depth = 0; depth < 4; depth++) {
     const found = (await nodes.allInnerTexts()).slice(0, 20).map((text, order) => ({ order, hit: numberAfter(text, label, depth > 0) })).filter((item): item is { order: number; hit: Reading } => item.hit !== null);
-    if (found.length) return found.sort((a, b) => a.hit.gap - b.hit.gap || a.order - b.order)[0].hit.value;
+    const best = found.sort((a, b) => Number(b.hit.own) - Number(a.hit.own) || a.hit.gap - b.hit.gap || a.order - b.order)[0];
+    if (best?.hit.own) return best.hit.value;
+    within ??= best?.hit.value ?? null;
     nodes = nodes.locator('xpath=..');
   }
-  return null;
+  return within;
 }
 
 // A field's value is what the application kept only while nothing else set it. Before the application's scripts run,
-// each document marks every form field an input or change event reaches, whoever sent it: what a journey typed, chose or
-// cleared there.
+// each document marks every form field or editing host (contenteditable) an input or change event reaches, whoever
+// sent it: what a journey typed, chose or cleared there.
 const EDITED = 'perpetual.edited';
 function markEdits(key: string) {
   const edited = new WeakSet<EventTarget>();
   Object.defineProperty(window, Symbol.for(key), { value: edited });
   for (const type of ['input', 'change']) window.addEventListener(type, event => { const target = event.composedPath()[0]; if (target) edited.add(target); }, true);
 }
+// What holds looks for: the text, from version 5 the source of the pattern that finds it, the edit marks' key, the check
+// version, and whether it reads form fields rather than the visible elements whose text holds it.
+type Wanted = [text: string, pattern: string | null, key: string, version: number, fields: boolean];
 // Whether matched visible text or visible form fields hold the text as the application put it there, matched as getByText
-// matches: ignoring case and runs of whitespace. A text field or text area holds its value, a select its selected options' labels. A password
+// matches: ignoring case and runs of whitespace, and from version 5 by its pattern, only where the text stands on its
+// own. A text field or text area holds its value, a select its selected options' labels. A password
 // field is never read, nor a field edited in the current document, nor any field of a document the browser returned to
-// through history, into which it restores what was typed before. Without the marks, no field is read.
+// through history, into which it restores what was typed before. Without the marks, no field is read. Visible text the
+// journey typed into an editing host of the current document is no more what the application kept, so it is not read.
 // From version 4, declared search controls carry query context, never stored-result evidence, even after a fresh GET.
-function holds(nodes: Element[], [text, key, version, fields]: [string, string, number, boolean]) {
+// From version 5, visible text is judged where the page renders it (shown), so what stands beside it is what a person
+// sees beside it, and the element that holds it must be one of the matched elements left after these exclusions.
+function holds(nodes: Element[], [text, pattern, key, version, fields]: Wanted) {
+  const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
+  // Playwright pierces open shadow roots, so an exclusion must follow their hosts too.
+  const up = (node: Element) => { const root = node.getRootNode(); return node.assignedSlot || node.parentElement || (root instanceof ShadowRoot ? root.host : null); };
   const query = (node: Element) => {
     let control = false;
-    // Playwright pierces open shadow roots, so the exclusion must follow their hosts too.
-    for (let parent: Element | null = node; parent;) {
+    for (let parent: Element | null = node; parent; parent = up(parent)) {
       control ||= parent.matches('input, textarea, select');
       if (parent.matches('input[type="search" i], [role~="searchbox" i]') || control && parent.matches('search, [role~="search" i]')) return true;
-      const root = parent.getRootNode();
-      parent = parent.assignedSlot || parent.parentElement || (root instanceof ShadowRoot ? root.host : null);
     }
     return false;
   };
-  nodes = nodes.filter(node => version < 4 || !query(node));
-  if (!fields) return nodes.length > 0;
-  const edited = (window as unknown as Record<symbol, WeakSet<EventTarget> | undefined>)[Symbol.for(key)];
+  const typed = (node: Element) => { for (let parent: Element | null = node; parent; parent = up(parent)) if (parent instanceof HTMLElement && parent.isContentEditable && edited?.has(parent)) return true; return false; };
+  // Whether the page renders a match of find whose owner, the deepest element holding all of it, is one of owners. The
+  // page's text is its visible text where it has a box, open shadow roots and slots included, and a button input's
+  // label. A line break stands at a <br> and around every box that does not flow inline or holds an image, a form control
+  // or other replaced content: a block such as a paragraph or a table cell, a flex or grid item, a badge's inline box, a
+  // button. Text the page does not render, as an SVG title or a closed select's other options, is not there, nor a text
+  // area's initial text, which may no longer be what it shows; fields are read below. An element holds the text of its
+  // children and of its shadow root, as getByText reads it, so the owner of a match is known among the matched elements.
+  const shown = (owners: Set<Element>, find: RegExp) => {
+    const parent = (node: Node) => node.parentElement ?? (node.parentNode instanceof ShadowRoot ? node.parentNode.host : null);
+    const boxes = new Set(['br', 'button', 'input', 'select', 'textarea', 'img', 'svg', 'video', 'audio', 'canvas', 'iframe', 'embed', 'object', 'meter', 'progress']);
+    // Where each run of the text starts, and the element that holds it.
+    const starts: [number, Element][] = [];
+    let rendered = '';
+    const walk = (node: Node, visible: boolean) => {
+      if (node instanceof Text) { if (visible && node.data) { starts.push([rendered.length, parent(node)!]); rendered += node.data; } return; }
+      if (!(node instanceof Element)) return;
+      const style = getComputedStyle(node), { display } = style, inner = style.visibility === 'visible';
+      if (display === 'none' || display !== 'contents' && !node.checkVisibility()) return;
+      const edge = display !== 'inline' && display !== 'contents' || boxes.has(node.localName) ? '\n' : '';
+      rendered += edge;
+      if (node instanceof HTMLInputElement) { if (['submit', 'button', 'reset'].includes(node.type)) { starts.push([rendered.length, node]); rendered += node.value; } }
+      else if (!(node instanceof HTMLTextAreaElement)) for (const child of node.shadowRoot?.childNodes ?? (node instanceof HTMLSlotElement && node.assignedNodes().length ? node.assignedNodes() : node.childNodes)) walk(child, inner);
+      rendered += edge;
+    };
+    walk(document.documentElement, true);
+    const at = (index: number) => starts.findLast(([start]) => start <= index)?.[1] ?? null;
+    const common = (one: Element | null, other: Element | null) => {
+      const chain = new Set<Element>();
+      for (; one; one = parent(one)) chain.add(one);
+      while (other && !chain.has(other)) other = parent(other);
+      return other;
+    };
+    for (let match = find.exec(rendered); match; match = find.exec(rendered)) {
+      const owner = common(at(match.index), at(match.index + match[0].length - 1));
+      if (owner && owners.has(owner)) return true;
+      // Matches may overlap, so the next starts one character later.
+      find.lastIndex = match.index + (rendered.codePointAt(match.index)! > 0xffff ? 2 : 1);
+    }
+    return false;
+  };
+  nodes = nodes.filter(node => (version < 4 || !query(node)) && !typed(node));
+  if (!fields) return pattern === null || !nodes.length ? nodes.length > 0 : shown(new Set(nodes), new RegExp(pattern, 'giu'));
   const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
   if (!edited || navigation?.type === 'back_forward') return false;
   const normal = (value: string) => value.replace(/\u200b/g, '').replace(/\s+/g, ' ').trim().toLowerCase(), wanted = normal(text);
+  const own = pattern === null ? null : new RegExp(pattern, 'iu'), found = (value: string) => own ? own.test(value) : normal(value).includes(wanted);
   const TEXT_FIELDS = ['text', 'search', 'email', 'url', 'tel', 'number'];
   const held = (node: Element) => node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label)
     : node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement && TEXT_FIELDS.includes(node.type) ? [node.value] : [];
-  return nodes.some(node => !edited.has(node) && held(node).some(value => normal(value).includes(wanted)));
+  return nodes.some(node => !edited.has(node) && held(node).some(found));
 }
 // Text a person sees on the page: visible text, or what the application put in a visible form field, as a saved value is
-// often shown. text-absent passes exactly when this is false.
+// often shown. text-absent passes exactly when this is false. From version 5, both find the text only where it stands on
+// its own: visible text where the page renders it, and each field's value on its own.
 async function shows(page: Page, text: string) {
-  const nodes = page.getByText(text).filter({ visible: true });
+  const pattern = CHECKS >= 5 ? textPattern(text).source : null, lookFor = (fields: boolean): Wanted => [text, pattern, EDITED, CHECKS, fields];
+  // getByText keeps only the deepest elements whose text holds the text, so a child holding it within a longer word, as
+  // Overdue holds due, would hide its parent's Due. From version 5, every visible element whose text holds it may own it.
+  const nodes = (pattern === null ? page.getByText(text) : page.locator('*', { hasText: text })).filter({ visible: true });
   // A textarea's server-rendered query is textContent too; exclude search controls from both observation paths.
-  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, [text, EDITED, CHECKS, false] as [string, string, number, boolean])) return true;
+  if (CHECKS < 4 ? await nodes.count() : await nodes.evaluateAll(holds, lookFor(false))) return true;
   if (CHECKS < 2) return false;
-  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, [text, EDITED, CHECKS, true] as [string, string, number, boolean]);
+  return page.locator('input, textarea, select').filter({ visible: true }).evaluateAll(holds, lookFor(true));
 }
 
 async function observe(page: Page, check: Check, captures: Captures): Promise<Observation> {
@@ -136,6 +191,7 @@ async function observe(page: Page, check: Check, captures: Captures): Promise<Ob
   if (check.type === 'compare-number' && !Object.hasOwn(captures, check.than)) return { passed: false, final: true, error: 'The earlier value was not captured.' };
   const value = await readNumber(page, check.label);
   if (value === null) return { passed: false, error: 'No number follows this label on the current page.' };
+  if (Number.isNaN(value)) return { passed: false, error: 'The number after this label is in an unsupported format.' };
   return check.type === 'read-number' ? { passed: true, observed: value } : { passed: OPERATORS[check.op](value, captures[check.than]), observed: value };
 }
 
@@ -147,20 +203,58 @@ function unjudged(page: Page | undefined, guard: Guard) {
   return page.url() !== 'about:blank' && navigationAllowed(page.url(), allowed) ? null : 'The current page is outside approved origins.';
 }
 
+// Checks that also hold on a page whose data has not arrived yet, an absent text or a placeholder number, pass only when
+// observed again after the page had no request in flight for QUIET_MS: a new document, a route change within one or a
+// refetch can each still be bringing the data.
+const SETTLED = new Set<Check['type']>(['text-absent', 'read-number', 'compare-number']), QUIET_MS = 500;
+// Each page's requests in flight, and when one last started or ended.
+const traffic = new WeakMap<Page, { open: Set<Request>; at: number }>();
+function trackRequests(context: BrowserContext) {
+  const owner = (request: Request) => { try { return request.frame().page(); } catch { return undefined; } };
+  const update = (request: Request, open: boolean) => {
+    const page = owner(request);
+    if (!page) return;
+    let item = traffic.get(page);
+    if (!item) traffic.set(page, item = { open: new Set(), at: 0 });
+    if (open) item.open.add(request); else item.open.delete(request);
+    item.at = Date.now();
+  };
+  context.on('request', request => update(request, true));
+  context.on('requestfinished', request => update(request, false));
+  context.on('requestfailed', request => update(request, false));
+}
+// Whether the page has no request in flight for QUIET_MS from now, before the deadline: a request it started just before
+// is reported within that time.
+async function quiet(page: Page, deadline: number) {
+  for (const since = Date.now(); !page.isClosed() && Date.now() < deadline; await wait(POLL_MS / 4)) {
+    const item = traffic.get(page);
+    if (!item?.open.size && Date.now() - Math.max(since, item?.at ?? 0) >= QUIET_MS) return true;
+  }
+  return false;
+}
+// Why a page that no observation can read, as a crashed page or one whose main thread is blocked, stops the journey.
+const UNCHECKED = 'The current page could not be checked.', OBSERVE_GRACE_MS = 5000;
+// A browser call on such a page can wait without end, so an observation gets until the deadline and a grace period.
+const bounded = <T>(promise: Promise<T>, deadline: number) => Promise.race([promise, wait(Math.max(0, deadline - Date.now()) + OBSERVE_GRACE_MS).then((): T => { throw new Error(UNCHECKED); })]);
+
 // Actions return before the page settles, so a check waits for its condition up to the check timeout. A page no check
 // can judge stops the journey for review instead, at once after a refused navigation, else once the timeout passes.
 // The page is judged by the check with the run's token in place of {run}; the result keeps the check as written.
 async function verify<C extends Check>(page: () => Page | undefined, check: C, captures: Captures, timeout: number, guard: Guard, record?: (page: Page) => (check: EvaluatedCheck) => void): Promise<{ stop: string } | EvaluatedCheck<C>> {
   const deadline = Date.now() + timeout, judged = resolveCheck(check, TOKEN), filled = checkTemplate(check).includes(RUN) ? { resolved: checkTemplate(judged) } : {};
-  for (;;) {
+  for (let settled = false;;) {
     const target = page(), reason = unjudged(target, guard), late = Date.now() >= deadline;
     if (reason && (guard.refused || late)) return { stop: reason };
     if (!reason) {
       const observed = record?.(target!);
-      let result: Observation;
-      // Browser errors can contain page text; keep only a fixed reason. A page is judgeable only while it is open.
-      try { result = await observe(target!, judged, captures); } catch { result = { passed: false, error: 'The current page could not be checked.' }; }
-      if (result.passed || result.final || late) {
+      // Browser errors can contain page text; keep only a fixed reason. An observation that threw, or was still running,
+      // at the deadline judged nothing, so the journey stops for review rather than failing the check.
+      const result = await bounded(observe(target!, judged, captures), deadline).catch(() => null);
+      if (!result && Date.now() >= deadline) return { stop: UNCHECKED };
+      // Such a check is observed again once the page went quiet, or judged as it is at the deadline.
+      const settle = result?.passed === true && !late && !settled && SETTLED.has(check.type);
+      if (settle && (settled = await quiet(target!, deadline))) continue;
+      if (result && !settle && (result.passed || result.final || late)) {
         // A passed read-number check always observed its number.
         if (check.type === 'read-number' && result.passed) captures[check.name] = result.observed!;
         const { final: _final, ...evaluated } = result;
@@ -169,6 +263,7 @@ async function verify<C extends Check>(page: () => Page | undefined, check: C, c
         return complete;
       }
     }
+    settled = false;
     await wait(POLL_MS);
   }
 }
@@ -283,6 +378,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     const guard: Guard = { refused: null }, stop = (reason: string) => { broken = true; return halt(reason); };
     // A refused top-level document stops the journey for review; a refused frame only stays empty.
     const refuse = (url: string, top: boolean) => { const reason = refusal(url, top); if (reason && top) guard.refused ||= reason; return reason; };
+    trackRequests(context);
     // Playwright's routes see only the first request of a redirect chain, so each page also pauses every document hop
     // over CDP. Routes still cover a popup's first request, which precedes its page's CDP session, keep live Stripe
     // resources out of every frame, and in a control run answer every write, a form's submission included.
@@ -404,13 +500,15 @@ export const test = base.extend<{ journey: JourneyFixture }>({
           await signing.goto(SIGN_IN_URL); await hold(true, signing);
           return await found(undefined, { identifierFirst: true }) ?? Promise.reject(new Error(NO_SIGN_IN_FORM));
         };
+        // A failed fill's call log names the value it typed, and Playwright writes a failed test's errors to a file.
+        const enter = (field: { fill(value: string): Promise<void> }, value: string) => field.fill(value).catch(() => { throw new Error(UNENTERED); });
         let form = await found(SIGN_IN_URL ? FORM_MS : undefined) ?? await onSignInPage();
         try {
           // A redirect can leave the application's origin; the account is entered only on it.
           if (!onApplication()) throw new Error(OFF_ORIGIN);
           let [username, password, submit] = await Promise.all(['username', 'password', 'submit'].map(name => form.getProperty(name).then(handle => handle.asElement())));
           if (username && !password && submit) {
-            await username.fill(account.username);
+            await enter(username, account.username);
             await submit.click({ timeout: 3000 });
             await form.dispose().catch(() => {});
             form = await found(SIGN_IN_MS, { passwordStep: true }) ?? await Promise.reject(new Error('The password step shows no matching sign-in form. Check the sign-in flow.'));
@@ -419,9 +517,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
             if (!username || await username.inputValue() !== account.username) throw new Error('The password step is for a different test account.');
             // A full navigation resets the document's socket guard; this verified password step is still sign-in.
             await hold(true, signing);
-          } else if (username) await username.fill(account.username);
+          } else if (username) await enter(username, account.username);
           if (!username || !password) throw new Error('The page has no sign-in form with one password field.');
-          await password.fill(account.password);
+          await enter(password, account.password);
           // Click waits until a control disabled before both fields held values is enabled.
           if (submit) await submit.click({ timeout: 3000 });
           else await password.press('Enter', { timeout: 3000 });
@@ -431,7 +529,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         for (let streak = 0; streak < 3;) {
           if (Date.now() >= deadline || signing.isClosed()) throw new Error('The test account did not sign in.');
           await wait(250);
-          const gone = await signing.locator('input[type=password]').filter({ visible: true }).count().then(count => !count, () => false);
+          const gone = await bounded(signing.locator('input[type=password]').filter({ visible: true }).count(), deadline).then(count => !count, () => false);
           streak = gone && navigationAllowed(signing.url(), allowed) ? streak + 1 : 0;
         }
       };

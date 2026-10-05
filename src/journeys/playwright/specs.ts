@@ -47,6 +47,7 @@ const ARGUMENTS = 'action arguments are literals, options objects or locators; a
 const NAMED = 'journey.run names an element or address only after a milestone whose text-visible, read-number or compare-number check reads {run}; type it with fill, type or pressSequentially, and locate by names that stay the same across runs.';
 const TYPED = 'a typing action types text: a string, journey.run or a template literal.';
 const GOTO = 'page.goto takes a literal http(s) URL or path; journey.run never makes its address.';
+const PERFORMED = "an action performs itself and its page loads: trial and waitUntil: 'commit' are not allowed.";
 // The text these actions type may hold journey.run in any milestone.
 const TYPING: Record<string, ReadonlySet<string>> = { locator: new Set(['fill', 'type', 'pressSequentially']), keyboard: new Set(['type', 'insertText']) };
 
@@ -81,6 +82,8 @@ function value(node: Node, scope: ReadonlySet<string>, runs: boolean) {
     if (item.type !== 'ObjectProperty') fail(item, ARGUMENTS);
     const key = item.key.type === 'Identifier' ? item.key.name : item.key.type === 'StringLiteral' ? item.key.value : null;
     if (item.computed || item.shorthand || key === null || RESERVED.has(key)) fail(item, ARGUMENTS);
+    // A trial action only checks that it could act, and a commit wait returns before the page has content.
+    if (key === 'trial' || key === 'waitUntil' && text(item.value) === 'commit') fail(item, PERFORMED);
     value(item.value, scope, runs);
   });
   if (kind(node, scope, runs) !== 'locator') fail(node, ARGUMENTS);

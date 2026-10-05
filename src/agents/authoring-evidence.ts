@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { redact } from '../redaction.ts';
 import type { AuthoringBlocker, AuthoringBlockerKind, AuthoringFinishReason, AuthoringTool, AuthoringToolError, AuthoringUsage, HarnessEvidence } from '../../contract/authoring.ts';
 
-const TOOLS: readonly AuthoringTool[] = ['generator_setup_page','generator_read_log','generator_write_test','browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_snapshot','browser_take_screenshot','browser_wait_for','browser_tabs','browser_handle_dialog','browser_file_upload','browser_evaluate','browser_run_code','browser_console_messages','browser_network_requests','browser_close'];
+const TOOLS: readonly AuthoringTool[] = ['generator_setup_page','generator_read_log','generator_write_test','browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_snapshot','browser_take_screenshot','browser_wait_for','browser_tabs','browser_handle_dialog','browser_file_upload','browser_evaluate','browser_run_code','browser_console_messages','browser_network_requests','browser_close','browser_verify_element_visible','browser_verify_list_visible','browser_verify_text_visible','browser_verify_value','read','ls','glob','grep'];
 const REASONS: readonly AuthoringFinishReason[] = ['stop','length','tool-calls','content-filter','error','other'];
 const ERRORS: readonly AuthoringToolError[] = ['stale-reference','ambiguous-locator','no-native-dialog','timeout'];
 const BLOCKERS: readonly AuthoringBlockerKind[] = ['missing-prerequisite','application-error','action-unavailable','observation-mismatch','request-unobserved','unknown'];
@@ -40,7 +40,7 @@ export function authoringUsage(value: unknown): AuthoringUsage | null {
 /** Bounded raw lines live only until projection; redact complete JSON string values before allowlisting them. */
 export function captureAuthoringEvidence(hide: (text: unknown) => string, onError: (message: string) => void = () => {}) {
   const started = Date.now(), hashes = { stdout: createHash('sha256'), stderr: createHash('sha256') };
-  let outputBytes = 0, scanned = 0, pending = '', discarding = false, eventsTruncated = false;
+  let outputBytes = 0, scanned = 0, pending = '', discarding = false, eventsTruncated = false, limited = false;
   let reportedFinishReason: AuthoringFinishReason = 'unknown', usage: AuthoringUsage | null = null;
   let lastToolError: HarnessEvidence['lastToolError'];
   let reportedBlocker: AuthoringBlocker | undefined;
@@ -49,6 +49,17 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
   const safe = (value: unknown) => typeof value === 'string' ? redact(hide(value)) : '';
   const clearReport = () => { reportedBlocker = undefined; reportStopped = false; };
   const loseScanIntegrity = () => { scanIncomplete = true; clearReport(); };
+  const reportError = (envelope: Record<string, unknown> | null) => {
+    const data = object(object(envelope?.error)?.data);
+    if (typeof data?.message === 'string') onError(safe(data.message));
+  };
+  // Past the stream bound, only error envelopes are read, for the provider refusal one may carry.
+  function errorLine(text: string) {
+    if (!text.includes('"error"')) return;
+    let value: unknown; try { value = JSON.parse(text); } catch { return; }
+    const envelope = object(value);
+    if (envelope?.type === 'error') reportError(envelope);
+  }
   function line(text: string) {
     let value: unknown; try { value = JSON.parse(text); } catch { loseScanIntegrity(); return; }
     const envelope = object(value), part = object(envelope?.part);
@@ -62,10 +73,7 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
         if (wrapper && Object.keys(wrapper).length === 1 && report && Object.keys(report).length === 2) reportedBlocker = authoringBlocker(report, hide);
       }
     }
-    if (envelope?.type === 'error') {
-      const data = object(object(envelope.error)?.data);
-      if (typeof data?.message === 'string') onError(safe(data.message));
-    }
+    if (envelope?.type === 'error') reportError(envelope);
     if (envelope?.type === 'tool_use' && part?.type === 'tool') {
       const state = object(part.state);
       if (state?.status !== 'completed' && state?.status !== 'error') return;
@@ -89,11 +97,11 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
       // Separate stream digests are stable across arbitrary chunk boundaries and output interleaving.
       const bytes = Buffer.byteLength(chunk); outputBytes += bytes; hashes[stream].update(chunk);
       if (stream !== 'stdout') return;
-      if (scanned + bytes > STREAM_BYTES) { scanned = STREAM_BYTES; pending = ''; discarding = true; eventsTruncated = true; loseScanIntegrity(); return; }
-      if (scanned === STREAM_BYTES) return;
-      scanned += bytes;
+      if (!limited && scanned + bytes > STREAM_BYTES) { limited = true; pending = ''; discarding = true; eventsTruncated = true; loseScanIntegrity(); }
+      if (!limited) scanned += bytes;
+      const read = limited ? errorLine : line;
       for (const [index, piece] of chunk.split('\n').entries()) {
-        if (index) { if (!discarding) line(pending); pending = ''; discarding = false; }
+        if (index) { if (!discarding) read(pending); pending = ''; discarding = false; }
         if (discarding) continue;
         if (Buffer.byteLength(pending) + Buffer.byteLength(piece) > LINE_BYTES) { pending = ''; discarding = true; eventsTruncated = true; loseScanIntegrity(); }
         else pending += piece;

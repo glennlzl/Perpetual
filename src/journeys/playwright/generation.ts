@@ -8,6 +8,7 @@ import { failureText, hide, redact } from '../../redaction.ts';
 import { chmod, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { OPENCODE, createOpencodeRunner, fingerprint, opencodeEnvironment, opencodeRun, opencodeSettings, setupCommand, setupEnvironment, type Harness, type OpencodeRunner } from '../../agents/opencode.ts';
 import type { WorkerEvent, WorkerJob } from '../../browser/runtime.ts';
@@ -40,6 +41,8 @@ export const GENERATOR_AGENT = 'playwright-test-generator';
 const GRAMMAR_REPAIR_AGENT = 'perpetual-grammar-repair';
 export const SEED = 'seed.spec.mjs', PLAN = 'specs/plan.md', TESTS = 'tests', TARGET = `${TESTS}/journey.spec.mjs`;
 const SEED_PROJECT = 'seed';
+// The test MCP server runs behind this filter, which sets up only the workspace's seed.
+const MCP_GUARD = fileURLToPath(new URL('./mcp-guard.ts', import.meta.url));
 // The test MCP server exits before its Playwright worker finishes teardown, so OpenCode can exit first.
 const MAX_SPEC = 256 * 1024, SETTLE_MS = 10000;
 export const CANCELLED = 'Code generation cancelled.';
@@ -90,7 +93,7 @@ Call one tool at a time and read its actual result before choosing the next acti
 Use browser_handle_dialog only for a native JavaScript dialog reported by the browser tool. A dialog rendered inside the page uses its observed DOM controls. If no native dialog is visible, refresh the snapshot and inspect those controls; that tool error alone does not establish a blocked business action.
 For a control's complete observed name, preserve exact: true in the final locator. Playwright's default name match is a substring: it can match newly created record titles and tags too, even within the correct record. A deliberate partial name needs observed evidence that it uniquely identifies the required control; do not drop exact matching when copying the exploration log.
 Exploration and replay are different: explore with a concrete new value such as "Note explore-<unique token>". The final code must create its own new data using the JavaScript expression journey.run, or a template literal such as \`Note \${journey.run}\`. Never type the literal words "journey.run" or "{run}" in replay. Every field and search value for that record must use the same run token. Preserve the reviewed field meanings; do not substitute one similarly named field for another.
-Use generator_read_log as evidence of locators and transitions, not a recording to copy verbatim: replace exploration-owned values with journey.run in the allowed positions. Wait for real navigation with waitForURL where needed, or an observed locator's waitFor before acting on updated search results. Never use fixed sleeps, guessed record URLs, broad ambiguous locators or outbound record links when the contract asks for local details.
+Use generator_read_log as evidence of locators and transitions, not a recording to copy verbatim: replace exploration-owned values with journey.run in the allowed positions. The log's closing best practices are for ordinary Playwright tests and do not apply here: write no assertions and no variables. Wait for real navigation with waitForURL where needed, or an observed locator's waitFor before acting on updated search results. Never use fixed sleeps, guessed record URLs, broad ambiguous locators or outbound record links when the contract asks for local details.
 The seed only opens the application and signs in when configured. The final test starts from that same initial state in a new browser, not from a panel or dialog left open by exploration. Include every observed prerequisite navigation and opening action needed to reach each milestone; generator_read_log's earlier clicks cannot be omitted merely because its last snapshot already shows the form. Check the complete path from the seed against the log before writing the test.
 Synchronize each write with a completion actually observed for that specific UI action: its submission response, application completion control or navigation. An autosave need not submit HTTP. An earlier action's request does not establish a request for a later edit, even when both controls edit the same record. If no suitable action-specific completion can be established, report request-unobserved instead of guessing a response wait or writing a purportedly runnable journey.
 Before the first persistence check, both a successful write and a blocked write must reach the same fresh readback page. Its observed completion wait must finish in both cases; never wait for a successful redirect, a success-only receipt or the saved entity before that check. For an in-place update with no redirect or form replacement, close an observed overlay if needed and reload the current page; do not copy its exploration-owned address. For a creation form or redirect, navigate explicitly to an observed stable list or application entry URL, never a session-local or explored record URL. The reviewed check must detect a missing save; a generated wait must not intercept it.
@@ -144,7 +147,7 @@ export function generationRules(item: Pick<ApprovedCase, 'name' | 'steps' | 'ass
     'Explore the actual actions needed to reach each reviewed milestone in order. If a prerequisite is missing, the application fails, or the required next business action cannot be reached, stop and report the blocking milestone and observed reason. Do not write a complete spec with guessed actions for the remaining milestones, skip the failed work, or substitute a recovery, retry or configuration control for the requested business action.',
     "A journey that creates data must create its own new entity during that run and continue with that same entity. Never reuse an earlier exploration's entity, fixed name or result to complete the journey. Existing data may be a starting point only when the reviewed preconditions explicitly require it; it is not evidence that this run created or changed anything.",
     "Every run uses the same application data. When a step creates or changes data that a later check reads, type a value that includes `journey.run`, such as `` `QA ${journey.run}` ``, never a fixed literal that an earlier run may already have stored. `journey.run` is the run's token and the only value an argument may read, alone or in a template literal.",
-    'A check never reads a form field the journey typed into or chose on the current page, nor the fields of a page reached with `goBack` or `goForward`: to see a saved value in a field, reload or open the page again. Declared search controls never count as stored-result text, even when a fresh page populates them from its query; use the reviewed result evidence.',
+    'A check never reads a form field or editable region the journey typed into or chose on the current page, nor the fields of a page reached with `goBack` or `goForward`: to see a saved value in a field, reload or open the page again. Declared search controls never count as stored-result text, even when a fresh page populates them from its query; use the reviewed result evidence.',
     'Before a persistence milestone is checked, reload or reopen the page after the change and complete that fresh read. The control must fail a reviewed run-unique value or numeric before/after check on that page. An acknowledgement or URL alone cannot verify persistence. If the reviewed checks cannot judge it, report that stronger reviewed checks are needed; never change the acceptance contract.',
     'Synchronize each write with completion actually observed for that specific UI action: its response, application completion control or navigation. An earlier action’s request, another field’s save or a pre-existing resource entry cannot justify this action’s response wait. An autosave need not submit HTTP. If no suitable action-specific synchronization is observed, report request-unobserved; never guess an endpoint, fabricate a receipt, sleep or retry.',
     'A blocked save may leave the form open. Before the first persistence check, its observed completion wait must finish for both successful and blocked writes; do not wait for a success redirect, success-only receipt or saved-result element. For an observed HTTP submission, use `await Promise.all([page.waitForResponse("observed submission URL pattern"), page.getByRole("button", { name: "Save" }).click()]);` with that action’s actual pattern and control. This is the only permitted Promise.all form: one response wait first, one UI action second, no predicates, variables or response access. For an in-place update without redirect or form replacement, close any observed overlay as needed and reload the current page after completion. Do not copy its address from exploration: a session-local route may not exist in another browser. When saving redirects or replaces a form, navigate to an observed stable list or application entry URL, never an exploration-owned or session-local route. Both successful and blocked writes must reach the same fresh readback, where independent reviewed checks judge persistence. A response URL, headers or completion control alone is not a business pass. URL waits must respect the actual query parameters retained by the application; never assume their order or omit existing search state.',
@@ -205,7 +208,8 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
   const repairPromptFile = join(project, '.opencode', 'prompts', `${GRAMMAR_REPAIR_AGENT}.md`);
   await writeFile(repairPromptFile, grammarRepairInstructions);
   // `opencode run --agent` runs a primary agent. It gets Playwright's tool list and nothing else, so no shell, edit or
-  // web tool can read the harness environment, and files outside the project stay closed.
+  // web tool can read the harness environment, and files outside the project stay closed: OpenCode's own file tools
+  // by its permission, and the seed setup, which would read any file named as its seed, by the server's filter.
   Object.assign(agent, { mode: 'primary', model: `openrouter/${model}`, tools: { '*': false, ...tools } });
   // Grammar repair uses the existing file. Its writer requires seed setup, but no tool may replay the business
   // actions or explore another route while fixing syntax. Keep both agents fixed before either model starts.
@@ -216,9 +220,9 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
   };
   // The test MCP server is the pinned Playwright, headless, on the seed's config; npx would fetch another version.
   // OpenCode starts it with its own environment and this one on top: the user's HOME, where Playwright's browsers are,
-  // and no model key.
+  // and no model key. It runs behind a filter that refuses any seed setup but the workspace's.
   Object.assign(server, {
-    command: [process.execPath, PLAYWRIGHT_CLI, 'run-test-mcp-server', '--headless', '--config', config],
+    command: [process.execPath, MCP_GUARD, SEED_PROJECT, SEED, PLAYWRIGHT_CLI, 'run-test-mcp-server', '--headless', '--config', config],
     environment: { HOME: userHome, OPENROUTER_API_KEY: '' },
   });
   // OpenCode forwards model options as providerOptions.openrouter. The pinned provider passes these keys directly
@@ -233,10 +237,10 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
 }
 
 /**
- * Runs the seed once as a journey runs, with the Playwright runtime and no model, so a generation whose seed cannot sign
- * in stops before the generator spends a model call writing locators for pages it never saw. The fixture says why; a
- * seed that stopped before its sign-in began, as when the application does not load, says the application could not
- * be opened instead.
+ * Runs the seed once as a journey runs, with the Playwright runtime and no model, so a generation whose seed cannot open
+ * the application or sign in stops before the generator spends a model call writing locators for pages it never saw.
+ * The fixture says why; a seed that stopped before its sign-in began, as when the application does not load, says the
+ * application could not be opened instead.
  */
 async function seedSignsIn(playwright: SeedRuntime, input: Pick<JourneyRunInput, 'case' | 'spec' | 'targetUrl' | 'timeoutSeconds' | 'allowedOrigins' | 'credentials' | 'signInUrl'>, signal: AbortSignal) {
   if (signal.aborted) throw new Error(CANCELLED);
@@ -288,7 +292,8 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
 /**
  * Generates a reviewed case's spec in a private workspace the caller owns and removes. The model key reaches only
  * OpenCode's environment and the test account only the harness's and the seed's, and every captured output is redacted.
- * With an account, the seed must first sign in, on the sign-in page when one is set, as it does for the generator.
+ * The seed must first open the application and, with an account, sign in, on the sign-in page when one is set, as it
+ * does for the generator.
  * Resolves { code, provenance } with code validateJourneySpec accepts; invalid output gets one repair with its
  * validation error. Missing output stops: another exploration cannot grammar-repair code that was never written.
  */
@@ -310,7 +315,8 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
     const previous = feedback ? { error: failureText(hide(secrets)(feedback.error), 4000),...(previousErrors?.length?{previousErrors}:{}) } : undefined;
     const { seed, kept } = await prepare({ project, run, home, item, targetUrl, timeoutSeconds, model, reasoning, feedback: previous, signIn, values, userHome, signal: abort.signal });
     const intact = async () => { if (!isDeepStrictEqual(await fingerprint(Object.keys(kept)).catch(() => null), kept)) throw new Error('The code generation workspace changed.'); };
-    if (credentials) await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, credentials, ...(signInUrl ? { signInUrl } : {}) }, abort.signal);
+    // With or without an account, an application that does not open stops here, before any model call.
+    await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, ...(credentials ? { credentials } : {}), ...(signInUrl ? { signInUrl } : {}) }, abort.signal);
     const childEnv = {
       // The seed runs as a journey does, without reporting: its hash is the one the fixture accepts.
       ...journeyEnvironment(values, run, { hash: specHash(seed), targetUrl, allowedOrigins, credentials, signInUrl, events: false }),

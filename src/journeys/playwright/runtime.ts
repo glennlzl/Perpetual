@@ -35,6 +35,17 @@ const require = createRequire(import.meta.url);
 export const PLAYWRIGHT_CLI = require.resolve('@playwright/test/cli');
 export const PLAYWRIGHT_VERSION = String(require('@playwright/test/package.json').version);
 const fixture = new URL('./fixture.ts', import.meta.url).href, reporter = fileURLToPath(new URL('./reporter.ts', import.meta.url));
+/**
+ * The Chromium a journey launches: headless with no channel, which is Playwright's headless shell rather than the full
+ * browser chromium.executablePath() names. The pinned Playwright's registry finds it; its untyped export is checked.
+ */
+export function headlessChromiumPath(): string {
+  const bundle: unknown = createRequire(require.resolve('@playwright/test'))('playwright-core/lib/coreBundle');
+  const registry = (bundle as { registry?: { registry?: { findExecutable?: (name: string) => { executablePath?: () => unknown } | undefined } } } | null)?.registry?.registry;
+  const path = registry?.findExecutable?.('chromium-headless-shell')?.executablePath?.();
+  if (typeof path !== 'string') throw new Error("Playwright's browser registry is unavailable. Run npm install.");
+  return path;
+}
 const VIEWPORT = { width: 1280, height: 800 };
 const TOKEN_LETTERS = 'abcdefghijklmnopqrstuvwxyz0123456789';
 /** A run's token, journey.run: 8 random lowercase letters or digits, new for every journey process. */
@@ -76,7 +87,8 @@ export async function writeJourneyWorkspace(workspace: string, { item, targetUrl
  * attempt of a verification, types its own values.
  */
 export function journeyEnvironment(values: NodeJS.ProcessEnv, workspace: string, { hash, targetUrl, allowedOrigins = [], credentials, signInUrl, videoDir, checkTimeoutMs = 10000, events = true, blockWrites = false, checkVersion = CHECK_VERSION, diagnostics = false }: JourneyEnvironmentOptions): Record<string, string> {
-  const childEnv: Record<string, string> = { FORCE_COLOR: '0' };
+  // Playwright would otherwise write a failed test's page snapshot, filled password field included, to a file.
+  const childEnv: Record<string, string> = { FORCE_COLOR: '0', PLAYWRIGHT_NO_COPY_PROMPT: '1' };
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH']) if (typeof values[key] === 'string') childEnv[key] = values[key];
   return Object.assign(childEnv, {
     ...(events ? { PERPETUAL_EVENT_CHANNEL: `@${randomBytes(16).toString('hex')}@` } : {}),
@@ -98,8 +110,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
   return {
     async capabilities(): Promise<PlaywrightCapabilities> {
       if (!preflight || Date.now() - checkedAt > 15000) {
-        const { chromium } = await import('@playwright/test');
-        preflight = { runtimeInstalled: true, browserInstalled: await access(chromium.executablePath()).then(() => true, () => false) };
+        preflight = { runtimeInstalled: true, browserInstalled: await access(headlessChromiumPath()).then(() => true, () => false) };
         checkedAt = Date.now();
       }
       return preflight;
@@ -117,7 +128,8 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       const promise = (async () => {
         const workspace = await mkdtemp(join(tmpdir(), 'perpetual-playwright-'));
         try {
-          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds, readOnlyRequests: input.readOnlyRequests });
+          // A journey records video only into a recording folder; without one, as for a generation's seed, nothing would keep it.
+          const config = await writeJourneyWorkspace(workspace, { item: input.case, targetUrl: input.targetUrl, timeoutSeconds: input.timeoutSeconds, video: Boolean(input.videoDir), readOnlyRequests: input.readOnlyRequests });
           await writeFile(join(workspace, 'journey.spec.mjs'), input.spec.code);
           const childEnv = journeyEnvironment(values, workspace, { hash: input.spec.hash, targetUrl: input.targetUrl, allowedOrigins: input.allowedOrigins, credentials, signInUrl, videoDir: input.videoDir, checkTimeoutMs, blockWrites: input.blockWrites === true, checkVersion, diagnostics: diagnostic.enabled });
           if (cancelled) throw new Error('Browser operation cancelled.');

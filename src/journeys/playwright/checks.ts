@@ -10,8 +10,8 @@ export type Operator = CompareNumberCheck['op'];
 /** How a check fared on the page: observed is the number it read, resolved the text it looked for when that held {run}. */
 export type Evaluation = { passed: boolean; observed?: number; resolved?: string; error?: string };
 export type EvaluatedCheck<C extends Check = Check> = C & Evaluation;
-/** The first number after a label, and how far after it that number starts. */
-export type Reading = { value: number; gap: number };
+/** The first number after a label, how far after it that number starts, and whether the label stood on its own there. */
+export type Reading = { value: number; gap: number; own: boolean };
 /** Numbers read-number checks captured so far, by name. */
 export type Captures = Record<string, number>;
 /** The approved case snapshot a journey runs against, as far as it reads it: the controller writes it from the reviewed case. */
@@ -36,9 +36,10 @@ export type FixtureEvent =
  * The version of what the fixture's reviewed checks read. A verification's attempts and an approval record it, so approved
  * code must be verified again when those semantics change. 1: text checks read visible text. 2: they also read
  * what the application put in visible form fields. 3: a caught control requires a fresh persistence read.
- * 4: declared search controls never supply stored-result text evidence.
+ * 4: declared search controls never supply stored-result text evidence. 5: a text check finds its value only where
+ * it stands on its own (textPattern) in the text the page renders.
  */
-export const CHECK_VERSION = 4;
+export const CHECK_VERSION = 5;
 
 // Named fixture steps keep checks private and report sign-in as one action and reload readiness as a wait.
 export const STEPS = { checks: 'Perpetual reviewed checks', signIn: 'Perpetual sign-in', reloadReady: 'Perpetual reload readiness' };
@@ -50,19 +51,54 @@ const squash = (value: string) => value.split(/\s+/).filter(Boolean).join(' ');
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
- * The first number after a visible label, { value, gap }, or null: 1,240, 1240.5, -3 or $12.00.
+ * The first number after a visible label, { value, gap, own }, or null: 1,240, 1240.5, -3 or $12.00.
  * adjacent: only separators may sit between them, so an ancestor's sibling text is never read.
+ * The label is read where it stands on its own, not within a longer word (Total, not the end of Subtotal), else where it
+ * first occurs, as in scripts that write words without spaces; own says which. A digit beside it, as its own number in
+ * Credits10, is no part of a word.
+ * A number that another format continues, as 1.240,50, 12,5, 1'240, 1 240 grouped with a no-break space, or 1.2k, is
+ * read as NaN rather than as its first part.
  */
 export function numberAfter(text: string, label: string, adjacent = false): Reading | null {
-  text = squash(text); label = squash(label);
-  const found = label ? new RegExp(escape(label), 'iu').exec(text) : null;
-  if (!found) return null;
-  const end = found.index + found[0].length;
+  // Digits grouped by a no-break or thin space are one number, which squashing would split into two.
+  text = squash(text.replace(/(?<=\d)[   ](?=\d)/gu, "'")); label = squash(label);
+  const found = label ? [...text.matchAll(new RegExp(escape(label), 'giu'))] : [];
+  const alone = found.find(item => !/\p{L}$/u.test(text.slice(0, item.index)) && !/^\p{L}/u.test(text.slice(item.index + item[0].length)));
+  const at = alone ?? found[0];
+  if (!at) return null;
+  const end = at.index + at[0].length;
   NUMBER.lastIndex = end;
   const match = NUMBER.exec(text);
   if (!match || adjacent && /[\p{L}\p{N}]/u.test(text.slice(end, match.index))) return null;
-  const [, sign, whole, fraction] = match;
-  return { value: Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end };
+  const [, sign, whole, fraction] = match, other = /^(?:[.,'’]\d|[kKMB](?![\p{L}\p{N}]))/u.test(text.slice(match.index + match[0].length));
+  return { value: other ? NaN : Number(`${sign ? '-' : ''}${whole.replaceAll(',', '')}${fraction || ''}`), gap: match.index - end, own: Boolean(alone) };
+}
+
+// Scripts written without spaces between words, in which a value may stand within a longer run of letters.
+const UNSPACED = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Thai}\\p{scx=Lao}\\p{scx=Khmer}\\p{scx=Myanmar}]';
+// What a text check skips, as Playwright's text matching does: zero-width spaces and soft hyphens anywhere, and more
+// whitespace where the value has a space.
+const SKIP = '[\\u200b\\u00ad]*', SPACE = '\\s[\\s\\u200b\\u00ad]*';
+// What joins the page's text to an edge of the value that is a letter or digit: a digit or a letter of a script written
+// with spaces, so Paid is within Unpaid and INV-7 within INV-70, while 42元 stands on its own in 共42元 and iPhone in
+// 购买iPhone手机.
+const JOIN = `(?:\\p{N}|(?!${UNSPACED})\\p{L})`;
+/**
+ * How a text check finds its value from check version 5, in the text a page renders and in form fields alike: ignoring
+ * case and runs of whitespace, and only where the value stands on its own. Right beside an edge of the value that is a
+ * letter or digit, the page shows nothing that joins it (JOIN), so Paid is not found in Unpaid. A combining mark counts
+ * with the character it follows: an edge of the value is its first character, or its last that is no mark. A mark right
+ * after the value continues its last character, so Cafe is not found in a Café written with a combining accent, and
+ * before the value, the page character that counts is the one any marks there follow, so Paid stands on its own after a
+ * check mark with a variation selector. An edge in a script written without spaces between words needs no boundary, so
+ * 已支付 is found in 订单已支付成功, and neither does an edge that is punctuation or a symbol.
+ */
+export function textPattern(value: string): RegExp {
+  const chars = [...squash(value.replace(/[\u200b\u00ad]/g, ''))], unspaced = new RegExp(UNSPACED, 'u');
+  const joins = (char = '') => !unspaced.test(char) && /[\p{L}\p{M}\p{N}]/u.test(char) ? JOIN : null;
+  const before = joins(chars[0]), after = joins(chars.findLast(char => !/\p{M}/u.test(char)));
+  const body = chars.map(char => char === ' ' ? SPACE : escape(char)).join(SKIP);
+  return new RegExp(`${before ? `(?<!${before}[\\p{M}\\u200b\\u00ad]*)` : ''}${body}${after ? `(?!${SKIP}(?:\\p{M}|${after}))` : ''}`, 'iu');
 }
 
 const originOf = (url: string) => { try { const { protocol, origin } = new URL(url); return ['http:', 'https:'].includes(protocol) ? origin : null; } catch { return null; } };

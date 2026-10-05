@@ -394,6 +394,12 @@ test('progress revision, total action count, last action and worker capture time
   worker.event({type:'status',status:'ready'});assert.equal((await f.report(run.id)).progress.revision,before+2,'Ignored worker events do not change progress.');
   worker.event({type:'case',caseId:'one',status:'running',actions:[]});
   current=(await f.report(run.id)).progress;assert.equal(current.cases[0].actionCount,0);assert.equal(current.cases[0].lastAction,undefined);
+  // A worker that sends only its latest actions names their total, never fewer than it sent.
+  worker.event({type:'case',caseId:'one',status:'running',actions:actions.slice(-150),actionCount:170});
+  current=(await f.report(run.id)).progress;assert.equal(current.cases[0].actions.length,150);assert.equal(current.cases[0].actionCount,170);
+  for(const actionCount of [149,1.5,'170'])worker.event({type:'case',caseId:'one',status:'running',actions:actions.slice(-150),actionCount});
+  assert.equal((await f.report(run.id)).progress.cases[0].actionCount,150);
+  worker.event({type:'case',caseId:'one',status:'running',actions:[]});
   const last=current.revision;assert.ok(typeof last==='number');
   f.complete(0,'one');worker.event({type:'result',result:outcome('one')});worker.gate.resolve();
   const completed=await f.terminal(run.id);assert.equal(completed.run.status,'passed');assert.ok(typeof completed.progress.revision==='number'&&completed.progress.revision>last);

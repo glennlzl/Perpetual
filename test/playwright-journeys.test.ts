@@ -1,13 +1,13 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp,rm,mkdir,stat} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,readFile,readdir,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
 import type {AddressInfo} from 'node:net';
 import {createBrowserManager} from '../src/browser/manager.ts';
-import {createPlaywrightRuntime} from '../src/journeys/playwright/runtime.ts';
+import {createPlaywrightRuntime,headlessChromiumPath} from '../src/journeys/playwright/runtime.ts';
 import {specHash,validateJourneySpec} from '../src/journeys/playwright/specs.ts';
 import {journeyResult} from '../src/browser/results.ts';
 import type {BrowserManager,BrowserStageContext} from '../src/browser/manager.ts';
@@ -29,7 +29,7 @@ const page=(title:string,body:string)=>`<!doctype html><title>${title}</title><b
 // does, and a message sent over it after that.
 const SOCKET="const SOCKET_URL=location.origin.replace('http','ws')+'/socket',socket=new WebSocket(SOCKET_URL),open=new Promise(resolve=>socket.addEventListener('open',()=>{socket.send(JSON.stringify({type:'hello'}));resolve();})),say=message=>open.then(()=>socket.send(JSON.stringify(message)));";
 function application({persist=true}:{persist?:boolean}={}){
-  const state={name:'Original Name',credits:10,notes:0,failRename:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
+  const state={name:'Original Name',body:'Original body',credits:10,notes:0,items:[] as string[],failRename:false,failDelete:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
   const server=http.createServer((req,res)=>{
     const url=new URL(req.url!,'http://app'),signedIn=/session=1/.test(req.headers.cookie||'');hosts.add(req.headers.host);
     if(req.method!=='GET')posts.push(`${req.method} ${url.pathname}`);
@@ -59,6 +59,31 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/rename'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.name=body;res.writeHead(200);return res.end();}
       if(url.pathname==='/rename')return send(page('Rename',`<h1>Rename</h1><label>Display name <input id=rename value="${state.name}"></label><button id=save>Rename</button>
         <script>save.onclick=()=>fetch(${url.searchParams.has('query')?"'/rename?name='+encodeURIComponent(rename.value)":"'/rename'"},{method:'POST',body:rename.value}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+      // The same save from a rich-text editor (contenteditable), which shows the body only in the editor.
+      if(url.pathname==='/compose'&&req.method==='POST'){if(state.failRename){res.writeHead(500);return res.end();}state.body=body;res.writeHead(200);return res.end();}
+      if(url.pathname==='/compose')return send(page('Compose',`<h1>Compose</h1><div id=editor contenteditable role=textbox aria-label=Body>${state.body}</div><button id=save>Save</button>
+        <script>save.onclick=()=>fetch('/compose',{method:'POST',body:editor.textContent}).then(r=>document.body.insertAdjacentHTML('beforeend',r.ok?'<p>Done</p>':'<p>Failed</p>'));</script>`));
+      // Items the page lists from a request it makes once loaded, and again on a change of its hash route, answered 400 ms
+      // later. A broken delete answers like a working one.
+      if(url.pathname==='/items'&&req.method==='POST'){state.items.push(body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/items/delete'&&req.method==='POST'){if(!state.failDelete)state.items=state.items.filter(item=>item!==body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/items/list')return void setTimeout(()=>{res.writeHead(200,{'content-type':'text/html'});res.end(state.items.map(item=>`<li><span>${item}</span> <button>Delete</button></li>`).join(''));},400);
+      if(url.pathname==='/items')return send(page('Items',`<h1>Items</h1><label>Title <input id=title></label><button id=add>Add</button><ul id=list></ul>
+        <script>const load=()=>fetch('/items/list').then(r=>r.text()).then(html=>{list.innerHTML=html;});add.onclick=()=>fetch('/items',{method:'POST',body:title.value}).then(load);
+        list.onclick=event=>{if(event.target.tagName==='BUTTON')fetch('/items/delete',{method:'POST',body:event.target.closest('li').querySelector('span').textContent}).then(load);};load();
+        addEventListener('hashchange',()=>{list.innerHTML='';load();});</script>`));
+      // A page whose own scripts break what every reviewed check reads, and one whose main thread stops once a button is clicked.
+      if(url.pathname==='/unreadable')return send(page('Unreadable','<h1>Unreadable</h1><label>Kept <input value=Kept></label><script>Element.prototype.matches=()=>{throw new Error(\'Unreadable\');};</script>'));
+      if(url.pathname==='/freeze')return send(page('Freeze','<h1>Freeze</h1><button onclick="setTimeout(()=>{for(;;){}},100)">Freeze</button>'));
+      // Rows whose labels end with another row's label.
+      if(url.pathname==='/cart')return send(page('Cart','<h1>Cart</h1><table><tr><td>Subtotal</td><td>$10.00</td></tr><tr><td>Shipping</td><td>$2.00</td></tr><tr><td>Total</td><td>$12.00</td></tr></table><p>Unpaid invoices 7</p><p>Paid invoices 3</p><p>Balance 1&#8239;240</p>'));
+      // Statuses whose words hold shorter ones, in elements with no space between them, a Chinese sentence, a flex row's
+      // badge, a cell's line break, a card's block and an icon's title beside text with no space either, a highlight and a
+      // word split between elements, and a field and a select the application filled.
+      if(url.pathname==='/statuses')return send(page('Statuses',`<p>Inactive</p><p>Invoice INV-70 Unpaid</p><p>订单已支付成功</p><p>Copy "Q3 report" &gt;&gt; 'Archive' (1/2)</p><p>Due <b>Overdue</b></p>
+        <ul><li style="display:flex;gap:8px">Weekly report<span>Archived</span></li></ul><table><tr><td>Monthly invoice<br>Owner: Ada</td></tr></table><div>Quarterly plan<div>Saved just now</div></div>
+        <button><svg width="12" height="12"><title>Approval mark</title><rect width="12" height="12"/></svg>Approved</button><p>Un<mark>settled</mark> balance</p><p><span>Re</span><span>opened</span></p>
+        <label>Card <input value="Prepaid card"></label><label>Seat <select><option selected>Deactivated</option></select></label>`),{'content-type':'text/html; charset=utf-8'});
       if(url.pathname==='/other')return send(page('Other','<p>Another page</p>'));
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
@@ -66,10 +91,11 @@ function application({persist=true}:{persist?:boolean}={}){
       if(url.pathname==='/')return redirect(signedIn?'/settings':'/login');
       if(url.pathname==='/login'&&req.method==='POST')return form.get('email')===account.username&&form.get('password')===account.password?redirect('/settings',{'set-cookie':'session=1; Path=/'}):redirect('/login');
       if(url.pathname==='/login')return send(page('Sign in','<form method=post action=/login><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>'));
-      // The same form, shown by a button once the socket said hello, signing in over that socket, then Notes, counted only
-      // over a socket and written over the socket of the page, a worker or a shared worker, the page's WebSocketStream or
-      // a socket the page opens only to add the note; with spa, the page itself opens a socket for Notes a moment later.
-      if(url.pathname==='/socket-login')return send(page('Sign in',`<button id=show hidden>Sign in</button><form hidden><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0],show=document.getElementById('show');open.then(()=>{show.hidden=false;});show.onclick=()=>{show.hidden=true;form.hidden=false;};form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';if(!location.search.includes('spa'))return location.assign('/live'+location.search);form.hidden=true;setTimeout(()=>{const notes=new WebSocket(SOCKET_URL);notes.onopen=()=>notes.send(JSON.stringify({type:'hello'}));notes.onmessage=event=>{document.body.insertAdjacentHTML('beforeend','<p>'+event.data+'</p><button id=add>Add note</button>');document.getElementById('add').onclick=()=>{notes.send(JSON.stringify({type:'add'}));document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');};};},1500);});</script>`));
+      // The same form, shown by a button once the application answered the socket's hello, signing in over that socket, then
+      // Notes, counted only over a socket and written over the socket of the page, a worker or a shared worker, the page's
+      // WebSocketStream or a socket the page opens only to add the note; with spa, the page itself opens a socket for Notes a
+      // moment later.
+      if(url.pathname==='/socket-login')return send(page('Sign in',`<button id=show hidden>Sign in</button><form hidden><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form><script>${SOCKET}const form=document.forms[0],show=document.getElementById('show');socket.addEventListener('message',event=>{if(event.data.startsWith('Notes '))show.hidden=false;});show.onclick=()=>{show.hidden=true;form.hidden=false;};form.onsubmit=event=>{event.preventDefault();say({type:'sign-in',email:form.email.value,password:form.password.value});};socket.addEventListener('message',event=>{if(event.data!=='signed-in')return;document.cookie='session=1; path=/';if(!location.search.includes('spa'))return location.assign('/live'+location.search);form.hidden=true;setTimeout(()=>{const notes=new WebSocket(SOCKET_URL);notes.onopen=()=>notes.send(JSON.stringify({type:'hello'}));notes.onmessage=event=>{document.body.insertAdjacentHTML('beforeend','<p>'+event.data+'</p><button id=add>Add note</button>');document.getElementById('add').onclick=()=>{notes.send(JSON.stringify({type:'add'}));document.body.insertAdjacentHTML('beforeend','<p>Note added</p>');};};},1500);});</script>`));
       if(url.pathname==='/note-worker.js'){res.writeHead(200,{'content-type':'text/javascript'});return res.end(`${SOCKET}const add=port=>()=>say({type:'add'}).then(()=>port.postMessage('sent'));onmessage=add(self);onconnect=event=>{event.ports[0].onmessage=add(event.ports[0]);};`);}
       // A landing page with no sign-in form, and a sign-in page whose form, shown at once, signs in over its socket.
       if(url.pathname==='/welcome')return send(page('Welcome','<h1>Welcome</h1>'));
@@ -303,8 +329,9 @@ test('a control run lets a socket opened after sign-in say hello, so checks that
   assert.deepEqual(await ends(liveSpec('page',true),weak),passed(weak));
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','hello']]);
   // A page that signed in over its socket, after the journey showed the form, then opens one for Notes: what that socket
-  // sends is no write around the block.
-  const spa={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[]}:step)};
+  // sends is no write around the block. The reloaded page is judged once its button shows that the application answered
+  // its socket's hello, so that hello is received before the browser closes.
+  const spa={...live,steps:live.steps.map((step,index)=>index===2?{...step,checks:[{type:'text-visible' as const,value:'Sign in'}]}:step)};
   assert.deepEqual(await ends(liveSpec('spa'),spa),passed(spa));
   assert.deepEqual([f.app.state.notes,f.app.received],[0,['hello','hello','hello','sign-in','hello','hello']]);
 });
@@ -589,6 +616,154 @@ test('a text check never reads what the journey typed into a field, nor a field 
   f.app.state.failRename=false;
   const events=await runSpec(target,renameSpec(reload),{item:renamed}),seen=events.find(event=>event.type==='journey-step'&&event.stepId==='see'&&event.status!=='running');
   assert.deepEqual([seen?.status,f.app.state.name],['completed',seen?.evidence?.match(/“(Renamed [a-z0-9]{8})”/)?.[1]]);
+});
+
+// The same journey writing its body in a rich-text editor, where what it types is visible page text.
+const composed={...renamed,id:'composed',name:'Compose and see the body',
+  steps:[{id:'compose',title:'Write the body',checks:[]},{id:'see',title:'See the new body',checks:[{type:'text-visible',value:'Body {run}'}]}]} satisfies Omit<BrowserCase,'evidence'>;
+const composeSpec=(see:string)=>`import { test } from 'perpetual';
+test('Compose and see the body', async ({ page, journey }) => {
+  await journey.milestone('compose', async () => {
+    await page.goto('/compose');
+    await page.getByRole('textbox', { name: 'Body' }).fill(\`Body \${journey.run}\`);
+    await page.getByRole('button', { name: 'Save' }).click();
+  });
+  await journey.milestone('see', async () => {
+    ${see}
+  });
+});
+`;
+
+test('a text check never reads what the journey typed into an editable region',{timeout:180000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const later='await page.getByRole(\'heading\', { name: \'Compose\' }).click();',reload='await page.reload();';
+  f.app.state.failRename=true;
+  // The body is not saved: the editor still shows the typed text on the same page, and in a control run; a reload shows the stored body.
+  for(const see of [later,reload]){
+    const code=composeSpec(see);validateJourneySpec(code,composed);
+    assert.deepEqual(ended(await runSpec(target,code,{item:composed})),['compose:completed','see:failed'],see);
+  }
+  assert.deepEqual(ended(await runSpec(target,composeSpec(later),{item:composed,blockWrites:true})),['compose:completed','see:failed']);
+  assert.equal(f.app.state.body,'Original body');
+  // Saved, the body is what the application shows in the editor once the page is opened again.
+  f.app.state.failRename=false;
+  const events=await runSpec(target,composeSpec(reload),{item:composed}),seen=events.find(event=>event.type==='journey-step'&&event.stepId==='see'&&event.status!=='running');
+  assert.deepEqual([seen?.status,f.app.state.body],['completed',seen?.evidence?.match(/“(Body [a-z0-9]{8})”/)?.[1]]);
+});
+
+// A journey that adds an item, deletes it and reopens the list, whose items arrive after the page has loaded.
+const listed={id:'listed',name:'Add and delete an item',goal:'Add an item, delete it and see it gone.',isolation:'shared',selected:true,needsReview:false,
+  steps:[{id:'add',title:'Add an item',checks:[{type:'text-visible',value:'Item {run}'}]},{id:'delete',title:'Delete the item',checks:[{type:'text-absent',value:'Item {run}'}]}],
+  preconditions:[],expectedOutcomes:['The deleted item is no longer listed.'],assertions:[]} satisfies Omit<BrowserCase,'evidence'>;
+const listSpec=(reopen:string)=>`import { test } from 'perpetual';
+test('Add and delete an item', async ({ page, journey }) => {
+  await journey.milestone('add', async () => {
+    await page.goto('/items');
+    await page.getByLabel('Title').fill(\`Item \${journey.run}\`);
+    await Promise.all([page.waitForResponse('**/items'), page.getByRole('button', { name: 'Add' }).click()]);
+    await page.goto('/items');
+  });
+  await journey.milestone('delete', async () => {
+    await Promise.all([page.waitForResponse('**/items/delete'), page.getByRole('listitem').filter({ hasText: \`Item \${journey.run}\` }).getByRole('button', { name: 'Delete' }).click()]);
+    ${reopen}
+  });
+});
+`;
+
+test('an absent text is judged once the reopened page has loaded its data, so a broken delete fails',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  // The list is reopened as a new document, or, once that document has long been idle, as another of its hash routes.
+  for(const reopen of ["await page.goto('/items');","await page.waitForTimeout(1500);\n    await page.goto('/items#list');"]){
+    validateJourneySpec(listSpec(reopen),listed);
+    f.app.state.failDelete=true;
+    assert.deepEqual(ended(await runSpec(target,listSpec(reopen),{item:listed})),['add:completed','delete:failed'],`The item is listed again once the reopened list arrives: ${reopen}`);
+    f.app.state.failDelete=false;
+    assert.deepEqual(ended(await runSpec(target,listSpec(reopen),{item:listed})),['add:completed','delete:completed'],reopen);
+  }
+  assert.equal(f.app.state.items.length,2,'Only the broken deletes kept their items.');
+});
+
+test('a page no observation can read stops the journey for review within its check timeout, never as a failed check',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const item={...journey,id:'unreadable',steps:[{id:'open',title:'Open the page',checks:[{type:'text-visible' as const,value:'Kept'}]}],assertions:[]};
+  for(const [path,action] of [['/unreadable',''],['/freeze',"await page.getByRole('button', { name: 'Freeze' }).click();"]]){
+    const code=`import { test } from 'perpetual';\ntest('Unreadable', async ({ page, journey }) => {\n  await journey.milestone('open', async () => {\n    await page.goto('${path}');\n    ${action}\n  });\n});\n`;
+    validateJourneySpec(code,item);
+    const started=Date.now(),events=await runSpec(target,code,{item,timeoutSeconds:120});
+    assert.deepEqual(events.at(-1)?.result,{caseId:item.id,assertions:[],stopCause:'action',error:'Action failed at “Open the page”: The current page could not be checked.'},path);
+    assert.ok(Date.now()-started<60000,`${path} settled ${Date.now()-started} ms after it started, well within its time limit.`);
+  }
+});
+
+test('a number is read after its label standing on its own, never after a longer word that ends with it',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  const cart={...journey,id:'cart',steps:[{id:'open-cart',title:'Open the cart',checks:[{type:'read-number' as const,label:'Total',name:'total'},{type:'read-number' as const,label:'Paid invoices',name:'paid'}]}],assertions:[]};
+  const code=`import { test } from 'perpetual';\ntest('Cart', async ({ page, journey }) => {\n  await journey.milestone('open-cart', async () => {\n    await page.goto('/cart');\n  });\n});\n`;
+  validateJourneySpec(code,cart);
+  const step=(await runSpec(target,code,{item:cart})).find(event=>event.type==='journey-step'&&event.status!=='running');
+  assert.deepEqual([step?.status,step?.evidence],['completed','Reviewed checks passed: Total 12; Paid invoices 3.']);
+  // A number in another format fails its check rather than reading its first group.
+  const balance={...cart,steps:[{...cart.steps[0],checks:[{type:'read-number' as const,label:'Balance',name:'balance'}]}]};
+  const failed=(await runSpec(target,code,{item:balance})).find(event=>event.type==='journey-step'&&event.status!=='running') as RunEvent&{checks?:{passed:boolean;error?:string}[]};
+  assert.deepEqual([failed?.status,failed?.checks?.map(check=>[check.passed,check.error])],['failed',[[false,'The number after this label is in an unsupported format.']]]);
+});
+
+test('a text check finds its value only where it stands on its own in the text the page renders, and in form fields alike',{timeout:120000},async t=>{
+  const f=await setup(t);
+  const target=(await f.manager.view(f.context)).config.targetUrl;
+  // Values at the start of an element right after another's last letter and at its end, within a Chinese sentence, between
+  // quotes, and beside a child that holds the value within a longer word; beside a flex row's badge, a line break, a
+  // card's block and an icon; and in a field and a select.
+  const alone=[['Invoice INV-70','Unpaid','已支付',`"Q3 report" >> 'Archive' (1/2)`,'Due'],['Weekly report','Archived','Monthly invoice','Owner: Ada','Quarterly plan','Approved'],['prepaid card','Deactivated']];
+  // Values the page and its fields show only within longer words, a highlight and a word split between elements
+  // included, and an icon's title, which the page does not render.
+  const within=['Paid','Active','INV-7','Settled','Opened','Paid card','Activated','Approval mark'];
+  const steps=[{id:'open-statuses',title:'Open the invoice statuses'},{id:'see-rows',title:'See the rows and cards'},{id:'see-fields',title:'See the fields'}];
+  const statuses={...journey,id:'statuses',steps:steps.map((step,index)=>({...step,checks:alone[index].map(value=>({type:'text-visible' as const,value}))})),
+    assertions:within.flatMap(value=>[{type:'text-visible' as const,value},{type:'text-absent' as const,value}])};
+  const code=`import { test } from 'perpetual';\ntest('Statuses', async ({ page, journey }) => {\n  await journey.milestone('open-statuses', async () => {\n    await page.goto('/statuses');\n  });\n  await journey.milestone('see-rows', async () => {});\n  await journey.milestone('see-fields', async () => {});\n});\n`;
+  validateJourneySpec(code,statuses);
+  const events=await runSpec(target,code,{item:statuses});
+  assert.deepEqual(events.filter(event=>event.type==='journey-step'&&event.status!=='running').map(event=>[event.status,event.evidence]),
+    alone.map(values=>['completed',`Reviewed checks passed: ${values.map(value=>`Text visible “${value}”`).join('; ')}.`]));
+  assert.deepEqual(events.at(-1)?.result?.assertions.map(item=>item.passed),within.flatMap(()=>[false,true]));
+  // A text-absent check fails on every value the page shows on its own.
+  const absent={...statuses,id:'statuses-absent',steps,assertions:alone.flat().map(value=>({type:'text-absent' as const,value}))};
+  assert.deepEqual((await runSpec(target,code,{item:absent})).at(-1)?.result?.assertions.map(item=>item.passed),alone.flat().map(()=>false));
+  // Code approved under check version 4 keeps its checks: they find a value within longer words too, never in what the
+  // page does not render.
+  const older=await runSpec(target,code,{item:statuses,checkVersion:4});
+  assert.deepEqual(ended(older),steps.map(step=>`${step.id}:completed`));
+  assert.deepEqual(older.at(-1)?.result?.assertions.map(item=>item.passed),within.flatMap(value=>value==='Approval mark'?[false,true]:[true,false]));
+});
+
+test('the Chromium preflight checks the build a journey launches, not the full browser',{timeout:60000},async()=>{
+  const {chromium}=await import('@playwright/test');
+  const server=await chromium.launchServer({headless:true});
+  try{assert.equal(server.process().spawnfile,headlessChromiumPath());}finally{await server.close();}
+  assert.notEqual(headlessChromiumPath(),chromium.executablePath());
+});
+
+test('a journey given no recording folder records no video',{timeout:120000},async t=>{
+  const f=await setup(t),target=(await f.manager.view(f.context)).config.targetUrl;
+  const root=await mkdtemp(join(tmpdir(),'perpetual-unrecorded-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const item={...journey,id:'unrecorded',steps:[{id:'other',title:'Open another page',checks:[{type:'url-contains' as const,value:'/other'}]}],assertions:[]};
+  const code="import { test } from 'perpetual';\ntest('Unrecorded', async ({ page, journey }) => {\n  await journey.milestone('other', async () => {\n    await page.goto('/other');\n    await page.waitForTimeout(2000);\n  });\n});\n";
+  validateJourneySpec(code,item);
+  // The journey's private workspace is created under this test's temporary folder, where its config can be read.
+  const previous=process.env.TMPDIR;process.env.TMPDIR=root;
+  let job;try{job=createPlaywrightRuntime({checkTimeoutMs:3000}).start({mode:'run',targetUrl:target,allowedOrigins:[new URL(target).origin],timeoutSeconds:30,case:item,spec:{code,hash:specHash(code)}},()=>{});}
+  finally{if(previous===undefined)delete process.env.TMPDIR;else process.env.TMPDIR=previous;}
+  let config='';
+  for(const deadline=Date.now()+10000;!config&&Date.now()<deadline;await new Promise(resolve=>setTimeout(resolve,50))){
+    const [workspace]=await readdir(root);config=workspace?await readFile(join(root,workspace,'playwright.config.mjs'),'utf8').catch(()=>''):'';
+  }
+  await job.promise;
+  assert.equal(JSON.parse(config.replace(/^export default /,'').replace(/;\s*$/,'')).use.video,'off');
 });
 
 test('a text-absent check passes when only the search field the journey typed into holds the text',{timeout:120000},async t=>{

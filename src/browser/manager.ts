@@ -769,7 +769,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             if(Array.isArray(event.actions)){
               // An action that is not an object is an invalid event, which stops the run; an action without a valid type is a browser action.
               progress.actions=event.actions.slice(-150).map((a:unknown):ActionProgress=>{if(!isRecord(a))throw new Error('Browser runtime returned an invalid event.');return {type:typeof a.type==='string'&&/^[a-z][a-z0-9_-]{0,40}$/i.test(a.type)?a.type:'browser',status:includes(['pending','running','passed','failed','cancelled'],a.status)?a.status:'running',...(a.status==='failed'&&typeof a.errorCode==='string'&&actionErrorCodes.has(a.errorCode)?{errorCode:a.errorCode}:{})};});
-              progress.actionCount=event.actions.length;
+              // A worker that sends only its latest actions names how many there were in all.
+              progress.actionCount=typeof event.actionCount==='number'&&Number.isSafeInteger(event.actionCount)&&event.actionCount>=event.actions.length?event.actionCount:event.actions.length;
               const last=progress.actions.at(-1);if(last)progress.lastAction={type:last.type,status:last.status};else delete progress.lastAction;
             }
           }else if(event.type==='journey-step')acceptMilestone(progress,event,run.approvedCases.find(item=>item.id===caseId));
