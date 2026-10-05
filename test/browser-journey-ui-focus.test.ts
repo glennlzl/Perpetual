@@ -82,13 +82,13 @@ test('focus falls back when the opener is gone, disabled or inert', () => {
 });
 test('every dialog opened inside the inspector restores focus when it closes', async () => {
   const panel = await source('BrowserTestingPanel.tsx');
-  for (const name of ['TestSettingsDialog', 'GenerateTestsDialog', 'RunTestsDialog', 'BusinessCaseEditor', 'DeleteCaseDialog']) {
+  for (const name of ['TestSettingsDialog', 'GenerateTestsDialog', 'RunTestsDialog', 'BusinessCaseEditor', 'ConfirmCaseDialog']) {
     const body = panel.slice(panel.indexOf(`function ${name}(`));
     const component = body.slice(0, body.indexOf('\n}\n'));
     assert.match(component, /const returnFocus = useReturnFocus\(focusFallback\);/, name);
     assert.match(component, /Content [^\n]*onCloseAutoFocus=\{returnFocus\}/, name);
   }
-  for (const [name, fallback] of [['BusinessCaseEditor', 'focusCase\\(editingCase\\.id\\)'], ['DeleteCaseDialog', 'sheet'], ['TestSettingsDialog', 'focusSettings'], ['GenerateTestsDialog', 'sheet'], ['NewTestDialog', 'sheet']]) assert.match(panel, new RegExp(`<${name} [^\\n]*focusFallback=\\{${fallback}\\}`), name);
+  for (const [name, fallback] of [['BusinessCaseEditor', 'focusCase\\(editingCase\\.id\\)'], ['ConfirmCaseDialog', 'sheet'], ['ConfirmCaseDialog', 'focusCase\\(discarding\\.item\\.id\\)'], ['TestSettingsDialog', 'focusSettings'], ['GenerateTestsDialog', 'sheet'], ['NewTestDialog', 'sheet']]) assert.match(panel, new RegExp(`<${name} [^\\n]*focusFallback=\\{${fallback}\\}`), name);
   assert.match(panel, /const sheet = \(\) => root\.current\?\.closest(?:<\w+>)?\('\[data-slot="sheet-content"\]'\) \|\| null;/);
   for (const file of ['NewTestDialog.tsx', 'BrowserAgentViewer.tsx']) {
     const dialog = await source(file);
