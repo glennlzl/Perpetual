@@ -225,10 +225,10 @@ test('Trigger.dev builds its pinned CLI image once per version, before the insta
   };
   const server = webapp(), ctx = await context({ server, respond });
   await trigger.setup(ctx);
-  const [inspect, build, up] = ctx.calls;
+  const [inspect, build, ...instance] = ctx.calls;
   assert.deepEqual(inspect.args, ['image', 'inspect', '--format', '{{.Id}}', cliImage(VERSION)]);
   assert.deepEqual(build.args, ['build', '--build-arg', `VERSION=${VERSION}`, '--tag', cliImage(VERSION), join(ctx.shared, 'cli')]);
-  assert.ok(up.args.includes('up'));
+  assert.ok(instance.some(({ args }) => args.includes('up')));
   const recipe = await readFile(join(ctx.shared, 'cli', 'Dockerfile'), 'utf8');
   assert.match(recipe, /^FROM node:22-bookworm-slim\n/);
   assert.match(recipe, /npm install --global "trigger\.dev@\$VERSION"/);
@@ -300,14 +300,61 @@ test('Trigger.dev runs a per-twin dev worker from the pinned CLI image, with the
   assert.deepEqual(JSON.parse(await readFile(join(xdg, 'trigger', 'config.json'), 'utf8')), expected);
 });
 
+// The machine's Docker engine: the instance's volumes exist once it has started, and it answers only while it runs.
+const engine = () => {
+  const state = { running: false, data: false };
+  const respond: Respond = ({ args }) => {
+    if (args[0] === 'volume') return state.data ? `${PROJECT}_postgres\n` : '';
+    if (args.includes('up')) Object.assign(state, { running: true, data: true });
+    return args.includes('logs') ? LOGGED_LINK : '';
+  };
+  return { state, respond };
+};
+
 test('Trigger.dev teardown deletes only the twin project', async () => {
-  const server = webapp(), ctx = await context({ server });
+  const server = webapp(), { respond } = engine(), ctx = await context({ server, respond });
   await trigger.setup(ctx);
   const before = ctx.calls.length;
   await trigger.teardown(ctx);
   assert.equal(server.requests.at(-1)?.key, 'DELETE /api/v1/projects/proj_1');
-  assert.equal(ctx.calls.length, before); // the shared instance keeps running
+  // The shared instance keeps running: at most started again as it was, never stopped.
+  assert.deepEqual(ctx.calls.slice(before).map(({ args }) => args), [
+    ['volume', 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${PROJECT}`], [...composeCall(ctx), 'up', '--detach', '--wait', '--no-recreate'],
+  ]);
 
   const fresh = await context({ fetch: () => assert.fail('no instance, nothing to delete') });
   await trigger.teardown(fresh);
+});
+
+test('Trigger.dev teardown starts a stopped instance before it deletes the twin project', async () => {
+  const server = webapp(), { state, respond } = engine();
+  const ctx = await context({ server, respond, fetch: (url: string, init?: RequestInit) => { assert.ok(state.running, 'The instance answers only while it runs.'); return server.fetch(url, init); } });
+  await trigger.setup(ctx);
+  state.running = false; // its containers were stopped, as Docker Desktop's Stop does
+  await trigger.teardown(ctx);
+  assert.equal(server.requests.at(-1)?.key, 'DELETE /api/v1/projects/proj_1');
+
+  // Its database, and the project in it, are gone with its volumes: nothing is left to delete.
+  const gone = await context({ fetch: () => assert.fail('no database, no project') });
+  await mkdir(gone.shared, { recursive: true });
+  await writeFile(join(gone.shared, 'state.json'), JSON.stringify({ port: PORT, token: 'tr_pat_bot', org: 'perpetual' }));
+  await trigger.teardown(gone);
+  assert.deepEqual(gone.calls.map(({ args }) => args[0]), ['volume']);
+});
+
+test('Trigger.dev never takes over an instance whose secrets this data directory does not have', async () => {
+  const server = webapp(), other = engine();
+  other.state.data = true; // set up from another data directory
+  const ctx = await context({ server, respond: other.respond });
+  await assert.rejects(trigger.setup(ctx), { message: `The machine's Trigger.dev instance (Docker Compose project ${PROJECT}) was set up with secrets this data directory does not have, as from another Perpetual data directory: use that one, or remove the project and its volumes.` });
+  assert.ok(!ctx.calls.some(({ args }) => args.includes('up')), 'Its containers keep their secrets and port.');
+  await assert.rejects(readFile(join(ctx.shared, '.env')));
+  assert.deepEqual(server.requests, []);
+
+  // The data directory that set it up keeps using it.
+  const owner = engine(), first = await context({ server: webapp(), respond: owner.respond });
+  await trigger.setup(first);
+  const again = await context({ server: webapp(), respond: owner.respond, shared: first.shared });
+  await trigger.setup(again);
+  assert.ok(again.calls.some(({ args }) => args.includes('up')));
 });

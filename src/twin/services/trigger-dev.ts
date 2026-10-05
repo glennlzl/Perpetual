@@ -171,6 +171,9 @@ export async function bootstrapToken(ctx: Pick<Context, 'fetch' | 'shared' | 'ex
   return minted;
 }
 
+/** Whether the machine's instance has data: its Compose project's volumes, where its bot, organization and projects live. */
+const hasData = async (ctx: Pick<Context, 'exec'>) => Boolean((await ctx.exec('docker', ['volume', 'ls', '--quiet', '--filter', `label=com.docker.compose.project=${PROJECT}`])).stdout.trim());
+
 // Twins set up at the same time share the instance, so it is started, signed in and given its organization one at a time.
 let turn: Promise<unknown> = Promise.resolve();
 const inTurn = <T>(work: () => Promise<T>) => { const next = turn.then(work); turn = next.catch(() => {}); return next; };
@@ -184,6 +187,9 @@ const instance = (ctx: Context) => inTurn(async () => {
   const state: Instance = { ...saved, port: await ctx.sharedPort(PROJECT, saved.port) };
   const save = () => writeStateFile(file, JSON.stringify(state));
   const kept = parseEnv(await readFile(envFile, 'utf8').catch(absent('')));
+  // The project's name is the machine's, its secrets this data directory's: new ones would start its existing database
+  // with a password it never had, and move the port other twins use.
+  if (!kept.POSTGRES_PASSWORD && await hasData(ctx)) throw new Error(`The machine's Trigger.dev instance (Docker Compose project ${PROJECT}) was set up with secrets this data directory does not have, as from another Perpetual data directory: use that one, or remove the project and its volumes.`);
   const secrets = Object.fromEntries(SECRETS.map(name => [name, kept[name] || randomBytes(16).toString('hex')]));
   await writeFile(envFile, formatEnv(webappEnv(state.port, secrets)), { mode: 0o600 });
   for (const [service, name] of Object.entries(PASSWORDS)) await writeFile(join(dir, passwordFile(service)), formatEnv({ [name]: secrets[name] }), { mode: 0o600 });
@@ -254,6 +260,10 @@ export default {
     if (!token || !org) return;
     // The port is saved before the token, so a state without one cannot reach the project: a cleanup failure, not nothing to do.
     if (typeof port !== 'number') throw new Error('Trigger.dev instance state has no port');
+    // The project is a record of the instance's database, gone with its volumes.
+    if (!await hasData(ctx)) return;
+    // A stopped instance starts again as it was, so deleting a twin never waits for another twin's setup to start it.
+    await inTurn(() => compose(ctx, 'up', '--detach', '--wait', '--no-recreate'));
     const call = api(ctx, { port, token, org }), project = await findProject(ctx, call, org);
     if (project) await call('DELETE', `/api/v1/projects/${text(project, 'externalRef', 'a project reference')}`);
   },
