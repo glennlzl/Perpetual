@@ -58,6 +58,7 @@ test('a box sits alone on an internal network, reaching out only through its egr
   assert.ok(calls.some(call => call.join(' ') === `rm -f -v ${'c'.repeat(64)}`) && calls.some(call => call.join(' ') === `network rm ${'d'.repeat(64)}`), 'Leftover boxes, proxies and networks go first.');
   const network = calls.find(call => call[0] === 'network' && call[1] === 'create')!;
   assert.deepEqual([network.includes('--internal'), network.at(-1), network.filter(arg => arg.startsWith('perpetual.')).length], [true, name, 3]);
+  assert.equal(network[network.indexOf('com.docker.network.bridge.inhibit_ipv4=true') - 1], '-o', 'Its bridge has no address on the host, which a host service listening everywhere would answer on.');
   const proxied = calls.find(call => call[0] === 'create' && call[2] === proxy)!;
   for (const flag of ['--read-only', '--init']) assert.ok(proxied.includes(flag), flag);
   assert.deepEqual([proxied[proxied.indexOf('--cap-drop') + 1], proxied[proxied.indexOf('--user') + 1], proxied[proxied.indexOf('--network') + 1]], ['ALL', 'node', 'bridge']);

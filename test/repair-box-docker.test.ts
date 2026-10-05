@@ -62,6 +62,15 @@ test('a repair box is confined: labelled, capped, without mounts, socket or cred
   assert.notEqual(direct.exitCode, 0);
   assert.notEqual(proxied.stdout.trim(), '200');
   assert.notEqual(tunnelled.exitCode, 0);
+  // A host service listening on every address is out of reach through the gateway address of the box's network too.
+  const everywhere = createServer((incoming, answer) => { hits.push(incoming.url ?? ''); answer.end('database'); });
+  everywhere.listen(0, '0.0.0.0');
+  await once(everywhere, 'listening');
+  t.after(() => { everywhere.close(); });
+  const gateway = docker('network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{.Subnet}}{{end}}', `perpetual-repair-test-${id}`).split(' ');
+  const address = gateway[0] || gateway[1].replace(/\.\d+\/\d+$/, '.1');
+  const bridged = await box.exec(['curl', '-sS', '-m', '5', '--noproxy', '*', `http://${address}:${(everywhere.address() as AddressInfo).port}/`]);
+  assert.notEqual(bridged.exitCode, 0, `The bridge address ${address} answers nothing.`);
   assert.deepEqual(hits, [], 'Nothing from the box reached the host.');
   const registry = await box.exec(['curl', '-sS', '-m', '30', '-o', '/dev/null', '-w', '%{http_code}', 'https://registry.npmjs.org/'], { timeoutMs: 60_000 });
   assert.equal(registry.stdout.trim(), '200', 'Public registries are reached through the proxy.');
