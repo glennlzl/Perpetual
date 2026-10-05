@@ -135,8 +135,8 @@ function computeLayout(commits: Commit[]): GraphRow[] {
       const parentHash = parents[p]
       const existingRail = rails.indexOf(parentHash)
       if (existingRail !== -1) {
-        // Already on a rail — draw merge line from that rail
-        edges.push({ fromRail: existingRail, toRail: commitRail, color: color(existingRail), type: "merge-in" })
+        // Already on a rail below — draw the merge line from this commit down to that rail
+        edges.push({ fromRail: commitRail, toRail: existingRail, color: color(existingRail), type: "merge-in" })
       } else {
         // Needs a new rail — fork out
         const emptySlot = rails.indexOf(null)
@@ -249,20 +249,14 @@ function RailsSVG({
         />
       ))}
 
-      {/* Merge curves */}
+      {/* Merge curves: this commit's parent is already on another rail — curve from dot down to that rail */}
       {row.edges.filter(e => e.type === "merge-in").map((edge, i) => {
-        const isOutgoing = edge.fromRail === row.rail
         const x1 = rx(edge.fromRail)
         const x2 = rx(edge.toRail)
-        // Outgoing: this commit's parent is on another rail — curve from dot down to target
-        // Incoming: another rail merges into this commit — curve from top of source rail to dot
-        const d = isOutgoing
-          ? `M${x1},${cy} C${x1},${h} ${x2},${cy} ${x2},${h}`
-          : `M${x1},${0} C${x1},${cy} ${x2},${0} ${x2},${cy}`
         return (
           <path
             key={`m-${i}`}
-            d={d}
+            d={`M${x1},${cy} C${x1},${h} ${x2},${cy} ${x2},${h}`}
             stroke={edge.color} strokeWidth={2} strokeOpacity={0.6} fill="none"
           />
         )
