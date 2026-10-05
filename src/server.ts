@@ -11,7 +11,7 @@ import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
-import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, discardGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
+import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, discardGitHubSource, ensureGitHubHistory, sourceRoot, updateGitHubSource } from './github-source.ts';
 import { readGitHubActions, readServiceConfig } from './service-config.ts';
 import type { ConfigFile } from '../contract/service-config.ts';
 import { withDeliveryGraph } from './delivery.ts';
@@ -700,7 +700,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
               const legacyKey=sourceKey({repository:detected,rootDirectory:'/'});
               pipelines[legacyKey] ??= current.pipelines[current.scan!.repo.path];
             }
-            const saved=pipelines[key];
+            // A root saved as it was typed, before roots were saved as the checkout spells them, keeps its pipeline.
+            const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
             const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
             pipelines[key]=pipeline;
             return {state:{...current,scan,source,providers:[],pipelines},
