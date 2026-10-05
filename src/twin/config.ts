@@ -71,6 +71,12 @@ function command(value: unknown, where: string) {
   return value.trim();
 }
 
+// Inline SQL goes to psql as written, which reads no twin variable: braces it stores are written apart.
+function inlineSql(value: unknown, where: string) {
+  if (typeof value === 'string' && HAS_PLACEHOLDER.test(value)) fail(`${where} holds a placeholder; inline SQL reads no twin value, so write literal braces apart, as '{' || '{name}}' does for {{name}}.`);
+  return command(value, where);
+}
+
 
 function parse(expression: string, where: string): Placeholder {
   const parts = expression.split('.');
@@ -224,7 +230,7 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
     // sql is a repository file; query is inline SQL kept with the twin config, so a twin needs no files in the product's repository.
     if (['sql', 'query', 'command'].filter(key => fixture[key] != null).length !== 1) fail(`${where} needs exactly one of sql, query or command.`);
     if (fixture.sql != null) return { service: fixture.service, sql: relative(fixture.sql, `${where}.sql`) };
-    if (fixture.query != null) return { service: fixture.service, query: command(fixture.query, `${where}.query`) };
+    if (fixture.query != null) return { service: fixture.service, query: inlineSql(fixture.query, `${where}.query`) };
     return { service: fixture.service, command: command(fixture.command, `${where}.command`) };
   });
   const check = (value: unknown, where: string) => {

@@ -103,10 +103,14 @@ test('Commands hold no placeholders: they read the variables that service option
     [{ apps: { ...base.apps, api: { ...base.apps.api, start: 'node server.js --db {{database.DATABASE_URL}}' } } }, 'apps.api.start'],
     [{ apps: { ...base.apps, web: { ...base.apps.web, build: 'pnpm build {{nope}}' } } }, 'apps.web.build'],
     [{ install: { command: 'npm ci && echo {{apps.web.url}}' } }, 'install.command'],
-    [{ fixtures: [{ service: 'database', query: "insert into t values ('{{apps.web.url}}')" }] }, 'fixtures[0].query'],
     [{ fixtures: [{ service: 'jobs', command: 'pnpm seed {{redis.REDIS_URL}}' }] }, 'fixtures[0].command'],
   ];
   for (const [patch, where] of cases) assert.throws(() => validate({ ...base, ...patch }), { message: `${where} holds a placeholder; placeholders go in service options and app env, and a command reads the variables they fill as $VARIABLE.` }, where);
+  // psql gets inline SQL as written, so the refusal says how to store braces rather than to read a variable.
+  assert.throws(() => validate({ ...base, fixtures: [{ service: 'database', query: "insert into templates (body) values ('Hi {{first_name}}')" }] }),
+    { message: "fixtures[0].query holds a placeholder; inline SQL reads no twin value, so write literal braces apart, as '{' || '{name}}' does for {{name}}." });
+  assert.equal(validate({ ...base, fixtures: [{ service: 'database', query: "insert into templates (body) values ('Hi {' || '{first_name}}')" }] }).fixtures[0].query,
+    "insert into templates (body) values ('Hi {' || '{first_name}}')");
   // Shell syntax with single braces stays a command.
   assert.equal(validate({ ...base, install: { command: 'npm ci && echo ${HOME} {a,b}' } }).install?.command, 'npm ci && echo ${HOME} {a,b}');
 });
