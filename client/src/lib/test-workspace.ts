@@ -322,7 +322,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         return result;
       } catch (failure) {
         const error = failure as ApiError;
-        if (resource === 'browser' && name === 'cases' && error.statusCode === 409) await refresh(entry, resource, true);
+        // A stale case list conflicts in a case save, and in the case writes a one-off run or a replacing Generate makes.
+        if (resource === 'browser' && error.statusCode === 409) await refresh(entry, resource, true);
         if (error.name !== 'AbortError') update(entry, { error: error.message });
         throw failure;
       } finally { update(entry, { pending: '' }); }

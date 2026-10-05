@@ -323,3 +323,19 @@ test('a source another window switched to is reported once a second poll names i
   await workspace.refreshSource();
   assert.equal(workspace.getSnapshot().error, '');
 });
+
+test('a case conflict inside a one-off run or a replacing Generate reads the changed list at once', async t => {
+  let cases = [{ ...scenario, name: 'Before' }];
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async (path, input) => {
+    if (input) throw Object.assign(new Error('Tests changed. Reopen Generate and try again.'), { statusCode: 409 });
+    return { cases, runs: [] };
+  } });
+  t.after(() => workspace.dispose());
+  workspace.activate(source, { browserTests: { beta: { cases, runs: [] } } });
+  const stage = workspace.stage('beta');
+  for (const [mode, name] of [['run', 'After a run'], ['discover', 'After Generate']]) {
+    cases = [{ ...scenario, name }];
+    await assert.rejects(stage.perform('browser', mode, tx => tx.post('cases', { cases: [], baseCases: [] })), /Tests changed/);
+    assert.equal(stage.getSnapshot().browser.cases[0].name, name, `${mode}: a retry starts from the controller's list`);
+  }
+});
