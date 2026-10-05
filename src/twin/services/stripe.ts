@@ -159,9 +159,11 @@ export default {
     webhook(options);
     events(options);
   },
+  // Both keys of one account: the service provides STRIPE_PUBLISHABLE_KEY whenever it is not blocked, and the keys that
+  // replace a sandbox's are entered together.
   inputs: [
     { name: 'secretKey', label: 'Stripe test secret key', secret: true, pattern: SECRET_KEY },
-    { name: 'publishableKey', label: 'Stripe test publishable key', pattern: /^pk_test_/, optional: true },
+    { name: 'publishableKey', label: 'Stripe test publishable key', pattern: /^pk_test_/ },
   ],
   // Only on the user's explicit action: the email goes to Stripe, which needs no account or key for it.
   provision: { inputs: [{ name: 'email', label: 'Email', default: 'git-email' }], run: createSandbox },

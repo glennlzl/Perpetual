@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import supabase, { CLI_VERSION as SUPABASE_VERSION, cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import { APP_IMAGE } from '../src/twin/compose.ts';
+import { createTwinRuntime } from '../src/twin/runtime.ts';
 import stripe, { CLI as STRIPE_CLI, EVENTS, SANDBOX_FAILED } from '../src/twin/services/stripe.ts';
 import { detectTwinConfig } from '../src/twin/detect.ts';
+import { missingInputs } from '../src/twin/inputs.ts';
 import type { CommandOutput, DockerCommand, EnvInput, ServiceContext } from '../src/twin/registry.ts';
 import { serviceOptionErrors, type Json, type JsonObject } from '../src/twin/config.ts';
 
@@ -253,7 +255,10 @@ test('Stripe accepts only test keys', () => {
   assert.deepEqual({ name: secret.name, secret: secret.secret }, { name: 'secretKey', secret: true });
   for (const key of ['sk_test_123', 'rk_test_123', 'rkcs_test_123']) assert.ok(secret.pattern.test(key), key);
   for (const key of ['sk_live_123', 'rk_live_123', 'rkcs_live_123', 'pk_test_123', 'whsec_123', ' sk_test_123']) assert.ok(!secret.pattern.test(key), key);
-  assert.ok(publishable.optional && publishable.pattern.test('pk_test_1') && !publishable.pattern.test('pk_live_1'));
+  assert.ok(publishable.pattern.test('pk_test_1') && !publishable.pattern.test('pk_live_1'));
+  // Required, like the secret key: a Stripe service that is not blocked always provides STRIPE_PUBLISHABLE_KEY.
+  assert.deepEqual(missingInputs(stripe, { secretKey: 'sk_test_123' }), ['publishableKey']);
+  assert.deepEqual(missingInputs(stripe, { secretKey: 'sk_test_123', publishableKey: 'pk_test_123' }), []);
 });
 
 // What `stripe sandbox create --non-interactive` prints; the keys are fixtures, never real ones.
@@ -419,11 +424,28 @@ test('Stripe listen forwards explicit events to the configured webhook', async (
   }
 });
 
-test('Stripe without a webhook or fixtures only provides the key', async () => {
-  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key' } });
+test('Stripe without a webhook or fixtures only provides the keys', async () => {
+  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key', publishableKey: 'pk_test_key' } });
   ctx.outputs = await stripe.setup(ctx);
   assert.deepEqual(ctx.calls, []);
-  assert.deepEqual(stripe.env(ctx), { STRIPE_SECRET_KEY: 'sk_test_key' });
+  assert.deepEqual(stripe.env(ctx), { STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_PUBLISHABLE_KEY: 'pk_test_key' });
+});
+
+test('Stripe without its publishable key is blocked on it, so an app that maps the key leaves it out instead of failing', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  const runtime = createTwinRuntime({ exec: async () => ({ stdout: '', stderr: '' }), owner: 'owner-1', isFree: async () => true });
+  const config = { services: { stripe: {} }, apps: { web: { start: 'npm start', port: 3000, env: { NEXT_PUBLIC_STRIPE_KEY: '{{stripe.STRIPE_PUBLISHABLE_KEY}}' } } } };
+  const prepare = (stripe: Record<string, string>) => runtime.prepare({ dataDir, id: 'beta', config, source, inputs: { stripe } });
+  const dotenv = () => readFile(join(dataDir, 'environments', 'beta', 'twin', '.env'), 'utf8');
+  const blocked = await prepare({ secretKey: 'sk_test_own_key' });
+  assert.deepEqual(blocked.services, [{ id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['publishableKey'] }]);
+  assert.doesNotMatch(await dotenv(), /STRIPE/);
+  const ready = await prepare({ secretKey: 'sk_test_own_key', publishableKey: 'pk_test_own_key' });
+  assert.equal(ready.status, 'ready');
+  assert.match(await dotenv(), /^WEB__NEXT_PUBLIC_STRIPE_KEY="pk_test_own_key"$/m);
+  assert.match(await dotenv(), /^WEB__STRIPE_PUBLISHABLE_KEY="pk_test_own_key"$/m);
 });
 
 test('Stripe setup fails when the CLI prints no signing secret', async () => {

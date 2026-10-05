@@ -176,7 +176,7 @@ test('live and persisted setup diagnostics redact a vendor secret printed before
     if (args[0] === 'ps') { cleaning(); await cleanup; }
     return {stdout: '', stderr: ''};
   }});
-  const runtime = createEnvironmentRuntime({twin, inputs: async () => ({stripe: {secretKey: 'sk_test_neutral_fixture_key'}})});
+  const runtime = createEnvironmentRuntime({twin, inputs: async () => ({stripe: {secretKey: 'sk_test_neutral_fixture_key', publishableKey: 'pk_test_neutral_fixture_key'}})});
   const f = await controller(t, runtime), configured = plan();
   configured.services = {stripe: {webhook: '{{apps.web.url}}/webhook'}};
   await f.post('plan', f.beta, {plan: configured});

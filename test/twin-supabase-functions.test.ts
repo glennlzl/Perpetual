@@ -316,7 +316,7 @@ async function twin(respond: (file: string, args: string[]) => string | undefine
   const prepare = (inputs: Record<string, InputValues>) => runtime.prepare({ dataDir, id: 'beta', config, source, inputs, onStep: step => steps.push(step) });
   return { dataDir, calls, steps, prepare, dir, functionsEnv: join(dir, 'services/supabase/supabase/supabase/functions/.env'), toml: join(dir, 'services/supabase/supabase/supabase/config.toml') };
 }
-const KEYS = { stripe: { secretKey: 'sk_test_twin_key' } };
+const KEYS = { stripe: { secretKey: 'sk_test_twin_key', publishableKey: 'pk_test_twin_key' } };
 
 test('A Stripe webhook targets the Supabase functions URL while the functions get the signing secret Stripe setup prints', async t => {
   const { dataDir, calls, steps, prepare, dir, functionsEnv, toml } = await twin();
@@ -348,7 +348,7 @@ test('Without a Stripe key Stripe is blocked, while Supabase still serves its fu
   assert.equal(result.status, 'blocked');
   assert.deepEqual(result.services, [
     { id: 'supabase', fidelity: 'official-sandbox', status: 'ready' },
-    { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey'] },
+    { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey', 'publishableKey'] },
   ]);
   assert.equal(await readFile(functionsEnv, 'utf8'), "SITE='twin'\n");
   assert.equal(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services?.['stripe-listen'], undefined);
