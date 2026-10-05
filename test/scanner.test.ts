@@ -169,6 +169,24 @@ test('returns read-only git identity without remote credentials', async t => {
   assert.doesNotMatch(JSON.stringify(scan), /credential-do-not-output|someone|token=hidden/);
 });
 
+test('a GitHub remote is GitHub however git spells it, and a host that merely mentions github.com is not', async t => {
+  const root = await fixture(t, { 'package.json': { name: 'app' } });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  for (const [url, remote, provider] of [
+    ['ssh://git@github.com/acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['ssh://git@ssh.github.com:443/acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['git@github.com:acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['github.com:acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['http://github.com/acme/app', 'https://github.com/acme/app', 'GitHub'],
+    ['https://gitlab.com/acme/github.com-mirror.git', 'https://gitlab.com/acme/github.com-mirror.git', 'Git'],
+    ['https://github.com.example.test/acme/app.git', 'https://github.com.example.test/acme/app.git', 'Git'],
+  ]) {
+    execFileSync('git', ['-C', root, 'config', 'remote.origin.url', url]);
+    const scan = await scanRepository(root);
+    assert.deepEqual([scan.repo.remote, scan.nodes.find(node => node.id === 'repository')!.provider, scan.delivery.build.length], [remote, provider, provider === 'GitHub' ? 1 : 0], url);
+  }
+});
+
 test('a git that gives no answer fails the scan instead of erasing its branch and commit', async t => {
   const root = await fixture(t, { 'package.json': { name: 'app' } });
   // A git killed before it answers, as a timeout leaves it.

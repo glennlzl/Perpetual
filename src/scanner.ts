@@ -4,6 +4,7 @@ import { parse, stringify } from 'yaml';
 import { withDeliveryGraph } from './delivery.ts';
 import { redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
+import { parseGitHubRemote } from './providers.ts';
 import { hasRepositoryFile, readRepositoryFile } from './repository-files.ts';
 import type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflow, ScanRepo, Scan, PreviewPlan } from '../contract/scanner.ts';
 export type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflowJob, ScanWorkflow, ScanRepo, ScanPlan, Scan, PreviewPlan } from '../contract/scanner.ts';
@@ -87,17 +88,23 @@ export async function repositoryTop(root: string) {
   return top && path.isAbsolute(top) ? path.resolve(top) : root;
 }
 
+// GitHub's SSH, git and plain HTTP addresses name the repository its HTTPS address does.
+const GITHUB_HOSTS = new Set(['github.com', 'ssh.github.com']);
 function safeRemote(remote: string | null) {
   if (!remote) return null;
+  // As git reads an address: one with :// is a URL, and one with a colon before any slash is scp-like,
+  // [user@]host:path, where a one-letter host would be a Windows drive.
+  if (!remote.includes('://')) {
+    const ssh = remote.match(/^(?:[^@\s]+@)?([\w.-]{2,}):([\w./-]+)$/);
+    return ssh ? `https://${GITHUB_HOSTS.has(ssh[1].toLowerCase()) ? 'github.com' : ssh[1]}/${ssh[2]}` : null;
+  }
   try {
     const url = new URL(remote);
     if (!['https:', 'http:', 'ssh:', 'git:'].includes(url.protocol)) return null;
+    if (GITHUB_HOSTS.has(url.hostname.toLowerCase())) return `https://github.com${url.pathname}`;
     url.username = ''; url.password = ''; url.search = ''; url.hash = '';
     return url.toString();
-  } catch {
-    const ssh = remote.match(/^(?:[^@\s]+@)?([\w.-]+):([\w./-]+)$/);
-    return ssh ? `https://${ssh[1]}/${ssh[2]}` : null;
-  }
+  } catch { return null; }
 }
 
 function framework(deps: Record<string, unknown>) {
@@ -202,7 +209,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     gitValue(root, ['symbolic-ref', '--short', 'HEAD']), gitValue(root, ['rev-parse', '--verify', 'HEAD']), gitValue(root, ['remote', 'get-url', 'origin']),
   ]);
   const repo: ScanRepo = { name: clean(rootPackage?.data.name || path.basename(root)), path: root, branch: clean(branch) || null, sha, remote: safeRemote(remote) };
-  node({ id: 'repository', label: repo.name, kind: 'repository', provider: repo.remote?.includes('github.com') ? 'GitHub' : 'Git', status: 'configured', detail: 'Local repository configuration; no cloud connection implied.', evidence: [evidence(rootPackage ? 'package.json' : '.', rootPackage ? 'Repository package manifest.' : 'Selected local directory.')] });
+  node({ id: 'repository', label: repo.name, kind: 'repository', provider: parseGitHubRemote(repo.remote) ? 'GitHub' : 'Git', status: 'configured', detail: 'Local repository configuration; no cloud connection implied.', evidence: [evidence(rootPackage ? 'package.json' : '.', rootPackage ? 'Repository package manifest.' : 'Selected local directory.')] });
 
   for (const pkg of packages) {
     const deps = { ...pkg.data.dependencies, ...pkg.data.devDependencies };
