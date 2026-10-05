@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
-import { api, replyError, type ApiError } from '@/lib/api';
+import { UNAVAILABLE, api, controllerFetch, replyError, type ApiError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
 import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
@@ -36,7 +36,8 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   const returnFocus = useReturnFocus(focusFallback);
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [error, setError] = useState('');
-  // A run the stage does not have, or a read the controller refuses, never appears by reading again.
+  // A run the stage does not have never appears by reading again. Any other failed read, such as one refused while a
+  // source change saves or one the stopped controller never answers, is read again.
   const [unavailable, setUnavailable] = useState(false);
   // Kept apart from read errors, so the next successful read does not clear why Cancel run failed.
   const [stopError, setStopError] = useState('');
@@ -58,10 +59,11 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
     const controller = new AbortController();
     async function poll() {
       try {
-        const response = await fetch(`/api/browser/runs/${encodeURIComponent(runId!)}?${new URLSearchParams({ repoPath, stageId })}`, {
+        const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId!)}?${new URLSearchParams({ repoPath, stageId })}`, {
           headers: { Accept: 'application/json' }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), cache: 'no-store',
-        });
-        const reply: unknown = await response.json();
+        }, controller.signal);
+        let reply: unknown;
+        try { reply = await response.json(); } catch { throw new Error(UNAVAILABLE); }
         if (!response.ok) throw Object.assign(new Error(replyError(reply) || 'Could not load this run.'), { statusCode: response.status });
         const next = reply as RunSnapshot; // the run route's reply, as the controller defines it
         if (cancelled) return;
@@ -74,8 +76,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
       } catch (failure) {
         if (cancelled) return;
         setError((failure as Error).message);
-        const status = (failure as ApiError).statusCode;
-        if (status >= 400 && status < 500) { active.current = false; setUnavailable(true); return; }
+        if ((failure as ApiError).statusCode === 404) { active.current = false; setUnavailable(true); return; }
       }
       if (!cancelled) timer = setTimeout(poll, 500);
     }
@@ -89,18 +90,20 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
     const controller = new AbortController();
     async function capture() {
       try {
-        const response = await fetch(`/api/browser/runs/${encodeURIComponent(runId!)}/frame?${new URLSearchParams({ repoPath, stageId })}`, {
+        const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId!)}/frame?${new URLSearchParams({ repoPath, stageId })}`, {
           headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
-        });
+        }, controller.signal);
         if (response.status !== 204) {
           if (!response.ok || !response.headers.get('content-type')?.startsWith('image/jpeg')) throw new Error('Browser stream unavailable.');
           const blob = await response.blob();
           if (cancelled) return;
           const previous = imageUrl.current;
           imageUrl.current = URL.createObjectURL(blob);
-          setFrame(imageUrl.current); setFrameError('');
+          setFrame(imageUrl.current);
           if (previous) URL.revokeObjectURL(previous);
         }
+        // A reply with no new frame still reached the controller, so an earlier failure no longer stands.
+        if (!cancelled) setFrameError('');
       } catch (failure) { if (cancelled) return; setFrameError((failure as Error).message); }
       if (!cancelled && active.current) timer = setTimeout(capture, 250);
     }
@@ -166,7 +169,8 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         {!evidenceOnly && <div className="relative flex min-h-0 min-w-0 items-center justify-center bg-background">
           {frame ? <img src={frame} alt={finished ? 'Final browser state' : 'Live browser viewport'} className="h-full w-full object-contain" />
             : <span role="status" className="text-sm text-muted-foreground">{startingError ? 'Browser not started' : finished || unavailable ? 'No browser frame' : 'Opening browser…'}</span>}
-          {frame && <Badge variant="secondary" className="absolute bottom-3 left-3">{finished ? endedLabel(run?.completedAt) : frameError || error ? 'Reconnecting' : freshFrame ? 'Live' : 'Waiting for frame'}</Badge>}
+          {/* A run the stage no longer has is not reconnected to, so its last frame carries no stream state. */}
+          {frame && !unavailable && <Badge variant="secondary" className="absolute bottom-3 left-3">{finished ? endedLabel(run?.completedAt) : frameError || error ? 'Reconnecting' : freshFrame ? 'Live' : 'Waiting for frame'}</Badge>}
           {frameError && <p role="status" className="absolute bottom-3 right-3 rounded bg-background px-3 py-2 text-sm text-destructive">{frameError}</p>}
         </div>}
         <aside className={`min-h-0 w-full overflow-y-auto ${evidenceOnly ? "" : "border-t lg:border-t-0 lg:border-l"}`} aria-label="Agent activity">
