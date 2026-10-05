@@ -11,21 +11,21 @@ import type { Verification, SpecVerification, SpecSummary, SpecCodeReply } from 
 export type { Verification, SpecSummary } from '../../contract/browser.ts';
 
 type VerificationState=Omit<SpecVerification,'status'>&{status:Exclude<SpecVerification['status'],'running'>};
-type StoredVerification=VerificationState&{id:string;checkVersion:number;readPolicy?:string;runIds:string[]};
+type StoredVerification=VerificationState&{id:string;checkVersion:number;readPolicy?:string;callbackPolicy?:string;runIds:string[]};
 type StoredSpec={code:string;hash:string;caseHash:string;savedAt:string;provenance?:unknown;verification?:StoredVerification};
-type ApprovedSpec=StoredSpec&{approvedAt:string;approvedRunIds:string[];checkVersion?:number;readPolicy?:string};
+type ApprovedSpec=StoredSpec&{approvedAt:string;approvedRunIds:string[];checkVersion?:number;readPolicy?:string;callbackPolicy?:string};
 type CaseSpecs={approved:ApprovedSpec|null;draft:StoredSpec|null};
 type LegacySpec=StoredSpec&{approvedAt?:string;approvedRunId?:string};
 export type GenerationFailure={caseHash:string;error:string;rejected?:string};
 /** Durable journey code belongs to the browser manager's state file, never a second store. */
 export type JourneyCodeState={specs:Record<string,CaseSpecs>;generationFailures:Record<string,GenerationFailure>;authoring?:Record<string,AuthoringRecord[]>};
-export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number;readPolicy?:string};
+export type VerificationIdentity={id:string;hash:string;caseHash:string;checkVersion:number;readPolicy?:string;callbackPolicy?:string};
 type VerificationRun={id:string;status:string;caseIds:readonly string[];verification?:Verification;specHashes?:Record<string,string>;results?:readonly JourneyResult[];error?:string;codeFeedback?:Record<string,string>;progress?:{cases:readonly {id:string;steps?:readonly {status:string}[]}[]}};
 type LiveVerification=VerificationIdentity&{caseId:string;done:boolean;error?:string};
 type LiveGeneration={status:'running'|'failed';step?:string;error?:string;rejected?:string;discarded?:true};
 export type RunnableCode={code:string;hash:string;checkVersion:number;missing?:undefined}|{missing:string;code?:undefined;hash?:undefined;checkVersion?:undefined};
 /** Read at the call/commit, including current execution facts; the code owner never retains a worker or lease. */
-export type JourneyCodeSnapshot={readPolicy?:string;cases:readonly BrowserCase[];code:JourneyCodeState;runs:readonly VerificationRun[];verifications:readonly LiveVerification[];generations:ReadonlyMap<string,LiveGeneration>};
+export type JourneyCodeSnapshot={readPolicy?:string;callbackPolicy?:string;cases:readonly BrowserCase[];code:JourneyCodeState;runs:readonly VerificationRun[];verifications:readonly LiveVerification[];generations:ReadonlyMap<string,LiveGeneration>};
 type Persistence={
   read(scope:string):JourneyCodeSnapshot;
   transact(scope:string,change:(current:JourneyCodeSnapshot)=>JourneyCodeState):Promise<void>;
@@ -40,7 +40,7 @@ const NO_CODE='Generate and approve code for this journey.',STALE_CODE='The appr
 const OLD_CODE='Reuse and verify the approved code again: its control evidence is out of date.';
 const UNREAD='The control did not check freshly read business data. Reload after the change, then check a run-unique value or a number against its earlier value.';
 const MISSED='The journey passed with every change blocked. Strengthen its checks.',UNJUDGED='No reviewed check noticed the blocked changes.',CHANGED='The journey changed during its verification. Verify its code again.';
-const policyMatches=(current:JourneyCodeSnapshot,value:{readPolicy?:string}|null|undefined)=>(current.readPolicy??'')===(value?.readPolicy??'');
+const policyMatches=(current:JourneyCodeSnapshot,value:{readPolicy?:string;callbackPolicy?:string}|null|undefined)=>(current.readPolicy??'')===(value?.readPolicy??'')&&(current.callbackPolicy??'')===(value?.callbackPolicy??'');
 const active=(run:VerificationRun)=>['queued','running'].includes(run.status);
 const drafted=(item:BrowserCase,code:string,provenance?:unknown):StoredSpec=>({code,hash:specHash(code),caseHash:caseHash(item),savedAt:now(),...(provenance?{provenance:structuredClone(provenance)}:{})});
 const caseOf=(current:JourneyCodeSnapshot,id:unknown)=>{
@@ -52,10 +52,11 @@ const attemptsOf=(current:JourneyCodeSnapshot,id:string)=>current.runs.filter((r
 const noticed=(run:VerificationRun,caseId:string,result:JourneyResult)=>Boolean(run.progress?.cases.find(item=>item.id===caseId)?.steps?.some(step=>step.status==='failed')||result.assertions?.some(item=>item.passed===false&&item.reached!==false));
 
 const UNSUPPORTED_CODE='Unsupported journey code state.',hex=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+const storedPolicy=(value:unknown)=>value===undefined||value===''||hex(value);
 const strings=(value:unknown)=>Array.isArray(value)&&value.every(item=>typeof item==='string');
 // Stored code always names its hash and reviewed case; anything else in the private state file was damaged or edited.
 function storedCode<T>(value:T):T{
-  if(value!==null&&value!==undefined&&(!isRecord(value)||typeof value.code!=='string'||!hex(value.hash)||!hex(value.caseHash)))throw new Error(UNSUPPORTED_CODE);
+  if(value!==null&&value!==undefined&&(!isRecord(value)||typeof value.code!=='string'||!hex(value.hash)||!hex(value.caseHash)||!storedPolicy(value.callbackPolicy)))throw new Error(UNSUPPORTED_CODE);
   return value;
 }
 // A verification counts only as a checkpoint writes it; another record verified nothing, and the draft stays unverified.
@@ -64,7 +65,7 @@ function checkpointed(draft:StoredSpec|null|undefined):StoredSpec|null{
   if(!draft)return null;
   if(value===undefined||isRecord(value)&&typeof value.id==='string'&&Number.isInteger(value.checkVersion)&&['passed','failed','cancelled'].includes(value.status as string)
     &&Number.isInteger(value.passes)&&(value.passes as number)>=0&&(value.passes as number)<=3&&[null,'caught','missed'].includes(value.control as string|null)&&strings(value.runIds)
-    &&(value.error===undefined||typeof value.error==='string')&&(value.readPolicy===undefined||typeof value.readPolicy==='string'))return draft;
+    &&storedPolicy(value.callbackPolicy)&&(value.error===undefined||typeof value.error==='string')&&(value.readPolicy===undefined||typeof value.readPolicy==='string'))return draft;
   const {verification:_verification,...kept}=draft;return kept;
 }
 
@@ -102,7 +103,7 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
     if(run.verification.attempt!==passes+1)return {status:'cancelled',passes:0,control:null};
     const result=run.results?.find(item=>item.caseId===caseId),failed=(error=result?.error||run.error||'The journey did not pass.'):VerificationState=>({status:'failed',passes,control:null,error});
     if(run.status==='cancelled'||result?.status==='cancelled'||result?.status==='skipped')return {status:'cancelled',passes,control:null};
-    if(own(run.specHashes,caseId)!==run.verification.hash)return failed();
+    if(own(run.specHashes,caseId)!==run.verification.hash||!policyMatches(current,run.verification))return failed();
     if(!run.verification.control){if(result?.status!=='passed')return failed();passes++;continue;}
     if(passes<3)return {status:'cancelled',passes,control:null};
     if(!result)return failed();
@@ -117,12 +118,12 @@ function verificationState(current:JourneyCodeSnapshot,caseId:string,id:string,e
 // than historical attempts even when its verification failed before admitting a run. Only unrecorded drafts use history.
 function verificationEvidence(current:JourneyCodeSnapshot,caseId:string,draft:StoredSpec):{view:SpecVerification;runIds:string[]}|null{
   const live=current.verifications.find(item=>item.caseId===caseId);
-  const matches=(value:{hash:string;caseHash:string;checkVersion?:number;readPolicy?:string}|undefined)=>value?.hash===draft.hash&&value.caseHash===draft.caseHash&&(value.checkVersion??1)===CHECK_VERSION&&policyMatches(current,value);
+  const matches=(value:{hash:string;caseHash:string;checkVersion?:number;readPolicy?:string;callbackPolicy?:string}|undefined)=>value?.hash===draft.hash&&value.caseHash===draft.caseHash&&(value.checkVersion??1)===CHECK_VERSION&&policyMatches(current,value);
   const record=draft.verification?.checkVersion===CHECK_VERSION&&policyMatches(current,draft.verification)?draft.verification:null;
   const id=matches(live)?live!.id:record?.id??current.runs.find(run=>run.caseIds[0]===caseId&&matches(run.verification))?.verification?.id;
   const running=Boolean(live&&live.id===id&&!live.done);
   if(!running&&record&&(!id||id===record.id)){
-    const {id:_id,checkVersion:_version,readPolicy:_policy,runIds,...view}=record;return {view,runIds};
+    const {id:_id,checkVersion:_version,readPolicy:_policy,callbackPolicy:_callbackPolicy,runIds,...view}=record;return {view,runIds};
   }
   if(!id)return null;
   const {status,error,...counts}=verificationState(current,caseId,id,live?.id===id?live.error:undefined);
@@ -184,7 +185,7 @@ export function createJourneyCode(storage:Persistence){
       const evidence=verificationEvidence(current,item.id,draft);
       if(evidence?.view.status!=='passed')throw conflict('Verify this code first: it needs three passing runs and a caught control run.');
       const {verification:ended,...code}=draft;
-      return {approved:{...code,approvedAt:now(),approvedRunIds:[...evidence.runIds],checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{})},draft:null};
+      return {approved:{...code,approvedAt:now(),approvedRunIds:[...evidence.runIds],checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{}),...(current.callbackPolicy?{callbackPolicy:current.callbackPolicy}:{})},draft:null};
     });},
     discard(scope:string,caseId:string,hash:unknown){return changeSpec(scope,caseId,(_,item,{approved,draft})=>{
       if(!draft)throw Object.assign(new Error('This test has no draft code.'),{statusCode:404});
@@ -205,14 +206,14 @@ export function createJourneyCode(storage:Persistence){
       if(!draft)throw Object.assign(new Error('Generate code for this test first.'),{statusCode:404});
       if(typeof hash!=='string'||draft.hash!==hash)throw conflict('The code changed. Reload it and verify again.');
       if(draft.caseHash!==caseHash(item))throw conflict('The test changed after this code was saved. Generate it again.');
-      const identity:Readonly<VerificationIdentity>=Object.freeze({id:randomUUID(),hash:draft.hash,caseHash:draft.caseHash,checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{})});
+      const identity:Readonly<VerificationIdentity>=Object.freeze({id:randomUUID(),hash:draft.hash,caseHash:draft.caseHash,checkVersion:CHECK_VERSION,...(current.readPolicy?{readPolicy:current.readPolicy}:{}),...(current.callbackPolicy?{callbackPolicy:current.callbackPolicy}:{})});
       return {
         identity,
         // Start before admitting an attempt, checkpoint after each, and finish before releasing the live activity.
         checkpoint(error?:string){return storage.transact(scope,current=>{
           const draft=own(current.code.specs,caseId)?.draft;
           if(draft?.hash!==identity.hash||draft.caseHash!==identity.caseHash)return current.code;
-          const verification:StoredVerification={id:identity.id,checkVersion:identity.checkVersion,...(identity.readPolicy?{readPolicy:identity.readPolicy}:{}),...verificationState(current,caseId,identity.id,error),runIds:attemptsOf(current,identity.id).map(run=>run.id)};
+          const verification:StoredVerification={id:identity.id,checkVersion:identity.checkVersion,...(identity.readPolicy?{readPolicy:identity.readPolicy}:{}),...(identity.callbackPolicy?{callbackPolicy:identity.callbackPolicy}:{}),...verificationState(current,caseId,identity.id,error),runIds:attemptsOf(current,identity.id).map(run=>run.id)};
           return {...current.code,specs:{...current.code.specs,[caseId]:{...own(current.code.specs,caseId)!,draft:{...draft,verification}}}};
         });},
       };
