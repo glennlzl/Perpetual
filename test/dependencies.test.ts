@@ -51,6 +51,12 @@ test('one Chromium serves both Playwright packages: the Node and Python browser 
   assert.deepEqual([locked('browser-use'), checked['browser-use']], Array(2).fill(pinned('browser-use')));
 });
 
+test('the shadcn CLI, which only adds components, runs through npx at a pinned version instead of installing with every setup', async () => {
+  const { dependencies, devDependencies } = await manifest();
+  assert.ok(!Object.hasOwn(dependencies, 'shadcn') && !Object.hasOwn(devDependencies, 'shadcn'), 'Nothing imports it, and its tree was most of the install.');
+  assert.match(await readFile(new URL('../CONTRIBUTING.md', import.meta.url), 'utf8'), /`npx shadcn@\d+\.\d+\.\d+ add <component>`/);
+});
+
 test('zod, which only the model packages\' peers need, is on the newest major every one of them accepts', async () => {
   const { dependencies } = await manifest();
   const { packages } = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8')) as { packages: Record<string, Locked> };
