@@ -61,6 +61,15 @@ test('results survive public run history, changed case drafts and controller res
   assert.deepEqual((await restarted.view(f.context)).runs[0].results,report.results);
 });
 
+test('a model key too short to be a real credential leaves a journey\'s error text whole',async t=>{
+  const error='Next step exceeded its time limit.';
+  const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error,assertions:[]}}]);
+  // A local endpoint's placeholder key.
+  await f.manager.saveModel(f.context,{apiKey:'x',model:'fixture-chat',baseUrl:'http://localhost:11434/v1'});
+  const {run}=await f.manager.run(f.context,{},manual);
+  assert.equal((await completed(f,run.id)).results[0].error,error);
+});
+
 test('code feedback is scrubbed with its originating account, stays private and survives restart',async t=>{
   const username=`former-${'y'.repeat(305)}`,password='former-private-test-password';
   const f=await fixture(t,[{type:'result',result:{caseId:scenario.id,stopCause:'action',error:`Missing link ${'detail '.repeat(85)} ${username}; input ${password}`,actionFeedback:`Edited control removed: Email. Current field Email: empty, invalid. ${username} ${password}`,assertions:[]}}]);

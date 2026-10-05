@@ -59,9 +59,12 @@ export function validateBrowserTarget(value:string,{controllerOrigin}:{controlle
   url.hash='';return url.href;
 }
 
+/** The model keys to hide. One too short to be a real credential, such as a local endpoint's placeholder `x`, is left: hiding it would only rewrite ordinary text. */
+export const modelKeys=(...keys:unknown[])=>keys.filter((key):key is string=>typeof key==='string'&&key.length>=16);
+
 export function browserError(error:unknown,env:NodeJS.ProcessEnv=process.env,limit=800):string {
   let text=String(messageOf(error)||error||'Browser operation failed.');
-  text=hide([env.PERPETUAL_MODEL_API_KEY,env.OPENROUTER_API_KEY])(text);
+  text=hide(modelKeys(env.PERPETUAL_MODEL_API_KEY,env.OPENROUTER_API_KEY))(text);
   // Each address is scanned once: its query and fragment are cut after it is found, never searched for from every start.
   return redact(text).replace(/https?:\/\/\S+/g,url=>url.replace(/[?#][\s\S]*$/,'')).slice(0,limit);
 }
@@ -198,7 +201,7 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
       const configuration=modelConfiguration();
       if(input.mode!=='preflight'&&!configuration.modelConfigured)throw new Error(configuration.modelError);
       const env=childEnvironment(configuration);
-      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,timeoutMs,cleanupGraceMs,secrets:[env.PERPETUAL_MODEL_API_KEY],unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
+      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,timeoutMs,cleanupGraceMs,secrets:modelKeys(env.PERPETUAL_MODEL_API_KEY),unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
     },
   };
   return runtime;

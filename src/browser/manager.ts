@@ -7,7 +7,7 @@ import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {hide,redact} from '../redaction.ts';
 import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
-import {createBrowserRuntime,validateBrowserTarget,browserError} from './runtime.ts';
+import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
 import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
@@ -240,7 +240,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const generationRoot=join(root,'generations');await mkdir(generationRoot,{recursive:true,mode:0o700});
   const generationInfo=await lstat(generationRoot);if(generationInfo.isSymbolicLink()||!generationInfo.isDirectory())throw new Error('Code generation storage must not be a symbolic link.');
   const modelSettings=await createBrowserModelSettings({dataDir});
-  const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([modelSettings.configuration().apiKey,...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
+  const generationDiagnostic=(value:unknown,limit=800,secrets:unknown[]=[])=>browserError(hide([...modelKeys(modelSettings.configuration().apiKey),...secrets])(String(messageOf(value)||value||'Code generation failed.')),process.env,limit);
   const modelCatalog=createOpenRouterModelCatalog();
   runtime ||= createBrowserRuntime({model:()=>modelSettings.configuration()});
   let state:BrowserState={version:1,configs:{},cases:{},analyses:{},runs:[],preparations:{},preparationAttempts:{},configTargets:{},specs:{},externalOperations:{},generationFailures:{},authoring:{}};

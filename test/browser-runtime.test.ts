@@ -24,11 +24,22 @@ test('runtime consumes bounded events and keeps model credentials out of errors'
   const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-runtime-'));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const runner=join(directory,'runner.mjs');
-  await writeFile(runner,`process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'case',caseId:'a',status:'running',actions:[]})); console.log(JSON.stringify({type:'error',error:'failed secret-value bearer abcdefghijklmnop'})); });`);
-  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture',PERPETUAL_MODEL_API_KEY:'secret-value'}});
+  await writeFile(runner,`process.stdin.resume(); process.stdin.on('end',()=>{ console.log(JSON.stringify({type:'case',caseId:'a',status:'running',actions:[]})); console.log(JSON.stringify({type:'error',error:'failed '+process.env.PERPETUAL_MODEL_API_KEY+' bearer abcdefghijklmnop'})); });`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture',PERPETUAL_MODEL_API_KEY:'secret-value-0123456789'}});
   const events:WorkerEvent[]=[];const job=runtime.start({mode:'discover'},event=>events.push(event));
-  await assert.rejects(job.promise,/\[REDACTED\]/);
+  await assert.rejects(job.promise,{message:'failed [REDACTED] Bearer [REDACTED]'});
   assert.equal(events[0].caseId,'a');
+});
+
+test('a model key too short to be a real credential, such as a local placeholder, rewrites no text',async t=>{
+  assert.equal(browserError('Browser operation exceeded its time limit.',{PERPETUAL_MODEL_API_KEY:'x'}),'Browser operation exceeded its time limit.');
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-short-key-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const discovery={type:'discovery',cases:[{id:'export-xlsx',name:'Export the next invoice',steps:[{id:'export',title:'Export',checks:[{type:'text-visible',value:'Exported'}]}]}],summary:'Explored the inbox'};
+  const runner=join(directory,'runner.mjs');
+  await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>{console.log(${JSON.stringify(JSON.stringify(discovery))});console.log(JSON.stringify({type:'error',error:'The next export exceeded its time limit.'}));});`);
+  const runtime=createBrowserRuntime({python:process.execPath,runner,env:{PERPETUAL_MODEL:'fixture-chat',PERPETUAL_MODEL_API_KEY:'x',PERPETUAL_MODEL_BASE_URL:'http://localhost:11434/v1'}}),events:WorkerEvent[]=[];
+  await assert.rejects(runtime.start({mode:'discover'},event=>events.push(event)).promise,{message:'The next export exceeded its time limit.'});
+  assert.deepEqual(events,[discovery]);
 });
 
 test('runtime cancellation terminates owned child and deadline does not leave it running',async t=>{
