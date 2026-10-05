@@ -106,9 +106,11 @@ export function createGitHubAuthManager(): GitHubAuthManager {
     if (!PENDING.has(session.status)) return;
     if (code !== 0 || !session.userCode) {
       const expired = /expired_token|code (?:has )?expired/i.test(session.output);
+      // A GitHub CLI older than the flags this sign-in passes, such as --clipboard, refuses them before any code.
+      const outdated = !session.userCode && /unknown (?:shorthand )?flag|unknown command/i.test(session.output);
       finish(session, expired ? 'expired' : 'error', expired
         ? 'The GitHub code expired. Start sign-in again.'
-        : 'GitHub sign-in did not finish. Try again.');
+        : outdated ? 'GitHub device sign-in is unavailable. Update GitHub CLI and try again.' : 'GitHub sign-in did not finish. Try again.');
       return;
     }
     // A successful child exit alone is insufficient: confirm the active account

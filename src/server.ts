@@ -5,13 +5,13 @@ import type { Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanRepository, createPreviewPlan, DISCOVERY_VERSION } from './scanner.ts';
+import { scanRepository, createPreviewPlan, DISCOVERY_VERSION, repositoryPath } from './scanner.ts';
 import { getProviderStatus, parseGitHubRemote } from './providers.ts';
 import { failureText, redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from './store.ts';
 import { defaultPipeline, normalizedPipeline, applyPipelineAction } from './pipeline.ts';
-import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, ensureGitHubHistory, updateGitHubSource } from './github-source.ts';
+import { getGitHubSession, listGitHubRepositories, listGitHubBranches, prepareGitHubSource, discardGitHubSource, ensureGitHubHistory, sourceRoot, updateGitHubSource } from './github-source.ts';
 import { readGitHubActions, readServiceConfig } from './service-config.ts';
 import type { ConfigFile } from '../contract/service-config.ts';
 import { withDeliveryGraph } from './delivery.ts';
@@ -126,7 +126,7 @@ async function configurationLinks(scan: Scan,files: ConfigFile[]): Promise<Confi
     if(!remote)return files.map(file=>({...file,local:true}));
     const prefix=stdout.trim();
     if(prefix && (prefix.startsWith('/') || prefix.includes('\\') || prefix.split('/').some(part=>part==='..')))return files;
-    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${(prefix+file.path).split('/').map(encodeURIComponent).join('/')}`}));
+    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${repositoryPath(file.path,prefix).split('/').map(encodeURIComponent).join('/')}`}));
   }catch {return files;}
 }
 
@@ -317,8 +317,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return await withSourceHeld(requireSourceChangeIdle,async()=>{
       // The account is verified through the reader the watcher and gates read GitHub with.
       await requireGitHub(await githubRuns.session());
-      await (github.update??updateGitHubSource)({source,dataDir,sha});
-      const scan=await scanRepository(source.scanPath),next={...source,sha:scan.repo.sha,savedAt:new Date().toISOString()};
+      const moved=await (github.update??updateGitHubSource)({source,dataDir,sha});
+      // Only a scan of the commit the copy moved to, on its branch, becomes the source: one whose git gave no answer never does.
+      const scan=await scanRepository(source.scanPath);
+      if(scan.repo.sha!==moved.sha||scan.repo.branch!==source.branch)throw new Error('Could not read the repository\'s branch and commit. Try again.');
+      const next={...source,sha:moved.sha,savedAt:new Date().toISOString()};
       await save(current=>({state:{...current,scan,source:next,providers:[]},commit(){state.scan=scan;state.source=next;state.providers=[];}}));
     });
   }
@@ -403,9 +406,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // rejected before any push (ADR 0002).
   const deployFiles=({key,rootDirectory}: Pick<Repair,'key'|'rootDirectory'>)=>{
     if(!state.scan||pipelineKey(state)!==key)return [];
-    const prefix=rootDirectory.split('/').filter(Boolean).join('/');
     const files=state.scan.nodes.filter(node=>node.kind==='deployment').flatMap(node=>[...node.evidence.map(item=>item.file),node.configFile]);
-    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)))].map(file=>prefix?`${prefix}/${file}`:file);
+    return [...new Set(files.filter((file): file is string=>typeof file==='string'&&Boolean(file)).map(file=>repositoryPath(file,rootDirectory)))];
   };
   const repairBoxes=repair.boxes??createRepairBoxes({dataDir}),repairHost=repair.host??createRepairHost({dataDir});
   // A pull request that passed CI goes through each Sandbox stage's journey gate at its head, over its own checkout, then
@@ -686,7 +688,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const connection=await requireGitHub(),input=await body(req);
           const prepared=await prepareGitHubSource({repository:input.repository,branch:input.branch,rootDirectory:input.rootDirectory,dataDir});
-          const scan=await scanRepository(prepared.scanPath);
+          // A copy whose scan or save fails is never saved, so nothing refers to it: it goes, as a failed clone does.
+          const discard=async(error: unknown): Promise<never>=>{await discardGitHubSource(prepared).catch(()=>{});throw error;};
+          const scan=await scanRepository(prepared.scanPath).catch(discard);
           const source: GitHubSource={...prepared,connectedAccount:connection.account.login,savedAt:new Date().toISOString()};
           const result=await save(current=>{
             const key=sourceKey(source),detected=parseGitHubRemote(current.scan?.repo?.remote);
@@ -696,13 +700,14 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
               const legacyKey=sourceKey({repository:detected,rootDirectory:'/'});
               pipelines[legacyKey] ??= current.pipelines[current.scan!.repo.path];
             }
-            const saved=pipelines[key];
+            // A root saved as it was typed, before roots were saved as the checkout spells them, keeps its pipeline.
+            const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
             const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
             pipelines[key]=pipeline;
             return {state:{...current,scan,source,providers:[],pipelines},
               commit(){state.scan=scan;state.source=source;state.providers=[];state.pipelines=pipelines;},
               result:{scan,source,pipeline} satisfies SourceReply};
-          });
+          }).catch(discard);
           return reply(res,200,result);
         });
       }

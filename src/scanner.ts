@@ -4,11 +4,12 @@ import { parse, stringify } from 'yaml';
 import { withDeliveryGraph } from './delivery.ts';
 import { redact } from './redaction.ts';
 import { gitReadOnly } from './process.ts';
+import { parseGitHubRemote } from './providers.ts';
 import { hasRepositoryFile, readRepositoryFile } from './repository-files.ts';
 import type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflow, ScanRepo, Scan, PreviewPlan } from '../contract/scanner.ts';
 export type { Confidence, Evidence, ScanNode, ScanEdge, ScanService, ScanWorkflowJob, ScanWorkflow, ScanRepo, ScanPlan, Scan, PreviewPlan } from '../contract/scanner.ts';
 
-export const DISCOVERY_VERSION = 5;
+export const DISCOVERY_VERSION = 6;
 
 // Parsed repository files are untrusted: these describe only the fields read below, and each is still checked where used.
 /** A repository's package.json as parsed JSON: only these fields are read, and each is checked where it is used. */
@@ -23,11 +24,13 @@ interface PackageManager { name: string; version: string | undefined; lock: stri
 interface WorkflowStep { name?: string; uses?: string; run?: string; with?: Record<string, string | boolean>; env?: Record<string, string>; 'working-directory'?: string }
 
 const SKIP = new Set(['node_modules', 'dist', 'build', 'coverage', 'vendor', 'graphify-out']);
+const DEPLOYMENT_FILES = new Set(['vercel.json', 'railway.toml', 'railway.json']);
 const SCRIPT_NAMES = ['build', 'test', 'lint', 'typecheck', 'check', 'test:changed', 'test:related'];
 const MAX_BYTES = 512 * 1024;
 const clean = (value: unknown) => redact(String(value ?? '').replace(/[\r\n\t]/g, ' ')).slice(0, 160);
 const slash = (value: string) => value.split(path.sep).join('/');
-const id = (value: string) => encodeURIComponent(value);
+// A lone surrogate, from a YAML escape or a clip through a pair, would make encodeURIComponent throw.
+const id = (value: string) => encodeURIComponent(value.toWellFormed());
 const evidence = (file: string, summary: string, line?: number): Evidence => ({ file, ...(line ? { line } : {}), summary });
 const lineOf = (text: string, search: string) => text.slice(0, Math.max(0, text.indexOf(search))).split('\n').length;
 const appendEvidence = (sources: Evidence[], item: Evidence) => {
@@ -44,8 +47,10 @@ async function safeFile(root: string, relative: string, { content = true }: { co
   return (await hasRepositoryFile(root, relative, { limit: MAX_BYTES })) ? true : null;
 }
 
+// Package manifests, and the directories that configure a deployment whether or not they hold one: a service in
+// another language deploys from its own directory.
 async function manifests(root: string) {
-  const found: string[] = [];
+  const found: string[] = [], deployments = new Set<string>();
   let visited = 0;
   async function walk(relative = '.', depth = 0) {
     if (depth > 4 || visited++ > 1200) return;
@@ -55,31 +60,61 @@ async function manifests(root: string) {
       if (entry.isSymbolicLink()) continue;
       const next = relative === '.' ? entry.name : `${relative}/${entry.name}`;
       if (entry.isFile() && entry.name === 'package.json') found.push(next);
+      else if (entry.isFile() && DEPLOYMENT_FILES.has(entry.name)) deployments.add(relative);
       else if (entry.isDirectory() && !entry.name.startsWith('.') && !SKIP.has(entry.name)) await walk(next, depth + 1);
     }
   }
   await walk();
-  return found.slice(0, 100);
+  return { packages: found.slice(0, 100), deployments: [...deployments].slice(0, 100) };
 }
 
 async function gitValue(root: string, args: string[]) {
   try {
-    const { stdout } = await gitReadOnly(root, args, { timeout: 2000, maxBuffer: 16 * 1024 });
+    const { stdout } = await gitReadOnly(root, args, { timeout: 10_000, maxBuffer: 16 * 1024 });
     return stdout.trim() || null;
-  } catch { return null; }
+  } catch (error) {
+    // Git's own exit, as for a detached HEAD, no commit, no origin or no repository, means the value is absent. A git
+    // that timed out or never ran gave no answer, and a scan without it would lose the commit it describes.
+    if (typeof (error as { code?: unknown }).code === 'number') return null;
+    throw new Error('Could not read the repository\'s branch and commit. Try again.');
+  }
 }
 
+/**
+ * The top level of the Git work tree holding `root`, or `root` outside one. GitHub reads `.github/workflows` only
+ * there, so workflow paths are relative to it, as GitHub names them, even when a subdirectory is scanned.
+ */
+export async function repositoryTop(root: string) {
+  const top = await gitValue(root, ['rev-parse', '--show-toplevel']);
+  return top && path.isAbsolute(top) ? path.resolve(top) : root;
+}
+
+/**
+ * A scan's evidence file named from the repository's top level, given the scanned directory within it, such as /apps/web
+ * or apps/web/: workflow files already are, as GitHub names them, and every other file is named from the directory.
+ */
+export function repositoryPath(file: string, directory: string) {
+  const prefix = directory.split('/').filter(Boolean).join('/');
+  return prefix && !file.startsWith('.github/workflows/') ? `${prefix}/${file}` : file;
+}
+
+// GitHub's SSH, git and plain HTTP addresses name the repository its HTTPS address does.
+const GITHUB_HOSTS = new Set(['github.com', 'ssh.github.com']);
 function safeRemote(remote: string | null) {
   if (!remote) return null;
+  // As git reads an address: one with :// is a URL, and one with a colon before any slash is scp-like,
+  // [user@]host:path, where a one-letter host would be a Windows drive.
+  if (!remote.includes('://')) {
+    const ssh = remote.match(/^(?:[^@\s]+@)?([\w.-]{2,}):([\w./-]+)$/);
+    return ssh ? `https://${GITHUB_HOSTS.has(ssh[1].toLowerCase()) ? 'github.com' : ssh[1]}/${ssh[2]}` : null;
+  }
   try {
     const url = new URL(remote);
     if (!['https:', 'http:', 'ssh:', 'git:'].includes(url.protocol)) return null;
+    if (GITHUB_HOSTS.has(url.hostname.toLowerCase())) return `https://github.com${url.pathname}`;
     url.username = ''; url.password = ''; url.search = ''; url.hash = '';
     return url.toString();
-  } catch {
-    const ssh = remote.match(/^(?:[^@\s]+@)?([\w.-]+):([\w./-]+)$/);
-    return ssh ? `https://${ssh[1]}/${ssh[2]}` : null;
-  }
+  } catch { return null; }
 }
 
 function framework(deps: Record<string, unknown>) {
@@ -160,7 +195,8 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
   const nodes: ScanNode[] = [], edges: ScanEdge[] = [], services: ScanService[] = [], workflows: ScanWorkflow[] = [], packages: { file: string; raw: string; data: PackageManifest }[] = [];
   const node = (n: ScanNode) => { if (!nodes.some(x => x.id === n.id)) nodes.push(n); };
   const edge = (source: string, target: string, label: string, confidence: Confidence = 'configured') => edges.push({ source, target, label, confidence });
-  for (const file of await manifests(root)) {
+  const found = await manifests(root);
+  for (const file of found.packages) {
     const raw = await safeFile(root, file);
     if (!raw) continue;
     try {
@@ -183,7 +219,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
     gitValue(root, ['symbolic-ref', '--short', 'HEAD']), gitValue(root, ['rev-parse', '--verify', 'HEAD']), gitValue(root, ['remote', 'get-url', 'origin']),
   ]);
   const repo: ScanRepo = { name: clean(rootPackage?.data.name || path.basename(root)), path: root, branch: clean(branch) || null, sha, remote: safeRemote(remote) };
-  node({ id: 'repository', label: repo.name, kind: 'repository', provider: repo.remote?.includes('github.com') ? 'GitHub' : 'Git', status: 'configured', detail: 'Local repository configuration; no cloud connection implied.', evidence: [evidence(rootPackage ? 'package.json' : '.', rootPackage ? 'Repository package manifest.' : 'Selected local directory.')] });
+  node({ id: 'repository', label: repo.name, kind: 'repository', provider: parseGitHubRemote(repo.remote) ? 'GitHub' : 'Git', status: 'configured', detail: 'Local repository configuration; no cloud connection implied.', evidence: [evidence(rootPackage ? 'package.json' : '.', rootPackage ? 'Repository package manifest.' : 'Selected local directory.')] });
 
   for (const pkg of packages) {
     const deps = { ...pkg.data.dependencies, ...pkg.data.devDependencies };
@@ -220,16 +256,16 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
   }
 
   let workflowFiles: string[] = [];
-  const workflowDir = path.join(root, '.github/workflows');
+  const top = await repositoryTop(root), workflowDir = path.join(top, '.github/workflows');
   try {
-    if (!(await lstat(path.join(root, '.github'))).isSymbolicLink() && !(await lstat(workflowDir)).isSymbolicLink()) {
+    if (!(await lstat(path.join(top, '.github'))).isSymbolicLink() && !(await lstat(workflowDir)).isSymbolicLink()) {
       workflowFiles = (await readdir(workflowDir, { withFileTypes: true })).filter(f => f.isFile() && /\.ya?ml$/.test(f.name)).map(f => `.github/workflows/${f.name}`).sort().slice(0, 40);
     }
   } catch { /* Workflows are optional. */ }
   const vercelEvidence: Evidence[] = [];
   const vercelConfigurations: { file: string; location: string }[] = [];
   for (const file of workflowFiles) {
-    const raw = await safeFile(root, file);
+    const raw = await safeFile(top, file);
     if (!raw) continue;
     let data: WorkflowYaml;
     try { const parsed: unknown = parse(raw, { maxAliasCount: 20 }); if (!parsed || typeof parsed !== 'object') throw new Error(); data = parsed; }
@@ -247,13 +283,12 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
       edge(workflowId, jobId, 'runs');
       for (const dependency of job.needs) if (jobs.some(j => j.id === dependency)) edge(`${workflowId}:${id(dependency)}`, jobId, 'needs');
     }
-    if (/vercel/i.test(raw)) {
-      const workflowEvidence = evidence(file, 'Vercel-related automation found; provider connection is not verified.', lineOf(raw.toLowerCase(), 'vercel'));
-      appendEvidence(vercelEvidence, workflowEvidence);
-    }
+    // A comment, an @vercel/ package such as @vercel/ncc or a vercel-labs/ tool mentions Vercel without deploying to it.
+    const vercelLine = raw.split('\n').findIndex(line => /vercel/i.test(line.replace(/(?:^|\s)#.*/, '').replace(/@vercel\/[\w.-]*|vercel-labs\/[\w.-]*/gi, '')));
+    if (vercelLine >= 0) appendEvidence(vercelEvidence, evidence(file, 'Vercel-related automation found; provider connection is not verified.', vercelLine + 1));
   }
 
-  for (const location of new Set(['.', ...services.map(s => s.path)])) {
+  for (const location of new Set(['.', ...services.map(s => s.path), ...found.deployments])) {
     const prefix = location === '.' ? '' : `${location}/`;
     const vercelFile = `${prefix}vercel.json`;
     if (await safeFile(root, vercelFile, { content: false })) vercelConfigurations.push({ file: vercelFile, location });
@@ -274,7 +309,7 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
       const railwayId = `railway:${id(file)}`;
       const sources = [evidence(file, 'Railway deployment configuration; cloud settings are not verified.', 1)];
       if (dockerfile && await safeFile(root, path.posix.join(prefix, dockerfile), { content: false })) sources.push(evidence(path.posix.join(prefix, dockerfile), 'Configured Dockerfile exists.'));
-      node({ id: railwayId, label: service ? `${service.name} deployment` : 'Railway deployment', kind: 'deployment', provider: 'Railway', status: 'configured', detail: `Deployment configuration detected${dockerfile ? '; Docker build context must be verified' : ''}.`, evidence: sources });
+      node({ id: railwayId, label: service ? `${service.name} deployment` : location === '.' ? 'Railway deployment' : `${clean(location)} deployment`, kind: 'deployment', provider: 'Railway', status: 'configured', detail: `Deployment configuration detected${dockerfile ? '; Docker build context must be verified' : ''}.`, evidence: sources });
       edge(service?.id || 'repository', railwayId, 'deployment configuration');
       if (service) { service.provider = 'Railway'; nodes.find(n => n.id === service.id)!.provider = 'Railway'; }
       if (healthPath) warnings.push(`${file}: a configured health endpoint is not proof of verified business behavior; inspect the response and test the intended integration separately.`);

@@ -7,8 +7,8 @@ import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
-/** owner/name as GitHub accepts it. */
-export const REPOSITORY = /^[a-z\d][a-z\d-]{0,38}\/[a-z\d._-]{1,100}$/i;
+/** owner/name as GitHub accepts it; an Enterprise Managed User's login, handle_shortcode, owns repositories too. */
+export const REPOSITORY = /^[a-z\d][a-z\d_-]{0,38}\/[a-z\d._-]{1,100}$/i;
 /** A full 40-hex commit id. */
 export const SHA = /^[a-f\d]{40}$/i;
 const ENTITY_TAG = /^(?:W\/)?"[\x21\x23-\x7e]{1,200}"$/;
@@ -70,6 +70,9 @@ export function parseGitHubResponse(stdout: string, unreadable: (message: string
   return { status: Number(status[1]), etag: etag && ENTITY_TAG.test(etag) ? etag : null, headers, data };
 }
 
+/** Whether a reply's Link header names a next page. */
+export const hasNextPage = (response: Pick<GitHubResponse, 'headers'>) => /;\s*rel="?next"?(?:\s*,|\s*$)/i.test(response.headers?.link || '');
+
 /** Whether a failed conditional request was gh reporting 304: gh exits non-zero on it, with the status line in its output. */
 export const notModified = (error: unknown, etag: string | null) => Boolean(etag) && /^HTTP\/[\d.]+ 304\b/.test(String((error as { stdout?: unknown } | null | undefined)?.stdout || ''));
 
@@ -77,21 +80,25 @@ export type GitHubFailureKind = 'missing' | 'timeout' | 'too-large' | 'rate-limi
 /** Why a gh or git command failed, from its exit and its output; the output itself never leaves this function. */
 export function githubFailureKind(error: unknown): GitHubFailureKind {
   const failure = error as (ExecFileException & { stderr?: unknown }) | null | undefined;
-  const detail = String(failure?.stderr || failure?.message || '').toLowerCase();
+  // A command's own output, never execFile's message, which repeats the command line: its repository, branch and paths
+  // are names, not GitHub's reply. Each family below is read as gh, git and GitHub print it, never as a bare word a
+  // name or a local path can hold.
+  const detail = String((typeof failure?.stderr === 'string' ? failure.stderr : failure?.message) || '').toLowerCase();
   if (failure?.code === 'ENOENT') return 'missing';
   if (failure?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'too-large';
   if (failure?.killed || failure?.code === 'ETIMEDOUT') return 'timeout';
-  if (/rate limit|secondary rate/.test(detail)) return 'rate-limit';
-  if (/http 401|bad credentials|authentication failed|gh auth login|not logged|could not read username|could not read password/.test(detail)) return 'unauthenticated';
+  if (/rate limit|secondary rate|returned error: 429\b/.test(detail)) return 'rate-limit';
+  if (/http 401|bad credentials|authentication failed|gh auth login|not logged|could not read username|could not read password|returned error: 401\b/.test(detail)) return 'unauthenticated';
   if (/http 404|repository not found|couldn.t find remote ref|remote branch.*not found/.test(detail)) return 'not-found';
-  if (/http 403|permission denied|access denied|saml|sso|resource not accessible/.test(detail)) return 'denied';
+  if (/http 403|returned error: 403\b|permission to \S+ denied to|write access to repository not granted|resource not accessible by|saml (?:sso|enforcement)|permission denied \(publickey|access denied/.test(detail)) return 'denied';
   return 'other';
 }
 
 /** The HTTP status gh printed for a request GitHub refused, such as `(HTTP 409)` or `HTTP 422:`, or null. */
 export function githubHttpStatus(error: unknown): number | null {
   const failure = error as { stderr?: unknown; message?: unknown } | null | undefined;
-  const match = /\bHTTP (\d{3})\b/i.exec(String(failure?.stderr || failure?.message || ''));
+  // As for the failure's kind: the command's own output, never execFile's message, which repeats its arguments.
+  const match = /\bHTTP (\d{3})\b/i.exec(String((typeof failure?.stderr === 'string' ? failure.stderr : failure?.message) || ''));
   return match ? Number(match[1]) : null;
 }
 

@@ -169,6 +169,15 @@ test('configuration edit links need the branch on GitHub, and the original check
   assert.deepEqual(await files(),[{path:'package.json',local:true}],'A branch only in the local checkout gets no GitHub edit link');
   await git('update-ref','refs/remotes/origin/feature/local','HEAD');
   assert.deepEqual(await files(),[{path:'package.json',editUrl:'https://github.com/acme/widgets/edit/feature%2Flocal/package.json'}]);
+  // A scanned subdirectory links its own files below it, and the workflows GitHub reads at the top level there.
+  const web=join(repo,'apps/web');
+  await mkdir(join(repo,'.github/workflows'),{recursive:true});await mkdir(web,{recursive:true});
+  await writeFile(join(repo,'.github/workflows/deploy.yml'),'name: Deploy\non: push\njobs:\n  deploy:\n    steps:\n      - run: npx vercel deploy --prod\n');
+  await writeFile(join(web,'package.json'),JSON.stringify({name:'web'}));
+  assert.equal((await fetch(`${app.url}/api/scan`,{method:'POST',headers:{'Content-Type':'application/json','X-Perpetual-Token':session.token},body:JSON.stringify({path:web})})).status,200);
+  const linked=async(nodeId: string)=>(await (await fetch(`${app!.url}/api/service-config?${new URLSearchParams({repoPath:web,nodeId})}`)).json()).files;
+  assert.deepEqual(await linked('vercel:Vercel'),[{path:'.github/workflows/deploy.yml',editUrl:'https://github.com/acme/widgets/edit/feature%2Flocal/.github/workflows/deploy.yml'}]);
+  assert.deepEqual(await linked('service:.'),[{path:'package.json',editUrl:'https://github.com/acme/widgets/edit/feature%2Flocal/apps/web/package.json'}]);
   const head=(await git('rev-parse','HEAD')).stdout;
   const connection=await (await fetch(`${app.url}/api/github/connection`)).json();
   assert.equal(connection.connected,false);

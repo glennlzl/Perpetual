@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -22,6 +23,17 @@ test('configuration file links remain available when workflow or Railway content
   });
   const actions = await readGitHubActions({ repo: { path: root, name: 'app', branch: 'main', sha: null, remote: null }, workflows: [{ file: '.github/workflows/build.yml', name: 'Build', triggers: [], jobs: [] }] });
   assert.equal(actions.workflows[0].error, 'Could not parse this workflow file.', 'The actual workflow rail still reports invalid YAML.');
+});
+
+test('the workflow rail of a scanned subdirectory reads the workflows at the repository top level', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-config-top-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, '.github/workflows'), { recursive: true });
+  await mkdir(join(root, 'apps/web'), { recursive: true });
+  await writeFile(join(root, '.github/workflows/ci.yml'), 'name: CI\njobs:\n  build:\n    steps:\n      - name: Install\n        run: npm ci\n');
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  const actions = await readGitHubActions({ repo: { path: join(root, 'apps/web'), name: 'web', branch: 'main', sha: null, remote: null }, workflows: [{ file: '.github/workflows/ci.yml', name: 'CI', triggers: [], jobs: [] }] });
+  assert.deepEqual(actions.workflows, [{ file: '.github/workflows/ci.yml', name: 'CI', jobs: [{ id: 'build', name: 'build', steps: [{ id: 'step-1', name: 'Install' }] }] }]);
 });
 
 test('Vercel configuration retains the read-only fields its drawer displays', async t => {

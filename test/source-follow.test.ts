@@ -117,7 +117,7 @@ test('a source that changed, or gained a Sandbox stage, while its head was read 
 // The controller as it runs: a managed copy under the data directory at commit A, its branch main at a later commit on
 // GitHub, and the copy's move injected as a local reset; the account, head and statuses are fakes.
 const SESSION: GitHubSession = { available: true, authenticated: true, account: { login: 'developer', name: null } };
-async function controller(t: TestContext, { stages, head, failing = false }: { stages?: GateStage[]; head?: 'saved'; failing?: boolean } = {}) {
+async function controller(t: TestContext, { stages, head, failing = false, detached = false }: { stages?: GateStage[]; head?: 'saved'; failing?: boolean; detached?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-follow-controller-')), dataDir = join(dir, 'data');
   await mkdir(dataDir);
   let app: Awaited<ReturnType<typeof startServer>> | undefined;
@@ -146,7 +146,9 @@ async function controller(t: TestContext, { stages, head, failing = false }: { s
         const target = String(input?.sha);
         moves.push(target);
         if (failing) throw new Error('Fetching the commit failed. Try again.');
-        fixtureGit(checkoutPath, 'reset', '--quiet', '--hard', target);
+        // A detached move lands on the commit, but the rescan then reads no branch, as when git gives no answer.
+        if (detached) fixtureGit(checkoutPath, 'checkout', '--quiet', '--detach', target);
+        else fixtureGit(checkoutPath, 'reset', '--quiet', '--hard', target);
         return { sha: target };
       },
     },
@@ -157,10 +159,13 @@ async function controller(t: TestContext, { stages, head, failing = false }: { s
     for (const deadline = Date.now() + 10_000; Date.now() < deadline;) { const body = await read(path) as T; if (check(body)) return body; await new Promise(done => setTimeout(done, 5)); }
     throw new Error(`${path} did not settle.`);
   }
-  return { sha, next, checkoutPath, moves, heads, read, until, recover() { failing = false; } };
+  return { sha, next, checkoutPath, moves, heads, read, until, recover() {
+    failing = false;
+    if (detached) { detached = false; fixtureGit(checkoutPath, 'switch', '--quiet', 'main'); }
+  } };
 }
 type GateBody = { repoPath: string; sha: string | null; watchError?: string };
-type StateBody = { scan: { repo: { sha: string } }; source: { sha: string } };
+type StateBody = { scan: { repo: { sha: string; branch: string | null } }; source: { sha: string } };
 
 test('the controller moves a managed source without a Sandbox stage to its branch head and rescans it', async t => {
   const c = await controller(t);
@@ -190,6 +195,18 @@ test('a move that fails is the gate view\'s watch error and is tried again at th
   assert.ok(c.moves.every(sha => sha === c.next));
   assert.equal((await c.until<GateBody>('/api/gate', () => c.heads.length > tries + 3)).sha, c.next);
   assert.equal(c.moves.length, tries, 'A source at the head moves no more.');
+});
+
+test('a rescan that does not read the branch and commit the copy moved to is refused, and the source stays as saved', async t => {
+  const c = await controller(t, { detached: true });
+  const failed = await c.until<GateBody>('/api/gate', body => body.watchError && c.moves.length >= 2);
+  assert.deepEqual([failed.sha, failed.watchError], [c.sha, 'Could not read the repository\'s branch and commit. Try again.']);
+  const kept = await c.read('/api/state') as StateBody;
+  assert.deepEqual([kept.scan.repo.sha, kept.scan.repo.branch, kept.source.sha], [c.sha, 'main', c.sha], 'Neither the scan nor the source loses its branch or commit.');
+  c.recover();
+  await c.until<GateBody>('/api/gate', body => body.sha === c.next && !body.watchError);
+  const moved = await c.read('/api/state') as StateBody;
+  assert.deepEqual([moved.scan.repo.sha, moved.scan.repo.branch, moved.source.sha], [c.next, 'main', c.next]);
 });
 
 test('with a Sandbox stage the controller\'s watcher leaves the source at its scanned commit', async t => {

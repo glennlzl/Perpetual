@@ -1,11 +1,11 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
-import { scanRepository, createPreviewPlan } from '../src/scanner.ts';
+import { scanRepository, createPreviewPlan, repositoryPath } from '../src/scanner.ts';
 
 // The generated starter as the tests read it back.
 type StarterStep = { uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, string>; 'working-directory'?: string };
@@ -54,6 +54,54 @@ test('discovers existing monorepo CI and provider clues without claiming authent
   assert.match(plan.title, /beta/i);
   assert.ok(plan.steps.some(s => /existing|reuse/i.test(s)));
   assert.ok(plan.steps.some(s => /credentials|connect|authoriz/i.test(s)));
+});
+
+test('deployment configuration in a directory without a package manifest is a Production target', async t => {
+  // A Next.js frontend on Vercel, and a Python API and a worker each deployed from their own directory.
+  const root = await fixture(t, {
+    'frontend/package.json': { name: 'web', scripts: { build: 'next build' }, dependencies: { next: '16' } },
+    'frontend/vercel.json': { framework: 'nextjs' },
+    'backend/railway.toml': '[build]\nbuilder = "dockerfile"\ndockerfilePath = "Dockerfile"\n',
+    'backend/Dockerfile': 'FROM python:3.13-slim\nCOPY . /app\n',
+    'backend/requirements.txt': 'fastapi\n',
+    'worker/vercel.json': {},
+  });
+  const scan = await scanRepository(root);
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => [node.provider, node.label, node.evidence.map(item => item.file)]), [
+    ['Railway', 'backend deployment', ['backend/railway.toml', 'backend/Dockerfile']],
+    ['Vercel', 'web deployment', ['frontend/vercel.json']],
+    ['Vercel', 'worker deployment', ['worker/vercel.json']],
+  ]);
+  assert.deepEqual(scan.delivery.production.map(entry => 'deployments' in entry ? [entry.provider, entry.deployments.length] : entry.id), [['Railway', 1], ['Vercel', 2]]);
+  assert.deepEqual(scan.services.map(service => service.path), ['frontend'], 'a deployment directory is not promoted to a service');
+});
+
+test('a scanned subdirectory keeps the workflows GitHub reads at the repository top level', async t => {
+  const root = await fixture(t, {
+    'apps/web/package.json': { name: 'web', scripts: { build: 'next build' }, dependencies: { next: '16' } },
+    '.github/workflows/ci.yml': 'name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: [{ run: npm ci }]\n',
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{ run: npx vercel deploy --prod }]\n',
+    'apps/web/.github/workflows/ignored.yml': 'name: Ignored\non: push\njobs:\n  nothing:\n    runs-on: ubuntu-latest\n',
+  });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  const scan = await scanRepository(path.join(root, 'apps/web'));
+  assert.deepEqual(scan.workflows.map(workflow => [workflow.file, workflow.jobs.map(job => job.id)]), [['.github/workflows/ci.yml', ['build']], ['.github/workflows/deploy.yml', ['deploy']]]);
+  assert.equal(scan.plan.workflow, undefined, 'must reuse existing CI rather than generate a competing workflow');
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => [node.provider, node.evidence.map(item => item.file)]), [['Vercel', ['.github/workflows/deploy.yml']]]);
+  assert.deepEqual(scan.delivery.build.map(entry => entry.label), ['GitHub Actions']);
+});
+
+test('a scanned subdirectory\'s evidence is named from the repository top level: workflows as they are, the rest below it', async t => {
+  const root = await fixture(t, {
+    'apps/web/package.json': { name: 'web' },
+    'apps/web/vercel.json': {},
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{ run: npx vercel deploy --prod }]\n',
+  });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  const files = (await scanRepository(path.join(root, 'apps/web'))).nodes.filter(node => node.kind === 'deployment').flatMap(node => node.evidence.map(item => item.file));
+  // As a root directory and as git's own prefix spell the directory.
+  for (const directory of ['/apps/web', 'apps/web/']) assert.deepEqual(files.map(file => repositoryPath(file, directory)), ['apps/web/vercel.json', '.github/workflows/deploy.yml'], directory);
+  assert.deepEqual(files.map(file => repositoryPath(file, '/')), files);
 });
 
 test('proposes a bounded starter using detected pnpm workspace rather than fabricated commands', async t => {
@@ -134,6 +182,38 @@ test('returns read-only git identity without remote credentials', async t => {
   assert.doesNotMatch(JSON.stringify(scan), /credential-do-not-output|someone|token=hidden/);
 });
 
+test('a GitHub remote is GitHub however git spells it, and a host that merely mentions github.com is not', async t => {
+  const root = await fixture(t, { 'package.json': { name: 'app' } });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  for (const [url, remote, provider] of [
+    ['ssh://git@github.com/acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['ssh://git@ssh.github.com:443/acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['git@github.com:acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['github.com:acme/app.git', 'https://github.com/acme/app.git', 'GitHub'],
+    ['http://github.com/acme/app', 'https://github.com/acme/app', 'GitHub'],
+    ['https://gitlab.com/acme/github.com-mirror.git', 'https://gitlab.com/acme/github.com-mirror.git', 'Git'],
+    ['https://github.com.example.test/acme/app.git', 'https://github.com.example.test/acme/app.git', 'Git'],
+  ]) {
+    execFileSync('git', ['-C', root, 'config', 'remote.origin.url', url]);
+    const scan = await scanRepository(root);
+    assert.deepEqual([scan.repo.remote, scan.nodes.find(node => node.id === 'repository')!.provider, scan.delivery.build.length], [remote, provider, provider === 'GitHub' ? 1 : 0], url);
+  }
+});
+
+test('a git that gives no answer fails the scan instead of erasing its branch and commit', async t => {
+  const root = await fixture(t, { 'package.json': { name: 'app' } });
+  // A git killed before it answers, as a timeout leaves it.
+  const bin = await fixture(t, { git: '#!/bin/sh\nkill -KILL $$\n' });
+  await chmod(path.join(bin, 'git'), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${saved}`;
+  t.after(() => { process.env.PATH = saved; });
+  await assert.rejects(scanRepository(root), /Could not read the repository's branch and commit/);
+  await writeFile(path.join(bin, 'git'), '#!/bin/sh\necho "fatal: not a git repository" >&2\nexit 128\n');
+  const { repo } = await scanRepository(root);
+  assert.deepEqual([repo.branch, repo.sha, repo.remote], [null, null, null], 'Git answering that there is no repository leaves them absent.');
+});
+
 test('withholds guessed install commands for unrelated nested packages without a root workspace', async t => {
   const root = await fixture(t, {
     'apps/a/package.json': { name: 'a', packageManager: 'pnpm@10.33.0', scripts: { test: 'vitest run' } },
@@ -197,4 +277,25 @@ test('custom helper paths and object fields never establish a Vercel project ide
     assert.deepEqual(targets.flatMap(node => node.evidence.map(item => item.file)).sort(), ['.github/workflows/deploy.yml', 'vercel.json']);
     assert.equal(scan.workflows.length, 1, 'the workflow remains with the Build runner');
   });
+});
+
+test('a workflow that mentions Vercel only in a comment, an @vercel/ package or a vercel-labs/ tool deploys nothing to Vercel', async t => {
+  const root = await fixture(t, {
+    'package.json': { name: 'action' },
+    '.github/workflows/build.yml': 'name: Build\non: push\n# Previews deploy through the Vercel Git integration, not here.\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx @vercel/ncc build index.js -o dist # bundled for Vercel\n      - uses: vercel-labs/emulate@v1\n',
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx @vercel/ncc build index.js\n      - run: npx vercel deploy --prod\n',
+  });
+  const scan = await scanRepository(root);
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => node.evidence.map(item => [item.file, item.line])), [[['.github/workflows/deploy.yml', 8]]]);
+});
+
+test('a workflow job key that is not well-formed text keeps the scan', async t => {
+  const root = await fixture(t, {
+    'package.json': { name: 'app' },
+    // A lone surrogate written as a YAML escape, and a key whose clip falls inside a surrogate pair.
+    '.github/workflows/ci.yml': `name: CI\non: push\njobs:\n  "\\uD83D":\n    runs-on: ubuntu-latest\n  ${'a'.repeat(159)}\u{1F600}:\n    runs-on: ubuntu-latest\n`,
+  });
+  const scan = await scanRepository(root);
+  assert.equal(scan.workflows[0].jobs.length, 2);
+  assert.equal(scan.nodes.filter(node => node.kind === 'job').length, 2);
 });

@@ -1,7 +1,7 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { failureText, redact } from './redaction.ts';
 import type { GitHubSession, GitHubRepositoryPage, GitHubBranchPage } from '../contract/github.ts';
@@ -83,12 +83,17 @@ function repositoryName(value: unknown) {
 }
 
 function branchName(value: unknown) {
-  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@'
+  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@' || value.endsWith('.')
     || /[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) || value.includes('..') || value.includes('@{')
-    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) {
+    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) {
     throw new GitHubSourceError('Choose a valid Git branch name from the repository.');
   }
   return value;
+}
+
+/** What `parse` makes of a value GitHub lists, or null when it refuses it: one such row never fails its page. */
+function listed<T>(parse: (value: unknown) => T, value: unknown): T | null {
+  try { return parse(value); } catch { return null; }
 }
 
 // client/src/lib/source-selection.ts mirrors these rules for the Source sheet.
@@ -105,8 +110,8 @@ export function sourceRoot(value: unknown = '/') {
 
 async function githubApi(endpoint: string): Promise<{ data: unknown; hasNext: boolean }> {
   const { stdout } = await command('gh', githubGetArgs(endpoint), 'Reading GitHub');
-  const { data, headers = {} } = parseGitHubResponse(stdout, message => new GitHubSourceError(message));
-  return { data, hasNext: /;\s*rel="?next"?(?:\s*,|\s*$)/i.test(headers.link || '') };
+  const response = parseGitHubResponse(stdout, message => new GitHubSourceError(message));
+  return { data: response.data, hasNext: hasNextPage(response) };
 }
 
 export async function getGitHubSession(): Promise<GitHubSession> {
@@ -124,10 +129,10 @@ export async function listGitHubRepositories({ page = 1 }: { page?: unknown } = 
   const currentPage = pageNumber(page);
   const { data, hasNext } = await githubApi(`user/repos?per_page=${PAGE_SIZE}&page=${currentPage}&sort=updated&direction=desc&affiliation=owner,collaborator,organization_member`);
   if (!Array.isArray(data)) throw new GitHubSourceError('GitHub did not return a repository list. Try again.');
-  const repositories = data.map((entry: unknown) => {
-    const item = record(entry);
-    return { fullName: repositoryName(item?.full_name), name: typeof item?.name === 'string' ? item.name : null,
-      private: Boolean(item?.private), defaultBranch: typeof item?.default_branch === 'string' && item.default_branch ? item.default_branch : null };
+  const repositories = data.flatMap((entry: unknown) => {
+    const item = record(entry), fullName = listed(repositoryName, item?.full_name);
+    return fullName ? [{ fullName, name: typeof item?.name === 'string' ? item.name : null,
+      private: Boolean(item?.private), defaultBranch: typeof item?.default_branch === 'string' && item.default_branch ? item.default_branch : null }] : [];
   });
   return { repositories, nextPage: hasNext && currentPage < 10_000 ? currentPage + 1 : null };
 }
@@ -140,14 +145,14 @@ export async function listGitHubBranches({ repository, page = 1, preferredBranch
     githubApi(`repos/${selected}/branches?per_page=${PAGE_SIZE}&page=${currentPage}`),
   ]);
   if (!Array.isArray(response.data)) throw new GitHubSourceError('GitHub did not return a branch list. Try again.');
-  const listed = record(metadata.data), defaultBranch = listed?.default_branch ? branchName(listed.default_branch) : null;
-  const names = new Set(response.data.map((item: unknown) => branchName(record(item)?.name)));
+  const defaultBranch = listed(branchName, record(metadata.data)?.default_branch);
+  const names = new Set(response.data.map((item: unknown) => listed(branchName, record(item)?.name)).filter((name): name is string => name !== null));
   if (currentPage === 1) {
     const missing = [...new Set([defaultBranch, preferred].filter((name): name is string => Boolean(name)))].filter(name => !names.has(name));
     const additional = await Promise.all(missing.map(async name => {
       try {
         const { data } = await githubApi(`repos/${selected}/branches/${encodeURIComponent(name)}`);
-        return branchName(record(data)?.name);
+        return listed(branchName, record(data)?.name);
       } catch (error) {
         if ((error as GitHubSourceError).code === 'GITHUB_NOT_FOUND') return null;
         throw error;
@@ -215,14 +220,16 @@ function inCheckoutTurn<T>(path: string, work: () => Promise<T>): Promise<T> {
   return turn;
 }
 
-async function managedHistoryCheckout(source: ManagedSourceInput | null | undefined, dataDir: unknown) {
+const invalidCheckout = () => new GitHubSourceError('History can only be synced in a managed GitHub checkout. Reconnect the repository.');
+
+/** A saved source's managed clone, validated, with its root directory unless `checkRoot` is false. */
+async function managedHistoryCheckout(source: ManagedSourceInput | null | undefined, dataDir: unknown, { checkRoot = true } = {}) {
   if (!source || typeof source !== 'object') throw new GitHubSourceError('Connect a GitHub repository before loading its history.');
   const repository = repositoryName(source.repository), branch = branchName(source.branch), root = sourceRoot(source.rootDirectory);
   if (typeof dataDir !== 'string' || !dataDir.trim() || dataDir.includes('\0')
     || typeof source.checkoutPath !== 'string' || !isAbsolute(source.checkoutPath) || source.checkoutPath.includes('\0')) {
     throw new GitHubSourceError('The managed GitHub checkout is unavailable. Reconnect the repository.');
   }
-  const invalidCheckout = () => new GitHubSourceError('History can only be synced in a managed GitHub checkout. Reconnect the repository.');
   const requireDirectory = async (path: string) => {
     const stat = await lstat(path);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw invalidCheckout();
@@ -244,8 +251,7 @@ async function managedHistoryCheckout(source: ManagedSourceInput | null | undefi
     const config = await lstat(join(gitDirectory, 'config'));
     if (config.isSymbolicLink() || !config.isFile()) throw invalidCheckout();
     for (const name of ['objects', 'refs']) await requireDirectory(join(gitDirectory, name));
-    const scanPath = await scanDirectory(checkoutPath, root);
-    if (source.scanPath !== scanPath) throw invalidCheckout();
+    if (checkRoot && source.scanPath !== await scanDirectory(checkoutPath, root)) throw invalidCheckout();
     const [layout, origin, head, shallow] = await Promise.all([
       command('git', gitArgs(['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir']), 'Reading the managed checkout', API_TIMEOUT, checkoutPath),
       command('git', gitArgs(['remote', 'get-url', '--all', 'origin']), 'Reading the GitHub remote', API_TIMEOUT, checkoutPath),
@@ -257,7 +263,7 @@ async function managedHistoryCheckout(source: ManagedSourceInput | null | undefi
       || resolve(checkoutPath, paths[1]) !== gitDirectory || resolve(checkoutPath, paths[2]) !== gitDirectory
       || origin.stdout.trim().toLowerCase() !== `https://github.com/${repository}.git`.toLowerCase()
       || head.stdout.trim() !== branch || !['true', 'false'].includes(shallow.stdout.trim())) throw invalidCheckout();
-    return { checkoutPath, repository, shallow: shallow.stdout.trim() === 'true' };
+    return { checkoutPath, repository, root, shallow: shallow.stdout.trim() === 'true' };
   } catch (error) {
     if (error instanceof GitHubSourceError) throw error;
     throw invalidCheckout();
@@ -295,10 +301,11 @@ export async function ensureGitHubHistory({ source, dataDir, refresh = false }: 
  */
 export async function updateGitHubSource({ source, dataDir, sha }: { source?: ManagedSourceInput | null; dataDir?: unknown; sha?: unknown } = {}): Promise<{ sha: string }> {
   if (typeof sha !== 'string' || !SHA.test(sha)) throw new GitHubSourceError('Choose a commit of the selected branch.');
-  const { checkoutPath } = await managedHistoryCheckout(source, dataDir);
+  const { checkoutPath } = await managedHistoryCheckout(source, dataDir, { checkRoot: false });
   return inCheckoutTurn(checkoutPath, async () => {
-    // Validated again in turn, so the shallow boundary is read after any history sync before it.
-    const checkout = await managedHistoryCheckout(source, dataDir);
+    // Validated again in turn, so the shallow boundary is read after any history sync before it. The root directory is
+    // checked at the commit the copy moves to: one that removed it must not keep the copy from one that restores it.
+    const checkout = await managedHistoryCheckout(source, dataDir, { checkRoot: false });
     await command('git', gitArgs([
       '-c', 'fetch.writeCommitGraph=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
       'fetch', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--no-write-fetch-head',
@@ -307,8 +314,11 @@ export async function updateGitHubSource({ source, dataDir, sha }: { source?: Ma
     ]), 'Fetching the commit', 120_000, checkoutPath);
     // No checkout hook; global filters and templates are disabled for this operation.
     await command('git', gitArgs(['reset', '--hard', sha]), 'Updating the source files', 60_000, checkoutPath);
+    // The graph follows the fetched branch tip, which this fetch by commit does not advance: the next read syncs again.
+    historySyncs.delete(checkoutPath);
     const { stdout } = await command('git', gitArgs(['rev-parse', '--verify', 'HEAD']), 'Reading the checkout commit', API_TIMEOUT, checkoutPath);
     if (stdout.trim().toLowerCase() !== sha.toLowerCase()) throw new GitHubSourceError('The managed source did not move to this commit. Try again.');
+    if (await scanDirectory(checkoutPath, checkout.root) !== source?.scanPath) throw invalidCheckout();
     return { sha: stdout.trim() };
   });
 }
@@ -367,7 +377,9 @@ export async function prepareGitHubSource({ repository, branch, rootDirectory = 
     const sha = stdout.trim();
     if (!/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(sha)) throw new GitHubSourceError('Git did not return a valid checkout commit. Reconnect the repository.');
     const scanPath = await scanDirectory(checkoutPath, root);
-    return { scanPath, checkoutPath, repository: selected, branch: selectedBranch, rootDirectory: root, sha };
+    // Saved as the checkout spells it: a case-insensitive file system also finds a root typed in another case.
+    const within = relative(checkoutPath, scanPath).split(sep).filter(Boolean);
+    return { scanPath, checkoutPath, repository: selected, branch: selectedBranch, rootDirectory: within.length ? `/${within.join('/')}` : '/', sha };
   } catch (error) {
     let cleanupFailed = false;
     if (ownedDirectory) try { await rm(ownedDirectory, { recursive: true, force: true }); } catch { cleanupFailed = true; }
@@ -375,4 +387,9 @@ export async function prepareGitHubSource({ repository, branch, rootDirectory = 
     if (cleanupFailed) safe.message += ' An incomplete private checkout could not be removed from the managed sources directory.';
     throw safe;
   }
+}
+
+/** Removes a prepared copy that was never saved, as a failed connection removes its own: nothing refers to it. */
+export async function discardGitHubSource(prepared: Pick<PreparedGitHubSource, 'checkoutPath'>) {
+  await rm(dirname(prepared.checkoutPath), { recursive: true, force: true });
 }
