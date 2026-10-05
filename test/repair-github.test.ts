@@ -378,6 +378,11 @@ test('the pull request branch is updated and merged only at the verified head, a
   assert.deepEqual(await refused(merge, 'error connecting to api.github.com'), ['Merging the pull request failed. Check your network connection and try again.', false]);
   answer = JSON.stringify({ merged: false, message: 'Not merged' });
   await assert.rejects(merge(), /did not merge/);
+  // A repository that allows no squash merging refuses with the same 405, which no review or check changes.
+  for (const [allowed, reason] of [[false, 'This repository does not allow squash merging, which Perpetual merges with. Merge the pull request on GitHub.'], [true, 'GitHub refused the merge. Check the pull request\'s required reviews and checks.']] as const) {
+    const repository = createRepairPullRequests({ run: async (_file, args) => { if (args.includes('repos/owner/app')) return { stdout: JSON.stringify({ full_name: 'owner/app', allow_squash_merge: allowed }) }; throw failure('gh: Squash merges are not allowed on this repository. (HTTP 405)'); } });
+    assert.deepEqual(await repository.merge({ repository: 'owner/app', number: 7, sha: P, title: 't' }).then(() => null, (error: Error & { refused?: unknown }) => [error.message, error.refused === true]), [reason, true]);
+  }
   const before = calls.length;
   await assert.rejects(pulls.merge({ repository: 'owner/app', number: 7, sha: 'main', title: 't' }), /Choose a commit/);
   await assert.rejects(pulls.updateBranch({ repository: 'owner/..', number: 7, sha: P }), /Choose a GitHub repository/);
