@@ -73,6 +73,12 @@ jobs:
             echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
           fi
       - run: npm run test:browser
+      # The Cua bridge's test runs the bridge with this job's locked Python environment, which the Node job lacks.
+      # actions/setup-node v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - run: node --test test/cua-bridge.test.ts
 
   bench:
     name: Repair bench
