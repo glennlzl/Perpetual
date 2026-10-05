@@ -23,7 +23,7 @@ type Options = {
   journeys?: number | ((context: Context) => number); runs?: Record<string, RunRollup>; heads?: (BranchHead | Error)[]; post?: (status: CommitStatusPost) => Promise<void>;
   pollInterval?: number; retryInterval?: number;
 };
-type Holds = { prepare?: (gate: GateRef) => Error | null | Promise<Error | null>; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
+type Holds = { prepare?: (gate: GateRef) => Error | null | Promise<Error | null>; journeys?: (context: Context) => Promise<unknown>; rebuild?: (context: Context) => Promise<unknown>; run?: (context: Context) => Promise<unknown> };
 
 // Injected source, GitHub and steps record what the gate asked for; nothing reaches the network or Docker.
 // Waits for a gate state with a deadline, so a regression fails at its assertion instead of hanging the file.
@@ -54,7 +54,7 @@ async function harness(t: TestContext, { dataDir, stages = STAGES, sha = A, repo
       current.sha = gate.sha;
       return { key: gate.key, stageId: gate.stageId, sha: gate.sha };
     },
-    journeys: async context => (typeof journeys === 'function' ? journeys(context) : journeys),
+    async journeys(context) { if (holds.journeys) await holds.journeys(context); return typeof journeys === 'function' ? journeys(context) : journeys; },
     async rebuild(context) {
       seen.rebuilding = manager.view().stages[context.stageId]?.status;
       log.push(`rebuild ${context.stageId} ${context.sha[0]}`);
@@ -183,6 +183,21 @@ test('a push while a gate is prepared supersedes it before any twin or journey w
   await preparing.promise;
   await h.manager.watch(); // push C while the source moves to B
   moved.resolve();
+  await h.manager.idle();
+  assert.deepEqual(h.log, ['prepare beta b', 'prepare beta c', 'rebuild beta c', 'run beta c twin-beta']);
+  assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded']]);
+  assert.equal(h.current.sha, C);
+});
+
+test('a push while a gate counts its journeys supersedes it before any twin or journey work', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), heads: [{ status: 200, sha: A, etag: '"1"' }, { status: 200, sha: B, etag: '"2"' }, { status: 200, sha: C, etag: '"3"' }] });
+  await h.manager.watch(); // baseline A
+  const counting = deferred(), counted = deferred();
+  h.holds.journeys = async context => { if (context.sha === B) { counting.resolve(); await counted.promise; } };
+  await h.manager.watch(); // push B
+  await counting.promise;
+  await h.manager.watch(); // push C while B's journeys are counted
+  counted.resolve();
   await h.manager.idle();
   assert.deepEqual(h.log, ['prepare beta b', 'prepare beta c', 'rebuild beta c', 'run beta c twin-beta']);
   assert.deepEqual((await h.gates('beta')).map(item => [item.sha[0], item.status]), [['c', 'passed'], ['b', 'superseded']]);

@@ -215,7 +215,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
     // A newer commit that reached the stage while the gate was admitted or prepared supersedes it before any twin work.
     if (await stopped() || !PENDING.includes(gate.status)) return true;
     try {
-      if (!(await steps.journeys(context))) { await settle(gate, 'needs-release', 'No reviewed journeys.'); return true; }
+      const journeys = await steps.journeys(context);
+      // So does one that reached it while the journeys were counted.
+      if (await stopped() || !PENDING.includes(gate.status)) return true;
+      if (!journeys) { await settle(gate, 'needs-release', 'No reviewed journeys.'); return true; }
       await transition(gate, 'rebuilding', { startedAt: now() });
       const twin = await steps.rebuild(context);
       if (closed) return false;
