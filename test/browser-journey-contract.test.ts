@@ -477,6 +477,22 @@ test('restart recovery cancels unstarted journeys, fails interrupted ones, finis
   assert.ok(typeof recovered.progress.revision==='number'&&recovered.progress.revision>revision);
 });
 
+test('a controller killed during a journey leaves the progress it saved, so a restart fails that journey with its milestones',async t=>{
+  const f=await fixture(t,[journey('one')]);
+  const {run}=await f.manager.run(f.context,{},manual);await until(()=>f.workers.length===1);
+  reach(f.workers[0],'one','start','completed',{checks:passedChecks.start});f.workers[0].event(step('one','run','running'));
+  // The data directory as a killed controller leaves it, while its journey is inside its second milestone.
+  const file=join(f.dataDir,'browser','state.json'),copy=await mkdtemp(join(tmpdir(),'perpetual-journey-killed-'));
+  t.after(()=>rm(copy,{recursive:true,force:true}));
+  await until(async()=>JSON.parse(await readFile(file,'utf8')).runs[0].progress.cases[0].steps[1].status==='running');
+  await mkdir(join(copy,'browser'));await writeFile(join(copy,'browser','state.json'),await readFile(file));
+  const reopened=await createBrowserManager({dataDir:copy,runtime:f.runtime});t.after(()=>reopened.close());
+  const recovered=await reopened.runProgress(f.context,run.id);
+  assert.equal(recovered.run.status,'failed');assert.equal(recovered.progress.cases[0].status,'failed');
+  assert.deepEqual(recovered.progress.cases[0].steps!.map(item=>item.status),['completed','unconfirmed','pending']);
+  assert.equal(recovered.results[0].status,'failed');assert.match(recovered.results[0].error!,/controller stopped during this journey/i);
+});
+
 test('evidence naming the test account is kept as reported, with its blocker kinds and check operators',async t=>{
   const f=await fixture(t,[journey('one')]);
   const {run}=await f.manager.run(f.context,{credentials:{username:'account',password:'<'}},manual);await until(()=>f.workers.length===1);

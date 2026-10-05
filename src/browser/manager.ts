@@ -729,9 +729,15 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const execution=async()=>{
         const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,Object.values(credentials??{}));
         // Set by the worker's discovery event.
-        let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown;
+        let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown,progressQueued=false;
         // Registered before execution starts.
         const entry=jobs.get(run.id)!;
+        // A journey's start, its milestones and its end survive a controller interruption, so a restart judges what it
+        // began. A save not yet started takes every later change with it.
+        const saveProgress=()=>{
+          if(progressQueued||progressError)return;progressQueued=true;
+          progressPersistence=progressPersistence.then(()=>{progressQueued=false;return persist();}).catch(error=>{progressError||=error;entry.cancel();});
+        };
         const assertCurrent=()=>{if(options.isCurrent&&!options.isCurrent())throw new Error('The active source changed. Open this source and discover cases to continue.');};
         function progressEvent(event:WorkerEvent,caseId:string){
           if(event.caseId!==undefined&&event.caseId!==caseId)throw new Error('Browser progress referenced another journey.');
@@ -760,7 +766,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
               progress.actionCount=event.actions.length;
               const last=progress.actions.at(-1);if(last)progress.lastAction={type:last.type,status:last.status};else delete progress.lastAction;
             }
-          }else if(event.type==='journey-step')acceptMilestone(progress,event,run.approvedCases.find(item=>item.id===caseId));
+          }else if(event.type==='journey-step'){acceptMilestone(progress,event,run.approvedCases.find(item=>item.id===caseId));saveProgress();}
           else return;
           touch(run);
         }
@@ -807,9 +813,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                   run.results=[...(run.results||[]).filter(previous=>previous.caseId!==caseId),result].sort((a,b)=>run.caseIds.indexOf(a.caseId)-run.caseIds.indexOf(b.caseId));
                   // An unreported milestone is unconfirmed, never a blocked prerequisite.
                   settleSteps(progress,status);
-                  // Completed journeys survive a later worker/controller interruption.
-                  progressPersistence=progressPersistence.then(()=>persist()).catch(error=>{progressError||=error;entry.cancel();});
                 }
+                if(status!=='queued')saveProgress();
                 touch(run);
               },
               launch(item){
