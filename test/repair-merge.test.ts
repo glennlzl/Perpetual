@@ -72,8 +72,11 @@ async function harness(t: TestContext, { holds = [] as string[], behind = [] as 
       return { sha: M };
     },
   };
+  // Each read of the clock moves it on 1 ms, so the checks' and the update's waits end after as many reads, however busy
+  // the machine running the test is.
+  let now = 0;
   const merger = createRepairMerge({
-    github, timing: { pollMs: 1, checksMs: 20, headMs: 20, ...timing },
+    github, timing: { pollMs: 1, checksMs: 20, headMs: 20, ...timing }, clock: () => now++,
     host: { async checkout(input) { calls.checkouts.push(input); await mkdir(input.directory, { recursive: true }); return input.directory; } },
     gates: {
       ...(stages === undefined ? {} : { repairStages: () => stages }),
@@ -272,7 +275,8 @@ test('a gate budget that runs out while a gate is at work never merges without t
     },
   });
   t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
-  const h = await harness(t, { timing: { gatesMs: 100 }, stages: manager.repairStages(KEY), gates: async (request, signal) => { budget = signal; return (await manager.runRepair(request, signal)).gates; } });
+  // The budget outlasts admitting Beta's gate on a busy machine; Beta's run then waits for it to run out.
+  const h = await harness(t, { timing: { gatesMs: 2000 }, stages: manager.repairStages(KEY), gates: async (request, signal) => { budget = signal; return (await manager.runRepair(request, signal)).gates; } });
   assert.deepEqual(await h.run(), { status: 'ready', reason: 'The journey gates did not finish in 0 hours.' });
   assert.deepEqual([log, h.calls.checks, h.calls.merges], [['prepare beta', 'run beta'], [], []], 'Gamma never runs, and nothing is read or merged.');
   assert.deepEqual(h.reports.find(report => report.gates)?.gates?.map(item => [item.stageId, item.status]), [['beta', 'passed'], ['gamma', 'superseded']]);
