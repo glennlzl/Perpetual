@@ -77,14 +77,17 @@ const fields = (value: unknown) => value !== null && typeof value === 'object' ?
 const readManifest = (root: string, directory: string): Promise<Manifest | null> => readLocal(root, posix.join(directory, 'package.json')).then(text => fields(JSON.parse(text))).catch(() => null);
 
 /**
- * Repository-relative files, without following links or entering skipped directories; `complete` is false when the
- * walk's depth or entry limit left some out.
+ * Repository-relative files, without following links or entering skipped directories or folders that cannot be read,
+ * such as a container's data owned by another user; `complete` is false when the walk's depth or entry limit left some out.
  */
 export async function repositoryWalk(root: string, limits: WalkLimits = WALK) {
   const files: string[] = [];
   let entries = 0, complete = true;
   async function walk(directory: string, depth: number) {
-    for (const entry of (await readdir(join(root, directory), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    let found;
+    try { found = await readdir(join(root, directory), { withFileTypes: true }); }
+    catch (error) { if (!directory) throw error; return; }
+    for (const entry of found.sort((a, b) => a.name.localeCompare(b.name))) {
       if (++entries > limits.entries) { complete = false; return; }
       const name = directory ? `${directory}/${entry.name}` : entry.name;
       if (entry.isFile()) files.push(name);
@@ -253,7 +256,10 @@ export async function snapshotSource(repoPath: string, destination: string) {
   async function walk(directory: string) {
     const folder = join(root, directory);
     if ((await lstat(folder)).isSymbolicLink() || await realpath(folder) !== folder) throw new Error('Source directories changed during snapshot creation.');
-    const entries = (await readdir(join(root, directory), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    const entries = (await readdir(join(root, directory), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
+      throw new Error(`The source folder ${directory.split(sep).join('/') || '.'} cannot be read. Make it readable, or move it out of the checkout or have git ignore it.`);
+    })).sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const name = join(directory, entry.name), path = name.split(sep).join('/');
       if (SKIP.has(entry.name) || PRIVATE.test(entry.name) || entry.isSymbolicLink() || ignored.has(entry.isDirectory() ? `${path}/` : path)

@@ -2,7 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, open, realpath } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, stat, open, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -191,6 +191,21 @@ test('a root manifest that does not parse is not evidence, and the scanned apps 
     const { repoPath } = await fixture(t, { 'package.json': root, 'apps/web/package.json': manifest('web', { express: '1.0.0' }, { start: 'node server.js' }) });
     assert.deepEqual((await detect(repoPath)).apps, { 'service-apps-2fweb': { directory: 'apps/web', build: 'npm install', start: 'npm run start', port: APP_PORT } }, JSON.stringify(root));
   }
+});
+
+test('a folder that cannot be read is left out of detection, and the snapshot names it', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  // A database container's bind-mounted data, owned by its own user.
+  const { root, repoPath } = await fixture(t, { 'package.json': manifest('web', { express: '1.0.0' }, { start: 'node server.js' }), 'pgdata/PG_VERSION': '16\n' });
+  await chmod(path.join(repoPath, 'pgdata'), 0o000);
+  try {
+    assert.deepEqual(Object.keys((await detect(repoPath)).apps), ['service']);
+    await assert.rejects(snapshotSource(repoPath, path.join(root, 'snapshot')), /^Error: The source folder pgdata cannot be read\. Make it readable, or move it out of the checkout or have git ignore it\.$/);
+    // A checkout whose git ignores it never opens it.
+    await writeFile(path.join(repoPath, '.gitignore'), 'pgdata/\n');
+    await git(repoPath, 'init', '--quiet');
+    await snapshotSource(repoPath, path.join(root, 'ignored'));
+    assert.deepEqual(await filesIn(path.join(root, 'ignored')), ['.gitignore', 'package.json']);
+  } finally { await chmod(path.join(repoPath, 'pgdata'), 0o700); }
 });
 
 test('a production launcher runs after its build and stays unbuilt in the source snapshot', async t => {
