@@ -168,9 +168,9 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
   function childEnvironment(configuration:BrowserModelSettings){
     const result:Record<string,string>={PYTHONUNBUFFERED:'1',ANONYMIZED_TELEMETRY:'false',BROWSER_USE_LOGGING_LEVEL:'error'};
     const values=typeof env==='function'?env():env;
-    // Chromium's install folder, as the journey worker reads it, and the proxy that model requests go through, as
-    // OpenCode's do.
-    for(const key of ['PATH','HOME','TMPDIR','LANG','DISPLAY','PLAYWRIGHT_BROWSERS_PATH','HTTPS_PROXY','HTTP_PROXY','NO_PROXY']){const value=values[key];if(typeof value==='string')result[key]=value;}
+    // Chromium's install folder, as the journey worker reads it, and the proxy and certificate authorities that model
+    // requests go through, under each name Python's HTTP clients read.
+    for(const key of ['PATH','HOME','TMPDIR','LANG','DISPLAY','PLAYWRIGHT_BROWSERS_PATH','HTTPS_PROXY','HTTP_PROXY','NO_PROXY','https_proxy','http_proxy','no_proxy','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE']){const value=values[key];if(typeof value==='string')result[key]=value;}
     Object.assign(result,browserModelEnvironment(configuration));
     return result;
   }

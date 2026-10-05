@@ -61,14 +61,16 @@ test('runtime capability preflight detects missing browser and is cached without
   await writeFile(runner,'process.exit(1);');assert.equal((await runtime.capabilities()).runtimeInstalled,true);
 });
 
-test('the discovery worker finds Chromium where it was installed and reaches its model through the configured proxy, and nothing else',async t=>{
+test('the discovery worker finds Chromium where it was installed and reaches its model through the configured proxy and certificates, and nothing else',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'perpetual-browser-environment-'));t.after(()=>rm(directory,{recursive:true,force:true}));
-  const runner=join(directory,'runner.mjs'),names=['PLAYWRIGHT_BROWSERS_PATH','HTTPS_PROXY','HTTP_PROXY','NO_PROXY','UNRELATED_SECRET'];
+  const proxy='http://proxy.example.test:3128',bundle=join(directory,'ca.pem');
+  const forwarded={PLAYWRIGHT_BROWSERS_PATH:join(directory,'browsers'),HTTPS_PROXY:proxy,HTTP_PROXY:proxy,NO_PROXY:'localhost,127.0.0.1',https_proxy:proxy,http_proxy:proxy,no_proxy:'localhost',SSL_CERT_FILE:bundle,SSL_CERT_DIR:directory,REQUESTS_CA_BUNDLE:bundle};
+  const runner=join(directory,'runner.mjs'),names=[...Object.keys(forwarded),'UNRELATED_SECRET'];
   await writeFile(runner,`process.stdin.resume();process.stdin.on('end',()=>console.log(JSON.stringify({type:'status',runtimeInstalled:true,browserInstalled:Boolean(process.env.PLAYWRIGHT_BROWSERS_PATH),environment:Object.fromEntries(${JSON.stringify(names)}.map(name=>[name,process.env[name]??null]))})));`);
-  const env={PERPETUAL_MODEL_API_KEY:'fixture-only',PERPETUAL_MODEL:'fixture-chat',PLAYWRIGHT_BROWSERS_PATH:join(directory,'browsers'),HTTPS_PROXY:'http://proxy.example.test:3128',HTTP_PROXY:'http://proxy.example.test:3128',NO_PROXY:'localhost,127.0.0.1',UNRELATED_SECRET:'not-for-the-worker'};
+  const env={PERPETUAL_MODEL_API_KEY:'fixture-only',PERPETUAL_MODEL:'fixture-chat',...forwarded,UNRELATED_SECRET:'not-for-the-worker'};
   const runtime=createBrowserRuntime({python:process.execPath,runner,env}),events:WorkerEvent[]=[];
   await runtime.start({mode:'preflight'},event=>events.push(event)).promise;
-  assert.deepEqual(events[0].environment,{PLAYWRIGHT_BROWSERS_PATH:env.PLAYWRIGHT_BROWSERS_PATH,HTTPS_PROXY:env.HTTPS_PROXY,HTTP_PROXY:env.HTTP_PROXY,NO_PROXY:env.NO_PROXY,UNRELATED_SECRET:null});
+  assert.deepEqual(events[0].environment,{...forwarded,UNRELATED_SECRET:null});
   assert.equal((await runtime.capabilities()).browserInstalled,true,'The preflight looks where Chromium was installed.');
 });
 
