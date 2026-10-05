@@ -233,7 +233,7 @@ async function attempt({ cell, adapter, c, context, model, gateway, options, pat
     }
     const timeout = AbortSignal.timeout(options.limits.timeMs + GRACE_MS), stop = AbortSignal.any([timeout, signal]), started = Date.now();
     try {
-      outcome = await adapter.runAttempt({ box, system: context.system, prompt: context.prompt, failing: context.failing, model, limits: options.limits, signal: stop, scratch,
+      outcome = await adapter.runAttempt({ box, system: context.system, prompt: context.prompt, failing: context.failing, base: context.sha, model, limits: options.limits, signal: stop, scratch,
         gateway: { baseUrl: gateway.url, ...(boxUrl ? { boxUrl } : {}), token: opened.token, provider, wire: wireOf(adapter, provider) ?? 'chat' }, log: event => { events.push({ ...event, at: Date.now() - started }); } });
     } catch (error) {
       if (signal.aborted) throw error;

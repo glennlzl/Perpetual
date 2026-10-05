@@ -28,6 +28,8 @@ export interface AttemptInput {
   prompt: string;
   /** The failing steps' run scripts, for the product's reproduced rule. */
   failing: readonly string[];
+  /** The case's commit the box holds, against which the product's loop reads a change made through a command. */
+  base?: string;
   model: ModelInfo; gateway: GatewayAccess; limits: AttemptLimits; signal: AbortSignal;
   /** A private (0700) host folder of this attempt's own, removed after it. */
   scratch: string;

@@ -31,9 +31,10 @@ async function versions() {
 export const adapter: Adapter = {
   key: 'aisdk', version: await versions().catch(() => 'ai (product)'), inBox: false,
   async available() { return null; },
-  async runAttempt({ box, system, prompt, failing, model, gateway, limits, signal, log }): Promise<AttemptOutcome> {
+  async runAttempt({ box, system, prompt, failing, base, model, gateway, limits, signal, log }): Promise<AttemptOutcome> {
     const factory = openrouterModels({ fetch: gatewayFetch(gateway.baseUrl) });
-    const result = await runAttempt({ model: factory(model.id, gateway.token), box, instructions: system, prompt, signal, failing, steps: limits.steps, timeoutMs: limits.timeMs, budget: limits.cost });
+    // base: as in the product, a change made through run counts when the model stops without calling done.
+    const result = await runAttempt({ model: factory(model.id, gateway.token), box, instructions: system, prompt, signal, failing, base, steps: limits.steps, timeoutMs: limits.timeMs, budget: limits.cost });
     log({ type: 'attempt', end: result.end, steps: result.steps, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost, reproduced: result.reproduced, ...(result.refusal ? { refusal: result.refusal } : {}) });
     return { reason: result.end, steps: result.steps, summary: result.summary, reproduced: result.reproduced, frameworkCost: result.cost, ...(result.error ? { error: result.error } : {}) };
   },
