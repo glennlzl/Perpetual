@@ -234,7 +234,7 @@ test('pull requests open as drafts of the repair branch against the target branc
   };
   const pulls = createRepairPullRequests({ run });
   assert.deepEqual(await pulls.account(), { login: 'developer', id: 1234 });
-  assert.equal(await pulls.find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c' }), null);
+  assert.equal(await pulls.find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), null);
   assert.deepEqual(await pulls.create({ repository: 'owner/app', base: 'main', branch: 'perpetual/repair/cb9292c', title: 'Fix the failed CI build at cb9292c', body: '@owner token=[REDACTED]' }), { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true });
   await pulls.ready({ repository: 'owner/app', number: 7 });
   await pulls.label({ repository: 'owner/app', number: 7, label: 'perpetual-repair' });
@@ -242,7 +242,7 @@ test('pull requests open as drafts of the repair branch against the target branc
   await pulls.close({ repository: 'owner/app', number: 7 });
   const create = calls[2];
   assert.deepEqual(create.slice(create.indexOf('--method')), ['--method', 'POST', 'repos/owner/app/pulls', '-f', 'title=Fix the failed CI build at cb9292c', '-f', 'head=perpetual/repair/cb9292c', '-f', 'base=main', '-f', 'body=@owner token=[REDACTED]', '-F', 'draft=true']);
-  assert.ok(calls[1].includes(`repos/owner/app/pulls?state=open&per_page=5&head=${encodeURIComponent('owner:perpetual/repair/cb9292c')}`));
+  assert.ok(calls[1].includes(`repos/owner/app/pulls?state=open&per_page=5&head=${encodeURIComponent('owner:perpetual/repair/cb9292c')}&base=main`));
   assert.deepEqual(calls[3], ['pr', 'ready', '7', '--repo', 'owner/app']);
   assert.deepEqual(calls[4].slice(-3), ['repos/owner/app/issues/7/labels', '-f', 'labels[]=perpetual-repair']);
   assert.deepEqual(calls[5].slice(-3), ['repos/owner/app/issues/7/comments', '-f', 'body=Perpetual closed this repair: Superseded by ddddddd.']);
@@ -250,6 +250,14 @@ test('pull requests open as drafts of the repair branch against the target branc
   await assert.rejects(pulls.create({ repository: 'owner/app', base: 'main', branch: 'main', title: 't', body: 'b' }), /only its perpetual\/repair branch/);
   await assert.rejects(pulls.ready({ repository: 'owner/app', number: '7; rm -rf /' }), /Choose the repair's pull request/);
   assert.equal(calls.length, 7);
+});
+
+// A person may open or retarget a pull request from the repair branch into another base, such as a release branch.
+test('a repair continues only its own branch\'s open pull request into the target branch, never one into another base', async () => {
+  const open = (number: number, base: string, head = 'perpetual/repair/cb9292c') => ({ number, html_url: `https://github.com/owner/app/pull/${number}`, draft: true, head: { ref: head }, base: { ref: base } });
+  const answer = (pulls: unknown[]) => createRepairPullRequests({ run: async () => ({ stdout: JSON.stringify(pulls) }) });
+  assert.deepEqual(await answer([open(9, 'release'), open(7, 'main')]).find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true });
+  assert.equal(await answer([open(9, 'release'), open(8, 'main', 'perpetual/repair/abc1234')]).find({ repository: 'owner/app', branch: 'perpetual/repair/cb9292c', base: 'main' }), null);
 });
 
 // Real git against a local bare repository standing in for GitHub: the runner swaps GitHub's URL for its path.

@@ -175,12 +175,16 @@ export function createRepairPullRequests({ run = exec }: { run?: CommandRunner }
       if (!isRecord(data) || typeof data.login !== 'string' || !Number.isSafeInteger(data.id)) throw new Error('GitHub returned an unreadable account.');
       return { login: data.login, id: data.id as number };
     },
-    /** The open pull request of a head branch, such as one a previous repair of the same commit left. */
-    async find({ repository, branch }: { repository: unknown; branch: unknown }) {
+    /**
+     * The open pull request of a head branch into base, such as one a previous repair of the same commit left; one a
+     * person opened or retargeted from the branch into another base is not the repair's.
+     */
+    async find({ repository, branch, base }: { repository: unknown; branch: unknown; base: string }) {
       const name = repositoryOf(repository);
       if (typeof branch !== 'string' || !REPAIR_BRANCH.test(branch)) throw new Error('A repair opens only its perpetual/repair branch.');
-      const data = json(await api(['--method', 'GET', `repos/${name}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${name.split('/')[0]}:${branch}`)}`], 'Reading pull requests'));
-      return Array.isArray(data) && data.length ? pullRequest(data[0]) : null;
+      const data = json(await api(['--method', 'GET', `repos/${name}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${name.split('/')[0]}:${branch}`)}&base=${encodeURIComponent(base)}`], 'Reading pull requests'));
+      const found = Array.isArray(data) ? data.find(item => isRecord(item) && isRecord(item.head) && item.head.ref === branch && isRecord(item.base) && item.base.ref === base) : undefined;
+      return found ? pullRequest(found) : null;
     },
     async create({ repository, base, branch, title, body }: { repository: unknown; base: string; branch: unknown; title: string; body: string }) {
       const name = repositoryOf(repository);

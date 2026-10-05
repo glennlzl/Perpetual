@@ -326,7 +326,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       pushed = sha;
       await context.report({ pushed: sha });
       if (!pullRequest) {
-        const existing = await pulls.find({ repository: repair.repository, branch });
+        const existing = await pulls.find({ repository: repair.repository, branch, base: repair.branch });
         signal.throwIfAborted();
         const opened = existing ?? await pulls.create({ repository: repair.repository, base: repair.branch, branch, title, body: body() });
         if (existing) await pulls.update({ repository: repair.repository, number: existing.number, body: body() });
