@@ -25,6 +25,7 @@ export function approvedCase(value: unknown): ApprovedCase {
 /** What the fixture reports to the reporter over the run's event channel, tagged with the case ID. */
 export type FixtureEvent =
   | { type: 'journey-stop'; error: string }
+  | { type: 'action-feedback'; feedback: string }
   | { type: 'control-read'; eligible: boolean }
   | { type: 'frame'; data: string; timestamp: number }
   | { type: 'journey-step'; stepId: string; status: 'running' | 'completed' | 'failed'; evidence?: string; checks?: EvaluatedCheck[] }

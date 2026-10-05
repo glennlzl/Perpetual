@@ -11,6 +11,7 @@ import { reviewedRead, validateReadRequests } from '../../browser/read-requests.
 import { controlReads } from './control.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
+import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 
 /** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
@@ -323,6 +324,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       await cdp.send('Target.setDiscoverTargets', { discover: true });
     };
     if (CHECKS >= 2) await context.addInitScript(markEdits, EDITED);
+    if (env.PERPETUAL_EVENT_CHANNEL) await installActionObservation(context);
     const GUARD = 'The browser navigation guard could not be attached.';
     // A page the guard cannot watch is closed and stops the journey.
     context.on('page', target => { watch(target).catch(() => { if (target.isClosed()) return; guard.refused ||= GUARD; target.close().catch(() => {}); }); });
@@ -341,7 +343,16 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         if (running || broken || step?.id !== id || typeof actions !== 'function') throw stop('The spec ran a milestone outside the reviewed order.');
         running = true; done.push(id);
         emit({ type: 'journey-step', stepId: id, status: 'running' });
-        await acting(() => base.step(step.title, actions));
+        if (env.PERPETUAL_EVENT_CHANNEL) await resetActionObservation(page);
+        try { await acting(() => base.step(step.title, actions)); }
+        catch (error) {
+          const target = current();
+          if (target && !signingIn && env.PERPETUAL_EVENT_CHANNEL) {
+            const feedback = await actionFeedback(target, [account?.username, account?.password]);
+            if (feedback) emit({ type: 'action-feedback', feedback });
+          }
+          throw error;
+        }
         const checks: EvaluatedCheck[] = [];
         let unjudgeable: string | null = null;
         await base.step(STEPS.checks, async () => {
