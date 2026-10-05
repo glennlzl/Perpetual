@@ -8,7 +8,7 @@ import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
 import type { ErrorReply } from '../contract/error.ts';
-import type { BuildReply, CommitDeployments, DeploymentRecord } from '../contract/github.ts';
+import type { BuildReply, CommitDeployments, DeploymentRecord, GitHubActionsReply } from '../contract/github.ts';
 import type { GateReply } from '../contract/gate.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
@@ -149,6 +149,32 @@ test('reads refused while a source change saves keep Build, Production and an op
   saving = false;
   await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
   await shown();
+  assert.deepEqual(pageErrors, []);
+});
+
+test('an unreadable Build lists the discovered workflows without run marks, with Retry and Connect beside it', { timeout: 60000 }, async t => {
+  const workflows: GitHubActionsReply['workflows'] = [{ file: '.github/workflows/ci.yml', name: 'CI', jobs: [{ id: 'test', name: 'Test', steps: [{ id: 'unit', name: 'Run unit tests' }] }] }];
+  let buildReads = 0;
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [actions], production: [] } } } };
+    if (path === '/api/github/build') { buildReads++; return { status: 400, json: { error: 'Connect your GitHub account to read Build.' } }; }
+    if (path === '/api/github-actions') return { json: { workflows } satisfies GitHubActionsReply };
+    if (path === '/api/github/connection') return { json: { available: true, authenticated: true, account: { login: 'acme', name: null }, connected: false, source: null, localCheckout: null } };
+  });
+  await open();
+  const buildCard = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(buildCard.getByRole('button', { name: 'Unverified', exact: true })).toBeVisible();
+  await buildCard.getByRole('button', { name: 'GitHub Actions', exact: true }).click();
+  await expect(buildCard.getByRole('alert')).toHaveText('Connect your GitHub account to read Build.');
+  // The workflow, job and step names the repository's files hold, with no run to mark them.
+  await buildCard.getByRole('button', { name: 'Workflow: CI', exact: true }).click();
+  await buildCard.getByRole('button', { name: 'Job: Test', exact: true }).click();
+  await expect(buildCard.getByText('Run unit tests', { exact: true })).toBeVisible();
+  const before = buildReads;
+  await buildCard.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => buildReads).toBeGreaterThan(before);
+  await buildCard.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
 

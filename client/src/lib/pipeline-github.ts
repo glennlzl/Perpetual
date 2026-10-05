@@ -113,10 +113,13 @@ export function watchedBuildStatus(view: BuildReply | null | undefined, error?: 
 /** Names from the scanned workflow files. These are configuration, never execution evidence. */
 export type ConfiguredWorkflow = ActionWorkflow;
 export interface BuildWorkflowRow extends ConfiguredWorkflow { runs: GitHubRun[] }
-/** Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. */
-export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined): BuildWorkflowRow[] {
+/**
+ * Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. While Build
+ * is `unreadable` there is no Build commit to describe, so the scanned workflows stand, without runs.
+ */
+export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined, unreadable = false): BuildWorkflowRow[] {
   const rows = new Map<string, BuildWorkflowRow>();
-  if (view?.sha && view.sha === scannedSha) for (const workflow of configured) rows.set(workflow.file, { ...workflow, runs: [] });
+  if (view ? view.sha && view.sha === scannedSha : unreadable) for (const workflow of configured) rows.set(workflow.file, { ...workflow, runs: [] });
   for (const run of githubBranchBuild(view, view?.sha, view?.branch)?.runs ?? []) {
     const file = workflowPath(run.path), row = rows.get(file);
     if (row) { row.runs.push(run); if (run.name) row.name = run.name; }

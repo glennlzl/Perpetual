@@ -123,7 +123,7 @@ test('Repair is a Button on the failed workflow row, Stop a Button on the change
   assert.match(changes, /<Button type="button" variant="ghost" size="sm"[^>]*onClick=\{\(\) => void stop\(\)\}><Square \/>Stop<\/Button>/);
   assert.match(changes, /passed: CircleCheck/);
   const app = await source('App.tsx');
-  assert.match(app, /<GitHubActionsCard repoPath=\{repoPath\} scannedAt=\{scannedAt\} scannedSha=\{sha\} runs=\{github\} readError=\{data\.buildReadError\} stageId=\{stage\.id\} autopilot=\{autopilot\} \/>/);
+  assert.match(app, /<GitHubActionsCard repoPath=\{repoPath\} scannedAt=\{scannedAt\} scannedSha=\{sha\} runs=\{github\} readError=\{data\.buildReadError\} stageId=\{stage\.id\} autopilot=\{autopilot\} onConnect=\{\(\) => openDialog\(\{ type: 'source', connect: true \}\)\} \/>/);
   assert.doesNotMatch(app, /AutoMergeFixes/);
   assert.doesNotMatch(await source('pipeline.css'), /stage-setting-footer/);
   for (const retired of ['AutoMergeFixes.tsx', 'lib/repairs.ts']) assert.equal(await access(new URL(`../client/src/${retired}`, import.meta.url)).then(() => true, () => false), false, `${retired} is retired.`);

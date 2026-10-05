@@ -57,6 +57,12 @@ test('new and removed workflows at the watched commit do not inherit the old con
   assert.deepEqual(display.buildWorkflowRows(current, configured, A).map(row => [row.file, row.jobs[0]?.name, row.runs.length]), [[CI, 'Tests (${{ matrix.shard }}/2)', 0]], 'Same-commit configured jobs without a run remain visible and unverified.');
 });
 
+test('while Build cannot be read the discovered workflows stand without runs, and nothing stands before its first read', () => {
+  assert.deepEqual(display.buildWorkflowRows(null, configured, A, true).map(row => [row.file, row.name, row.jobs[0]?.name, row.runs.length]), [[CI, 'Old CI', 'Tests (${{ matrix.shard }}/2)', 0]]);
+  assert.deepEqual(display.buildWorkflowRows(null, configured, A), [], 'A Build still loading lists nothing yet.');
+  assert.deepEqual(display.buildWorkflowRows(reply(), configured, A, true).map(row => [row.file, row.jobs.length, row.runs.length]), [[CI, 0, 1]], 'A newer Build that was read never takes the older scan\'s tree.');
+});
+
 test('latest eligible workflow attempt owns the actual job tree, including unavailable jobs', () => {
   const rows = display.buildWorkflowRows(reply([run({ id: '1', conclusion: 'failure' }), run({ attempt: 2, jobs: null })]), configured, A);
   assert.deepEqual(rows[0].runs.map(item => [item.id, item.attempt, item.jobs]), [['2', 2, null]]);

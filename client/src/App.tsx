@@ -306,7 +306,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
         {(services.length > 0 || changes.length > 0) && <StepList className="stage-actions" label={`${stage.name} steps`}>
           {services.map(service => <StepItem key={service.id} icon={<ProviderMark provider={service.provider} active={service.kind === 'github-actions' && ['running', 'queued'].includes(build?.status ?? '')} />}>
             {service.kind === 'github-actions'
-              ? <GitHubActionsCard repoPath={repoPath} scannedAt={scannedAt} scannedSha={sha} runs={github} readError={data.buildReadError} stageId={stage.id} autopilot={autopilot} />
+              ? <GitHubActionsCard repoPath={repoPath} scannedAt={scannedAt} scannedSha={sha} runs={github} readError={data.buildReadError} stageId={stage.id} autopilot={autopilot} onConnect={() => openDialog({ type: 'source', connect: true })} />
               : isDeploymentGroup(service)
               ? <DeploymentGroup service={service} repoPath={repoPath} stageId={stage.id} selection={selection} openDialog={openDialog} />
               : <Button variant="ghost" size="sm" className="stage-step-action nodrag nopan h-auto min-h-8 w-full justify-between whitespace-normal aria-pressed:bg-accent" onClick={() => openDialog({ type: stage.kind === 'source' ? 'source' : 'service', nodeId: service.id, stageId: stage.id })} aria-pressed={selection?.nodeId === service.id || (stage.kind === 'source' && selection?.type === 'source')} aria-label={`Configure ${service.label}`}>
