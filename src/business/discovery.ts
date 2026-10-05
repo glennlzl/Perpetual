@@ -154,9 +154,8 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
  * useful interior implementation lines over spending the whole budget on imports
  * or the first few large files. Citations always retain original line numbers. */
 function browserModelSources(files: SourceFile[]): ModelSource[] {
-  let auxiliary = 0;
-  const selected = files.filter(file => !/\.mdx?$/i.test(file.path) &&
-    (/(?:^|\/)(?:api|backend|server|routes|frontend|client|web|pages|components)(?:\/|$)/i.test(file.path) || ++auxiliary <= 6)).slice(0, 56);
+  // The files arrive balanced across UI, API, documentation and shared code, whatever their folders are called.
+  const selected = files.filter(file => !/\.mdx?$/i.test(file.path)).slice(0, 56);
   selected.push(...files.filter(file => /\.mdx?$/i.test(file.path)).slice(0, 4));
   if (!selected.length) return [];
   let remaining = MAX_MODEL_BYTES;

@@ -25,6 +25,19 @@ test('browser discovery prioritizes an unfamiliar product\'s primary pages witho
   assert.ok(names.indexOf('web/app/orders/new/page.tsx') < names.indexOf('api/lib/helper-000.ts'));
 });
 
+test('every page of a layout without conventional folder names reaches the model, within its budget', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'discovery-layout-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const write = async (name: string, content: string) => { await mkdir(join(root, dirname(name)), { recursive: true }); await writeFile(join(root, name), content); };
+  // A root App Router layout, and a framework whose views live in each application's own folder.
+  const app = ['app/page.tsx', 'app/dashboard/page.tsx', 'app/workflows/page.tsx', 'app/workflows/[id]/page.tsx', 'app/workflows/new/page.tsx', 'app/settings/page.tsx', 'app/reports/page.tsx', 'app/reports/[id]/page.tsx', 'app/team/page.tsx', 'app/billing/page.tsx', 'app/login/page.tsx', 'app/api/workflows/route.ts', 'lib/workflows.ts', 'lib/reports.ts', 'lib/credits.ts', 'lib/auth.ts'];
+  const views = ['shop/views.py', 'shop/models.py', 'orders/views.py', 'orders/models.py', 'orders/forms.py', 'accounts/views.py', 'accounts/forms.py', 'billing/views.py'];
+  for (const name of [...app, ...views]) await write(name, `export const page = "${name}";\n`);
+  const context = await businessSourceContext(root, { scope: '' }), names = context.files.map(file => file.path);
+  for (const name of [...app, ...views]) assert.ok(names.includes(name), name);
+  assert.ok(context.files.reduce((bytes, file) => bytes + Buffer.byteLength(file.source), 0) <= 180 * 1024);
+});
+
 test('a product route named like a tooling folder is sampled, while tooling, tests and retired plans stay out', async t => {
   const root = await mkdtemp(join(tmpdir(), 'discovery-aside-'));
   t.after(() => rm(root, { recursive: true, force: true }));
