@@ -38,6 +38,25 @@ test('every page of a layout without conventional folder names reaches the model
   assert.ok(context.files.reduce((bytes, file) => bytes + Buffer.byteLength(file.source), 0) <= 180 * 1024);
 });
 
+test('component and template pages are sampled, and a large file contributes its first whole lines', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'discovery-pages-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const write = async (name: string, content: string) => { await mkdir(join(root, dirname(name)), { recursive: true }); await writeFile(join(root, name), content); };
+  const pages = ['src/views/Orders.vue', 'src/components/OrderForm.vue', 'src/routes/orders/+page.svelte', 'src/pages/index.astro', 'app/views/orders/index.html.erb', 'views/orders.ejs', 'views/orders.hbs', 'templates/orders.html.twig', 'Pages/Orders.cshtml'];
+  for (const name of pages) await write(name, `<h1>${name}</h1>\n`);
+  // A single-file application over 64 KiB, each line holding characters wider than one byte.
+  const lines = Array.from({ length: 1500 }, (_, index) => `const order${index} = "Save Bestellung ${index} – €";`);
+  await write('src/App.jsx', `${lines.join('\n')}\n`);
+  const context = await businessSourceContext(root, { scope: '' }), names = context.files.map(file => file.path);
+  for (const name of [...pages, 'src/App.jsx']) assert.ok(names.includes(name), name);
+  const sampled = context.files.find(file => file.path === 'src/App.jsx')!.source.split('\n');
+  assert.equal(sampled[0], `1: ${lines[0]}`);
+  // Every sampled line, the last one read included, is a whole original line under its own number.
+  for (const line of sampled) { const [, number, text] = line.match(/^(\d+): (.*)$/)!; assert.equal(text, lines[Number(number) - 1], line); }
+  assert.ok(Number(sampled.at(-1)!.match(/^\d+/)![0]) > 1000, 'Lines near the end of the first 64 KiB are sampled.');
+  assert.ok(context.warnings.some(warning => /shortened/.test(warning)));
+});
+
 test('a product route named like a tooling folder is sampled, while tooling, tests and retired plans stay out', async t => {
   const root = await mkdtemp(join(tmpdir(), 'discovery-aside-'));
   t.after(() => rm(root, { recursive: true, force: true }));

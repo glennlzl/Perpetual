@@ -18,8 +18,9 @@ const SKIP_DIRS = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage'
 // name, such as app/agents/page.tsx. One at the repository root is skipped; below it, one is sampled only when it holds
 // a page itself, and never for its documentation.
 const ASIDE_DIRS = new Set(['test', 'tests', 'fixtures', 'archive', 'archives', 'archived', 'graveyard', 'deprecated', 'superpowers', 'agents', 'scripts', 'eval', 'evals']);
-const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.md', '.mdx']);
-const UI_FILE = /\.(?:jsx|tsx|html|htm)$/i;
+// Components and server templates render pages too.
+const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rb', '.java', '.cs', '.php', '.html', '.htm', '.vue', '.svelte', '.astro', '.erb', '.ejs', '.hbs', '.twig', '.cshtml', '.md', '.mdx']);
+const UI_FILE = /\.(?:jsx|tsx|html|htm|vue|svelte|astro|erb|ejs|hbs|twig|cshtml)$/i;
 const sampled = (name: string) => SOURCE_EXTENSIONS.has(path.extname(name).toLowerCase()) && !/(?:\.min\.|\.d\.ts$|\.test\.|\.spec\.)/.test(name);
 // Generic journey vocabulary shared by most products; nothing product-specific.
 const BILLING_PATH = /billing|payment|stripe|checkout|subscription|credit|wallet|refund/i;
@@ -128,15 +129,17 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       if (!resolved.startsWith(`${root}${path.sep}`) || resolved !== path.join(root, name)) continue;
       handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES || stat.size > MAX_BYTES - total) { limited = true; continue; }
-      const buffer = Buffer.alloc(Math.min(MAX_FILE_BYTES, MAX_BYTES - total) + 1);
+      // A file over its bound contributes its first 64 KiB, as the model sees at most part of one anyway.
+      if (!stat.isFile() || Math.min(stat.size, MAX_FILE_BYTES) > MAX_BYTES - total) { limited = true; continue; }
+      const room = Math.min(MAX_FILE_BYTES, MAX_BYTES - total), buffer = Buffer.alloc(room + 1);
       let size = 0;
       while (size < buffer.length) {
         const chunk = await handle.read(buffer, size, buffer.length - size, size);
         if (!chunk.bytesRead) break;
         size += chunk.bytesRead;
       }
-      if (size >= buffer.length) { limited = true; continue; }
+      // Cut at its last whole line, so no character is split and every line keeps its number.
+      if (size > room) { limited = true; size = buffer.lastIndexOf(0x0a, room - 1); if (size <= 0) continue; }
       total += size;
       const raw = buffer.subarray(0, size).toString('utf8');
       if (raw.includes('\0')) continue;
@@ -145,7 +148,7 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
     } catch { /* Unreadable and changing source files are omitted. */ }
     finally { await handle?.close(); }
   }
-  if (limited) warnings.push('Browser source discovery used a balanced sample bounded to 200 files, 1 MiB, eight directory levels and 5,000 entries; some files were omitted.');
+  if (limited) warnings.push('Browser source discovery used a balanced sample bounded to 200 files, 1 MiB, 64 KiB per file, eight directory levels and 5,000 entries; some files were omitted or shortened.');
   if (!files.length) warnings.push('No supported source files were available for discovery.');
   return { files, warnings };
 }
