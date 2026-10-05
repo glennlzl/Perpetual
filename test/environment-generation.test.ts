@@ -278,6 +278,17 @@ test('an invalid config is the next attempt’s feedback, which starts from what
   assert.match(logs, /Writing twin config \(attempt 3 of 4\): Failed at valid\.\n# Attempt 3 of 4: [\s\S]*auth\.users must be a list\./);
 });
 
+test('deleting a generated twin removes its generation log with the rest of its evidence', async t => {
+  const f = await fixture(t, { script: [{ raw: '{' }, { write: good }] });
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  assert.match((await f.saved()).environments[0].authoringLogs, /^Writing twin config \(attempt 1 of 4\): Failed at valid\./);
+  await f.manager.destroy(f.context, ready.id);
+  assert.equal((await f.manager.awaitIdle(ready.id)).status, 'destroyed');
+  const [saved] = (await f.saved()).environments;
+  assert.deepEqual(['authoringLogs', 'logs', 'logsAt'].filter(key => key in saved), []);
+});
+
 test('a failed preparation is feedback with its step, error and redacted log tail, and the twin is torn down first', async t => {
   const f = await fixture(t, { script: [{ write: good }, { write: good }] });
   f.twinState.fail = prepared => prepared === 1 ? `Web: container web exited (1) with ${SECRET}` : null;

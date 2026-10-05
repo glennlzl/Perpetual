@@ -471,7 +471,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           Object.assign(environment, { status: 'destroyed', step: 'Deleted', services: [], apps: [], destroyedAt: now(), updatedAt: now(), error: null });
           delete environment.accounts;
           await removeSnapshot(environment);
-          delete environment.logs; delete environment.logsAt;
+          // A successful deletion removes the evidence, a generated twin's log of how its config was written included.
+          delete environment.logs; delete environment.logsAt; delete environment.authoringLogs;
           delete environment.plan;
         } catch (error) { Object.assign(environment, { status: 'cleanup_failed', step: 'Deletion failed', updatedAt: now(), error: failure(error) }); }
         await persist();
