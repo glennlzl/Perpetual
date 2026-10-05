@@ -9,7 +9,7 @@ const user = { id: 'owner', email: 'owner@example.test' };
 const unexpected = async (): Promise<never> => { throw new Error('Unexpected account capability'); };
 const context = (fetch: NonNullable<Context['fetch']>, overrides: Partial<Context> = {}): Context => ({ options: { users: [user] },
   outputs: { serviceRoleKey: 'private-service-key', anonKey: '', url: '', jwtSecret: '', dbUrl: '' }, inputs: {}, host: 'host.docker.internal', project: 'perpetual-beta', dir: '/fixture/service', shared: '/fixture/shared', source: '/fixture/source',
-  port: () => 43100, url: () => 'http://host.docker.internal:43100/auth/v1/token', app: () => { throw new Error('Unexpected app lookup'); }, sharedPort: unexpected, run: unexpected, exec: unexpected, fetch, ...overrides });
+  port: () => 43100, url: () => 'http://host.docker.internal:43100/auth/v1/token', apps: [], app: () => { throw new Error('Unexpected app lookup'); }, sharedPort: unexpected, run: unexpected, exec: unexpected, fetch, ...overrides });
 const failure = async (ctx: Context) => { try { await supabase.accounts(ctx); assert.fail('The account request must fail'); } catch (error) { return (error as Error).message; } };
 const diagnostic = (message: string, kind: RegExp, phase: string) => {
   assert.match(message, /account [a-f0-9]{12}/);

@@ -41,7 +41,7 @@ async function context(options: { directory?: string; functions?: Json }): Promi
     root, calls, project: 'perpetual-beta1', dir: join(root, 'twin'), shared: join(root, 'shared'), source: join(root, 'source'), options, inputs: {},
     outputs: { url: '', anonKey: '', serviceRoleKey: '', jwtSecret: '', dbUrl: '' },
     host: HOST, port, url: (name: string, path = '') => `http://${HOST}:${port(name)}${path}`,
-    sharedPort: async () => { throw new Error('Unexpected shared port'); }, app: () => { throw new Error('Unexpected app'); },
+    sharedPort: async () => { throw new Error('Unexpected shared port'); }, apps: [], app: () => { throw new Error('Unexpected app'); },
     run: async () => ({ stdout: '' }),
     exec: async (command: string, args: string[]) => { calls.push(args); return { stdout: args.includes('status') ? STATUS : '' }; },
   };

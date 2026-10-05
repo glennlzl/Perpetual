@@ -18,7 +18,7 @@ const context = ({ options = {}, inputs = {}, outputs = {}, dir = '/twins/beta' 
   const ctx: ServiceContext<object, object> = {
     options, inputs, outputs, dir, host: HOST, port, project: 'perpetual-beta', shared: '/twins/shared', source: '/twins/source',
     url: (name, path = '') => `http://${HOST}:${port(name)}${path}`,
-    app: id => ({ url: `http://${HOST}:${port(`app:${id}`)}`, port: port(`app:${id}`) }),
+    apps: [], app: id => ({ url: `http://${HOST}:${port(`app:${id}`)}`, publicUrl: `http://127.0.0.1:${port(`app:${id}`)}`, port: port(`app:${id}`) }),
     run: async () => { throw new Error('No service in this file runs a CLI image'); },
     exec: async () => { throw new Error('No service in this file runs a host command'); },
     sharedPort: async () => { throw new Error('No service in this file shares an instance'); },

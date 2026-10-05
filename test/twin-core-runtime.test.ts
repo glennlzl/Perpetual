@@ -309,6 +309,22 @@ test('Twins prepared at the same time get separate host port blocks', async t =>
   assert.equal(new Set(results.map(result => result.apps[0].url)).size, 3);
 });
 
+test('A service context names the twin\'s apps in config order, with each app\'s container and browser address', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  const seen: unknown[] = [];
+  const probe = { id: 'probe', title: 'Probe', fidelity: 'actual', env: () => ({}),
+    setup: async ctx => { seen.push(ctx.apps, ctx.apps.map(id => ctx.app(id)), ctx.options); return {}; } } satisfies TwinService;
+  const runtime = createTwinRuntime({ exec: async () => ({ stdout: '' }), services: { probe }, owner: 'o', isFree: async () => true });
+  const apps = { web: { start: 'node web.js', port: 3000 }, api: { start: 'node api.js', port: 8080 } };
+  await runtime.prepare({ dataDir, id: 'beta', source, config: { services: { probe: { site: '{{apps.web.publicUrl}}/welcome' } }, apps } });
+  assert.deepEqual(seen, [['web', 'api'], [
+    { url: `http://host.docker.internal:${PORT_BASE}`, publicUrl: `http://127.0.0.1:${PORT_BASE}`, port: PORT_BASE },
+    { url: `http://host.docker.internal:${PORT_BASE + 1}`, publicUrl: `http://127.0.0.1:${PORT_BASE + 1}`, port: PORT_BASE + 1 },
+  ], { site: `http://127.0.0.1:${PORT_BASE}/welcome` }]);
+});
+
 test('A machine-wide instance keeps one host port that no twin block takes, even after its first twin is gone', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
   t.after(() => rm(dataDir, { recursive: true, force: true }));

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseToml } from 'smol-toml';
 import supabase, { CLI_VERSION as SUPABASE_VERSION, cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import { APP_IMAGE } from '../src/twin/compose.ts';
 import { createTwinRuntime } from '../src/twin/runtime.ts';
@@ -32,6 +33,7 @@ const context = async <C extends ServiceContext<object, object>>({ respond = () 
   return {
     project: 'perpetual-beta1', dir: join(root, 'twin'), source: join(root, 'source'), shared: join(root, 'shared', 'trigger-dev'),
     options: {}, inputs: {}, outputs: {}, host: HOST, port, url: (name: string, path = '') => `http://${HOST}:${port(name)}${path}`,
+    apps: [] as string[], app: (id: string) => ({ url: `http://${HOST}:${port(`app:${id}`)}`, publicUrl: `http://127.0.0.1:${port(`app:${id}`)}`, port: port(`app:${id}`) }),
     run: (image: string, args: string[], options?: Call['options']) => call({ image, args, options }), exec: (command: string, args: string[], options?: Call['options']) => call({ command, args, options }),
     calls, ...values,
   } as Fake<C>;
@@ -158,6 +160,62 @@ test('Supabase copies the project with twin ports, id and a host.docker.internal
   await assert.rejects(stat(join(target, '.temp')));
 });
 
+// A project whose Auth settings are the CLI template's development addresses, one list spread over several lines.
+const AUTH_CONFIG = `${CONFIG}
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+  "http://localhost:3000/auth/callback",
+]
+jwt_expiry = 3600
+`;
+
+test('Supabase Auth sends a browser to the twin\'s only app, or to the Site URL and redirect URLs its options name', async () => {
+  const prepared = async (apps: string[], auth?: Json) => {
+    const ctx = await context<SupabaseContext>({ apps, respond: ({ args }) => args.includes('status') ? STATUS : '' });
+    await supabaseSource(ctx);
+    await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), AUTH_CONFIG);
+    if (auth !== undefined) ctx.options = { ...ctx.options, auth };
+    await supabase.setup(ctx);
+    const settings = parseToml(await readFile(join(ctx.dir, 'supabase/supabase/config.toml'), 'utf8')).auth as Record<string, unknown>;
+    return { ctx, settings };
+  };
+  // The twin's only app, at its browser address, replaces the development address; the allowed redirects stay the project's.
+  const single = await prepared(['web']);
+  assert.equal(single.settings.site_url, single.ctx.app('web').publicUrl);
+  assert.match(String(single.settings.site_url), /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.deepEqual(single.settings.additional_redirect_urls, ['https://127.0.0.1:3000', 'http://localhost:3000/auth/callback']);
+  assert.deepEqual([single.settings.jwt_expiry, single.settings.enabled], [3600, true]);
+  // With several apps no default is unambiguous, so the project's Site URL stays.
+  assert.equal((await prepared(['web', 'api'])).settings.site_url, 'http://127.0.0.1:3000');
+  // Named addresses, as placeholders resolve them, replace both, and the list spread over several lines is replaced whole.
+  const redirectUrls = ['http://127.0.0.1:43180/auth/callback', 'http://127.0.0.1:43180/**', 'acme://callback'];
+  const named = await prepared(['web', 'api'], { siteUrl: 'http://127.0.0.1:43180', redirectUrls });
+  assert.deepEqual([named.settings.site_url, named.settings.additional_redirect_urls, named.settings.jwt_expiry], ['http://127.0.0.1:43180', redirectUrls, 3600]);
+  assert.deepEqual((await prepared(['web'], { redirectUrls: [] })).settings.additional_redirect_urls, []);
+  // A Site URL that is not a web address stops setup before the CLI starts the stack.
+  const ctx = await context<SupabaseContext>({ apps: ['web'], respond: ({ args }) => args.includes('status') ? STATUS : '' });
+  await supabaseSource(ctx);
+  ctx.options = { ...ctx.options, auth: { siteUrl: 'acme://welcome' } };
+  await assert.rejects(supabase.setup(ctx), { message: 'supabase.auth.siteUrl must be an http or https URL.' });
+  assert.ok(!ctx.calls.some(call => call.args.includes('start')));
+});
+
+test('Supabase auth options are checked before setup, with placeholders as text', () => {
+  const refused: [Json, RegExp][] = [
+    ['http://127.0.0.1:3000', /supabase\.auth must be an object with siteUrl, redirectUrls\./],
+    [{ site: 'http://127.0.0.1:3000' }, /supabase\.auth has unsupported field site; use siteUrl, redirectUrls\./],
+    [{ siteUrl: 'http://127.0.0.1:3000 /x' }, /supabase\.auth\.siteUrl must be a URL/],
+    [{ siteUrl: 3000 }, /supabase\.auth\.siteUrl must be a URL/],
+    [{ redirectUrls: 'http://127.0.0.1:3000' }, /supabase\.auth\.redirectUrls must list URLs/],
+    [{ redirectUrls: ['http://127.0.0.1:3000', 3000] }, /supabase\.auth\.redirectUrls must list URLs/],
+  ];
+  for (const [auth, error] of refused) assert.match(serviceOptionErrors({ services: { supabase: { auth } } }).join('\n'), error, JSON.stringify(auth));
+  assert.deepEqual(serviceOptionErrors({ services: { supabase: { auth: { siteUrl: '{{apps.web.publicUrl}}', redirectUrls: ['{{apps.web.publicUrl}}/auth/callback'] } } } }), []);
+});
+
 test('Supabase provides its standard variables from supabase status', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
@@ -243,6 +301,9 @@ test('TOML rewrite adds missing keys and sections and uses [local_smtp] for curr
   assert.equal(setToml('[api]\nenabled = true\n\n[db]\nport = 2\n', 'api', 'port', 3), '[api]\nenabled = true\nport = 3\n\n[db]\nport = 2\n');
   assert.equal(setToml('[api] # gateway\nport = 1\n', 'api', 'port', 5), '[api] # gateway\nport = 5\n');
   assert.equal(setToml('[db]\nport = 2\n', 'db.pooler', 'port', 4), '[db]\nport = 2\n\n[db.pooler]\nport = 4\n');
+  // A value spread over several lines, an array or a multi-line string, is replaced whole.
+  assert.equal(setToml('[auth]\nurls = [\n  "a", # first\n  "b",\n]\nport = 1\n', 'auth', 'urls', ['c']), '[auth]\nurls = ["c"]\nport = 1\n');
+  assert.equal(setToml('[auth]\nsite = """\nhttp://a\n"""\nport = 1\n', 'auth', 'site', 'http://b'), '[auth]\nsite = "http://b"\nport = 1\n');
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), '[api]\nport = 54321\n');

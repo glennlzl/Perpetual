@@ -45,7 +45,7 @@ export default {
 - `ctx` has four groups of values:
   - `options`: this service's section of the twin config;
   - `inputs` and `outputs`;
-  - addressing: `host`, `port(name)`, `url(name, path)`, `app(id).url`, and `sharedPort(name, current?)`, the port of a service's machine-wide instance, reserved once in `<dataDir>/twin-services/ports.json` outside every twin's port block;
+  - addressing: `host`, `port(name)`, `url(name, path)`, `apps` (the twin's app ids), `app(id).url` and `app(id).publicUrl`, and `sharedPort(name, current?)`, the port of a service's machine-wide instance, reserved once in `<dataDir>/twin-services/ports.json` outside every twin's port block;
   - `run(image, args)` for a pinned CLI image, and `exec(file, args, { cwd, env })` for a pinned CLI on the host that drives Docker itself, with `env` set over the controller's environment, which it otherwise inherits. The Docker socket is never mounted into a container.
 - Inputs are test credentials only. They are validated by pattern, stored locally (mode 0600), never sent to the client and reused across twins. A service with a missing input is **blocked**: its variables are left out, and nothing substitutes for it. A journey on the twin keeps its own verdict, since nothing tells whether the missing service caused it.
 - A service may declare `provision: { inputs: [{ name, label, default? }], run }` to create its inputs on the user's explicit action. `run(ctx)` gets `{ inputs, docker(args, { timeoutMs }), tempDir }`, where `tempDir` is a private, empty 0700 directory removed afterwards, and returns `{ values, details: { expiresAt, claimUrl?, account? } }`. `default: 'git-email'` pre-fills an input from `git config --global user.email`.
@@ -104,6 +104,8 @@ services:
   supabase: { functions: { env: { STRIPE_WEBHOOK_SECRET: "{{stripe.STRIPE_WEBHOOK_SECRET}}" }, noVerifyJwt: [stripe-webhook] } }
   stripe:   { webhook: "{{services.supabase.url.api}}/functions/v1/stripe-webhook" }
 ```
+
+- Supabase Auth: `auth: { siteUrl?, redirectUrls? }`. Auth's Site URL, where a browser goes when a sign-in or email link names no other address, is the `publicUrl` of the twin's only app unless `siteUrl` names another; with several apps and no `siteUrl` it stays the project's. `redirectUrls` replaces the project's `additional_redirect_urls`.
 
 - Fixtures run after services are ready and before apps start.
 - Test accounts come from a service's `accounts(ctx)` hook, which runs once services are ready and before the install and fixtures. Supabase creates its `users: [{ id, email, emailConfirmed?, metadata? }]` through its local Auth admin API.

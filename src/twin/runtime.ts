@@ -305,7 +305,9 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       port, url: (name, path = '') => hostUrl(port(name), path),
       // A port for this service's machine-wide instance, the same for every twin and outside all their blocks.
       sharedPort: (name, current) => reserveSharedPort(twin.root, portKey(service, name), current, { start: portBase, isFree }),
-      app: id => { const appPort = ports[portKey(APPS, id)] ?? fail(`No app "${id}" is configured.`); return { url: hostUrl(appPort), port: appPort }; },
+      // Every app's port is allocated before any setup, so its key names each app.
+      apps: Object.keys(ports).flatMap(key => key.startsWith(`${APPS}.`) ? [key.slice(APPS.length + 1)] : []),
+      app: id => { const appPort = ports[portKey(APPS, id)] ?? fail(`No app "${id}" is configured.`); return { url: hostUrl(appPort), publicUrl: addressUrl({ app: id, public: true }, appPort), port: appPort }; },
       run: (image, args, { env, mounts } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`),
         volumes: mounts === 'service-only' ? [`${dir}:${dir}:ro`] : [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.

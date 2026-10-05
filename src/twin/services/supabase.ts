@@ -26,8 +26,8 @@ const CLI_MISSING = `Supabase CLI ${CLI_VERSION} is not installed: run npm run s
 /** The launcher would run whatever binary this names in place of the locked one, so it is always cleared. */
 const BINARY_OVERRIDE = 'SUPABASE_CLI_BINARY_OVERRIDE';
 const MOUNT_CHECK_IMAGE = 'node:24-bookworm-slim';
-/** directory: the repository's supabase directory; functions and users are checked where they are used. */
-type Options = { directory?: Json; functions?: Json; users?: Json };
+/** directory: the repository's supabase directory; functions, users and auth are checked where they are used. */
+type Options = { directory?: Json; functions?: Json; users?: Json; auth?: Json };
 type Outputs = { url: string; anonKey: string; serviceRoleKey: string; jwtSecret: string; dbUrl: string };
 type Context = ServiceContext<Options, Outputs>;
 const STATE = new Set(['.branches', '.temp']); // CLI-local state, never source
@@ -99,28 +99,64 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseEnv = (text: string): Record<string, string> => Object.fromEntries(text.split('\n').map(line => line.trim().match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
   .filter(match => match !== null).map(([, key, value]) => [key, value.startsWith('"') ? String(JSON.parse(value)) : value]));
 
-// Sets `key = value` in `[section]` ('' is the top level), adding the key or the section when absent.
-export function setToml(text: string, section: string, key: string, value: string | number | boolean) {
+/** How many lines the value of the key on line `at` spans: the fewest that parse, as an array or a multi-line string continues. */
+function valueLines(lines: string[], at: number) {
+  for (let end = at + 1; end <= lines.length; end += 1) {
+    try { parseToml(lines.slice(at, end).join('\n')); return end - at; } catch { /* the value goes on */ }
+  }
+  return 1;
+}
+
+// Sets `key = value` in `[section]` ('' is the top level), adding the key or the section when absent. A value the file
+// spreads over several lines is replaced whole.
+export function setToml(text: string, section: string, key: string, value: string | number | boolean | string[]) {
   const lines = text.split('\n'), line = `${key} = ${JSON.stringify(value)}`;
   const start = section ? lines.findIndex(l => new RegExp(`^\\s*\\[\\s*${escape(section)}\\s*\\]\\s*(#.*)?$`).test(l)) : -1;
   if (section && start < 0) return `${text.trimEnd()}\n\n[${section}]\n${line}\n`;
   const end = lines.findIndex((l, i) => i > start && /^\s*\[/.test(l));
   const at = lines.findIndex((l, i) => i > start && (end < 0 || i < end) && new RegExp(`^\\s*${escape(key)}\\s*=`).test(l));
-  if (at >= 0) { lines[at] = line; return lines.join('\n'); }
+  if (at >= 0) { lines.splice(at, valueLines(lines, at), line); return lines.join('\n'); }
   let last = end < 0 ? lines.length : end; // append after the section's last non-blank line
   while (last > start + 1 && !lines[last - 1].trim()) last -= 1;
   lines.splice(last, 0, line);
   return lines.join('\n');
 }
 
+// Auth's Site URL and the other URLs it may redirect to: options.auth { siteUrl?, redirectUrls? }, placeholders allowed.
+const AUTH_FIELDS = ['siteUrl', 'redirectUrls'];
+const URL_TEXT = /^[^\s\x00-\x1f\x7f]+$/;
+function authOptions(input: unknown) {
+  const where = 'supabase.auth';
+  if (input == null) return {};
+  if (!object(input)) throw new Error(`${where} must be an object with ${AUTH_FIELDS.join(', ')}.`);
+  const extra = Object.keys(input).filter(key => !AUTH_FIELDS.includes(key));
+  if (extra.length) throw new Error(`${where} has unsupported field ${extra.join(', ')}; use ${AUTH_FIELDS.join(', ')}.`);
+  if (input.siteUrl != null && (typeof input.siteUrl !== 'string' || !URL_TEXT.test(input.siteUrl))) throw new Error(`${where}.siteUrl must be a URL, such as {{apps.web.publicUrl}}.`);
+  const urls = input.redirectUrls;
+  // Auth also takes patterns and an app's own scheme here, such as http://127.0.0.1:3000/** or acme://callback.
+  if (urls != null && (!Array.isArray(urls) || urls.some(url => typeof url !== 'string' || !URL_TEXT.test(url)))) throw new Error(`${where}.redirectUrls must list URLs, such as {{apps.web.publicUrl}}/auth/callback.`);
+  return { ...(typeof input.siteUrl === 'string' ? { siteUrl: input.siteUrl } : {}), ...(urls == null ? {} : { redirectUrls: urls as string[] }) };
+}
+/** The Site URL a browser follows when a link names no other address: the option, else the twin's app when it has one. */
+function siteUrl(ctx: Pick<Context, 'options' | 'apps' | 'app'>) {
+  const { siteUrl: site = ctx.apps.length === 1 ? ctx.app(ctx.apps[0]).publicUrl : undefined } = authOptions(ctx.options.auth);
+  if (site !== undefined && !/^https?:\/\/[^/?#\s]+/.test(site)) throw new Error('supabase.auth.siteUrl must be an http or https URL.');
+  return site;
+}
+
 // Gives the copied project this twin's id, allocated ports and a host.docker.internal token issuer, which the
 // apps verify tokens against. api.external_url keeps the CLI's default: the CLI health-checks the stack from the
-// host through it, and host.docker.internal does not resolve on the host.
-export function twinConfig(text: string, ctx: Pick<Context, 'port' | 'url' | 'project'>) {
+// host through it, and host.docker.internal does not resolve on the host. Auth sends a browser to its Site URL when a
+// link names no other address, as a confirmation email does, so the twin's app replaces the repository's development
+// address there; auth.redirectUrls replaces its other allowed addresses.
+export function twinConfig(text: string, ctx: Pick<Context, 'port' | 'url' | 'project' | 'options' | 'apps' | 'app'>) {
   const mail = /^\s*\[\s*inbucket\s*\]/m.test(text) ? 'inbucket' : 'local_smtp'; // [inbucket] is the older name
+  const site = siteUrl(ctx), { redirectUrls } = authOptions(ctx.options.auth);
+  let toml = setToml(setToml(text, '', 'project_id', projectId(ctx)), 'auth', 'jwt_issuer', ctx.url('api', '/auth/v1'));
+  if (site !== undefined) toml = setToml(toml, 'auth', 'site_url', site);
+  if (redirectUrls) toml = setToml(toml, 'auth', 'additional_redirect_urls', redirectUrls);
   return [...PORTS, ...MAIL_PORTS.map(([key, name]) => [mail, key, name])]
-    .reduce((toml, [section, key, name]) => setToml(toml, section, key, ctx.port(name)),
-      setToml(setToml(text, '', 'project_id', projectId(ctx)), 'auth', 'jwt_issuer', ctx.url('api', '/auth/v1')));
+    .reduce((current, [section, key, name]) => setToml(current, section, key, ctx.port(name)), toml);
 }
 
 // Edge functions: options.functions { directory?, env?, noVerifyJwt? }. `supabase start` serves the copied project's
@@ -269,6 +305,7 @@ export default {
       directory: `The repository's Supabase project directory, holding config.toml, migrations and seed.sql; default ${DIRECTORY}.`,
       functions: '{ directory?, env?, noVerifyJwt? }: serves the project\'s edge functions. directory: where they are when not in <project>/functions; env: their variables, placeholders allowed, no SUPABASE_ names; noVerifyJwt: functions that take requests without a JWT, such as a vendor\'s webhook.',
       users: '[{ id, email, emailConfirmed?, metadata? }]: test accounts, created through Auth with a generated password; emailConfirmed defaults to true, metadata is the user metadata.',
+      auth: '{ siteUrl?, redirectUrls? }: Auth\'s Site URL, where a browser goes when a sign-in or email link names no other address, default the {{apps.<id>.publicUrl}} of the twin\'s only app, else the project\'s config.toml value; redirectUrls: the other URLs Auth may redirect to, such as {{apps.web.publicUrl}}/auth/callback, in place of the project\'s additional_redirect_urls.',
     },
     provides: ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET', 'DATABASE_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY'],
     ports: [...PORTS.map(([, , name]) => name), ...MAIL_PORTS.map(([, name]) => name)],
@@ -278,6 +315,7 @@ export default {
     relative(options.directory ?? DIRECTORY, 'supabase directory');
     users(options);
     if (options.functions != null) functionOptions(options.functions);
+    authOptions(options.auth);
   },
   setup: async ctx => {
     const target = join(workdir(ctx), 'supabase'), config = join(target, 'config.toml');

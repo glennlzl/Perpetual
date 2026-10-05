@@ -54,7 +54,10 @@ export interface ServiceContext<Options extends ServiceOptions<Options> = JsonOb
   port(name: string): number;
   url(name: string, path?: string): string;
   sharedPort(name: string, current?: unknown): Promise<number>;
-  app(id: string): { url: string; port: number };
+  /** The twin's app ids, in config order. */
+  apps: string[];
+  /** An app's container address, its host browser address and its host port. */
+  app(id: string): { url: string; publicUrl: string; port: number };
   /** service-only mounts just this service's private directory read-only, without the source snapshot. */
   run(image: string, args: string[], options?: { env?: EnvInput; mounts?: 'service-only' }): Promise<CommandOutput>;
   /** env sets variables over the controller's environment, which the command otherwise inherits. */
