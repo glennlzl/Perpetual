@@ -8,8 +8,9 @@ const NAMES = 'token|secret|password|api[-_]?key|access[-_]?(?:key|token)|author
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
 const PEM = /-----BEGIN (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----[\s\S]*?(?:-----END (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----|(?![\s\S]))/g;
 const QUOTED_KEY = new RegExp(`(["'])([\\w-]*(?:${NAMES})[\\w-]*)\\1(\\s*:\\s*)(["'])([^\\r\\n]*?)\\4`, 'gi');
-const NAMED_VALUE = new RegExp(`(\\b[\\w-]*(?:${NAMES})[\\w-]*\\s*[=:]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'[^']*'|[^\\s,;]+)`, 'gi');
-const FLAG_VALUE = new RegExp(`(--?[\\w-]*(?:${NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
+// A name starts where a run of name characters starts, so a long run is read once, not once per hyphen in it.
+const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${NAMES})[\\w-]*\\s*[=:]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'[^']*'|[^\\s,;]+)`, 'gi');
+const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
 const QUERY_VALUE = new RegExp(`([?&](?:${NAMES})=)[^&\\s"'<>]+`, 'gi');
 const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|AKIA[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
@@ -39,7 +40,7 @@ const decodedUri = (text: string) => {
   return text;
 };
 const NOT_LITERAL = '(?![$<{%/]|\\w+://)';
-const QUOTED_LITERAL = new RegExp(`\\b${CREDENTIAL_NAME}["']?\\s*[=:]\\s*(["'])${NOT_LITERAL}[^"'\\s]{8,}\\1`, 'i');
+const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*[=:]\\s*(["'])${NOT_LITERAL}[^"'\\s]{8,}\\1`, 'i');
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));

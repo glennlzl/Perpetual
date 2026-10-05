@@ -28,6 +28,17 @@ test('redact knows every secret shape once: named values, tokens, key blocks, us
   assert.equal(redact(undefined), '');
 });
 
+test('a long run of name characters is read once, so a log of hyphenated or base64url text never stalls the controller', () => {
+  for (const run of ['a-'.repeat(30000), '-'.repeat(60000), 'Zm9v_-YmFy'.repeat(8000), Array.from({ length: 3000 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`).join('_')]) {
+    const started = performance.now();
+    assert.equal(redact(run), run);
+    assert.equal(hasCredential(run), false);
+    assert.equal(hasCredential(run, { code: true }), false);
+    assert.ok(performance.now() - started < 2000, `${run.slice(0, 20)}… took ${Math.round(performance.now() - started)} ms`);
+  }
+  assert.equal(redact(`${'a-'.repeat(30000)} token=abc`), `${'a-'.repeat(30000)} token=${REDACTED}`, 'A name after the run is still found.');
+});
+
 test('a private key block is blanked line by line, so line numbers hold', () => {
   const block = 'before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nAAAA\n-----END RSA PRIVATE KEY-----\nafter';
   assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
