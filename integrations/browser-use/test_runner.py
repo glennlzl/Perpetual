@@ -271,6 +271,46 @@ class RuntimeContractTests(unittest.TestCase):
         asyncio.run(owned.close())
         self.assertEqual(events, [{"type": "error", "error": "Cleanup incomplete: browser agent connection", "cleanupIncomplete": True}])
 
+    def test_a_stop_during_cleanup_still_runs_and_reports_every_step(self):
+        import asyncio
+        import os
+        import tempfile
+        calls, events = [], []
+
+        class SlowBrowser:
+            async def stop(self):
+                calls.append("browser agent connection")
+                await asyncio.sleep(30)
+
+        class Recorded:
+            def __init__(self, name):
+                self.name = name
+
+            async def close(self):
+                calls.append(self.name)
+
+            async def stop(self):
+                calls.append(self.name)
+
+        async def stopped_during_cleanup():
+            owned = self.runner.OwnedBrowser({}, emit_event=events.append)
+            owned.browser, owned.context, owned.playwright = SlowBrowser(), Recorded("owned Chromium"), Recorded("browser driver")
+            owned.profile = tempfile.TemporaryDirectory(prefix="perpetual-browser-")
+            cleanup = asyncio.create_task(owned.close())
+            for _ in range(1000):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            cleanup.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cleanup
+            return owned.profile.name
+
+        profile = asyncio.run(stopped_during_cleanup())
+        self.assertEqual(calls, ["browser agent connection", "owned Chromium", "browser driver"])
+        self.assertFalse(os.path.exists(profile))
+        self.assertEqual(events, [{"type": "error", "error": "Cleanup incomplete: browser agent connection", "cleanupIncomplete": True}])
+
     def test_discovery_schema_rejects_invalid_evidence_and_oversized_candidates(self):
         schema = self.runner.discovery_schema()
         valid = {"cases": [{"name": "Open workspace", "goal": "Inspect workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [{"type": "text-visible", "value": "Workspace"}], "evidence": [{"path": "frontend/page.tsx", "line": 2}]}], "summary": "Workspace observed"}

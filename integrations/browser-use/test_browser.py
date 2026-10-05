@@ -107,6 +107,30 @@ class ProtocolModelHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class DeadlineModelHandler(BaseHTTPRequestHandler):
+    """Deterministic fixture: with explore set, waits while other actions are offered; otherwise reports."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.requests.append(request)
+        if self.server.explore and '"wait"' in json.dumps(request["tools"]):
+            # Browser Use waits one second less than asked.
+            action = {"wait": {"seconds": 2}}
+        else:
+            action = {"done": {"data": {"cases": [{"name": "Open workspace", "goal": "Inspect the workspace", "steps": [{"id": "enter", "title": "Enter the workspace"}, {"id": "result", "title": "Save and reopen the workspace"}], "preconditions": [], "expectedOutcomes": ["Workspace is visible"], "assertions": [], "evidence": []}], "summary": "Fixture workspace observed"}}}
+        content = {"evaluation_previous_goal": "Read fixture page", "memory": "Use observed page state", "next_goal": "Complete fixture goal", "action": [action]}
+        response = {"id": "fixture-completion", "object": "chat.completion", "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "decision-1", "type": "function", "function": {"name": "browser_decision", "arguments": json.dumps(content)}}]}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        body = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class SocketModelHandler(BaseHTTPRequestHandler):
     """Deterministic fixture: once the page's subscription answered, press its button, then report."""
 
@@ -329,6 +353,42 @@ class BrowserContracts(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(runner.InputError) as caught:
                 await runner.discover(payload)
         self.assertEqual(runner.safe_error(caught.exception), "The agent did not produce a valid discovery result.")
+
+    def deadline_model(self, explore):
+        model = ThreadingHTTPServer(("127.0.0.1", 0), DeadlineModelHandler)
+        model.requests, model.explore = [], explore
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        self.addCleanup(model.server_close)
+        self.addCleanup(model.shutdown)
+        return {"PERPETUAL_MODEL_API_KEY": "fixture-not-a-real-key", "PERPETUAL_MODEL": "fixture", "PERPETUAL_MODEL_BASE_URL": f"http://127.0.0.1:{model.server_port}/v1"}, model
+
+    async def test_exploration_ends_with_its_report_before_the_time_limit(self):
+        environment, model = self.deadline_model(explore=True)
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        # The agent would keep exploring for all 100 steps; the report must still arrive within 12 seconds.
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 100, "timeoutSeconds": 12})
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", [].append):
+            discovered = await asyncio.wait_for(runner.discover(payload), 30)
+        self.assertEqual(discovered["type"], "discovery")
+        self.assertEqual(discovered["cases"][0]["name"], "Open workspace")
+        self.assertTrue(discovered["diagnostics"]["forcedFinalization"])
+        self.assertGreater(len(model.requests), 2)
+        self.assertNotIn('"wait"', json.dumps(model.requests[-1]["tools"]))
+
+    async def test_a_finished_report_survives_a_time_limit_that_expires_during_cleanup(self):
+        environment, _ = self.deadline_model(explore=False)
+        url = f"http://127.0.0.1:{self.server.server_port}"
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": url, "allowedOrigins": [url], "maxSteps": 4, "timeoutSeconds": 8})
+        close, started = runner.OwnedBrowser.close, asyncio.get_running_loop().time()
+
+        async def slow_close(owned):
+            # Cleanup that lasts past the time limit, as a slow browser disconnect can.
+            await asyncio.sleep(max(0, started + 9 - asyncio.get_running_loop().time()))
+            await close(owned)
+        events = []
+        with patch.dict("os.environ", environment), patch.object(runner, "emit", events.append), patch.object(runner.OwnedBrowser, "close", slow_close):
+            await asyncio.wait_for(runner.execute(payload), 30)
+        self.assertEqual([event["type"] for event in events if event["type"] in {"discovery", "error"}], ["discovery"])
 
     async def test_tools_have_no_files_shell_or_evaluate(self):
         tools = runner.safe_tools(runner.discovery_schema())

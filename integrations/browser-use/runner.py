@@ -39,6 +39,9 @@ SAFE_ACTIONS = {"navigate", "click", "input", "scroll", "go_back", "wait", "swit
 TWIN_HOST = "host.docker.internal"
 CHROMIUM_ARGS = ("--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--disable-extensions", f"--host-resolver-rules=MAP {TWIN_HOST} 127.0.0.1")
 VIEWPORT = {"width": 1280, "height": 800}
+# Exploration stops this long before discovery's time limit: one step in progress and the final report each take
+# up to about a 60-second model call.
+REPORT_SECONDS = 150
 # JavaScript's \s, so a source line counts as supplied exactly when src/business/browser-cases.ts counts it.
 JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 SUPPLIED_LINE = re.compile(f"([0-9]+):[{JS_SPACE}]*[^{JS_SPACE}]")
@@ -594,26 +597,32 @@ class OwnedBrowser:
         return outcome
 
     async def close(self):
+        # A stop that arrives during cleanup interrupts only the current step: every later step still runs and is
+        # reported, and the cancellation continues once they have.
+        cancelled = False
         if self.stream_task:
             self.stream_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self.stream_task
+            try:
+                await asyncio.wait({self.stream_task})
+            except asyncio.CancelledError:
+                cancelled = True
         cleanup_errors = []
+
+        async def step(name, operation):
+            nonlocal cancelled
+            try:
+                await asyncio.wait_for(operation(), 10)
+            except asyncio.CancelledError:
+                cancelled = True
+                cleanup_errors.append(name)
+            except Exception:
+                cleanup_errors.append(name)
         if self.browser:
-            try:
-                await asyncio.wait_for(self.browser.stop(), 10)
-            except Exception:
-                cleanup_errors.append("browser agent connection")
+            await step("browser agent connection", self.browser.stop)
         if self.context:
-            try:
-                await asyncio.wait_for(self.context.close(), 10)
-            except Exception:
-                cleanup_errors.append("owned Chromium")
+            await step("owned Chromium", self.context.close)
         if self.playwright:
-            try:
-                await asyncio.wait_for(self.playwright.stop(), 10)
-            except Exception:
-                cleanup_errors.append("browser driver")
+            await step("browser driver", self.playwright.stop)
         if self.profile:
             try:
                 self.profile.cleanup()
@@ -621,6 +630,8 @@ class OwnedBrowser:
                 cleanup_errors.append("temporary browser profile")
         if cleanup_errors:
             self.emit_event({"type": "error", "error": "Cleanup incomplete: " + ", ".join(cleanup_errors), "cleanupIncomplete": True})
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def __aexit__(self, *_):
         await self.close()
@@ -790,7 +801,7 @@ def safe_tools(output_model, allowed_origins=(), credentials=None, credential_or
     return tools
 
 
-def create_agent(payload, owned, task, schema, case_id=None, actions=None, source_context=""):
+def create_agent(payload, owned, task, schema, case_id=None, actions=None, source_context="", report_by=None):
     from browser_use import Agent
     from browser_use.llm.messages import UserMessage
     from decision_model import DecisionChatOpenAI
@@ -865,6 +876,9 @@ def create_agent(payload, owned, task, schema, case_id=None, actions=None, sourc
 
     async def ended(current_agent):
         owned.require_guard()
+        if report_by is not None and asyncio.get_running_loop().time() >= report_by:
+            # Browser Use forces its final report only at its last step, so the next step becomes the last.
+            current_agent.state.n_steps = max(current_agent.state.n_steps, payload["maxSteps"])
         # Parsing can fail even after upstream restricts the model to done. That
         # step never invokes planned(), but its termination limit still applies.
         owned.diagnostics["forcedFinalization"] |= current_agent.AgentOutput is current_agent.DoneAgentOutput
@@ -923,13 +937,17 @@ def accepted_proposals(payload, candidates, summary):
 
 
 async def discover(payload):
+    # Discovery reports its time limit as an error. The limit bounds exploration, so the owned browser's cleanup and a
+    # finished report stay outside it, and exploration ends early enough for the final report to arrive within it.
+    deadline = asyncio.get_running_loop().time() + payload["timeoutSeconds"]
     schema = discovery_schema()
     actions = []
     emit({"type": "case", "caseId": "discovery", "actions": actions})
     task = DISCOVERY_INSTRUCTIONS + (AUTHENTICATED_DISCOVERY if payload.get("credentials") else "") + json.dumps({key: payload[key] for key in ["targetUrl", "allowedOrigins", "scope", "requirements"]}, ensure_ascii=False)
     async with OwnedBrowser(payload) as owned:
-        agent, ended = create_agent(payload, owned, task, schema, "discovery", actions, source_context=payload["sourceContext"])
-        history = await agent.run(max_steps=payload["maxSteps"], on_step_end=ended)
+        agent, ended = create_agent(payload, owned, task, schema, "discovery", actions, source_context=payload["sourceContext"], report_by=deadline - min(REPORT_SECONDS, payload["timeoutSeconds"] // 2))
+        async with asyncio.timeout_at(deadline):
+            history = await agent.run(max_steps=payload["maxSteps"], on_step_end=ended)
         owned.require_guard()
         output = history.get_structured_output(schema)
         if not output:
@@ -985,9 +1003,7 @@ async def execute(payload):
         raise InputError(check["error"])
     emit({"type": "status", "status": "running", "mode": payload["mode"]})
     try:
-        # Discovery reports its time limit as an error.
-        async with asyncio.timeout(payload["timeoutSeconds"]):
-            result = await discover(payload)
+        result = await discover(payload)
         emit(result)
     except asyncio.CancelledError:
         # Only the controller cancels discovery, and it records that itself.
