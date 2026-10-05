@@ -48,7 +48,7 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
     onUpdate: async update => { Object.assign(environment, update); if (update.step) steps.push(update.step); } });
   assert.equal(ready.status, 'ready');
   assert.deepEqual(ready.services, [{ id: 'mailpit', title: 'Mailpit', fidelity: 'actual', status: 'ready', missing: [] }]);
-  assert.deepEqual(steps, ['Copying source', 'Preparing twin', 'Setting up Mailpit', 'Loading source', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(steps, ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Setting up Mailpit', 'Loading source', 'Starting twin', 'Checking apps']);
   const url = new URL(ready.apps[0].url);
   assert.equal(url.hostname, '127.0.0.1');
   const reply = await (await fetch(new URL('/journey', url))).json();
@@ -111,7 +111,7 @@ test('apps sharing a workspace lockfile start after one shared install in a Comp
   const ready = await runtime.prepareEnvironment({ dataDir, environment, repoPath, directory, cancelled: () => false,
     onUpdate: async update => { Object.assign(environment, update); if (update.step) steps.push(update.step); } });
   assert.equal(ready.status, 'ready');
-  assert.deepEqual(steps, ['Copying source', 'Preparing twin', 'Loading source', 'Installing dependencies', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(steps, ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Loading source', 'Installing dependencies', 'Starting twin', 'Checking apps']);
   const file = YAML.parse(await readFile(join(dataDir, 'environments', id, 'twin', 'compose.yaml'), 'utf8'));
   assert.deepEqual(file.services.install.profiles, ['install']);
   for (const app of Object.keys(environment.plan.apps)) assert.equal(file.services[app].command.join(' ').includes('npm ci'), false, app);
