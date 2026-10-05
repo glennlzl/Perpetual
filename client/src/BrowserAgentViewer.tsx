@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
-import { api, replyError } from '@/lib/api';
+import { api, replyError, type ApiError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
 import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
@@ -36,6 +36,10 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   const returnFocus = useReturnFocus(focusFallback);
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [error, setError] = useState('');
+  // A run the stage does not have, or a read the controller refuses, never appears by reading again.
+  const [unavailable, setUnavailable] = useState(false);
+  // Kept apart from read errors, so the next successful read does not clear why Cancel run failed.
+  const [stopError, setStopError] = useState('');
   const [frame, setFrame] = useState('');
   const [frameError, setFrameError] = useState('');
   const [stopping, setStopping] = useState(false);
@@ -47,7 +51,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   const currentAction = useRef<HTMLLIElement>(null);
 
   useEffect(() => {
-    setSnapshot(null); setError(''); setFrame(''); setFrameError('');
+    setSnapshot(null); setError(''); setUnavailable(false); setFrame(''); setFrameError('');
     active.current = true;
     if (!runId) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout> | undefined;
@@ -58,7 +62,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
           headers: { Accept: 'application/json' }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), cache: 'no-store',
         });
         const reply: unknown = await response.json();
-        if (!response.ok) throw new Error(replyError(reply) || 'Could not load this run.');
+        if (!response.ok) throw Object.assign(new Error(replyError(reply) || 'Could not load this run.'), { statusCode: response.status });
         const next = reply as RunSnapshot; // the run route's reply, as the controller defines it
         if (cancelled) return;
         setSnapshot(next); setError('');
@@ -67,7 +71,12 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
           finishedCallback.current?.(next);
           return;
         }
-      } catch (failure) { if (cancelled) return; setError((failure as Error).message); }
+      } catch (failure) {
+        if (cancelled) return;
+        setError((failure as Error).message);
+        const status = (failure as ApiError).statusCode;
+        if (status >= 400 && status < 500) { active.current = false; setUnavailable(true); return; }
+      }
       if (!cancelled) timer = setTimeout(poll, 500);
     }
     void poll();
@@ -123,9 +132,9 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   useEffect(() => { currentAction.current?.scrollIntoView({ block: 'nearest' }); }, [current?.caseId, actions.length, actions.at(-1)?.status]);
 
   async function stop() {
-    setStopping(true); setError('');
+    setStopping(true); setStopError('');
     try { await api('/api/browser/stop', { repoPath, stageId, id: runId }); }
-    catch (failure) { setError((failure as Error).message); }
+    catch (failure) { setStopError((failure as Error).message); }
     finally { setStopping(false); }
   }
 
@@ -138,10 +147,10 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
           {run?.verification?.control && <Badge variant="outline">Control</Badge>}
           {browserConcurrencyLabel(run) && <Badge variant="outline">{browserConcurrencyLabel(run)}</Badge>}
-          <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>
+          {!unavailable && <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>}
           {startingError && mode === 'discover' && onTestSettings && <Button size="sm" variant="outline" onClick={onTestSettings}>Test settings</Button>}
           {/* Cancelling stops every journey in the run, so it is confirmed with Keep running focused first. */}
-          {!finished && !startingError && <AlertDialog open={confirmingStop} onOpenChange={setConfirmingStop}>
+          {!finished && !startingError && !unavailable && <AlertDialog open={confirmingStop} onOpenChange={setConfirmingStop}>
             <AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={!runId || stopping}><Square />{stopping ? 'Cancelling…' : 'Cancel run'}</Button></AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader><AlertDialogTitle>Cancel run?</AlertDialogTitle><AlertDialogDescription className="break-words">{run ? browserRunTitle(run) : mode === 'discover' ? 'Explore product' : 'Browser test'}</AlertDialogDescription></AlertDialogHeader>
@@ -152,17 +161,17 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
           <DialogClose asChild><Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Close viewer"><X /></Button></DialogClose>
         </div>
       </DialogHeader>
-      {(startingError || error || run?.error) && <p role="alert" className="border-b px-5 py-3 text-sm text-destructive">{startingError || error || run?.error}</p>}
+      {(startingError || stopError || error || run?.error) && <p role="alert" className="border-b px-5 py-3 text-sm text-destructive">{startingError || stopError || error || run?.error}</p>}
       {run?.concurrency ? <RunJourneyGallery run={run} repoPath={repoPath} stageId={stageId} initialFocus={focusCaseId} /> : <div className={evidenceOnly ? "flex min-h-0 flex-1" : "grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_200px] lg:grid-cols-[minmax(0,1fr)_320px] lg:grid-rows-1"}>
         {!evidenceOnly && <div className="relative flex min-h-0 min-w-0 items-center justify-center bg-background">
           {frame ? <img src={frame} alt={finished ? 'Final browser state' : 'Live browser viewport'} className="h-full w-full object-contain" />
-            : <span role="status" className="text-sm text-muted-foreground">{startingError ? 'Browser not started' : finished ? 'No browser frame' : 'Opening browser…'}</span>}
+            : <span role="status" className="text-sm text-muted-foreground">{startingError ? 'Browser not started' : finished || unavailable ? 'No browser frame' : 'Opening browser…'}</span>}
           {frame && <Badge variant="secondary" className="absolute bottom-3 left-3">{finished ? endedLabel(run?.completedAt) : frameError || error ? 'Reconnecting' : freshFrame ? 'Live' : 'Waiting for frame'}</Badge>}
           {frameError && <p role="status" className="absolute bottom-3 right-3 rounded bg-background px-3 py-2 text-sm text-destructive">{frameError}</p>}
         </div>}
         <aside className={`min-h-0 w-full overflow-y-auto ${evidenceOnly ? "" : "border-t lg:border-t-0 lg:border-l"}`} aria-label="Agent activity">
           <div className="sticky top-0 z-10 flex items-center justify-between bg-background px-4 py-3"><span className="text-sm font-medium">{mode === 'discover' ? 'Exploration' : 'Cases'}</span></div><Separator />
-          {!displayedCases.length && <p role="status" className="p-4 text-sm text-muted-foreground">{finished ? (run!.status === 'completed' ? 'Cases ready for review' : browserRunLabel(run!.status)) : 'Waiting for agent'}</p>}
+          {!displayedCases.length && !unavailable && <p role="status" className="p-4 text-sm text-muted-foreground">{finished ? (run!.status === 'completed' ? 'Cases ready for review' : browserRunLabel(run!.status)) : 'Waiting for agent'}</p>}
           {orderedCases.map((item, index) => {
             const caseId = item.caseId || item.id;
             const approved = approvedCases.find(value => value.id === caseId);
