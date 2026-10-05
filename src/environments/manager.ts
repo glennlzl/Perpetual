@@ -315,14 +315,16 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
      * generated config failed to build since, starting from that config and its failure. A gate never generates: it
      * builds the saved config, and when a generated one fails, its failure becomes the stage's draft. A repair gate's
      * creation (context.repair) builds repairPlan and writes no plan, draft or provenance to the stage, whatever its twin
-     * does, so a person's pending draft stays.
+     * does, so a person's pending draft stays. A stage has one twin: its earlier twins that still hold resources are deleted
+     * first, as a gate's rebuild does, and one that cannot be deleted stops the creation with its cleanup error.
      */
     async create(context: Context, { generate = false }: { generate?: boolean } = {}) {
       context = structuredClone(context);
       // Only a creation for the stage's own source owns its plan and draft.
       const scope = scopeId(context), owns = context.repair === undefined;
       if (scopesBusy.has(scope) || state.environments.some(item => item.scope === scope && IN_PROGRESS.includes(item.status))) throw conflict('This stage already has an environment operation in progress.');
-      if (state.environments.filter(holdsResources).length >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
+      const previous = state.environments.filter(item => item.scope === scope && holdsResources(item));
+      if (state.environments.filter(item => holdsResources(item) && !previous.includes(item)).length >= 8) throw new Error('Delete an environment before creating another (local limit: eight).');
       const id = randomUUID(), release = usage.acquire(context, { environmentId: id, operation: 'create' });
       // Set before any closure uses it; admission failures before that only compare against it.
       let queued = false, environment!: EnvironmentRecord, directoryCreated = false, recorded = false;
@@ -330,6 +332,11 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       admitted.set(context.key, (admitted.get(context.key) ?? 0) + 1);
       const record = () => { if (recorded) return; recorded = true; const left = (admitted.get(context.key) ?? 1) - 1; if (left) admitted.set(context.key, left); else admitted.delete(context.key); };
       try {
+        for (const item of previous) {
+          await manager.destroy(context, item.id);
+          const result = await manager.awaitIdle(item.id);
+          if (result.status !== 'destroyed') throw new Error(result.error || 'The previous twin could not be deleted.');
+        }
         const saved = owns ? await planFor(context) : await repairPlan(context), stored = configOf(saved), generated = isGenerated(saved);
         // Only a person's saved config selects the app explicitly. A detected or agent-generated plan must still
         // establish runtime coverage, including when a gate or a restart reuses it.
