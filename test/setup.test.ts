@@ -1,9 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isEntryPoint, nodeSatisfies, report, SERVE } from '../scripts/setup.ts';
 
 const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+
+test('setup runs when it is the process entry point, named through a link or not, and not when imported', async t => {
+  // A path through a link, such as macOS's /tmp, once made setup exit 0 without running anything.
+  const directory = await mkdtemp(join(tmpdir(), 'perpetual-setup-link-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await symlink(fileURLToPath(new URL('../scripts', import.meta.url)), join(directory, 'scripts'));
+  assert.equal(isEntryPoint(join(directory, 'scripts', 'setup.ts')), true);
+  assert.equal(isEntryPoint(fileURLToPath(new URL('../scripts/setup.ts', import.meta.url))), true);
+  assert.equal(isEntryPoint(fileURLToPath(import.meta.url)), false, 'A script that imports setup runs nothing.');
+  assert.equal(isEntryPoint(join(directory, 'scripts', 'missing.ts')), false);
+});
 
 test('setup admits the Node.js versions package.json engines names, and refuses older ones', async () => {
   const { engines } = JSON.parse(await read('package.json')) as { engines: { node: string } };
