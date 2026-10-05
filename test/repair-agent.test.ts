@@ -225,6 +225,22 @@ test('a credential in a file git treats as binary is refused from what the host 
   assert.equal((await h.saved()).attempts?.[0].failure, REJECTED.credential);
 });
 
+test('a change that weakens how CI checks the code reaches the merge step held for a person', async t => {
+  const seen: (readonly string[])[] = [];
+  const weaken: ScriptedStep[] = [
+    { calls: [{ tool: 'edit', input: { path: 'package.json', old: '"check": "node check.js"', new: '"check": "exit 0"' } }] },
+    { calls: [{ tool: 'done', input: { summary: 'The check passes now.' } }] },
+  ];
+  const h = await harness(t, {
+    scripts: [weaken], ci: (_push, sha) => [run('101', sha, 'success', { branch: 'perpetual/repair/x', event: 'pull_request' })],
+    merge: { async merge(input) { seen.push(input.holds); return { status: 'ready', reason: `Held for a person: ${input.holds.join(' ')}` }; } },
+  });
+  await h.fail();
+  await until(() => h.repair()?.status === 'ready');
+  await h.manager.idle();
+  assert.deepEqual([seen, (await h.saved()).holds], [[[HELD.checks]], [HELD.checks]], 'The package script the failing step runs is a judge of the fix.');
+});
+
 test('the cost cap ends the repair as failed and keeps its pull request a draft', async t => {
   const h = await harness(t, { scripts: [FIX, FIX], budget: { cost: 0.04 }, ci: (_push, sha) => [run('101', sha, 'failure', { event: 'pull_request' })] });
   await h.fail();

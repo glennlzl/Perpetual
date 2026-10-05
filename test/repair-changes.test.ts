@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HELD, REJECTED, checkChanges, pathRules } from '../src/repair/changes.ts';
+import { HELD, REJECTED, checkChanges, manifestChecksChanged, pathRules } from '../src/repair/changes.ts';
 
 // A git diff --binary with a/ and b/ prefixes, as the repair box returns one.
 const file = (path: string, added: string[], removed: string[] = [], { header = `diff --git a/${path} b/${path}`, from = `a/${path}`, to = `b/${path}` } = {}) =>
@@ -52,6 +52,41 @@ test('tests and a large change are held for a person, never rejected', () => {
   assert.deepEqual([large.added, large.removed, large.rejected, large.holds], [300, 101, [], [HELD.size]]);
   const both = checkChanges(diff(file('src/a.ts', ['x']), file('test/a.test.ts', ['y'])));
   assert.deepEqual([both.paths, both.rejected, both.holds], [['src/a.ts', 'test/a.test.ts'], [], [HELD.tests]]);
+});
+
+test('tests in the usual layouts of each ecosystem are held for a person', () => {
+  for (const path of ['src/test/java/com/acme/UserServiceTest.java', 'cypress/e2e/login.cy.ts', 'Acme.Tests/Billing.cs', 'Sources/App/AppTests.swift', 'Tests/AppTests/Login.swift', 'conftest.py',
+    'app/tests.py', 'src/__mocks__/api.ts', 'e2e/checkout.ts', 'app/src/androidTest/kotlin/Login.kt', 'pkg/parse/testdata/input.json', 'src/User.test.tsx', 'src/app.e2e-spec.ts',
+    'lib/test_helper.rb', 'src/components/Button.snap', 'integration-tests/run.sh', 'src/OrderIT.java']) {
+    assert.deepEqual(pathRules([path]), { rejected: [], holds: [HELD.tests] }, path);
+  }
+  assert.deepEqual(pathRules(['src/contest.ts', 'src/getLatest.ts', 'docs/ApiSpec.md', 'app/attestation.py', 'src/Edit.ts']).holds, [], 'A name that only contains a test word is not a test.');
+});
+
+// A fix must never pass because what judges it was loosened: a test script, a runner's file list, a type or lint rule.
+test('test, lint and type configuration, npm configuration and make files are held for a person, never rejected', () => {
+  for (const path of ['vitest.config.ts', 'web/jest.config.js', 'tsconfig.json', 'packages/api/tsconfig.build.json', '.eslintrc.json', 'eslint.config.mjs', 'web/.prettierrc', 'biome.json',
+    'playwright.config.ts', 'pytest.ini', 'setup.cfg', 'mypy.ini', '.golangci.yml', '.rubocop.yml', 'phpunit.xml.dist', '.npmrc', 'Makefile']) {
+    assert.deepEqual(pathRules([path]), { rejected: [], holds: [HELD.checks] }, path);
+  }
+  assert.deepEqual(pathRules(['package.json', 'pyproject.toml', 'src/config.ts', 'vite-env.d.ts', 'docs/Makefile.md', 'src/eslint.ts']).holds, [], 'A manifest is read for what changed in it; other files are code.');
+  const weakened = checkChanges(diff(file('vitest.config.ts', ['export default { test: { include: [] } };'], ['export default { test: { include: [\'src/**/*.test.ts\'] } };'])));
+  assert.deepEqual([weakened.rejected, weakened.holds], [[], [HELD.checks]]);
+});
+
+test('a manifest\'s change is held when what it says about checks changed, never for its dependencies', () => {
+  const pkg = (scripts: Record<string, string>, dependencies: Record<string, string> = {}) => JSON.stringify({ name: 'app', scripts, dependencies }, null, 2);
+  assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), pkg({ test: 'echo skipped' })), true);
+  assert.equal(manifestChecksChanged('web/package.json', pkg({ test: 'vitest run' }), pkg({ test: 'vitest run' }, { zod: '4.0.0' })), false, 'A dependency is the fix\'s own.');
+  assert.equal(manifestChecksChanged('package.json', null, pkg({ test: 'exit 0' })), false, 'An added manifest loosens no check that ran.');
+  assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), null), true, 'A removed one does.');
+  assert.equal(manifestChecksChanged('package.json', pkg({ test: 'vitest run' }), '{ "scripts": '), true, 'So does one that does not parse.');
+  assert.equal(manifestChecksChanged('package.json', JSON.stringify({ jest: { testPathIgnorePatterns: [] } }), JSON.stringify({ jest: { testPathIgnorePatterns: ['src'] } })), true);
+  const pyproject = (options: string, dependencies = '"httpx"') => `[project]\nname = "app"\ndependencies = [${dependencies}]\n\n[tool.pytest.ini_options]\naddopts = "${options}"\n`;
+  assert.equal(manifestChecksChanged('pyproject.toml', pyproject('-q'), pyproject('-q --deselect tests/test_tax.py')), true);
+  assert.equal(manifestChecksChanged('pyproject.toml', pyproject('-q'), pyproject('-q', '"httpx", "anyio"')), false);
+  assert.equal(manifestChecksChanged('Cargo.toml', '[package]\nname = "app"\n', '[package]\nname = "app"\n\n[lints.clippy]\nall = "allow"\n'), true);
+  assert.equal(manifestChecksChanged('src/package.ts', 'a', 'b'), false, 'Only manifests are read.');
 });
 
 // A pushed branch runs its own workflows with the repository's secrets, and deploy previews build from its configuration.

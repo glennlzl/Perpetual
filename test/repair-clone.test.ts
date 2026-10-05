@@ -133,6 +133,23 @@ test('what the host copy staged is returned as git\'s text diff, binary files in
   assert.deepEqual(checkChanges(staged.text).rejected, [REJECTED.credential]);
 });
 
+test('the host copy names each manifest whose checks the staged change changed, read from both of its versions', async t => {
+  const f = await copy(t);
+  const directory = join(f.dataDir, 'repairs', 'r1', 'clone');
+  const host = createRepairHost({ dataDir: f.dataDir });
+  await host.clone({ repair: { repository: 'owner/app', branch: 'main', sha: f.sha, rootDirectory: '/', checkoutPath: f.checkoutPath } as Repair, directory });
+  const made = await hostBox(directory);
+  t.after(() => made.box.remove());
+  const manifest = (scripts: Record<string, string>, extra: object = {}) => JSON.stringify({ name: 'app', private: true, scripts, ...extra }, null, 2);
+  await writeFile(join(made.root, 'package.json'), manifest({ check: 'node check.js' }, { dependencies: { zod: '4.0.0' } }));
+  assert.deepEqual((await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha })).checks, [], 'A dependency is not a check.');
+  await writeFile(join(made.root, 'package.json'), manifest({ check: 'exit 0' }));
+  await mkdir(join(made.root, 'web'));
+  await writeFile(join(made.root, 'web', 'package.json'), manifest({ test: 'exit 0' }));
+  const staged = await host.stage({ directory, diff: await made.box.diff(f.sha), base: f.sha });
+  assert.deepEqual([staged.paths, staged.checks], [['package.json', 'web/package.json'], ['package.json']], 'A new package loosens no check that ran.');
+});
+
 // The pull request head's checkout for its journey gates: the host copy's worktree stays at the failing commit, so the
 // gates scan a checkout of the commit it pushed, or of one only GitHub has, such as GitHub's update of the branch.
 test('a pull request head is checked out for its gates from the host copy, or from GitHub when the copy lacks it', async t => {
