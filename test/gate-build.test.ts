@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createGateManager, type BuildVerdict, type GateSource } from '../src/gate/manager.ts';
 import type { CommitStatusPost } from '../src/gate/github.ts';
 
-const A = 'a'.repeat(40), B = 'b'.repeat(40), P = 'f'.repeat(40);
+const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), P = 'f'.repeat(40);
 type Build = BuildVerdict;
 const until = async (condition: () => boolean) => {
   for (let count = 0; count < 200 && !condition(); count++) await delay(5);
@@ -96,6 +96,27 @@ test('a newer push supersedes a build wait even when the older build read return
   assert.deepEqual(h.work, [`prepare ${B}`, `rebuild ${B}`, `run ${B}`]);
   const saved = JSON.parse(await readFile(join(h.dataDir, 'gates/state.json'), 'utf8'));
   assert.equal(saved.gates.find((gate: { sha: string }) => gate.sha === A).status, 'superseded');
+});
+
+test('a baseline head supersedes an older gate still waiting at the first stage, so it never moves the source back', async t => {
+  const h = await harness(t);
+  await h.manager.watch(); // baseline A
+  h.state.head = B;
+  await h.manager.watch(); // push B while its Build runs
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'waiting-build');
+  const main = h.state.source;
+  h.state.source = { ...main, branch: 'release' };
+  await h.manager.watch(); // the other branch's first head is a baseline
+  h.state.source = main;
+  h.state.head = C;
+  h.state.build = { status: 'passed' };
+  await h.manager.watch(); // back on main at C, a baseline again; B's Build has passed meanwhile
+  await h.manager.idle();
+  assert.deepEqual(h.work, []);
+  const saved = JSON.parse(await readFile(join(h.dataDir, 'gates/state.json'), 'utf8'));
+  assert.deepEqual(saved.gates.map((gate: { sha: string; status: string }) => [gate.sha, gate.status]), [[B, 'superseded']]);
+  assert.equal(h.manager.view().stages.beta, undefined);
 });
 
 test('a source switch during build evidence reading cannot prepare either source from stale evidence', async t => {

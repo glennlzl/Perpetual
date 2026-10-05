@@ -348,6 +348,9 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         state.heads[current.key] = { repository: current.repository, branch: current.branch, login, sha: head.sha, etag: head.etag, checkedAt: now() };
         const first = sandboxes(current)[0];
         if (first && known && previous.sha !== head.sha) enqueue(current, first, head.sha, now());
+        // A baseline queues nothing, but a gate still pending at the first stage for another commit, such as one queued
+        // before a branch switch, no longer belongs to the branch head and would move the source back.
+        else if (first && !known) for (const gate of scoped(current)) if (gate.stageId === first.id && gate.sha !== head.sha && PENDING.includes(gate.status)) Object.assign(gate, { status: 'superseded', reason: `Superseded by ${short(head.sha)}.`, updatedAt: now() } satisfies Partial<Gate>);
         await persist();
         kick();
       } else if (known && !previous.repository) {
