@@ -78,6 +78,15 @@ async function gitValue(root: string, args: string[]) {
   }
 }
 
+/**
+ * The top level of the Git work tree holding `root`, or `root` outside one. GitHub reads `.github/workflows` only
+ * there, so workflow paths are relative to it, as GitHub names them, even when a subdirectory is scanned.
+ */
+export async function repositoryTop(root: string) {
+  const top = await gitValue(root, ['rev-parse', '--show-toplevel']);
+  return top && path.isAbsolute(top) ? path.resolve(top) : root;
+}
+
 function safeRemote(remote: string | null) {
   if (!remote) return null;
   try {
@@ -230,16 +239,16 @@ export async function scanRepository(repositoryPath: unknown): Promise<Scan> {
   }
 
   let workflowFiles: string[] = [];
-  const workflowDir = path.join(root, '.github/workflows');
+  const top = await repositoryTop(root), workflowDir = path.join(top, '.github/workflows');
   try {
-    if (!(await lstat(path.join(root, '.github'))).isSymbolicLink() && !(await lstat(workflowDir)).isSymbolicLink()) {
+    if (!(await lstat(path.join(top, '.github'))).isSymbolicLink() && !(await lstat(workflowDir)).isSymbolicLink()) {
       workflowFiles = (await readdir(workflowDir, { withFileTypes: true })).filter(f => f.isFile() && /\.ya?ml$/.test(f.name)).map(f => `.github/workflows/${f.name}`).sort().slice(0, 40);
     }
   } catch { /* Workflows are optional. */ }
   const vercelEvidence: Evidence[] = [];
   const vercelConfigurations: { file: string; location: string }[] = [];
   for (const file of workflowFiles) {
-    const raw = await safeFile(root, file);
+    const raw = await safeFile(top, file);
     if (!raw) continue;
     let data: WorkflowYaml;
     try { const parsed: unknown = parse(raw, { maxAliasCount: 20 }); if (!parsed || typeof parsed !== 'object') throw new Error(); data = parsed; }

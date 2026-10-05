@@ -3,7 +3,7 @@ import path from 'node:path';
 import { parse } from 'yaml';
 import { redact } from './redaction.ts';
 import { SECRET_PATH, readRepositoryFile } from './repository-files.ts';
-import type { Scan } from './scanner.ts';
+import { repositoryTop, type Scan } from './scanner.ts';
 import type { ConfigField, ConfigSection, ServiceConfiguration } from '../contract/service-config.ts';
 import type { ActionJob, ActionWorkflow, GitHubActionsReply } from '../contract/github.ts';
 export type { ConfigField, ConfigSection, ConfigFile, ServiceConfiguration } from '../contract/service-config.ts';
@@ -106,6 +106,8 @@ export async function readGitHubActions(scan: Pick<Scan, 'repo' | 'workflows'>):
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('Repository configuration is unavailable.');
   const workflows: ActionWorkflow[] = [];
   const seen = new Set<string>();
+  // Workflow paths are relative to the repository's top level, where GitHub reads them, even for a scanned subdirectory.
+  let top: string | undefined;
   for (const known of Array.isArray(scan.workflows) ? scan.workflows : []) {
     if (!known || typeof known.file !== 'string' || seen.has(known.file)) continue;
     seen.add(known.file);
@@ -119,7 +121,7 @@ export async function readGitHubActions(scan: Pick<Scan, 'repo' | 'workflows'>):
       workflow.error = 'Workflow file is unavailable.';
       continue;
     }
-    const raw = await readConfig(root, known.file);
+    const raw = await readConfig(top ??= await repositoryTop(root), known.file);
     if (raw === null) {
       workflow.error = 'Could not read this workflow file.';
       continue;

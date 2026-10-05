@@ -126,7 +126,8 @@ async function configurationLinks(scan: Scan,files: ConfigFile[]): Promise<Confi
     if(!remote)return files.map(file=>({...file,local:true}));
     const prefix=stdout.trim();
     if(prefix && (prefix.startsWith('/') || prefix.includes('\\') || prefix.split('/').some(part=>part==='..')))return files;
-    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${(prefix+file.path).split('/').map(encodeURIComponent).join('/')}`}));
+    // Workflow files are named from the repository's top level, where GitHub reads them; the rest from the scanned directory.
+    return files.map(file=>({...file,editUrl:`https://github.com/${repository}/edit/${encodeURIComponent(scan.repo.branch!)}/${((file.path.startsWith('.github/workflows/')?'':prefix)+file.path).split('/').map(encodeURIComponent).join('/')}`}));
   }catch {return files;}
 }
 

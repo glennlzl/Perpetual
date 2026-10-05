@@ -76,6 +76,21 @@ test('deployment configuration in a directory without a package manifest is a Pr
   assert.deepEqual(scan.services.map(service => service.path), ['frontend'], 'a deployment directory is not promoted to a service');
 });
 
+test('a scanned subdirectory keeps the workflows GitHub reads at the repository top level', async t => {
+  const root = await fixture(t, {
+    'apps/web/package.json': { name: 'web', scripts: { build: 'next build' }, dependencies: { next: '16' } },
+    '.github/workflows/ci.yml': 'name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: [{ run: npm ci }]\n',
+    '.github/workflows/deploy.yml': 'name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{ run: npx vercel deploy --prod }]\n',
+    'apps/web/.github/workflows/ignored.yml': 'name: Ignored\non: push\njobs:\n  nothing:\n    runs-on: ubuntu-latest\n',
+  });
+  execFileSync('git', ['init', '--quiet', root], { stdio: 'ignore' });
+  const scan = await scanRepository(path.join(root, 'apps/web'));
+  assert.deepEqual(scan.workflows.map(workflow => [workflow.file, workflow.jobs.map(job => job.id)]), [['.github/workflows/ci.yml', ['build']], ['.github/workflows/deploy.yml', ['deploy']]]);
+  assert.equal(scan.plan.workflow, undefined, 'must reuse existing CI rather than generate a competing workflow');
+  assert.deepEqual(scan.nodes.filter(node => node.kind === 'deployment').map(node => [node.provider, node.evidence.map(item => item.file)]), [['Vercel', ['.github/workflows/deploy.yml']]]);
+  assert.deepEqual(scan.delivery.build.map(entry => entry.label), ['GitHub Actions']);
+});
+
 test('proposes a bounded starter using detected pnpm workspace rather than fabricated commands', async t => {
   const root = await fixture(t, {
     'package.json': { name: 'workspace', packageManager: 'pnpm@10.33.0' },
