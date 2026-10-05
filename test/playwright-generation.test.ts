@@ -20,7 +20,7 @@ type JourneyRuntime=NonNullable<BrowserManagerOptions['playwright']>;
 type Events=(input:JourneyRunInput)=>WorkerEvent[];
 /** One run of the fake harness, as it logs what it saw (test/fixtures/fake-opencode.ts). */
 type HarnessCall={prompt:string;cwd:string;workspaceMode:number;git:boolean;prompts:boolean;agent:unknown;permission:unknown;provider:unknown;smallModel:unknown;mcp:string[];config:{projects:unknown};modes:unknown;env:unknown;mcpEnvironment:unknown;seed:string;plan:string;pids?:number[];
-  generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown}};
+  generation:{setups:unknown;refused:Record<string,unknown>;written:Record<string,unknown>;wrote:unknown;leaked:unknown;exposed:unknown};hostFile?:{setups:boolean[];readLog:boolean;read:boolean}};
 type StoredState={specs:Record<string,Record<string,{approved:unknown;draft:{code:string;hash:string}}>>};
 
 // Code generation with a fake harness in place of OpenCode: no network, no key, no model.
@@ -176,8 +176,9 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   assert.equal(call.git,true);assert.equal(call.prompts,true);
   assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
-  assert.deepEqual(call.mcp.slice(0,3),[process.execPath,fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url)),'run-test-mcp-server']);
-  assert.deepEqual(call.mcp.slice(3),['--headless','--config',join(run,'playwright.config.mjs')]);
+  // The test MCP server runs behind the filter that sets up only the workspace's seed.
+  assert.deepEqual(call.mcp.slice(0,6),[process.execPath,fileURLToPath(new URL('../src/journeys/playwright/mcp-guard.ts',import.meta.url)),'seed','seed.spec.mjs',await realpath(fileURLToPath(new URL('../node_modules/@playwright/test/cli.js',import.meta.url))),'run-test-mcp-server']);
+  assert.deepEqual(call.mcp.slice(6),['--headless','--config',join(run,'playwright.config.mjs')]);
   // The only test folder under the project is where the spec is written; no project loads it.
   assert.deepEqual(call.config.projects,[{name:'seed',testDir:join(run,'seed'),testMatch:'seed.spec.mjs'},{name:'tests',testDir:join(call.cwd,'tests'),testIgnore:'**'}]);
   assert.deepEqual(call.modes,{config:0o444,seed:0o444,case:0o444,opencode:0o444,plan:0o444});
@@ -789,6 +790,15 @@ test('the test MCP server’s seed signs in with the twin account on the sign-in
   assert.deepEqual([generation.wrote,generation.leaked,generation.exposed],[false,false,false]);
   assert.deepEqual([Object.keys(spec),Object.keys(spec.draft!)],[['draft'],['hash','stale','provenance']],JSON.stringify(spec));
   await access(join(f.dataDir,'browser','generations')).then(async()=>assert.deepEqual(await readdir(join(f.dataDir,'browser','generations')),[]));
+});
+
+test('the generator’s seed setup reads no file outside its workspace, whatever it names as the seed',{timeout:120000},async t=>{
+  // A prompt-injected generator names a file beside the controller's data as its seed, then reads the generator's log.
+  const f=await setup(t,{mode:'read-host'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id});
+  assert.equal((await settled(f,journey.id,90))?.draft?.stale,false);
+  const [{hostFile}]=await lines(f.log);
+  assert.deepEqual(hostFile,{setups:[true,true,true],readLog:true,read:false},'Every setup naming another seed or project is refused, so the log holds nothing it read.');
 });
 
 test('a seed whose application does not open says so, never that the test account could not sign in',{timeout:120000},async t=>{

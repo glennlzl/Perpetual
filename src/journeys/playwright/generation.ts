@@ -8,6 +8,7 @@ import { failureText, hide, redact } from '../../redaction.ts';
 import { chmod, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { OPENCODE, createOpencodeRunner, fingerprint, opencodeEnvironment, opencodeRun, opencodeSettings, setupCommand, setupEnvironment, type Harness, type OpencodeRunner } from '../../agents/opencode.ts';
 import type { WorkerEvent, WorkerJob } from '../../browser/runtime.ts';
@@ -40,6 +41,8 @@ export const GENERATOR_AGENT = 'playwright-test-generator';
 const GRAMMAR_REPAIR_AGENT = 'perpetual-grammar-repair';
 export const SEED = 'seed.spec.mjs', PLAN = 'specs/plan.md', TESTS = 'tests', TARGET = `${TESTS}/journey.spec.mjs`;
 const SEED_PROJECT = 'seed';
+// The test MCP server runs behind this filter, which sets up only the workspace's seed.
+const MCP_GUARD = fileURLToPath(new URL('./mcp-guard.ts', import.meta.url));
 // The test MCP server exits before its Playwright worker finishes teardown, so OpenCode can exit first.
 const MAX_SPEC = 256 * 1024, SETTLE_MS = 10000;
 export const CANCELLED = 'Code generation cancelled.';
@@ -201,7 +204,8 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
   const repairPromptFile = join(project, '.opencode', 'prompts', `${GRAMMAR_REPAIR_AGENT}.md`);
   await writeFile(repairPromptFile, grammarRepairInstructions);
   // `opencode run --agent` runs a primary agent. It gets Playwright's tool list and nothing else, so no shell, edit or
-  // web tool can read the harness environment, and files outside the project stay closed.
+  // web tool can read the harness environment, and files outside the project stay closed: OpenCode's own file tools
+  // by its permission, and the seed setup, which would read any file named as its seed, by the server's filter.
   Object.assign(agent, { mode: 'primary', model: `openrouter/${model}`, tools: { '*': false, ...tools } });
   // Grammar repair uses the existing file. Its writer requires seed setup, but no tool may replay the business
   // actions or explore another route while fixing syntax. Keep both agents fixed before either model starts.
@@ -212,9 +216,9 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
   };
   // The test MCP server is the pinned Playwright, headless, on the seed's config; npx would fetch another version.
   // OpenCode starts it with its own environment and this one on top: the user's HOME, where Playwright's browsers are,
-  // and no model key.
+  // and no model key. It runs behind a filter that refuses any seed setup but the workspace's.
   Object.assign(server, {
-    command: [process.execPath, PLAYWRIGHT_CLI, 'run-test-mcp-server', '--headless', '--config', config],
+    command: [process.execPath, MCP_GUARD, SEED_PROJECT, SEED, PLAYWRIGHT_CLI, 'run-test-mcp-server', '--headless', '--config', config],
     environment: { HOME: userHome, OPENROUTER_API_KEY: '' },
   });
   // OpenCode forwards model options as providerOptions.openrouter. The pinned provider passes these keys directly
