@@ -95,12 +95,12 @@ export interface GenerationSteps<Result> {
   author(input: { draft: string; feedback: string | null; attempt: number }): Promise<Authored>;
   /** Prepares the twin from a valid config, reporting its steps; rejects with its failure. */
   prepare(config: TwinConfig): Promise<Result>;
-  /** Why a prepared twin does not count as ready, or null when it does. */
-  verify(config: TwinConfig, result: Result): Promise<Pick<StagedFailure, 'stage' | 'subject' | 'error'> | null>;
+  /** Why a prepared twin does not count as ready, with the app that did not answer, or null when it does. */
+  verify(config: TwinConfig, result: Result): Promise<(Pick<StagedFailure, 'stage' | 'subject' | 'error'> & { app?: string }) | null>;
   /** Where a failed preparation of `config` stopped, and the end of the failed containers' logs. */
   diagnose(config: TwinConfig, error: unknown): Promise<Diagnosis>;
-  /** The end of the prepared twin's relevant logs. */
-  logs(): Promise<string>;
+  /** The end of the prepared twin's relevant logs: the app's that did not answer, when one did not. */
+  logs(app?: string): Promise<string>;
   /** Each app's unwired variables in a twin.json, as feedback lines. */
   unwired?(text: string): string[];
   /** Records a failed attempt's outcome before the next attempt starts. */
@@ -148,7 +148,8 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
           const result = await prepare(built);
           const problem = await verify(built, result);
           if (problem === null) return { config: built, result, attempts: attempt, logs: output.join('\n\n') };
-          failure = { ...problem, heading: 'the twin started, but does not count as ready', logs: await logs() };
+          const { app, ...found } = problem;
+          failure = { ...found, heading: 'the twin started, but does not count as ready', logs: await logs(app) };
         } catch (error) {
           if (cancelled() || error instanceof Error && 'cleanupIncomplete' in error && error.cleanupIncomplete === true) throw error instanceof Error ? withLogs(error) : error;
           const { step: at, ...found } = await diagnose(built, error);
