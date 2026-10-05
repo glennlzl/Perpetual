@@ -251,7 +251,7 @@ test('a control run blocks every write from the page but lets the fixture sign i
   assert.deepEqual(steps.map(event=>`${event.stepId}:${event.status}`),['open-settings:running','open-settings:completed','save-name:running','save-name:failed']);
   assert.equal(steps.at(-1)?.evidence,'Reviewed check failed: Text visible “Saved”.');
   const facts=events.at(-1)?.result;
-  assert.deepEqual(facts,{caseId:journey.id,assertions:[],controlRead:false,controlReadReason:'blocked-request-failed',stopCause:'none'});
+  assert.deepEqual(facts,{caseId:journey.id,assertions:[],controlRead:false,controlReadReason:'blocked-request-failed',controlBlocks:[{kind:'http',method:'POST',url:new URL('/settings',target).href,afterRead:false}],stopCause:'none'});
   assert.equal(journeyResult(journey,facts,journey.steps.map(({id,title},index)=>({id,title,status:['completed','failed','pending'][index]}))).status,'failed');
   // The same code without the block saves the name.
   await runSpec(target,spec());

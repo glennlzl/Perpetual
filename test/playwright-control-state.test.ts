@@ -126,3 +126,33 @@ test('a read arriving after the observation cannot replace its missing-read diag
   f.fresh(); assert.equal(observed(f.failed), undefined);
   assert.equal(observed.reason(f.failed)(), 'no-fresh-document');
 });
+
+test('blocked HTTP evidence belongs to the judged page and omits request contents',()=>{
+  const f=setup(), request={...f.request(f.first,'POST'),url:()=> 'http://viewer:private@app.test/save?token=private#private',postData:()=>{assert.fail('Evidence must not read request bodies');},headers:()=>{assert.fail('Evidence must not read headers');}} as unknown as Request;
+  f.reads.blockedRequest(request);f.fresh();f.reads.blockedRequest({...request,url:()=> 'http://app.test/read'} as Request);
+  const blocks=(f.reads as unknown as {blocks(page:Page):unknown}).blocks;
+  assert.deepEqual(blocks(f.first),[{kind:'http',method:'POST',url:'http://app.test/save',afterRead:false},{kind:'http',method:'POST',url:'http://app.test/read',afterRead:true}]);
+  assert.deepEqual(blocks(f.second),[]);assert.equal(f.reads.eligible(f.first,f.failed),false);
+});
+
+test('later socket blocks keep their read phase and evidence drops old distinct entries at ten',()=>{
+  const f=setup();f.reads.blockedRequest(f.request(f.first,'POST'));f.fresh();
+  f.reads.blocked(f.first,{kind:'socket',transport:'websocket'});f.reads.blocked(f.first,{kind:'socket',transport:'websocket'});
+  assert.deepEqual(f.reads.blocks(f.first).at(-1),{kind:'socket',transport:'websocket',afterRead:true});
+  assert.equal(f.reads.blocks(f.first).length,2);
+  for(let i=0;i<11;i++)f.reads.blocked(f.first,{kind:'http',method:'PATCH',url:`http://app.test/resource/${i}`});
+  const blocks=f.reads.blocks(f.first);assert.equal(blocks.length,10);
+  assert.equal(blocks[0].kind==='http'&&blocks[0].url,'http://app.test/resource/1');
+  assert.ok(blocks.every(block=>block.afterRead));
+  blocks.pop();assert.equal(f.reads.blocks(f.first).length,10,'Evidence readers cannot mutate retained state.');
+  assert.equal(f.reads.eligible(f.first,f.failed),false);
+});
+
+test('a failed request cannot erase the read phase of a later blocked transport',()=>{
+  const f=setup();f.reads.blockedRequest(f.request(f.first,'POST'));f.fresh();
+  f.reads.blocked(f.first,{kind:'socket',transport:'websocket'});
+  f.context.emit('requestfailed',f.request());
+  f.reads.blocked(f.first,{kind:'http',method:'POST',url:'http://app.test/read'});
+  assert.equal(f.reads.blocks(f.first).at(-1)?.afterRead,true);
+  assert.equal(f.reads.eligible(f.first,f.failed),false);
+});
