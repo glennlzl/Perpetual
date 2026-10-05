@@ -148,3 +148,20 @@ test('a run requested from the canvas names what keeps its dialog from running',
   });
   assert.deepEqual(fixture.pageErrors, []);
 });
+
+test('the journey list, a focused journey and its recording tabs have the roles and names assistive technology reads', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  const failed = browserRunFixture({ id: 'failed', status: 'failed', caseIds: ['save'], caseSummaries: [journey], results: [{ caseId: 'save', status: 'failed' }],
+    progress: { revision: 1, cases: [{ id: 'save', status: 'failed', videos: ['page@1.webm', 'page@2.webm'] }] } });
+  fixture.controller.view = browserView({ specs: { save: { approved: { hash, stale: false } } }, runs: [failed] });
+  const page = await fixture.open(t, { initialCaseId: 'save', caseRequestKey: '1' });
+  const list = page.getByRole('list', { name: 'Integration tests', exact: true });
+  const card = list.getByRole('listitem', { name: 'Save a workspace', exact: true });
+  // A journey opened from the canvas is focused as the named item of the list.
+  await expect(card).toBeFocused();
+  const tab = card.getByRole('tab', { name: 'Tab 2', exact: true });
+  await tab.click();
+  const panel = page.locator(`#${await tab.getAttribute('aria-controls')}`);
+  await expect(panel).toHaveAttribute('role', 'tabpanel');
+  await expect(panel.getByLabel('Save a workspace recording', { exact: true })).toHaveCount(1);
+});

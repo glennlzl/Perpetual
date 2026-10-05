@@ -659,7 +659,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {activeRun && <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{activeRun.mode === 'discover' ? 'Exploring' : 'Running'}</Badge>{concurrencyLabel && <Badge variant="outline">{concurrencyLabel}</Badge>}</div><Button size="sm" variant="outline" onClick={() => setWatching(watchedRun(activeRun))}><Eye />Watch live</Button></div>}
       {loading && !cases.length && <TestListSkeleton label="Loading integration tests" />}
       {cases.length > 0 && <div className="flex items-center justify-between gap-3"><Select value={caseFilter} onValueChange={setCaseFilter}><SelectTrigger className="w-44" aria-label="Filter tests"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All tests</SelectItem><SelectItem value="review">Needs review</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="selected">Selected</SelectItem></SelectContent></Select>{reviewCount > 0 && <span className="text-xs tabular-nums text-muted-foreground">{reviewCount} to review</span>}</div>}
-      <div ref={caseList} className="journey-list grid gap-5" aria-label="Integration tests">
+      <div ref={caseList} role="list" className="journey-list grid gap-5" aria-label="Integration tests">
         {visibleCases.map(item => {
           const status = browserCaseState(item, data.runs);
           const run = browserCaseRun(item, data.runs);

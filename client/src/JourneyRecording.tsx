@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 function Recording({ src, name }: { src: string; name: string }) {
   const [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0);
@@ -23,9 +23,12 @@ export default function JourneyRecording({ urls, name = 'Journey', variant = 'fu
   const [selected, setSelected] = useState('0');
   const tab = urls[Number(selected)] ? selected : '0', src = urls[Number(tab)];
   return <div role="group" aria-label={`${name} browser`} className={`journey-browser relative flex min-w-0 items-center justify-center overflow-hidden bg-background ${variant === 'focus' ? 'h-full w-full' : 'aspect-video border-y'} ${className}`}>
-    <Recording key={src} src={src} name={name} />
-    {urls.length > 1 && <Tabs value={tab} onValueChange={setSelected} className="absolute top-2 right-2 left-2 min-w-0 overflow-x-auto overscroll-x-contain">
-      <TabsList aria-label={`${name} recordings`}>{urls.map((url, index) => <TabsTrigger key={url} value={String(index)} className="text-xs">Tab {index + 1}</TabsTrigger>)}</TabsList>
-    </Tabs>}
+    {urls.length > 1 ? <Tabs value={tab} onValueChange={setSelected} className="absolute inset-0 gap-0">
+      {/* Each tab's recording is the panel that tab controls. */}
+      {urls.map((url, index) => <TabsContent key={url} value={String(index)} className="relative flex min-h-0 items-center justify-center"><Recording key={url} src={url} name={name} /></TabsContent>)}
+      <div className="absolute top-2 right-2 left-2 min-w-0 overflow-x-auto overscroll-x-contain">
+        <TabsList aria-label={`${name} recordings`}>{urls.map((url, index) => <TabsTrigger key={url} value={String(index)} className="text-xs">Tab {index + 1}</TabsTrigger>)}</TabsList>
+      </div>
+    </Tabs> : <Recording key={src} src={src} name={name} />}
   </div>;
 }

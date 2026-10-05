@@ -47,7 +47,8 @@ export default function JourneyCard({ item, run, status, label, repoPath, stageI
   useEffect(() => { if (attention) setOpen(true); }, [attention]);
   // A journey clicked on its stage opens its live card.
   useEffect(() => { if (focused) setOpen(true); }, [focused]);
-  return <Card className="journey-card gap-0 overflow-hidden py-0 shadow-none" data-status={status} data-case-id={item.id} data-focused={focused || undefined} tabIndex={-1}>
+  // A list item named by its journey, so focusing the card from the canvas announces which journey it is.
+  return <Card role="listitem" aria-label={item.name} className="journey-card gap-0 overflow-hidden py-0 shadow-none" data-status={status} data-case-id={item.id} data-focused={focused || undefined} tabIndex={-1}>
     <Collapsible open={open} onOpenChange={setOpen}>
       <CardHeader className="flex flex-row flex-wrap items-start gap-2 px-4 py-3">
         <div className="flex min-w-0 flex-1 basis-56 items-start gap-2">
