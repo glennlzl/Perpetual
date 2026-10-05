@@ -258,6 +258,19 @@ class RuntimeContractTests(unittest.TestCase):
         error = type("AuthenticationError", (Exception,), {})("Bearer sk-fixture-secret")
         self.assertEqual(self.runner.safe_error(error), "Model authentication failed. Check the configured model API key and access.")
 
+    def test_events_reach_the_controller_as_utf8_whatever_the_locale(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        event = {"type": "discovery", "summary": "Workspace 工作区 – ready"}
+        script = f"import sys; sys.path.insert(0, {str(HERE)!r}); import runner; runner.emit({event!r})"
+        for encoding in ["latin-1", "gbk"]:
+            with self.subTest(encoding=encoding):
+                completed = subprocess.run([sys.executable, "-c", script], env={**os.environ, "PYTHONIOENCODING": encoding, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, timeout=60)
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(json.loads(completed.stdout.decode("utf-8")), event)
+
     def test_failed_browser_cleanup_emits_structured_ownership_uncertainty(self):
         import asyncio
 

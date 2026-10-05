@@ -133,7 +133,8 @@ class InputError(ValueError):
 
 
 def emit(event):
-    STDOUT.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+    # ASCII JSON: the controller reads the stream as UTF-8, while stdout's encoding follows the inherited locale.
+    STDOUT.write(json.dumps(event, separators=(",", ":")) + "\n")
     STDOUT.flush()
 
 
