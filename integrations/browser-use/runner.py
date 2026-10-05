@@ -28,7 +28,7 @@ from read_requests import validate_read_requests, reviewed_read
 from action_output import single_action_output
 from journey_steps import validate_steps
 from model_settings import ModelConfigurationError, model_config
-from run_credentials import ALIASES, contains_reference, credential_alias, credential_field_error, redact_messages, validate_credentials
+from run_credentials import ALIASES, contains_reference, credential_alias, credential_field_error, redact, redact_messages, redact_value, validate_credentials
 from sign_in import sign_in_on_page
 
 VERSIONS = {"browser-use": "0.13.10", "playwright": "1.63.0"}
@@ -67,7 +67,7 @@ SIGN_IN_REPLIES = {
     "still_on_sign_in": "The form is still shown; its fields stay filled.",
     "no_sign_in_form": "No password field with a username or email field in one form. Open the sign-in page or type the placeholders.",
 }
-CREDENTIAL_INSTRUCTIONS = "\nA run-only test account is available. To sign in, open the application's sign-in page and call sign_in_with_test_account: it fills and submits the sign-in form and reports signed_in, still_on_sign_in, no_sign_in_form or error. Only when it cannot use the page, such as a separate username step, type <secret>perpetual_test_username</secret> in the username/email field and <secret>perpetual_test_password</secret> only in a password field, then submit. Never reveal, transform or put these values in any other field."
+CREDENTIAL_INSTRUCTIONS = "\nA run-only test account is available. To sign in, open the application's sign-in page and call sign_in_with_test_account: it fills and submits the sign-in form and reports signed_in, still_on_sign_in, no_sign_in_form or error. Only when it cannot use the page, such as a separate username step, type <secret>perpetual_test_username</secret> in the username/email field and <secret>perpetual_test_password</secret> only in a password field, then submit. Never reveal, transform or put these values in any other field. Text shown as [REDACTED] is withheld account data: never copy it into proposals."
 
 
 def action_progress(action_type, result):
@@ -911,8 +911,9 @@ def supplied_lines(source_context):
     return {item["path"]: {int(match.group(1)) for line in item["source"].split("\n") if (match := SUPPLIED_LINE.match(line))} for item in files if isinstance(item, dict) and isinstance(item.get("path"), str) and isinstance(item.get("source"), str)}
 
 
-def discovered_case(candidate, supplied):
-    case = candidate.model_dump()
+def discovered_case(candidate, supplied, credentials=None):
+    # A proposal never keeps an account value the model saw despite redaction.
+    case = redact_value(candidate.model_dump(), credentials)
     case["steps"] = validate_steps(case["steps"])
     # Only citations of lines actually supplied are published; others are dropped, never guessed.
     case["evidence"] = [ref for ref in case["evidence"] if ref["line"] in supplied.get(ref["path"], ())]
@@ -924,7 +925,7 @@ def accepted_proposals(payload, candidates, summary):
     cases, omitted, supplied = [], [], supplied_lines(payload["sourceContext"])
     for candidate in candidates[:30]:
         try:
-            case = discovered_case(candidate, supplied)
+            case = discovered_case(candidate, supplied, payload.get("credentials"))
             # Validate a proposal as the controller accepts a case; it keeps its review flags.
             validate_case(case)
         except ValueError as error:
@@ -933,7 +934,7 @@ def accepted_proposals(payload, candidates, summary):
         cases.append(case)
     if candidates and not cases:
         raise InputError("No proposed journey was valid. " + " ".join(omitted)[:1000])
-    return cases, "\n".join([summary, *omitted])[:4000]
+    return cases, redact("\n".join([summary, *omitted]), payload.get("credentials"))[:4000]
 
 
 async def discover(payload):

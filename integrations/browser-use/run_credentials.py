@@ -6,6 +6,9 @@ import re
 ALIASES = {"username": "perpetual_test_username", "password": "perpetual_test_password"}
 # Each value fills only its own kind of login field.
 FIELD_TYPES = {"username": {"text", "email"}, "password": {"password"}}
+# Names the model must reproduce exactly. An account value that is a common word, such as "password", is not
+# redacted inside them, so the placeholders and the sign-in tool keep working.
+OWN_NAMES = re.compile("|".join(re.escape(name) for name in [*ALIASES.values(), "sign_in_with_test_account"]))
 
 
 def credential_field_error(name, same_origin, agent_tab, top_frame, tag, input_type):
@@ -34,11 +37,35 @@ def validate_credentials(raw, mode):
 
 
 def redact(text, credentials):
-    """Account values in text the model receives, longest first, become [REDACTED]."""
+    """Account values in text the model receives, longest first, become [REDACTED].
+
+    Matching ignores letter case and covers a value as Browser Use shows a field's value too: stripped, and clipped to
+    its first 100 characters. Only a value found inside one of the adapter's own names stays there.
+    """
     if not credentials:
         return text
-    secrets = sorted(set(credentials.values()), key=len, reverse=True)
-    return re.sub("|".join(re.escape(item) for item in secrets), "[REDACTED]", text)
+    secrets = set()
+    for value in credentials.values():
+        for shown in (value, value.strip()):
+            secrets.update({shown, shown[:100]} - {""})
+    pattern = re.compile("|".join(re.escape(item) for item in sorted(secrets, key=len, reverse=True)), re.IGNORECASE)
+    names = [found.span() for found in OWN_NAMES.finditer(text)]
+
+    def replace(found):
+        inside = any(start <= found.start() and found.end() <= end and found.end() - found.start() < end - start for start, end in names)
+        return found.group(0) if inside else "[REDACTED]"
+    return pattern.sub(replace, text)
+
+
+def redact_value(value, credentials):
+    """A copy of JSON-like data with account values redacted from every string."""
+    if isinstance(value, str):
+        return redact(value, credentials)
+    if isinstance(value, list):
+        return [redact_value(item, credentials) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_value(item, credentials) for key, item in value.items()}
+    return value
 
 
 def credential_alias(text):

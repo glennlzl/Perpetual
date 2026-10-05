@@ -12,10 +12,48 @@ from urllib.parse import parse_qs
 from unittest.mock import patch
 
 import runner
-from run_credentials import validate_credentials
+from run_credentials import redact, validate_credentials
 
 runner.configure_private_runtime()
 ACCOUNT = {"username": "ephemeral-test@example.invalid", "password": "fixture-only-password-43"}
+
+
+class Redaction(unittest.TestCase):
+    def test_account_values_are_redacted_as_the_page_shows_them(self):
+        account = {"username": "Owner@Example.invalid ", "password": "  Zq7-" + "long-fixture-password-" * 6}
+        shown = account["password"].strip()
+        for text, expected in [
+            ("Signed in as Owner@Example.invalid.", "Signed in as [REDACTED]."),
+            ("Signed in as owner@example.invalid", "Signed in as [REDACTED]"),
+            # Browser Use strips a field's value and clips it to 100 characters.
+            (f"<input type=text id=password value={shown[:100]}...>", "<input type=text id=password value=[REDACTED]...>"),
+            (f"Rejected value: {account['password']}", "Rejected value: [REDACTED]"),
+        ]:
+            with self.subTest(text=text[:40]):
+                self.assertEqual(redact(text, account), expected)
+
+    def test_a_common_word_account_keeps_the_adapter_names_whole(self):
+        account = {"username": "test", "password": "password"}
+        instructions = redact(runner.CREDENTIAL_INSTRUCTIONS, account)
+        for name in ["call sign_in_with_test_account", "<secret>perpetual_test_username</secret>", "<secret>perpetual_test_password</secret> only in a [REDACTED] field"]:
+            self.assertIn(name, instructions)
+        self.assertEqual(redact("<input type=password name=Password>", account), "<input type=[REDACTED] name=[REDACTED]>")
+        # A value that merely contains or equals one of those names is redacted whole.
+        for value in ["xperpetual_test_passwordx", "perpetual_test_password"]:
+            with self.subTest(value=value):
+                self.assertEqual(redact(f"Shown: {value}", {"username": "owner@example.invalid", "password": value}), "Shown: [REDACTED]")
+
+    def test_proposals_and_their_summary_never_keep_an_account_value(self):
+        class Proposal:
+            name = "Reopen saved work"
+
+            def model_dump(self):
+                return {"name": self.name, "goal": f"Sign in as {ACCOUNT['username'].upper()} and reopen saved work", "steps": [{"id": "open", "title": "Open"}, {"id": "reopen", "title": "Reopen"}],
+                        "preconditions": [], "expectedOutcomes": ["Saved work is visible"], "assertions": [], "evidence": []}
+        payload = runner.validate_payload({"mode": "discover", "targetUrl": "http://127.0.0.1:3010/", "credentials": ACCOUNT})
+        cases, summary = runner.accepted_proposals(payload, [Proposal()], f"Signed in as {ACCOUNT['username']}.")
+        self.assertEqual(cases[0]["goal"], "Sign in as [REDACTED] and reopen saved work")
+        self.assertEqual(summary, "Signed in as [REDACTED].")
 
 
 class CredentialValidation(unittest.TestCase):
@@ -96,7 +134,7 @@ class Application(BaseHTTPRequestHandler):
         values = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
         self.server.login_ok = values == {"email": [ACCOUNT["username"]], "password": [ACCOUNT["password"]]}
         if self.server.login_ok:
-            body = f'<!doctype html><html><body><h1>Workspace ready</h1><p>{ACCOUNT["username"]}</p><p>{ACCOUNT["password"]}</p></body></html>'.encode()
+            body = f'<!doctype html><html><body><h1>Workspace ready</h1><p>{ACCOUNT["username"]}</p><p>{ACCOUNT["username"].upper()}</p><p>{ACCOUNT["password"]}</p></body></html>'.encode()
         else:
             body = b"<h1>Login failed</h1>"
         self.respond(body)
@@ -164,9 +202,10 @@ class AuthenticatedDiscovery(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result["authenticated"], True)
             self.assertTrue(result["cases"][0]["needsReview"])
             self.assertFalse(result["cases"][0]["selected"])
-            # The page shows the account after signing in; the model never receives its values or a screenshot.
+            # The page shows the account after signing in, the username also in capitals; the model never receives its
+            # values or a screenshot.
             self.assertNotIn('"image_url"', json.dumps(model.requests))
-            for value in ACCOUNT.values():
+            for value in [*ACCOUNT.values(), ACCOUNT["username"].upper()]:
                 self.assertNotIn(value, json.dumps(model.requests))
             for request in model.requests:
                 self.assertIn(requirements, json.dumps(request["messages"]))
