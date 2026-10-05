@@ -62,6 +62,24 @@ test('an Authorization value of any scheme and every part of a named value or UR
   assert.equal(hasCredential('git clone https://user@github.com/acme/app.git'), false, 'A user alone is not a password.');
 });
 
+test('common credential names, token shapes, escaped JSON and PGP key blocks are secrets too', () => {
+  assert.equal(redact('request failed: {\\"password\\":\\"fixture-literal\\"}'), `request failed: {\\"password\\":\\"${REDACTED}\\"}`);
+  assert.equal(redact('PRIVATE_KEY=fixture-a ENCRYPTION_KEY=fixture-b SIGNING_KEY: fixture-c'), `PRIVATE_KEY=${REDACTED} ENCRYPTION_KEY=${REDACTED} SIGNING_KEY: ${REDACTED}`);
+  assert.equal(redact('DB_PASS=fixture-a MYSQL_PWD=fixture-b passphrase: fixture-c'), `DB_PASS=${REDACTED} MYSQL_PWD=${REDACTED} passphrase: ${REDACTED}`);
+  const ordinary = 'tests_passed=12 bypass=true passenger=3 pass_count=4 npm_lifecycle_event=test';
+  assert.equal(redact(ordinary), ordinary, 'A name holding PASS, or npm\'s own variables, is not a credential.');
+  // Built at run time, so the file itself holds no token-shaped text.
+  for (const token of [`sb_secret_${'x'.repeat(24)}`, `xoxb-${'0'.repeat(12)}-fixture-value`, `npm_${'a1'.repeat(18)}`, `AIza${'x'.repeat(35)}`, `ASIA${'X'.repeat(16)}`, `glpat-${'x'.repeat(20)}`]) {
+    assert.equal(redact(`value ${token} end`), `value ${REDACTED} end`, token);
+    assert.equal(hasCredential(`const value = "${token}";`, { code: true }), true, token);
+  }
+  const block = 'before\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nafter';
+  assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
+  assert.equal(hasSecretLiteral(JSON.stringify({ value: block })), true);
+  assert.equal(redact('CACHE_KEY=user-profile-v2'), `CACHE_KEY=${REDACTED}`, 'Redaction hides any name that ends in KEY.');
+  assert.equal(hasCredential('const CACHE_KEY = "user-profile-v2";', { code: true }), false, 'The change rule leaves a cache key alone.');
+});
+
 test('a private key block is blanked line by line, so line numbers hold', () => {
   const block = 'before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nAAAA\n-----END RSA PRIVATE KEY-----\nafter';
   assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);
