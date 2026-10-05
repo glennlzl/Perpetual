@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
 import type { GitHubConnection } from '../contract/github.ts';
+
+// CI runs test files concurrently, so every wait allows ten seconds.
+const expect = playwrightExpect.configure({ timeout: 10_000 });
 
 // The canvas branch Select itself, with GitHub replies supplied only at the HTTP boundary.
 test('the canvas branch Select lists, pages, refreshes and switches the repository branches', { timeout: 60000 }, async t => {

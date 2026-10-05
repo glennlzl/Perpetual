@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
-import { chromium, expect, type Request } from '@playwright/test';
+import { chromium, expect as playwrightExpect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { Pipeline } from '../contract/pipeline.ts';
 import type { ReleaseReply } from '../contract/releases.ts';
+
+// CI runs test files concurrently, so every wait allows ten seconds.
+const expect = playwrightExpect.configure({ timeout: 10_000 });
 
 const repoPath = '/acme/app', sha = 'a'.repeat(40);
 type Reply = { status?: number; json: unknown };

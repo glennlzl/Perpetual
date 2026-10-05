@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
 import { browserCaseFixture, browserRunFixture } from './fixtures/browser-view.ts';
+
+// CI runs test files concurrently, so every wait allows ten seconds.
+const expect = playwrightExpect.configure({ timeout: 10_000 });
 
 const hash = 'a'.repeat(64);
 const journey = browserCaseFixture({ id: 'save', name: 'Save a workspace', goal: 'Save and reopen the workspace', expectedOutcomes: ['The saved workspace is shown'],
