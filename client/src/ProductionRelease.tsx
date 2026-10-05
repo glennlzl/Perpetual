@@ -97,7 +97,7 @@ function AbandonDialog({ confirmation, view, pending, disabled, error, onClose, 
   const request = abandonRequest(view, confirmation);
   return <AlertDialog open onOpenChange={open => { if (!open && !pending) onClose(); }}>
     <AlertDialogContent onCloseAutoFocus={returnFocus}>
-      <AlertDialogHeader><AlertDialogTitle>Abandon deployment {confirmation.sha.slice(0, 7)}?</AlertDialogTitle><AlertDialogDescription className="break-words">Perpetual stops following this deployment to <strong>{confirmation.environment}</strong> and allows another. GitHub keeps its record.</AlertDialogDescription></AlertDialogHeader>
+      <AlertDialogHeader><AlertDialogTitle>Abandon deployment {confirmation.sha.slice(0, 7)}?</AlertDialogTitle><AlertDialogDescription className="break-words">Perpetual stops following this deployment to <strong>{confirmation.environment}</strong> and allows another. Nothing changes on GitHub.</AlertDialogDescription></AlertDialogHeader>
       {!request && <p role="alert" className="text-sm text-destructive">The deployment changed. Close and review it again.</p>}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
       <AlertDialogFooter><AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={disabled || pending || !request} onClick={event => { event.preventDefault(); if (request) onAbandon(request); }}>{pending ? 'Abandoning…' : 'Abandon'}</AlertDialogAction></AlertDialogFooter>

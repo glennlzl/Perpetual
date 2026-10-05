@@ -1,6 +1,6 @@
 /** An explicitly configured GitHub deployment handler and its destination. */
 export interface ReleaseTarget { environment: string; productionEnvironment: boolean; workflowPath: string }
-/** abandoned: a person ended an unresolved request, which Perpetual no longer follows; GitHub keeps its own record. */
+/** abandoned: a person ended an unresolved request, which Perpetual no longer follows; nothing changes on GitHub. */
 export type ReleaseStatus = 'requesting' | 'unknown' | 'queued' | 'deploying' | 'deployed' | 'failed' | 'inactive' | 'abandoned';
 /** A request and the deployment provider's reported outcome, never a gate verdict. */
 export interface ReleaseRecord {
