@@ -37,6 +37,11 @@ export const FACTS = 'facts.json';
  */
 export const TOOL_OUTPUT = '~/.local/share/opencode/tool-output/*';
 export const MAX_CONFIG = 256 * 1024;
+/**
+ * No credential is shorter: a supplied value that is, such as `none` for a local model server, is a placeholder, and
+ * hiding it would rewrite ordinary text in the author's copy and refuse every draft that contains it.
+ */
+const MIN_SECRET = 8;
 /** An upper bound on the agent's tool calls in one attempt, besides its time limit. */
 export const STEPS = 100;
 /** One attempt's time limit. */
@@ -325,7 +330,8 @@ const authorFailure = (failure: RunFailure): AuthorFailure => Object.assign(new 
  */
 export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
   const abort = new AbortController();
-  const supplied = [apiKey, ...secrets], hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
+  const supplied = [apiKey, ...secrets].filter(value => typeof value === 'string' && value.length >= MIN_SECRET);
+  const hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
   let runner: OpencodeRunner | null = null;
   const promise = (async (): Promise<Authored> => {
     if (hasSecretLiteral(draft, supplied)) return { error: `${CONFIG} contains a credential literal. Use a service placeholder or a configured test input.` };

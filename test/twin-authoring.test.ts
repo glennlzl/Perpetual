@@ -67,6 +67,22 @@ test('the author reads EVIDENCE.md as the controller formatted it, credential-na
   assert.equal(observed, evidence);
 });
 
+test('a short supplied value, such as a local model server placeholder key, is not a secret to the author', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.source, 'style.css'), '.hidden { display: none; }\n');
+  await writeFile(join(f.source, 'nonempty.js'), 'export const value = 1;\n');
+  const draft = JSON.stringify({ apps: { web: { start: 'node app.mjs', port: 3000, env: { ADMIN_EMAIL: 'owner@example.test' } } } });
+  let files: string[] = [], style = '';
+  const result = await authorTwinConfig({ ...f.options, draft, secrets: ['none', 'test'], harness: ({ cwd }) => {
+    files = readdirSync(join(cwd, 'repo')).sort();
+    style = readFileSync(join(cwd, 'repo/style.css'), 'utf8');
+    return rewriteDraft;
+  } }).promise;
+  assert.equal(result.text, draft, 'A draft with the documented account address is no credential literal.');
+  assert.deepEqual(files, ['nonempty.js', 'style.css']);
+  assert.equal(style, '.hidden { display: none; }\n');
+});
+
 test('a credential-bearing draft is refused before the author starts, preserving its text', async t => {
   const f = await fixture(t);
   const draft = JSON.stringify({ services: {}, apps: { web: { start: 'node app.mjs', port: 3000, env: { VALUE: KEY } } } });
