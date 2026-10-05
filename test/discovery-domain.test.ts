@@ -86,3 +86,20 @@ test('product code named like a tooling or test folder is sampled, while tooling
   for (const name of product) assert.ok(names.includes(name), name);
   assert.doesNotMatch(JSON.stringify(context), /SEED_SCRIPT|AGENT_NOTES|JAVA_TEST|PYTHON_TEST|TEST_UTILS|TEST_SETUP|MOCK_DATA|TEST_RENDER|TEST_DB|MOCK_PAGE|RETIRED_UI|ROUTE_NOTES|FEATURE_NOTES|OLD_PLAN/);
 });
+
+test('UI and API files fill the model\'s sample first, shared code keeps a quarter of it until they run out', async t => {
+  const sample = async (names: string[]) => {
+    const root = await mkdtemp(join(tmpdir(), 'discovery-split-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    for (const name of names) { await mkdir(join(root, dirname(name)), { recursive: true }); await writeFile(join(root, name), `export const page = "${name}";\n`); }
+    const sent = (await businessSourceContext(root, { scope: '' })).files.map(file => file.path);
+    return (folder: string) => sent.filter(name => name.startsWith(folder)).length;
+  };
+  const files = (count: number, name: (index: string) => string) => Array.from({ length: count }, (_, index) => name(String(index).padStart(2, '0')));
+  // A frontend and a backend beside a larger shared package.
+  const layered = await sample([...files(40, index => `frontend/pages/page-${index}.tsx`), ...files(40, index => `backend/routes/route-${index}.ts`), ...files(60, index => `packages/shared/helper-${index}.ts`)]);
+  assert.deepEqual([layered('frontend/'), layered('backend/'), layered('packages/')], [21, 21, 14]);
+  // Once the pages run out, shared code takes every remaining slot.
+  const pages = await sample([...files(10, index => `app/area-${index}/page.tsx`), ...files(60, index => `lib/helper-${index}.ts`)]);
+  assert.deepEqual([pages('app/'), pages('lib/')], [10, 46]);
+});

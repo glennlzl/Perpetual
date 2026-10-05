@@ -29,6 +29,12 @@ const sampled = (name: string) => SOURCE_EXTENSIONS.has(path.extname(name).toLow
 // A route's own page or handler in a folder: page.tsx, +page.svelte, route.ts, or an index page below app, pages or routes.
 const routePage = (folder: string, name: string) => sampled(name) && !/\.mdx?$|test|spec|mock|setup|fixture/i.test(name)
   && (/^(?:\+?page|route)\./i.test(name) || /^index\./i.test(name) && /(?:^|\/)(?:app|pages|routes)\//i.test(folder));
+const category = (name: string) => {
+  if (/\.mdx?$/i.test(name)) return 'product';
+  if (/(?:^|\/)(?:api|backend|server|routes)(?:\/|$)/i.test(name)) return 'api';
+  if (UI_FILE.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
+  return 'other';
+};
 // Generic journey vocabulary shared by most products; nothing product-specific.
 const BILLING_PATH = /billing|payment|stripe|checkout|subscription|credit|wallet|refund/i;
 const ACTION_PATH = /(?:^|\/)(?:new|create|edit|run|submit|result)(?:\/|\.|-|$)/i;
@@ -81,12 +87,6 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
       + (/(?:^|\/)(?:readme|prd|product|requirements)\.mdx?$/.test(normalized) ? 80 : 0)
       + (/(?:^|\/)docs\/(?:user|product)\//.test(normalized) ? 100 : 0)
       - (/(?:^|\/)(?:plans|changelog|history)(?:\/|\.)/.test(normalized) ? 30 : 0);
-  };
-  const category = (name: string) => {
-    if (/\.mdx?$/i.test(name)) return 'product';
-    if (/(?:^|\/)(?:api|backend|server|routes)(?:\/|$)/i.test(name)) return 'api';
-    if (UI_FILE.test(name) || /(?:^|\/)(?:frontend|client|web|pages|components)(?:\/|$)/i.test(name)) return 'ui';
-    return 'other';
   };
   let visited = 0, total = 0, limited = false;
   // aside: inside a test or tooling folder, whose documentation stays out.
@@ -165,8 +165,12 @@ async function balancedBrowserSources(repoPath: string, scope: string): Promise<
  * useful interior implementation lines over spending the whole budget on imports
  * or the first few large files. Citations always retain original line numbers. */
 function browserModelSources(files: SourceFile[]): ModelSource[] {
-  // The files arrive balanced across UI, API, documentation and shared code, whatever their folders are called.
-  const selected = files.filter(file => !/\.mdx?$/i.test(file.path)).slice(0, 56);
+  // The files arrive balanced across UI, API, documentation and shared code. UI and API files take the slots first;
+  // shared code takes at most a quarter of them while those last, and the rest once they run out. The order is kept.
+  const code = files.filter(file => !/\.mdx?$/i.test(file.path)), shared = code.filter(file => category(file.path) === 'other');
+  const room = Math.min(shared.length, Math.max(14, 56 - (code.length - shared.length)));
+  const kept = new Set([...code.filter(file => category(file.path) !== 'other').slice(0, 56 - room), ...shared.slice(0, room)]);
+  const selected = code.filter(file => kept.has(file));
   selected.push(...files.filter(file => /\.mdx?$/i.test(file.path)).slice(0, 4));
   if (!selected.length) return [];
   let remaining = MAX_MODEL_BYTES;
