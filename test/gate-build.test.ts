@@ -9,8 +9,9 @@ import type { CommitStatusPost } from '../src/gate/github.ts';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), P = 'f'.repeat(40);
 type Build = BuildVerdict;
+// CI runs test files concurrently, so a wait allows ten seconds before it fails.
 const until = async (condition: () => boolean) => {
-  for (let count = 0; count < 200 && !condition(); count++) await delay(5);
+  for (const deadline = Date.now() + 10_000; !condition() && Date.now() < deadline;) await delay(5);
   assert.ok(condition(), 'The expected gate state must arrive.');
 };
 

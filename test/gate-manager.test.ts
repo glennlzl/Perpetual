@@ -160,7 +160,7 @@ test('a newer commit supersedes queued ones; the running gate finishes and only 
   h.holds.run = async context => { if (context.sha === A) await release.promise; };
   h.current.sha = A;
   await h.manager.run({ stageId: 'beta' }); // Run now reads the unchanged head A
-  while (h.manager.view().stages.beta.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   await h.manager.watch(); // push B
   await h.manager.watch(); // push C
   const during = await h.gates('beta');
@@ -244,7 +244,7 @@ test('a promoted commit runs before a newer push enters the first stage', async 
   const release = deferred();
   h.holds.run = async context => { if (context.stageId === 'beta' && context.sha === A) await release.promise; };
   await h.manager.run({ stageId: 'beta' });
-  while (h.manager.view().stages.beta.status !== 'running') await new Promise(done => setTimeout(done, 1));
+  await until(() => h.manager.view().stages.beta?.status === 'running');
   await h.manager.watch(); // push B while Beta tests A
   release.resolve();
   await h.manager.idle();
@@ -274,7 +274,7 @@ test('a busy stage keeps its gate queued and retries it', async t => {
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
   assert.equal(h.manager.view().stages.beta.status, 'queued');
-  while (h.manager.view().stages.beta.status !== 'passed') await new Promise(done => setTimeout(done, 2));
+  await until(() => h.manager.view().stages.beta?.status === 'passed');
   assert.equal(busy, -1);
 });
 
@@ -307,7 +307,7 @@ test('a busy stage never holds back another stage; its newest commit runs once i
   await h.manager.idle();
   assert.deepEqual(h.log.filter(line => line.startsWith('run')), ['run beta a twin-beta', 'run beta b twin-beta']);
   gammaBusy = false;
-  while (h.manager.view().stages.gamma.status !== 'passed') await new Promise(done => setTimeout(done, 2));
+  await until(() => h.manager.view().stages.gamma?.status === 'passed');
   await h.manager.idle();
   assert.deepEqual(h.log.filter(line => line.startsWith('run gamma')), ['run gamma b twin-gamma']);
   assert.deepEqual((await h.gates('gamma')).map(item => [item.sha[0], item.status]).sort(), [['a', 'superseded'], ['b', 'passed']]);
