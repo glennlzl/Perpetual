@@ -202,6 +202,14 @@ const reserveSharedPort = (dataDir: string, key: string, current: unknown, { sta
   return port;
 });
 
+/** The services a plain `up` starts: those of the twin's compose.yaml outside a profile, as the install and the source copy are. */
+async function upServices(file: string) {
+  const invalid = 'Invalid twin compose file; its services could not be read.', info = await lstat(file);
+  if (!info.isFile() || info.size > STATE_LIMIT) fail(invalid);
+  const services = fields(fields(YAML.parse(await readFile(file, 'utf8')))?.services) ?? fail(invalid);
+  return Object.keys(services).filter(name => fields(services[name])?.profiles === undefined);
+}
+
 const parsePs = (stdout: unknown): ComposePs[] => {
   const text = String(stdout).trim();
   if (!text) return [];
@@ -489,6 +497,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     const containers = parsePs(stdout).map(item => ({ name: String(item.Service), state: String(item.State), health: typeof item.Health === 'string' && item.Health ? item.Health : null, exitCode: typeof item.ExitCode === 'number' ? item.ExitCode : null }));
     // A separate service stack cannot supply the twin's missing Compose containers.
     if (!containers.length) return { status: 'stopped', containers };
+    // Nor can the containers left supply a removed one, which never comes back by itself.
+    const listed = new Set(containers.map(item => item.name)), missing = (await upServices(twin.compose)).some(name => !listed.has(name));
     // Blocked services have no resource record. A restarted controller reads the same owned names from the adapter.
     for (const record of state?.services ?? []) {
       const definition = services[record.id];
@@ -500,7 +510,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         containers.push(...inspectedHealth(inspected.stdout, expected));
       } catch (error) { throw new Error(`${definition.title}: ${redactSecrets(redact((error as Error).message))}`); }
     }
-    return { status: overall(containers), containers };
+    return { status: missing ? 'failed' : overall(containers), containers };
   }
 
   async function logs({ dataDir, id, service, tail = 200 }: { dataDir: string; id: string; service?: string | null; tail?: number }) {

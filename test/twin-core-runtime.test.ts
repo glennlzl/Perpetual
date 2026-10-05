@@ -293,11 +293,11 @@ test('A machine-wide instance that already publishes a port keeps it, and twins 
 });
 
 test('Logs, health and command failures never reveal secret values', async t => {
-  const leak = `key=${KEY} whsec=${WEBHOOK_SECRET} url=postgres://postgres:db-password-1@db`;
+  const leak = `key=${KEY} whsec=${WEBHOOK_SECRET} url=postgres://postgres:db-password-1@db`, others = ['jobs-worker', 'payments-listener', 'mail', 'api'];
   let failUp = false;
   const { runtime, prepare, dataDir } = await setup(args => {
     if (args.includes('logs')) return { stdout: `web | ${leak}\n`, stderr: `payments | ${KEY}\n` };
-    if (args[0] === 'compose' && args.includes('ps')) return { stdout: '{"Service":"web","State":"running","Health":"healthy","ExitCode":0}\n{"Service":"database","State":"running","Health":"starting"}\n' };
+    if (args[0] === 'compose' && args.includes('ps')) return { stdout: `{"Service":"web","State":"running","Health":"healthy","ExitCode":0}\n{"Service":"database","State":"running","Health":"starting"}\n${others.map(name => `{"Service":"${name}","State":"running","Health":"","ExitCode":0}\n`).join('')}` };
     if (failUp && args.includes('up')) throw Object.assign(new Error('Command failed'), { stderr: `listener exited: ${leak}` });
     return {};
   });
@@ -306,7 +306,8 @@ test('Logs, health and command failures never reveal secret values', async t => 
   const text = await runtime.logs({ dataDir, id: 'beta', service: 'web', tail: 50 });
   assert.equal(text, 'web | key=[redacted] whsec=[redacted] url=postgres://[REDACTED]@db\npayments | [redacted]\n');
   assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'starting', containers: [
-    { name: 'web', state: 'running', health: 'healthy', exitCode: 0 }, { name: 'database', state: 'running', health: 'starting', exitCode: null }] });
+    { name: 'web', state: 'running', health: 'healthy', exitCode: 0 }, { name: 'database', state: 'running', health: 'starting', exitCode: null },
+    ...others.map(name => ({ name, state: 'running', health: null, exitCode: 0 }))] });
   await assert.rejects(runtime.logs({ dataDir, id: 'beta', service: 'web; rm' }), /Choose a service/);
   failUp = true;
   await assert.rejects(prepare(), (error: Error) => { assert.deepEqual(secretsIn(error.message), []); assert.match(error.message, /listener exited: key=\[redacted\]/); return true; });
@@ -342,6 +343,19 @@ test('Health reads either Compose ps format and reports stopped twins', async t 
   assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'stopped', containers: [] });
   await prepare();
   assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: [{ name: 'web', state: 'exited', health: null, exitCode: 1 }] });
+});
+
+test('Health fails a twin whose Compose service container is gone, however healthy the others are', async t => {
+  const services = ['jobs-worker', 'payments-listener', 'database', 'mail', 'web', 'api'];
+  let listed = services;
+  const { runtime, prepare, dataDir } = await setup(args => args[0] === 'compose' && args.includes('ps')
+    ? { stdout: listed.map(name => JSON.stringify({ Service: name, State: 'running', Health: 'healthy', ExitCode: 0 })).join('\n') } : {});
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await prepare();
+  assert.equal((await runtime.health({ dataDir, id: 'beta' })).status, 'ready');
+  // A crashed database that a prune removed: the apps still run, and nothing brings it back.
+  listed = services.filter(name => name !== 'database');
+  assert.deepEqual(await runtime.health({ dataDir, id: 'beta' }), { status: 'failed', containers: listed.map(name => ({ name, state: 'running', health: 'healthy', exitCode: 0 })) });
 });
 
 test('Destroy takes Compose down with volumes, then tears services down in reverse setup order', async t => {
