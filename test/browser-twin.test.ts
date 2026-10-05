@@ -35,7 +35,8 @@ async function fixture(t:TestContext,{environments=[twin],events=()=>[],hold=()=
     scan:{repo:{path:join(dataDir,'repo'),sha:'abc'},services:[{id:'service:web',framework:'Next.js'},{id:'service:api',framework:'Hono'}]}});
   return {manager,context,requests,dataDir};
 }
-async function settled<T>(read:()=>T|false|null|Promise<T|false|null>):Promise<T>{for(let i=0;i<200;i++){const value=await read();if(value)return value;await delay(5);}throw new Error('Operation did not settle.');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+async function settled<T>(read:()=>T|false|null|Promise<T|false|null>):Promise<T>{for(const deadline=Date.now()+10000;Date.now()<deadline;await delay(5)){const value=await read();if(value)return value;}throw new Error('Operation did not settle.');}
 const prepared=(f:Awaited<ReturnType<typeof fixture>>,context:BrowserStageContext)=>settled(()=>{const {preparation}=f.manager.summary(context);return preparation&&!['preparing','discovering'].includes(preparation.status)&&preparation;});
 const finished=(f:Awaited<ReturnType<typeof fixture>>,context:BrowserStageContext,id:string)=>settled(async()=>{const report=await f.manager.runProgress(context,id);return !['queued','running'].includes(report.run.status)&&report;});
 const discovered=()=>[{type:'discovery',summary:'Billing observed',cases:[{...journey,id:'drafted',selected:false,needsReview:true}]}];

@@ -22,7 +22,8 @@ const outcome=(id:string)=>({caseId:id,stopCause:'none',agentCompleted:true,outc
 const step=(caseId:string,stepId:string,status:string,extra:Record<string,unknown>={})=>({type:'journey-step',caseId,stepId,status,...(status==='running'?{}:{evidence:`${stepId} ${status} observed`}),...extra});
 const reach=(worker:Worker,caseId:string,stepId:string,status:string,extra?:Record<string,unknown>)=>{worker.event(step(caseId,stepId,'running'));worker.event(step(caseId,stepId,status,extra));};
 const passedChecks:Record<string,Record<string,unknown>[]>={start:[{type:'read-number',label:'Credits',name:'before',passed:true,observed:10}],run:[{type:'text-visible',value:'Run complete',passed:true},{type:'compare-number',label:'Credits',name:'after',op:'<',than:'before',passed:true,observed:9}]};
-async function until(predicate:()=>unknown){for(let i=0;i<300;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,2));}throw new Error('Condition did not settle.');}
+// Test files run at once, so a loaded runner can take seconds where a quiet one takes milliseconds.
+async function until(predicate:()=>unknown){for(const deadline=Date.now()+10000;Date.now()<deadline;await new Promise(resolve=>setTimeout(resolve,2)))if(await predicate())return;throw new Error('Condition did not settle.');}
 async function fixture(t:TestContext,cases=[journey('one'),journey('two')],config:Record<string,unknown>={}){
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-journey-contract-')),repo=join(dataDir,'repo');
   await mkdir(repo);await writeFile(join(repo,'app.js'),'export const credits="Credits";');
