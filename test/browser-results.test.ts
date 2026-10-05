@@ -54,6 +54,15 @@ test('a fixed control-read diagnosis is retained while arbitrary worker text and
   for(const controlReadReason of [null,{},'private page address','constructor'])assert.throws(()=>verdict({controlRead:false,controlReadReason}),/control read diagnosis/);
 });
 
+test('control transport evidence stays bounded and cannot qualify a failed control',()=>{
+  const controlBlocks=[{kind:'http',method:'POST',url:'https://viewer:secret@app.test/read;token=private?secret=private#private',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}];
+  const result=verdict({controlRead:false,controlReadReason:'blocked-after-read',controlBlocks},progress('completed','failed'));
+  assert.equal(result.status,'failed');assert.equal(result.controlRead,false);
+  assert.deepEqual((result as unknown as {controlBlocks:unknown}).controlBlocks,[{kind:'http',method:'POST',url:'https://app.test/read',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}]);
+  for(const controlRead of [undefined,true])assert.throws(()=>verdict({controlRead,controlBlocks}),/control transport evidence/);
+  for(const invalid of [null,{},Array(11).fill(controlBlocks[0]),[{...controlBlocks[0],body:'private'}],[{...controlBlocks[1],message:'private'}],[{...controlBlocks[0],afterRead:'true'}]])assert.throws(()=>verdict({controlRead:false,controlBlocks:invalid}),/control transport evidence/);
+});
+
 test('one precedence decides status and message: failed, blocked, needs review, then passed',()=>{
   const failedCheck=[{...journey.steps[0],status:'completed'},{...journey.steps[1],status:'failed',checks:[{type:'compare-number',label:'Credits',name:'after',op:'>',than:'before',passed:false,observed:10,provenance:'independent'}]}];
   const table:[string,Record<string,unknown>,MilestoneState[],string,string|undefined][]=[

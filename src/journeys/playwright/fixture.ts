@@ -10,7 +10,7 @@ import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTem
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads, controlBlockerText } from './control.ts';
-import type { ControlReadReason } from '../../../contract/browser.ts';
+import type { ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
@@ -263,9 +263,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false, sharedWorker = false;
     const controlRefusal = () => sharedWorker ? SHARED_WORKER : UNGUARDED;
     const controlFailures: (() => boolean)[] = [];
-    const controlReasons: (() => ControlReadReason | undefined)[] = [];
+    const controlReasons: { reason: () => ControlReadReason | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
     let controlCheckFailed = false;
-    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context) : undefined;
+    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, Object.values(account ?? {})) : undefined;
     const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
       write.call(process.stdout, `${env.PERPETUAL_EVENT_CHANNEL}${JSON.stringify({ type: 'lifecycle', caseId: approved.id, lifecycle })}\n`);
     }) : undefined;
@@ -274,7 +274,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       return (check: EvaluatedCheck) => {
         control.captured(check);
         controlCheckFailed ||= !check.passed;
-        if (!check.passed) controlReasons.push(observed.reason(check));
+        if (!check.passed) controlReasons.push({ reason: observed.reason(check), blocks: () => control.blocks(target) });
         const witness = observed(check);
         if (witness && !unguarded) controlFailures.push(witness);
       };
@@ -305,7 +305,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     // Routes never see a WebSocket's messages, so a control run also routes every page's sockets to their server,
     // counting what holdSockets lets through; the page's script is added after the route's, so it sees routed sockets.
     if (BLOCK_WRITES) {
-      await context.exposeBinding(REPORT, ({ page }, kind: unknown) => { if (kind === 'blocked') control?.blocked(page); else unguarded = true; });
+      await context.exposeBinding(REPORT, ({ page }, kind: unknown) => { if (kind === 'blocked') control?.blocked(page, { kind: 'socket', transport: 'websocket' }); else unguarded = true; });
       await context.routeWebSocket('**/*', socket => {
         const server = socket.connectToServer();
         socket.onMessage(message => { forwarded++; server.send(message); });
@@ -327,7 +327,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         const navigation = resourceType === 'Document';
         const refused = navigation ? refuse(request.url, frameId === targetInfo.targetId) : stripeLive(request.url);
         if (!refused && redirectedRequestId && BLOCK_WRITES && !signingIn && !READS.has(request.method) && !reviewedRead(readRequests, request.method, request.url, request.postData, request.headers)) {
-          control?.blocked(target);
+          control?.blocked(target, { kind: 'http', method: request.method, url: request.url });
           cdp.send('Fetch.fulfillRequest', { requestId, responseCode: navigation ? 204 : 503 }).catch(() => {}); return;
         }
         cdp.send(refused ? 'Fetch.failRequest' : 'Fetch.continueRequest', refused ? { requestId, errorReason: 'BlockedByClient' } : { requestId }).catch(() => {});
@@ -458,8 +458,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (unguarded) emit({ type: 'journey-stop', error: controlRefusal() });
       if (control && controlCheckFailed) {
         const eligible = !unguarded && controlFailures.some(valid => valid());
-        const reason = eligible || unguarded ? undefined : controlReasons.map(reason => reason()).find(Boolean);
-        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}) });
+        const rejected = eligible || unguarded ? undefined : controlReasons.find(observed => observed.reason());
+        const reason = rejected?.reason(), controlBlocks = rejected?.blocks();
+        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}), ...(controlBlocks?.length ? { controlBlocks } : {}) });
       }
     }
   },

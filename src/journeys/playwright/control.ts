@@ -1,5 +1,6 @@
 import type { BrowserContext, Page, Request } from '@playwright/test';
-import type { ControlReadReason } from '../../../contract/browser.ts';
+import type { ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
+import { controlBlocks } from '../../browser/control-evidence.ts';
 import { RUN, checkTemplate, type EvaluatedCheck } from './checks.ts';
 
 /** Fixed transport limitations, never page text, URLs or message contents. */
@@ -25,23 +26,34 @@ const READ_REASONS: Record<ControlReadReason, string> = {
 export const controlReadReasonText = (value: unknown): string | undefined => typeof value === 'string' && Object.hasOwn(READ_REASONS, value) ? READ_REASONS[value as ControlReadReason] : undefined;
 
 /** A control failure needs a fresh document of the judged page, after its blocked change. */
-export function controlReads(context: BrowserContext) {
+export function controlReads(context: BrowserContext, secrets?: Iterable<unknown>) {
+  const known = [...(secrets ?? [])];
   type Document = { request: Request; epoch: number; ok: boolean; responded: boolean; finished: boolean; committed: boolean };
-  type State = { epoch: number; document?: Document; invalid: boolean; reason?: ControlReadReason };
+  type State = { epoch: number; document?: Document; invalid: boolean; reason?: ControlReadReason; blocks: ControlBlockedTransport[]; readStarted: boolean };
   const pages = new WeakMap<Page, State>(), documents = new WeakMap<Request, Document>(), blockedRequests = new WeakSet<Request>(), captures = new Map<string, number>();
   let sequence = 0;
-  const state = (page: Page) => { let item = pages.get(page); if (!item) { item = { epoch: 0, invalid: true }; pages.set(page, item); } return item; };
+  const state = (page: Page) => { let item = pages.get(page); if (!item) { item = { epoch: 0, invalid: true, blocks: [], readStarted: false }; pages.set(page, item); } return item; };
   const owner = (request: Request) => { try { return request.frame().page(); } catch { return undefined; } };
   const top = (request: Request) => { try { return request.isNavigationRequest() && !request.frame().parentFrame(); } catch { return false; } };
-  const blocked = (page: Page | undefined) => { sequence++; if (page) { const item = state(page); Object.assign(item, { epoch: sequence, reason: item.document ? 'blocked-after-read' : item.reason || 'no-fresh-document', document: undefined, invalid: true }); } };
+  const blocked = (page: Page | undefined, transport?: { kind: 'http'; method: string; url: string } | { kind: 'socket'; transport: 'websocket' }) => {
+    sequence++;
+    if (!page) return;
+    const item = state(page);
+    if (transport) {
+      const block = controlBlocks([{ ...transport, afterRead: item.readStarted }], known)?.[0];
+      if (block && !item.blocks.some(previous => JSON.stringify(previous) === JSON.stringify(block))) item.blocks = [...item.blocks, block].slice(-10);
+    }
+    // Diagnostics never participate in eligibility or change the invalidation order.
+    Object.assign(item, { epoch: sequence, reason: item.document ? 'blocked-after-read' : item.reason || 'no-fresh-document', document: undefined, invalid: true });
+  };
   const invalidate = (request: Request) => { const page = owner(request); if (page) Object.assign(state(page), { invalid: true, reason: blockedRequests.has(request) ? 'blocked-request-failed' : 'read-failed' }); };
   context.on('request', request => {
     const page = owner(request); if (!page || !top(request)) return;
     const item = state(page);
-    item.document = undefined; item.invalid = true; item.reason = undefined;
+    item.document = undefined; item.invalid = true; item.reason = undefined; item.readStarted = false;
     if (request.method() !== 'GET' || !item.epoch) return;
     const document: Document = { request, epoch: item.epoch, ok: false, responded: false, finished: false, committed: false };
-    documents.set(request, document); item.document = document; item.invalid = false;
+    documents.set(request, document); item.document = document; item.invalid = false; item.readStarted = true;
   });
   context.on('response', response => {
     const request = response.request(), document = documents.get(request);
@@ -87,7 +99,8 @@ export function controlReads(context: BrowserContext) {
   }
   return {
     blocked,
-    blockedRequest(request: Request) { blockedRequests.add(request); blocked(owner(request)); },
+    blockedRequest(request: Request) { blockedRequests.add(request); blocked(owner(request), { kind: 'http', method: request.method(), url: request.url() }); },
+    blocks(page: Page | undefined) { return page ? state(page).blocks.map(block => ({ ...block })) : []; },
     captured(check: EvaluatedCheck) { if (check.type === 'read-number' && check.passed && Number.isFinite(check.observed)) captures.set(check.name, sequence); },
     eligible,
     // Snapshot before the browser observation. A later document can never certify this check,

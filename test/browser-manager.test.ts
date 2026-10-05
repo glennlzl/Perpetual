@@ -88,9 +88,25 @@ test('restart refuses malformed stored control limitations before publishing run
     const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
     await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control read diagnosis/);
   }
+  for(const fields of [{controlRead:false,controlBlocks:{}},{controlRead:false,controlBlocks:[{kind:'socket',transport:'websocket',afterRead:true,message:'private'}]},{controlRead:true,controlBlocks:[]}]){
+    const corrupt=structuredClone(saved);Object.assign(corrupt.runs[0].results[0],fields);await writeFile(file,JSON.stringify(corrupt));
+    await assert.rejects(createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime}),/Invalid stored control transport evidence/);
+  }
   await writeFile(file,JSON.stringify(saved));
   const restored=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restored.close());
   assert.deepEqual((await restored.runProgress(f.context,run.id)).results,report.results,'Legacy evidence without a limitation stays unchanged.');
+});
+
+test('control transport evidence is scrubbed with the run account and survives history and restart',async t=>{
+  const username='viewer@example.test',password='private-'+ 'p'.repeat(600);
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',controlRead:false,controlReadReason:'blocked-after-read',controlBlocks:[{kind:'http',method:'POST',url:`http://app.test/${encodeURIComponent(username)}/${encodeURIComponent(password)}?secret=private`,afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}],assertions:[{...scenario.assertions[0],passed:false}]}}]);
+  const {run}=await f.manager.run(f.context,{credentials:{username,password}},manual),report=await completed(f,run.id);
+  assert.deepEqual(report.results[0].controlBlocks,[{kind:'http',method:'POST',url:'http://app.test/[REDACTED]/[REDACTED]',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}]);
+  assert.equal(report.run.status,'failed');assert.equal(report.results[0].controlRead,false);
+  await f.manager.close();
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.runProgress(f.context,run.id)).results,report.results);
+  assert.deepEqual((await restarted.view(f.context)).runs[0].results,report.results);
 });
 
 test('unverified passed claims and missing results cannot become business passes',async t=>{
