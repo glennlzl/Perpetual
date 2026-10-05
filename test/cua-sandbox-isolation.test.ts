@@ -127,61 +127,49 @@ test('destroy removes exactly the owned container and reports deletion only once
     ['--host', socket, 'container', 'rm', '--force', '--volumes', containerId], inspect,
   ]);
   assert.equal(record?.status, 'destroyed');
-  assert.equal(record?.apiUrl, null);
+  assert.equal(record?.apiUrl, undefined, 'A desktop keeps no host address.');
   assert.equal((await fixture.saved()).status, 'destroyed');
 });
 
-test('the SDK bridge talks only to a loopback Perpetual desktop and sends a failed request once', async t => {
+test('the SDK bridge reaches only a Perpetual desktop container, through the local Docker engine', async t => {
   // Stand-ins for the pinned SDK and httpx, so the bridge's own checks run without either installed.
   const script = `
 import asyncio, importlib.metadata, json, sys, types
 sys.path.insert(0, sys.argv[1])
 import bridge
-class Response:
-    def raise_for_status(self): raise RuntimeError("HTTP 503")
-class Stream:
-    async def __aenter__(self): return Response()
-    async def __aexit__(self, *exc): return False
-class Client:
-    requests = 0
-    def stream(self, method, path, json=None, timeout=None):
-        Client.requests += 1
-        return Stream()
-class Transport:
-    def __init__(self, url): self._client = Client()
 class Sandbox:
     created = 0
     def __init__(self, transport, name, _telemetry_enabled): Sandbox.created += 1
     async def __aenter__(self): return self
     async def __aexit__(self, *exc): return False
-    async def screenshot(self): return b"\\x89PNG\\r\\n\\x1a\\n"
+class Transport:
+    def __init__(self, *args, **kwargs): pass
 for name, values in {"httpx": {"Timeout": lambda *args, **kwargs: None}, "cua_sandbox": {"Sandbox": Sandbox},
                      "cua_sandbox.transport": {}, "cua_sandbox.transport.http": {"HTTPTransport": Transport}}.items():
     module = types.ModuleType(name)
     module.__dict__.update(values)
     sys.modules[name] = module
 importlib.metadata.version = lambda name: bridge.SDK_VERSION
-def outcome(url, name="perpetual-cua-desktop"):
-    try: return asyncio.run(bridge.dispatch({"apiUrl": url, "name": name, "action": {"type": "screenshot"}}))["mimeType"]
+def outcome(**fields):
+    request = {"dockerHost": "unix:///var/run/docker.sock", "containerId": "c" * 64, "name": "perpetual-cua-desktop", "action": {"type": "screenshot"}}
+    request.update(fields)
+    try: asyncio.run(bridge.dispatch(request)); return "accepted"
     except bridge.BridgeError as error: return str(error)
-urls = ["http://0.0.0.0:8000", "http://192.0.2.10:8000", "https://127.0.0.1:8000", "http://user:secret@127.0.0.1:8000",
-        "http://127.0.0.1:8000/cmd", "http://127.0.0.1:8000?next=1", "http://127.0.0.1", "http://localhost:8000"]
-result = {"refused": [outcome(url) for url in urls], "loopback": outcome("http://127.0.0.1:8000"), "name": outcome("http://127.0.0.1:8000", "desktop")}
-try: asyncio.run(bridge.checked_transport("http://127.0.0.1:8000")._cmd("run_command", {"command": "true"}))
-except RuntimeError: pass
+result = {"engines": [outcome(dockerHost=host) for host in ["tcp://127.0.0.1:2375", "ssh://user@example.test", "unix://docker.sock", "", None]],
+          "containers": [outcome(containerId=value) for value in ["", "C" * 64, "c" * 63, "../" + "c" * 61, 5]],
+          "name": outcome(name="desktop")}
 importlib.metadata.version = lambda name: "0.0.0"
-result.update(created=Sandbox.created, requests=Client.requests, version=outcome("http://127.0.0.1:8000"))
+result.update(created=Sandbox.created, version=outcome())
 print(json.dumps(result))
 `;
   let stdout: string;
   try { ({ stdout } = await exec('python3', ['-c', script, integration], { env: { PATH: process.env.PATH, PYTHONDONTWRITEBYTECODE: '1' }, timeout: 20000 })); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { t.skip('python3 is not installed.'); return; } throw error; }
-  const result = JSON.parse(stdout) as { refused: string[]; loopback: string; name: string; created: number; requests: number; version: string };
-  assert.deepEqual(new Set(result.refused), new Set(['A loopback Cua API URL is required.']));
-  assert.equal(result.loopback, 'image/png');
+  const result = JSON.parse(stdout) as { engines: string[]; containers: string[]; name: string; created: number; version: string };
+  assert.deepEqual(new Set(result.engines), new Set(['A local Docker engine is required.']));
+  assert.deepEqual(new Set(result.containers), new Set(['A sandbox container ID is required.']));
   assert.equal(result.name, 'A Perpetual sandbox name is required.');
-  assert.equal(result.created, 1, 'Only the loopback desktop is connected to.');
-  assert.equal(result.requests, 1, 'A request that failed is never sent again.');
+  assert.equal(result.created, 0, 'A refused request connects to no desktop.');
   // The refusal names the version the adapter pins, so a bump that leaves its text behind fails here.
   assert.ok(result.version.startsWith(`Expected cua-sandbox ${CUA_VERSIONS.sandbox};`), result.version);
 });
