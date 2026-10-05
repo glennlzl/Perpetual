@@ -39,6 +39,29 @@ test('a long run of name characters is read once, so a log of hyphenated or base
   assert.equal(redact(`${'a-'.repeat(30000)} token=abc`), `${'a-'.repeat(30000)} token=${REDACTED}`, 'A name after the run is still found.');
 });
 
+test('an Authorization value of any scheme and every part of a named value or URL user info are hidden', () => {
+  const cases: [string, string][] = [
+    ['curl -H "Authorization: token 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
+    ['Authorization: ApiKey opaque-value-12345', `Authorization: ${REDACTED}`],
+    ["headers: { Authorization: 'Bot opaque-value' }", `headers: { Authorization: ${REDACTED} }`],
+    ['const password: string = "fixture-literal-1";', `const password: ${REDACTED};`],
+    ['{"password":"fixture\\"literal"}', `{"password":"${REDACTED}"}`],
+    ['env DB_PASSWORD=fixture,literal;tail next', `env DB_PASSWORD=${REDACTED} next`],
+    ['  token: process.env.TOKEN,', `  token: ${REDACTED},`],
+    ['password: correct horse battery\nother: kept', `password: ${REDACTED}\nother: kept`],
+    ['token=abc user=bob', `token=${REDACTED} user=bob`],
+    ['postgres://user:fixture@literal@db.example.test/app', `postgres://${REDACTED}@db.example.test/app`],
+    ['REDIS_URL=redis://:fixture-literal@cache:6379/0', `REDIS_URL=redis://${REDACTED}@cache:6379/0`],
+    ['git clone https://0123456789abcdef@github.com/acme/app.git', `git clone https://${REDACTED}@github.com/acme/app.git`],
+  ];
+  for (const [input, output] of cases) assert.equal(redact(input), output, input);
+  const paths = 'http://localhost:3000/@vite/client https://registry.npmjs.org/@types/node';
+  assert.equal(redact(paths), paths, 'An @ after the host is not user info.');
+  assert.equal(hasCredential('REDIS_URL=redis://:fixture-literal@cache:6379/0'), true, 'A password alone is a literal URL password.');
+  assert.equal(hasSecretLiteral(JSON.stringify({ url: 'redis://:fixture-literal@cache:6379/0' })), true);
+  assert.equal(hasCredential('git clone https://user@github.com/acme/app.git'), false, 'A user alone is not a password.');
+});
+
 test('a private key block is blanked line by line, so line numbers hold', () => {
   const block = 'before\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nAAAA\n-----END RSA PRIVATE KEY-----\nafter';
   assert.equal(redact(block), `before\n${REDACTED}\n${REDACTED}\n${REDACTED}\n${REDACTED}\nafter`);

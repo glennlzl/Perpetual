@@ -7,20 +7,29 @@ export const REDACTED = '[REDACTED]';
 const NAMES = 'token|secret|password|api[-_]?key|access[-_]?(?:key|token)|authorization';
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
 const PEM = /-----BEGIN (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----[\s\S]*?(?:-----END (?:[A-Z ]*PRIVATE KEY|CERTIFICATE)-----|(?![\s\S]))/g;
-const QUOTED_KEY = new RegExp(`(["'])([\\w-]*(?:${NAMES})[\\w-]*)\\1(\\s*:\\s*)(["'])([^\\r\\n]*?)\\4`, 'gi');
-// A name starts where a run of name characters starts, so a long run is read once, not once per hyphen in it.
-const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${NAMES})[\\w-]*\\s*[=:]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'[^']*'|[^\\s,;]+)`, 'gi');
+// JSON members, whose value may hold escaped quotes.
+const QUOTED_KEY = new RegExp(`(["'])([\\w-]*(?:${NAMES})[\\w-]*)\\1(\\s*:\\s*)(["'])((?:\\\\.|[^\\\\\\r\\n])*?)\\4`, 'gi');
+// A name starts where a run of name characters starts, so a long run is read once, not once per hyphen in it. A value
+// ends at whitespace, keeping trailing punctuation and quotes, and in code it runs on through the quoted literal a type
+// annotation is set to (`password: string = "…"`).
+const QUOTED_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'`, WORD = `["']*[^\\s,;"']+(?:[,;"']+[^\\s,;"']+)*`;
+const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${NAMES})[\\w-]*\\s*[=:]\\s*)(?:${QUOTED_VALUE}|${WORD}(?:[ \\t]*=[ \\t]*(?:${QUOTED_VALUE}))?)`, 'gi');
+// An env-file or YAML line: an unquoted value runs on over spaces, up to the next name set with = or :.
+const LINE_VALUE = new RegExp(`^([ \\t]*(?:export[ \\t]+|-[ \\t]+)?[\\w-]*(?:${NAMES})[\\w-]*[ \\t]*[=:][ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
 const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
 const QUERY_VALUE = new RegExp(`([?&](?:${NAMES})=)[^&\\s"'<>]+`, 'gi');
+// An Authorization value of any scheme, through the end of its line or its closing quote.
+const AUTHORIZATION = /(Authorization\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"'][^\r\n"']*)/gi;
 const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|AKIA[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
-// Require the closing @ before splitting user/password, avoiding quadratic colon backtracking when it is absent.
-const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)(?=[^\s/@]+@)[^\s/@]+:[^\s/@]+@/gi;
+// User info, a user or a password alone too, runs to the last @ before the host, so a password may hold an @. Without
+// an @ the authority is read once.
+const USER_INFO = /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^\s/?#]+@/gi;
 function literalUrlPassword(text: string): boolean {
   return [...text.matchAll(USER_INFO)].some(([match, scheme]) => {
-    const userinfo = match.slice(scheme.length, -1), password = userinfo.slice(userinfo.indexOf(':') + 1);
-    return !/^(?:\{\{[\w.-]+\}\}|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)$/.test(password);
+    const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':'), password = userinfo.slice(colon + 1);
+    return colon >= 0 && password !== '' && !/^(?:\{\{[\w.-]+\}\}|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)$/.test(password);
   });
 }
 // A credential written as a literal, which a repair's change may never add: a credential name set to a quoted value
@@ -47,18 +56,20 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
 
 /**
  * Text with every secret-shaped value replaced by the marker: ANSI colour removed; private key and
- * certificate blocks blanked line by line, so line numbers hold; Authorization and Bearer values;
- * named values in JSON, YAML, env and CLI form (`API_KEY=…`, `"token": "…"`, `--password …`,
- * `?access_token=…`); known token shapes (GitHub, OpenAI and OpenRouter, Stripe, Supabase, AWS, JWT);
- * and user info in any URL. Ordinary text, however long, comes back unchanged.
+ * certificate blocks blanked line by line, so line numbers hold; Authorization values of any scheme and
+ * Bearer values; named values in JSON, YAML, env, code and CLI form (`API_KEY=…`, `"token": "…"`,
+ * `password: string = "…"`, `--password …`, `?access_token=…`); known token shapes (GitHub, OpenAI and
+ * OpenRouter, Stripe, Supabase, AWS, JWT); and user info in any URL, with or without a password.
+ * Ordinary text, however long, comes back unchanged.
  */
 export function redact(input: unknown = '', { decodeUri = false }: { decodeUri?: boolean } = {}): string {
   return (decodeUri ? decodedUri(String(input)) : String(input))
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block))
-    .replace(/(Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?)[^\s]+/gi, `$1${REDACTED}`)
+    .replace(AUTHORIZATION, `$1${REDACTED}`)
     .replace(/\bBearer\s+\S+/gi, match => `Bearer ${redactedLines(match)}`)
     .replace(QUOTED_KEY, `$1$2$1$3$4${REDACTED}$4`)
+    .replace(LINE_VALUE, `$1${REDACTED}`)
     .replace(NAMED_VALUE, namedValue)
     .replace(FLAG_VALUE, namedValue)
     .replace(QUERY_VALUE, `$1${REDACTED}`)
