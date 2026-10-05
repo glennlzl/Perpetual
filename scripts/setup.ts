@@ -25,17 +25,28 @@ export function nodeSatisfies(version: string, minimum: string): boolean {
 /** A tool Perpetual runs but does not install, and what to do when the machine lacks it. */
 export type Tool = { name: string; ready: boolean; fix: string };
 
-async function available(command: string, args: string[], timeout = 15000) {
-  try { await exec(command, args, { cwd: root, timeout, shell, windowsHide: true }); return true; } catch { return false; }
+/** A command's output, or null when it cannot run or fails. */
+async function output(command: string, args: string[], timeout = 15000) {
+  try { return (await exec(command, args, { cwd: root, timeout, shell, windowsHide: true })).stdout; } catch { return null; }
 }
+const available = async (command: string, args: string[], timeout?: number) => await output(command, args, timeout) !== null;
+
+/** Twins reach their services through Docker Desktop's host gateway; build repair runs on any engine. */
+export const TWINS_NEED_DESKTOP = 'Twins need Docker Desktop: on this native Linux Docker Engine their containers cannot reach their services. Build repair runs on it.';
+/** The note for a Linux engine that `docker info` does not report as Docker Desktop, given its OperatingSystem; null otherwise. */
+export const engineNote = (platform: string, system: string | null) => platform === 'linux' && system !== null && !/^Docker Desktop\b/.test(system.trim()) ? TWINS_NEED_DESKTOP : null;
 
 /** uv installs the browser runtime, so setup runs again after it; Docker and the GitHub CLI are used only at run time. */
-async function tools(): Promise<Tool[]> {
+async function tools(notes: string[]): Promise<Tool[]> {
   const compose = await available('docker', ['compose', 'version']);
+  const docker = compose && await available('docker', ['info'], 30000);
+  // A native Linux engine stays ready, for build repair, with a note that twins need Docker Desktop.
+  const note = docker ? engineNote(process.platform, await output('docker', ['info', '--format', '{{.OperatingSystem}}'], 30000)) : null;
+  if (note) notes.push(note);
   return [
     { name: 'uv', ready: await available('uv', ['--version']), fix: 'Install uv (https://docs.astral.sh/uv/getting-started/installation/), then run npm run setup again.' },
     compose
-      ? { name: 'Docker', ready: await available('docker', ['info'], 30000), fix: 'Start Docker.' }
+      ? { name: 'Docker', ready: docker, fix: 'Start Docker.' }
       : { name: 'Docker', ready: false, fix: 'Install Docker with Compose (https://docs.docker.com/get-started/get-docker/).' },
     { name: 'GitHub CLI', ready: await available('gh', ['--version']), fix: 'Install the GitHub CLI (https://cli.github.com/).' },
   ];
@@ -68,8 +79,8 @@ export function report({ installed, tools, notes = [] }: { installed: string[]; 
 async function main() {
   const { engines } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { engines: { node: string } };
   if (!nodeSatisfies(process.version, engines.node)) throw new Error(`Perpetual needs Node.js ${engines.node.replace(/^\D+/, '')} or later; this is ${process.version}. https://nodejs.org/en/download`);
-  const found = await tools();
   const installed: string[] = [], notes: string[] = [];
+  const found = await tools(notes);
   await run({ title: 'Install dependencies', command: 'npm', args: ['ci'] });
   installed.push('dependencies');
   await run({ title: 'Build the interface', command: 'npm', args: ['run', 'build'] });
