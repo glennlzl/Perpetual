@@ -608,7 +608,7 @@ test('code generation validates explicit account choices and can opt out of a tw
   }
   await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
   assert.equal((await settled(f))?.draft?.stale,false);
-  assert.equal(f.launches.length,0,'No sign-in seed is run when the person chooses no account.');
+  assert.deepEqual(f.launches.map(input=>[input.spec.code,input.credentials]),[[seedSpec(false),undefined]],'Without an account, the seed opens the application and signs in nowhere.');
 });
 
 test('generation keeps the entered account selected before runtime preflight awaits',async t=>{
@@ -686,7 +686,7 @@ test('a seed that cannot sign in stops the generation before the generator runs,
   assert.deepEqual([seed.mode,seed.spec.code,seed.spec.hash,seed.case.id,seed.credentials?.username,seed.signInUrl,seed.targetUrl,seed.timeoutSeconds,seed.blockWrites],
     ['run',seedSpec(true),specHash(seedSpec(true)),journey.id,'tester@example.com','http://localhost:3000/login','http://localhost:3000/',60,undefined]);
   assert.ok(secretFree(await f.manager.view(f.context)));
-  // Once the seed signs in, the generator runs; without a test account there is no seed to check.
+  // Once the seed signs in, the generator runs; without a test account the seed only opens the application.
   signedIn=true;
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.equal((await settled(f))?.draft?.stale,false);
@@ -694,7 +694,7 @@ test('a seed that cannot sign in stops the generation before the generator runs,
   f.environment.accounts=[];
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.equal((await settled(f))?.draft?.stale,false);
-  assert.deepEqual([f.launches.length,(await lines(f.log)).length],[2,2]);
+  assert.deepEqual([f.launches.length,(await lines(f.log)).length,f.launches[2].credentials],[3,2,undefined]);
 });
 
 test('cancelling a generation while its seed signs in stops the seed, and the generator never starts',{timeout:60000},async t=>{
@@ -812,6 +812,10 @@ test('a seed whose application does not open says so, never that the test accoun
   await f.manager.generateSpec(f.context,{caseId:journey.id});
   assert.deepEqual(await settled(f,journey.id,90),{generation:{status:'failed',error:`The application could not be opened: page.goto: net::ERR_CONNECTION_REFUSED at ${url}`}});
   assert.equal((await lines(f.log)).length,0,'No model call was spent.');
+  // Without a test account the seed opens the application all the same, before any model call.
+  await f.manager.generateSpec(f.context,{caseId:journey.id,accountId:null});
+  assert.deepEqual(await settled(f,journey.id,90),{generation:{status:'failed',error:`The application could not be opened: page.goto: net::ERR_CONNECTION_REFUSED at ${url}`}});
+  assert.equal((await lines(f.log)).length,0,'No model call was spent without an account either.');
 });
 
 

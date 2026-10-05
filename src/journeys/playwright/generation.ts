@@ -233,10 +233,10 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
 }
 
 /**
- * Runs the seed once as a journey runs, with the Playwright runtime and no model, so a generation whose seed cannot sign
- * in stops before the generator spends a model call writing locators for pages it never saw. The fixture says why; a
- * seed that stopped before its sign-in began, as when the application does not load, says the application could not
- * be opened instead.
+ * Runs the seed once as a journey runs, with the Playwright runtime and no model, so a generation whose seed cannot open
+ * the application or sign in stops before the generator spends a model call writing locators for pages it never saw.
+ * The fixture says why; a seed that stopped before its sign-in began, as when the application does not load, says the
+ * application could not be opened instead.
  */
 async function seedSignsIn(playwright: SeedRuntime, input: Pick<JourneyRunInput, 'case' | 'spec' | 'targetUrl' | 'timeoutSeconds' | 'allowedOrigins' | 'credentials' | 'signInUrl'>, signal: AbortSignal) {
   if (signal.aborted) throw new Error(CANCELLED);
@@ -288,7 +288,8 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
 /**
  * Generates a reviewed case's spec in a private workspace the caller owns and removes. The model key reaches only
  * OpenCode's environment and the test account only the harness's and the seed's, and every captured output is redacted.
- * With an account, the seed must first sign in, on the sign-in page when one is set, as it does for the generator.
+ * The seed must first open the application and, with an account, sign in, on the sign-in page when one is set, as it
+ * does for the generator.
  * Resolves { code, provenance } with code validateJourneySpec accepts; invalid output gets one repair with its
  * validation error. Missing output stops: another exploration cannot grammar-repair code that was never written.
  */
@@ -310,7 +311,8 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
     const previous = feedback ? { error: failureText(hide(secrets)(feedback.error), 4000),...(previousErrors?.length?{previousErrors}:{}) } : undefined;
     const { seed, kept } = await prepare({ project, run, home, item, targetUrl, timeoutSeconds, model, reasoning, feedback: previous, signIn, values, userHome, signal: abort.signal });
     const intact = async () => { if (!isDeepStrictEqual(await fingerprint(Object.keys(kept)).catch(() => null), kept)) throw new Error('The code generation workspace changed.'); };
-    if (credentials) await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, credentials, ...(signInUrl ? { signInUrl } : {}) }, abort.signal);
+    // With or without an account, an application that does not open stops here, before any model call.
+    await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, ...(credentials ? { credentials } : {}), ...(signInUrl ? { signInUrl } : {}) }, abort.signal);
     const childEnv = {
       // The seed runs as a journey does, without reporting: its hash is the one the fixture accepts.
       ...journeyEnvironment(values, run, { hash: specHash(seed), targetUrl, allowedOrigins, credentials, signInUrl, events: false }),
