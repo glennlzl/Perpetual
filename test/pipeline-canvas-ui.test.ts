@@ -347,15 +347,16 @@ test('the Pipeline opens with its navigation collapsed, zoom and Fit view only, 
   assert.deepEqual(pageErrors, []);
 });
 
-test('connecting GitHub reads Build and the recorded deployments again at once', { timeout: 60000 }, async t => {
+test('connecting GitHub reads Build, the recorded deployments and the release again at once', { timeout: 60000 }, async t => {
   const account = { login: 'acme', name: null };
-  let connected = false, deploymentReads = 0;
+  let connected = false, deploymentReads = 0, releaseReads = 0;
   const build: BuildReply = { repoPath, repository: 'acme/app', branch: 'main', scannedSha: sha, sha, source: 'watched', runs: [{ id: '1', workflowId: '2', name: 'CI', path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success', attempt: 1, sha, branch: 'main', url: null, createdAt: null, startedAt: null, updatedAt: null, jobs: [] }] };
   const { page, pageErrors, open } = await openApp(t, path => {
     if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } } } };
     if (path === '/api/github/connection' || path === '/api/github/connect') { connected ||= path === '/api/github/connect'; return { json: { available: true, authenticated: true, account, connected, source: null, localCheckout: null } }; }
     if (path === '/api/github/build') return connected ? { json: build } : { status: 400, json: { error: 'Connect your GitHub account to read Build.' } };
     if (path === '/api/github/deployments') { deploymentReads++; return connected ? { json: { repository: 'acme/app', sha, deployments: [] } } : { status: 400, json: { error: 'Connect your GitHub account to read deployments.' } }; }
+    if (path === '/api/releases') { releaseReads++; return { json: release }; }
     if (path === '/api/github-actions') return { json: { workflows: [] } };
     if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
   });
@@ -363,11 +364,46 @@ test('connecting GitHub reads Build and the recorded deployments again at once',
   const buildCard = page.getByRole('group', { name: 'Build', exact: true });
   await expect(buildCard.getByText('Unverified', { exact: true })).toBeVisible();
   await expect.poll(() => deploymentReads).toBe(1);
+  await expect.poll(() => releaseReads).toBe(1);
   await page.getByRole('button', { name: 'Configure source', exact: true }).click();
   await page.locator('.pipeline-inspector').getByRole('button', { name: 'Connect', exact: true }).click();
   await page.getByRole('dialog', { name: 'Connect GitHub', exact: true }).getByRole('button', { name: 'Continue as acme', exact: true }).click();
-  // Both evidence reads wait a minute after a failure; the connection change reads them again at once.
+  // These evidence reads wait a minute after a failure or while idle; the connection change reads them again at once.
   await expect(buildCard.getByText('Passedaaaaaaa', { exact: true })).toBeVisible();
   await expect.poll(() => deploymentReads).toBe(2);
+  await expect.poll(() => releaseReads).toBe(2);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a GitHub sign-in that ends without connecting reads Build, the recorded deployments and the release again at once', { timeout: 60000 }, async t => {
+  // The controller refuses these reads while a device sign-in is pending.
+  const refused = { status: 409, json: { error: 'Finish or cancel GitHub sign-in first.' } };
+  const signIn = { id: 'sign-in-1', status: 'pending', userCode: 'ABCD-EFGH', verificationUrl: null, expiresAt: '2026-01-01T00:15:00Z', account: null, error: null };
+  const reads = { build: 0, deployments: 0, releases: 0 };
+  let pending = false;
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } } } };
+    if (path === '/api/github/connection') return { json: { available: true, authenticated: false, account: null, connected: false, source: null, localCheckout: null } };
+    if (path === '/api/github/auth/start') { pending = true; return { json: signIn }; }
+    if (path === '/api/github/auth/status') return { json: signIn };
+    if (path === '/api/github/auth/cancel') { pending = false; return { json: { ...signIn, status: 'cancelled' } }; }
+    if (path === '/api/github/build') { reads.build++; return pending ? refused : { status: 400, json: { error: 'Connect your GitHub account to read Build.' } }; }
+    if (path === '/api/github/deployments') { reads.deployments++; return pending ? refused : { status: 400, json: { error: 'Connect your GitHub account to read deployments.' } }; }
+    if (path === '/api/releases') { reads.releases++; return pending ? refused : { json: release }; }
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+  });
+  await open();
+  await expect.poll(() => Object.values(reads)).toEqual([1, 1, 1]);
+  await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+  await page.locator('.pipeline-inspector').getByRole('button', { name: 'Connect', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
+  await dialog.getByRole('button', { name: 'Sign in with GitHub', exact: true }).click();
+  await expect(dialog.getByRole('textbox', { name: 'Enter this code on GitHub', exact: true })).toHaveValue('ABCD-EFGH');
+  // Coming back from GitHub's tab reads Build while the sign-in is still pending.
+  await refresh('/api/github/build', '/build/src/lib/pipeline-github.ts', 'buildChanges');
+  const before = { ...reads };
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => [reads.build - before.build, reads.deployments - before.deployments, reads.releases - before.releases]).toEqual([1, 1, 1]);
   assert.deepEqual(pageErrors, []);
 });

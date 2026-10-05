@@ -11,7 +11,8 @@ import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 const DEVICE_URL = 'https://github.com/login/device';
 const pending = (session: SignInSnapshot | null) => ['starting', 'pending'].includes(session?.status ?? '');
 
-export default function GitHubConnectDialog({ connection, checking = false, onConnect, onClose, focusTargets }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onClose: () => void; focusTargets: () => readonly (FocusTarget | null | undefined)[] }) {
+// onSignInEnded runs when a device sign-in ends without completing: it failed, expired or was cancelled.
+export default function GitHubConnectDialog({ connection, checking = false, onConnect, onSignInEnded, onClose, focusTargets }: { connection: GitHubConnection | null; checking?: boolean; onConnect: () => Promise<unknown>; onSignInEnded?: () => void; onClose: () => void; focusTargets: () => readonly (FocusTarget | null | undefined)[] }) {
   const [session, setSession] = useState<SignInSnapshot | null>(null);
   const [starting, setStarting] = useState(false);
   const [attaching, setAttaching] = useState(false);
@@ -24,14 +25,15 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
   const signIn = useRef<HTMLButtonElement>(null);
   const continueConnection = useRef<HTMLButtonElement>(null);
   const openGitHub = useRef<HTMLAnchorElement>(null);
-  const callbacks = useRef({ onConnect, onClose });
-  callbacks.current = { onConnect, onClose };
+  const callbacks = useRef({ onConnect, onClose, onSignInEnded });
+  callbacks.current = { onConnect, onClose, onSignInEnded };
+  const cancel = (id: string) => void api('/api/github/auth/cancel', { id }).catch(() => {}).finally(() => callbacks.current.onSignInEnded?.());
 
   useEffect(() => {
     active.current = true;
     return () => {
       active.current = false;
-      if (sessionId.current) void api('/api/github/auth/cancel', { id: sessionId.current }).catch(() => {});
+      if (sessionId.current) cancel(sessionId.current);
     };
   }, []);
 
@@ -69,12 +71,13 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
         } else {
           sessionId.current = null;
           setError(result.error || 'GitHub sign-in was cancelled. Try again.');
+          callbacks.current.onSignInEnded?.();
         }
       } catch (failure) {
         if (!cancelled && active.current) {
           setError((failure as Error).message);
           setSession(previous => previous ? { ...previous, status: 'error' } : previous);
-          void api('/api/github/auth/cancel', { id }).catch(() => {});
+          cancel(id);
         }
       }
     }
@@ -91,7 +94,7 @@ export default function GitHubConnectDialog({ connection, checking = false, onCo
     try {
       const result = await api<SignInSnapshot>('/api/github/auth/start', {});
       if (!active.current) {
-        if (result.id) void api('/api/github/auth/cancel', { id: result.id }).catch(() => {});
+        if (result.id) cancel(result.id);
         return;
       }
       sessionId.current = result.id;

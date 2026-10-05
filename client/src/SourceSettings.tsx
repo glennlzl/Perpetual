@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { api } from '@/lib/api';
 import { deploymentChanges } from '@/lib/pipeline-deployments';
 import { buildChanges } from '@/lib/pipeline-github';
+import { releaseChanges } from '@/lib/production-release';
 import { restoreFocus, type FocusTarget } from '@/lib/journey-focus';
 import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } from '@/lib/source-selection';
 import { BranchName, BranchOptions } from './BranchSwitcher';
@@ -29,6 +30,9 @@ type SourceSettingsProps = {
 };
 
 const messageOf = (error: unknown) => error instanceof Error ? error.message : 'Could not load GitHub settings.';
+// Build, the recorded deployments and the release read GitHub through the connection, and the controller refuses those
+// reads while a sign-in is pending, so they read again at once after a connection change or a sign-in that ended.
+const readGitHubAgain = () => { buildChanges.notify(); deploymentChanges.notify(); releaseChanges.notify(); };
 const mergeBy = <Item, Key extends keyof Item>(old: Item[], incoming: Item[], key: Key) => [...new Map([...old, ...incoming].map(item => [item[key], item])).values()];
 const ownerOf = (fullName: string) => fullName.split('/')[0];
 
@@ -177,8 +181,6 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     try {
       const result = await api<GitHubConnection>(`/api/github/${action}`, {});
       if (active.current && request === connectionRequest.current) applyConnection(result, action === 'connect');
-      // Build and the recorded deployments read GitHub through this connection, so they read again at once.
-      buildChanges.notify(); deploymentChanges.notify();
       return result;
     } catch (failure) {
       if (active.current && request === connectionRequest.current) setConnectionError(messageOf(failure));
@@ -186,6 +188,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     } finally {
       if (active.current && request === connectionRequest.current) setConnectionAction('');
       onBusyChange?.(false);
+      readGitHubAgain();
     }
   }
 
@@ -276,7 +279,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const repositoryItem = (item: Pick<GitHubRepositoryChoice, 'fullName'> & Partial<Pick<GitHubRepositoryChoice, 'private'>>, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
 
   return <>
-    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onClose={() => setConnectOpen(false)} focusTargets={() => [
+    {connectOpen && <GitHubConnectDialog connection={connection} checking={connectionLoading} onConnect={() => changeConnection('connect', true)} onSignInEnded={readGitHubAgain} onClose={() => setConnectOpen(false)} focusTargets={() => [
       connected ? repositoryTrigger.current : null,
       connectionButton.current,
       connectionButton.current?.closest<HTMLElement>('[data-slot="sheet-content"]'),
