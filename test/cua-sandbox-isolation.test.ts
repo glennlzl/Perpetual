@@ -182,7 +182,8 @@ print(json.dumps(result))
   assert.equal(result.name, 'A Perpetual sandbox name is required.');
   assert.equal(result.created, 1, 'Only the loopback desktop is connected to.');
   assert.equal(result.requests, 1, 'A request that failed is never sent again.');
-  assert.match(result.version, /^Expected cua-sandbox /);
+  // The refusal names the version the adapter pins, so a bump that leaves its text behind fails here.
+  assert.ok(result.version.startsWith(`Expected cua-sandbox ${CUA_VERSIONS.sandbox};`), result.version);
 });
 
 test('the Cua versions the adapter names are the ones its Python environment, guest image and docs pin', async () => {
