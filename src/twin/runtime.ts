@@ -296,7 +296,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       run: (image, args, { env, mounts } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`),
         volumes: mounts === 'service-only' ? [`${dir}:${dir}:ro`] : [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.
-      exec: (file, args, { cwd = dir } = {}) => host(file, args, { cwd, redact }),
+      exec: (file, args, { cwd = dir, env } = {}) => host(file, args, { cwd, env, redact }),
       fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([AbortSignal.timeout(READ_TIMEOUT_MS), ...(operations.getStore()?.signal ? [operations.getStore()!.signal!] : []), ...(init?.signal ? [init.signal] : [])]) }),
     };
   }

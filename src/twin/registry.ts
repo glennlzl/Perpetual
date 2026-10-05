@@ -57,7 +57,8 @@ export interface ServiceContext<Options extends ServiceOptions<Options> = JsonOb
   app(id: string): { url: string; port: number };
   /** service-only mounts just this service's private directory read-only, without the source snapshot. */
   run(image: string, args: string[], options?: { env?: EnvInput; mounts?: 'service-only' }): Promise<CommandOutput>;
-  exec(file: string, args: string[], options?: { cwd?: string }): Promise<CommandOutput>;
+  /** env sets variables over the controller's environment, which the command otherwise inherits. */
+  exec(file: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<CommandOutput>;
   /** Tests supply their own; services otherwise use the global fetch. */
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   /** The operation's cancellation, including while an HTTP response body is being read. */

@@ -86,6 +86,26 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   assert.deepEqual(supabase.containers(), []); // the CLI owns the stack's containers
 });
 
+test('Supabase starts its stack with every env() name of its config.toml unset, whatever the controller exports', async () => {
+  const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
+  await supabaseSource(ctx);
+  await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), `${CONFIG}
+[studio]
+openai_api_key = "env(OPENAI_API_KEY)"
+
+[auth]
+additional_redirect_urls = ["env(REDIRECT_URL)", "http://127.0.0.1:3000"]
+
+[edge_runtime.secrets]
+token = "env(GH_TOKEN)"
+`);
+  await supabase.setup(ctx);
+  // The CLI reads an empty variable as unset, so the stack gets each reference as written.
+  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '' };
+  const cli = (name: string) => ctx.calls.find(call => call.command === 'npx' && call.args.includes(name));
+  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
+});
+
 test('Supabase does not start its stack when the private mount is unavailable to Docker', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ image, args }) => {
     if (image) throw new Error('Private mount unavailable');

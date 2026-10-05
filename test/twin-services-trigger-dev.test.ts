@@ -98,6 +98,22 @@ test('Trigger.dev starts one shared instance on its machine-wide port, published
   assert.deepEqual(trigger.env(ctx), { TRIGGER_API_URL: `http://${HOST}:${PORT}`, TRIGGER_SECRET_KEY: 'tr_dev_proj_1' });
 });
 
+test('Trigger.dev databases read the generated passwords from their own files, which no controller variable overrides', async () => {
+  const server = webapp(), ctx = await context({ server });
+  await trigger.setup(ctx);
+  const text = await readFile(join(ctx.shared, 'compose.yaml'), 'utf8'), file = parse(text), env = await readFile(join(ctx.shared, '.env'), 'utf8');
+  // Compose fills `${NAME}` from its own environment first, which is the controller's: the stack holds no reference.
+  assert.doesNotMatch(text, /\$\{/);
+  for (const [service, name] of [['postgres', 'POSTGRES_PASSWORD'], ['clickhouse', 'CLICKHOUSE_PASSWORD']]) {
+    assert.deepEqual(file.services[service].env_file, [`${service}.env`]);
+    const password = new RegExp(`^${name}='([0-9a-f]{32})'$`, 'm').exec(env)?.[1];
+    assert.ok(password, name);
+    assert.equal(await readFile(join(ctx.shared, `${service}.env`), 'utf8'), `${name}='${password}'\n`);
+    assert.equal(await mode(join(ctx.shared, `${service}.env`)), 0o600);
+  }
+  assert.ok(env.includes(`DATABASE_URL='postgresql://postgres:${/^POSTGRES_PASSWORD='([0-9a-f]{32})'$/m.exec(env)?.[1]}@postgres:5432/`), 'The webapp connects with the password its database starts with.');
+});
+
 test('Trigger.dev bootstraps the bot token once, from the logged magic link and CLI authorization', async () => {
   const server = webapp(), ctx = await context({ server });
   ctx.outputs = await trigger.setup(ctx);

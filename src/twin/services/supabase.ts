@@ -57,7 +57,22 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
   return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
     .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
 }
-const cli = (ctx: Pick<Context, 'dir' | 'exec'>, ...args: string[]) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir });
+const cli = (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir, env });
+const ENV_REFERENCE = /^env\((.*)\)$/; // a config.toml value the CLI fills from its own environment
+/**
+ * The CLI fills each env(NAME) value of config.toml from its environment, which is the controller's: every name the
+ * copied config references is set empty for it, which the CLI reads as unset, so no host variable reaches the stack.
+ */
+function unsetReferences(toml: string) {
+  const names = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') { const name = ENV_REFERENCE.exec(value)?.[1]; if (name !== undefined && VARIABLE.test(name)) names.add(name); }
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (object(value)) Object.values(value).forEach(visit);
+  };
+  visit(parseToml(toml));
+  return Object.fromEntries([...names].map(name => [name, '']));
+}
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseEnv = (text: string): Record<string, string> => Object.fromEntries(text.split('\n').map(line => line.trim().match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
   .filter(match => match !== null).map(([, key, value]) => [key, value.startsWith('"') ? String(JSON.parse(value)) : value]));
@@ -243,7 +258,7 @@ export default {
   },
   setup: async ctx => {
     const target = join(workdir(ctx), 'supabase'), config = join(target, 'config.toml');
-    await cli(ctx, 'stop', '--no-backup', '--project-id', projectId(ctx)); // a rebuild starts from an empty database
+    await cli(ctx, ['stop', '--no-backup', '--project-id', projectId(ctx)]); // a rebuild starts from an empty database
     await rm(workdir(ctx), { recursive: true, force: true });
     await cp(join(ctx.source, relative(ctx.options.directory ?? DIRECTORY, 'supabase directory')), target, { recursive: true, filter: path => !STATE.has(basename(path)) });
     const toml = twinConfig(await readFile(config, 'utf8'), ctx);
@@ -253,8 +268,9 @@ export default {
     // Docker Desktop can retain a deleted bind ancestor across rebuilds: the CLI's first `docker cp`
     // then fails before its Edge Runtime starts. Read the recreated private tree from a running guest first.
     await ctx.run(MOUNT_CHECK_IMAGE, ['node', '-e', 'require("node:fs").accessSync(process.argv[1])', config], { mounts: 'service-only' });
-    await cli(ctx, 'start', '--workdir', workdir(ctx));
-    const status = parseEnv((await cli(ctx, 'status', '--output', 'env', '--workdir', workdir(ctx))).stdout);
+    const unset = unsetReferences(prepared);
+    await cli(ctx, ['start', '--workdir', workdir(ctx)], unset);
+    const status = parseEnv((await cli(ctx, ['status', '--output', 'env', '--workdir', workdir(ctx)], unset)).stdout);
     if (!status.ANON_KEY || !status.SERVICE_ROLE_KEY || !status.DB_URL) throw new Error('Supabase status did not report its keys and database URL');
     const db = new URL(status.DB_URL);
     db.hostname = ctx.host; db.port = String(ctx.port('db')); db.searchParams.set('sslmode', 'disable');
@@ -268,5 +284,5 @@ export default {
     DATABASE_URL: o.dbUrl, NEXT_PUBLIC_SUPABASE_URL: o.url, NEXT_PUBLIC_SUPABASE_ANON_KEY: o.anonKey,
   }),
   accounts,
-  teardown: async ctx => { await cli(ctx, 'stop', '--no-backup', '--project-id', projectId(ctx)); },
+  teardown: async ctx => { await cli(ctx, ['stop', '--no-backup', '--project-id', projectId(ctx)]); },
 } satisfies TwinService<Options, Outputs>;

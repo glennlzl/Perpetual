@@ -112,6 +112,10 @@ export function webappEnv(port: number, secrets: Record<string, string>) {
 // The stack's .env: single-quoted, so Compose interpolates nothing. Its secrets are read back on every start.
 const formatEnv = (env: Record<string, string>) => Object.entries(env).map(([key, value]) => `${key}='${value}'\n`).join('');
 const parseEnv = (text: string) => Object.fromEntries([...text.matchAll(/^(\w+)='([^'\n]*)'$/gm)].map(([, key, value]) => [key, value]));
+// Each database reads its password from an env file of its own: Compose would fill a `${...}` reference from a variable of
+// the same name in the controller's environment before the stack's .env.
+const PASSWORDS = { postgres: 'POSTGRES_PASSWORD', clickhouse: 'CLICKHOUSE_PASSWORD' };
+const passwordFile = (service: string) => `${service}.env`;
 
 export function stack(port: number) {
   const healthy = Object.fromEntries(['postgres', 'redis', 'clickhouse'].map(name => [name, { condition: 'service_healthy' }]));
@@ -123,10 +127,10 @@ export function stack(port: number) {
       // The first boot applies every database and ClickHouse migration before the server listens.
       webapp: { image: IMAGES.webapp, ...common, env_file: ['.env'], ports: [`127.0.0.1:${port}:3000`], depends_on: healthy,
         extra_hosts: ['host.docker.internal:host-gateway'], healthcheck: { ...check(['CMD', 'node', '-e', HEALTH]), start_period: FIRST_BOOT } },
-      postgres: { image: IMAGES.postgres, ...common, command: ['-c', 'wal_level=logical'], environment: { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' },
+      postgres: { image: IMAGES.postgres, ...common, command: ['-c', 'wal_level=logical'], env_file: [passwordFile('postgres')],
         volumes: ['postgres:/var/lib/postgresql/data'], healthcheck: check(['CMD', 'pg_isready', '-U', 'postgres']) },
       redis: { image: IMAGES.redis, ...common, volumes: ['redis:/data'], healthcheck: check(['CMD', 'redis-cli', 'ping']) },
-      clickhouse: { image: IMAGES.clickhouse, ...common, environment: { CLICKHOUSE_PASSWORD: '${CLICKHOUSE_PASSWORD}', CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
+      clickhouse: { image: IMAGES.clickhouse, ...common, env_file: [passwordFile('clickhouse')], environment: { CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1' },
         ulimits: { nofile: { soft: 262144, hard: 262144 } }, volumes: ['clickhouse:/var/lib/clickhouse'],
         healthcheck: check(['CMD-SHELL', 'clickhouse-client --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1"']) },
     },
@@ -182,6 +186,7 @@ const instance = (ctx: Context) => inTurn(async () => {
   const kept = parseEnv(await readFile(envFile, 'utf8').catch(absent('')));
   const secrets = Object.fromEntries(SECRETS.map(name => [name, kept[name] || randomBytes(16).toString('hex')]));
   await writeFile(envFile, formatEnv(webappEnv(state.port, secrets)), { mode: 0o600 });
+  for (const [service, name] of Object.entries(PASSWORDS)) await writeFile(join(dir, passwordFile(service)), formatEnv({ [name]: secrets[name] }), { mode: 0o600 });
   await writeFile(join(dir, 'compose.yaml'), stringify(stack(state.port)));
   await save();
   await compose(ctx, 'up', '--detach', '--wait');
