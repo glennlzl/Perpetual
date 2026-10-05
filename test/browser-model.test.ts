@@ -23,6 +23,27 @@ test('OpenRouter key is persisted privately, omitted from view, and retained dur
   const restored=await createBrowserModelSettings({dataDir,env:{}});assert.equal(restored.environment().PERPETUAL_MODEL_API_KEY,'openrouter-private-fixture');
 });
 
+test('a key the environment supplies is never saved, and a saved key never follows a new endpoint',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-model-key-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const file=join(dataDir,'browser-model.json');
+  const exported=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'environment-fixture-one'}});
+  await exported.saveOpenRouter({model:'anthropic/claude-sonnet-4.6'});
+  assert.equal(JSON.parse(await readFile(file,'utf8')).apiKey,undefined,'Choosing a model does not copy the exported key to disk.');
+  assert.equal(exported.configuration().apiKey,'environment-fixture-one');
+  const rotated=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'environment-fixture-two'}});
+  assert.deepEqual([rotated.configuration().apiKey,rotated.configuration().model,rotated.view().modelConfigured],['environment-fixture-two','anthropic/claude-sonnet-4.6',true],'A rotated exported key takes effect.');
+  // The exported key is for its own endpoint only.
+  await assert.rejects(rotated.save({baseUrl:'https://other-provider.example/v1'}),/API key/);
+  await rotated.saveOpenRouter({apiKey:'entered-fixture-only',model:'anthropic/claude-sonnet-4.6'});
+  assert.equal(JSON.parse(await readFile(file,'utf8')).apiKey,'entered-fixture-only','An entered key is saved.');
+  await assert.rejects(rotated.save({baseUrl:'https://other-provider.example/v1'}),/Enter the API key for the new model API URL/);
+  assert.equal(JSON.parse(await readFile(file,'utf8')).baseUrl,'https://openrouter.ai/api/v1','A refused endpoint change saves nothing.');
+  await rotated.save({apiKey:'other-fixture-only',baseUrl:'https://other-provider.example/v1'});
+  assert.deepEqual([rotated.configuration().apiKey,rotated.configuration().baseUrl],['other-fixture-only','https://other-provider.example/v1']);
+  await rotated.save({baseUrl:'https://other-provider.example/v2'});
+  assert.equal(rotated.configuration().apiKey,'other-fixture-only','A path on the same host keeps its key.');
+});
+
 test('generic provider credentials require an explicit model while an empty install shows OpenRouter defaults',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-browser-generic-model-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const generic=await createBrowserModelSettings({dataDir,env:{PERPETUAL_MODEL_API_KEY:'generic-private-fixture'}});
