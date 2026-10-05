@@ -413,8 +413,9 @@ class OwnedBrowser:
                     user_data_dir=self.profile.name, headless=True, viewport=VIEWPORT, accept_downloads=False,
                     service_workers="block", chromium_sandbox=True, args=list(CHROMIUM_ARGS))
             except PlaywrightError as error:
-                # The sandbox stays on. Playwright's message, which holds no page data, only chooses the advice.
-                if "sandbox" in str(error).lower():
+                # The sandbox stays on. Playwright's message, which holds no page data, only chooses the advice: its own
+                # sandbox reports, never a path that names a sandbox, as its launch command line does.
+                if re.search(r"Chromium sandboxing failed|No usable sandbox|without --no-sandbox", str(error)):
                     raise InputError("Chromium could not start its sandbox. Run Perpetual as a user other than root, and on Linux allow unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor.") from None
                 raise InputError("Chromium could not start. Install it and its system libraries with integrations/browser-use/.venv/bin/python -m playwright install --with-deps chromium.") from None
             self.context.set_default_timeout(8000)

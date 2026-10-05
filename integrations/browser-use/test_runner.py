@@ -189,7 +189,11 @@ class RuntimeContractTests(unittest.TestCase):
         for logs, advice in [
             # Playwright's report when the host refuses the sandbox, such as Ubuntu 23.10+ without unprivileged user namespaces.
             ("Chromium sandboxing failed!\n================================\nTo avoid the sandboxing issue, do either of the following:", "allow unprivileged user namespaces"),
+            ("[pid=1][err] Running as root without --no-sandbox is not supported. See https://crbug.com/638180.", "other than root"),
             ("/home/user/.cache/ms-playwright/chromium-1243/chrome-linux/chrome: error while loading shared libraries: libnss3.so", "install --with-deps chromium"),
+            # Missing libraries on a host whose paths name a sandbox, as Playwright's launch command line shows them.
+            ("<launching> /home/sandbox/.cache/ms-playwright/chromium-1243/chrome-linux/chrome --user-data-dir=/home/sandbox/tmp/perpetual-browser-x\n"
+             "/home/sandbox/.cache/ms-playwright/chromium-1243/chrome-linux/chrome: error while loading shared libraries: libnss3.so", "install --with-deps chromium"),
         ]:
             class Chromium:
                 async def launch_persistent_context(self, **options):
