@@ -1,7 +1,7 @@
 import test from 'node:test';
 import type {TestContext} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,mkdir,writeFile} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -33,7 +33,7 @@ async function fixture(t:TestContext,{environments=[twin],events=()=>[],hold=()=
   t.after(async()=>{await manager.close();await rm(dataDir,{recursive:true,force:true});});
   const context=(stageId:string)=>({key:'repo',stageId,controllerOrigin:'http://127.0.0.1:4317',
     scan:{repo:{path:join(dataDir,'repo'),sha:'abc'},services:[{id:'service:web',framework:'Next.js'},{id:'service:api',framework:'Hono'}]}});
-  return {manager,context,requests};
+  return {manager,context,requests,dataDir};
 }
 async function settled<T>(read:()=>T|false|null|Promise<T|false|null>):Promise<T>{for(let i=0;i<200;i++){const value=await read();if(value)return value;await delay(5);}throw new Error('Operation did not settle.');}
 const prepared=(f:Awaited<ReturnType<typeof fixture>>,context:BrowserStageContext)=>settled(()=>{const {preparation}=f.manager.summary(context);return preparation&&!['preparing','discovering'].includes(preparation.status)&&preparation;});
@@ -62,6 +62,22 @@ test('a twin stage targets its web app by default and keeps an explicit target',
   await prepared(f,chosen);
   assert.equal((await f.manager.view(chosen)).config.targetUrl,'https://preview.example/billing');
   assert.equal(f.requests.at(-1)!.targetUrl,'https://preview.example/billing');
+});
+
+test('a discovery whose admission cannot be saved leaves the stage\'s preparation as it was',async t=>{
+  const f=await fixture(t,{events:discovered}),beta=f.context('beta');
+  await f.manager.prepareEnvironment(beta,twin);
+  const before=await prepared(f,beta);
+  assert.equal(before.status,'completed');
+  // The state file cannot be replaced when a person's discovery is admitted.
+  const file=join(f.dataDir,'browser','state.json'),saved=await readFile(file,'utf8');
+  await rm(file);await mkdir(file);
+  try{await assert.rejects(f.manager.discover(beta,{}));}
+  finally{await rm(file,{recursive:true});await writeFile(file,saved);}
+  assert.deepEqual(f.manager.summary(beta).preparation,before,'The stage still shows its completed preparation.');
+  assert.equal(f.requests.length,1,'No worker started.');
+  // No unfinished preparation holds the model settings.
+  await f.manager.saveModel(beta,{apiKey:'fixture-only',model:'openai/gpt-4.1-mini'});
 });
 
 test('a twin with several apps and no web frontend asks for the application URL',async t=>{

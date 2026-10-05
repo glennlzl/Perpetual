@@ -727,10 +727,12 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
-      const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null;
+      const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
       if(preparation){Object.assign(preparation,{status:'discovering',targetUrl:config.targetUrl,runId:run.id});delete preparation.error;delete preparation.completedAt;}
       const admittedRuns=()=>[run,...state.runs].filter(kept);
-      await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});
+      // A discovery that could not be admitted leaves the stage's preparation as it was.
+      try{await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});}
+      catch(error){if(preparation){delete preparation.runId;delete preparation.targetUrl;Object.assign(preparation,before);}throw error;}
       if(closed){run.status='cancelled';run.completedAt=now();await persist();throw conflict('The controller is shutting down.');}
       const execution=async()=>{
         const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,Object.values(credentials??{}));
