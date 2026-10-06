@@ -43,7 +43,7 @@
   "dependencies": {
     "@openrouter/ai-sdk-provider": "3.1.0",
     "@playwright/test": "1.63.0",
-    "ai": "7.0.116",
+    "ai": "7.0.127",
     "jsonc-parser": "3.3.1",
     "smol-toml": "1.9.0",
     "supabase": "2.119.0",
