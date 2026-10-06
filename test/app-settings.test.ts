@@ -118,3 +118,13 @@ test('without the catalog a saved model is not judged unavailable, and one never
   await settings.load();
   assert.deepEqual([settings.getSnapshot().modelState, settings.getSnapshot().escalationState], [null, 'unsaved']);
 });
+
+test('the Model is not saved while the controller has no model configured, whatever default it reports', async () => {
+  // Before a key is saved the controller reports its built-in default, whether or not the catalog lists it.
+  for (const model of ['example/default', 'example/a']) {
+    const settings = createAppSettings({ controller: async path => path.endsWith('/models') ? catalog
+      : { capabilities: { ...reply(model).capabilities, escalationModel: '', keyConfigured: false, modelConfigured: false, modelError: 'Configure a model API key to use the browser agent.' } } });
+    await settings.load();
+    assert.deepEqual([settings.getSnapshot().modelState, settings.getSnapshot().escalationState], ['unsaved', 'unsaved'], model);
+  }
+});

@@ -25,7 +25,7 @@ Linux hosts may also need Chromium's system libraries (`npx playwright install-d
 
 ## Configure a model
 
-Discovery, drafting and code generation use a model; runs do not. Open the app-wide **Settings** page from the sidebar. Enter an **OpenRouter API Key** and choose a model; the list comes from OpenRouter's catalog of models that take text and images and support tools, and the saved model, else `openai/gpt-6-luna`, is preselected when the catalog has it. A saved model the catalog no longer lists is marked **Saved model unavailable** beside the Model Select, which preselects the default instead: the controller keeps using the saved model until you save. Or export the settings before starting the controller:
+Discovery, drafting and code generation use a model; runs do not. Open the app-wide **Settings** page from the sidebar. Enter an **OpenRouter API Key** and choose a model; the list comes from OpenRouter's catalog of models that take text and images and support tools, and the saved model, else `openai/gpt-6-luna`, is preselected when the catalog has it. A saved model the catalog no longer lists is marked **Saved model unavailable** beside the Model Select, which preselects the default instead: the controller keeps using the saved model until you save. While no OpenRouter model is configured, such as before an API key is saved or exported, the Select is marked **Not saved**. Or export the settings before starting the controller:
 
 ```sh
 export OPENROUTER_API_KEY='your-key'
