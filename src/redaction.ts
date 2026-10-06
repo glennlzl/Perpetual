@@ -92,8 +92,54 @@ const QUERY_LITERAL = new RegExp(`([?&]${SECRET_NAME}=)(?![$<{%#(])[^&\\s"'<>\`]
 const REFERENCE = /\$\{[^}]*\}|\$[A-Za-z_]\w*|\{\{[^}]*\}\}|#\{[^}]*\}|\{\w*\}|%(?:\(\w+\))?s/g;
 const literal = (value: string) => (value.length >= 8 || value.includes('\n')) && !/^(?:[$<{%/]|\w+:\/\/)|\$\{|\{\{|#\{/.test(value);
 const literalValue = (match: string, prefix: string, quoted: string) => literal(quoted.slice(1, -1)) ? prefix + redactedLines(quoted) : match;
-const literalMember = (match: string, quote: string, name: string, separator: string, open: string, value: string) =>
-  literal(value) ? `${quote}${name}${quote}${separator}${open}${REDACTED}${open}` : match;
+// The quote of the string each offset sits in on its line: a quote opens a string, the same quote closes it, and inside
+// one a backslash escapes the next character. Offsets are asked in order, so one pass over the text answers them all.
+function strings(text: string) {
+  let at = 0, quote = '';
+  return (offset: number) => {
+    for (; at < offset; at += 1) {
+      const char = text[at];
+      if (char === '\n') quote = '';
+      else if (!quote) { if (char === '"' || char === "'" || char === '`') quote = char; }
+      else if (char === '\\') at += 1;
+      else if (char === quote) quote = '';
+    }
+    return quote;
+  };
+}
+// Each match of a global pattern, replaced by what `hide` returns for it. One it keeps (undefined) is read again from
+// its next character, so the text its value spans still meets the pattern.
+function literals(text: string, pattern: RegExp, hide: (match: RegExpExecArray, inside: (offset: number) => string) => string | undefined) {
+  const inside = strings(text);
+  let output = '', last = 0;
+  pattern.lastIndex = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const replaced = hide(match, inside);
+    if (replaced === undefined) { pattern.lastIndex = match.index + 1; continue; }
+    output += text.slice(last, match.index) + replaced;
+    last = pattern.lastIndex;
+  }
+  return output + text.slice(last);
+}
+// A quote that would close the string a name sits in on its line opens no literal: in `"Missing token: " + name` or
+// `'#secret=', next = '…'` the name is text, and what follows the closing quote is code. A name in quotes of its own
+// (`"password": …`, `'password' => …`) is a key, which sits in the string, if any, before its opening quote.
+function codeLiterals(text: string) {
+  text = literals(text, QUOTED_KEY, (match, inside) => {
+    const [, quote, name, separator, open, value] = match;
+    return inside(match.index) === open || !literal(value) ? undefined : `${quote}${name}${quote}${separator}${open}${REDACTED}${open}`;
+  });
+  text = literals(text, NAMED_LITERAL, (match, inside) => {
+    const [, prefix, quoted] = match, closing = prefix[/^[\w-]+/.exec(prefix)![0].length];
+    const key = (closing === '"' || closing === "'") && match.input[match.index - 1] === closing;
+    return inside(key ? match.index - 1 : match.index) === quoted[0] || !literal(quoted.slice(1, -1)) ? undefined : prefix + redactedLines(quoted);
+  });
+  text = literals(text, FLAG_LITERAL, (match, inside) => {
+    const [, prefix, quoted] = match;
+    return inside(match.index) === quoted[0] || !literal(quoted.slice(1, -1)) ? undefined : prefix + redactedLines(quoted);
+  });
+  return text.replace(QUERY_LITERAL, `$1${REDACTED}`);
+}
 const literalUserInfo = (match: string, scheme: string) => {
   const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':');
   return (colon < 0 ? userinfo : userinfo.slice(colon + 1)).replace(REFERENCE, '') ? `${scheme}${REDACTED}@` : match;
@@ -123,11 +169,7 @@ export function redact(input: unknown = '', { decodeUri = false, names = true, c
   if (code) {
     if (names) text = text.replace(HEADER_LITERAL, `$1${REDACTED}`).replace(AUTHORIZATION_LITERAL, literalValue);
     text = text.replace(BEARER_LITERAL, `Bearer ${REDACTED}`);
-    if (names) text = text
-      .replace(QUOTED_KEY, literalMember)
-      .replace(NAMED_LITERAL, literalValue)
-      .replace(FLAG_LITERAL, literalValue)
-      .replace(QUERY_LITERAL, `$1${REDACTED}`);
+    if (names) text = codeLiterals(text);
     return text.replace(TOKEN_SHAPE, REDACTED).replace(USER_INFO, literalUserInfo);
   }
   if (names) text = text.replace(AUTHORIZATION_HEADER, `$1${REDACTED}`).replace(AUTHORIZATION, `$1${REDACTED}`);

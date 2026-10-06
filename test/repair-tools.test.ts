@@ -220,13 +220,14 @@ test('multiline credential redaction preserves later read offsets and grep line 
 });
 
 // An ordinary sign-in module, holding no credential: what follows token, secret or password there is an expression or
-// a type, which the agent reads, finds and changes as written.
+// a type, which the agent reads, finds and changes as written; and a string that ends with a name and a colon is text.
 const AUTH = [
   "import { getToken, sign } from './tokens';",
-  'export interface Session { token: string; secret: string }',
+  'export interface Session { token: string; secret: string; message: string }',
   'export async function login(username: string, password: string): Promise<Session> {',
+  '  if (!password) throw new Error("Missing password: " + username);',
   '  const token = getToken(username);',
-  '  return { token, secret: sign(token, password) };',
+  '  return { token, secret: sign(token, password), message: "Signed in" };',
   '}',
   '',
 ].join('\n');
@@ -237,11 +238,11 @@ test('ordinary auth code reads, greps and runs as written, and a line read can b
   await writeFile(join(f.root, 'src/auth.ts'), AUTH);
   const read = await f.call('read', { path: 'src/auth.ts' });
   assert.equal(read.content, AUTH.trimEnd().split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n'));
-  assert.deepEqual((await f.call('grep', { pattern: 'getToken\\(username', include: '*.ts' })).matches, ['src/auth.ts:4:  const token = getToken(username);']);
+  assert.deepEqual((await f.call('grep', { pattern: 'getToken\\(username', include: '*.ts' })).matches, ['src/auth.ts:5:  const token = getToken(username);']);
   assert.equal((await f.call('run', { command: 'cat src/auth.ts' })).output, AUTH);
   const diagnostic = "src/auth.ts(5,12): error TS2741: Property 'secret' is missing in type '{ token: string; }' but required in type 'Session'.";
   assert.equal((await f.call('run', { command: `printf '%s\\n' "${diagnostic}"; exit 2` })).output, `${diagnostic}\n`, 'A type checker\'s diagnostic reads as it printed it.');
-  const line = String((await f.call('read', { path: 'src/auth.ts', offset: 4, limit: 1 })).content).split('\t')[1];
+  const line = String((await f.call('read', { path: 'src/auth.ts', offset: 5, limit: 1 })).content).split('\t')[1];
   assert.equal((await f.call('edit', { path: 'src/auth.ts', old: line, new: '  const token = await getToken(username);' })).ok, true);
   assert.equal(await readFile(join(f.root, 'src/auth.ts'), 'utf8'), AUTH.replace('getToken(username)', 'await getToken(username)'));
 });

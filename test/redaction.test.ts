@@ -74,6 +74,9 @@ test('code keeps what follows a credential name when it is an expression, a type
     '  headers: { Authorization: `Bearer ${token}` },', "  headers: { Authorization: 'Bearer ' + token },", '  Authorization: token,', '// Uses Bearer authentication.',
     'const url = `postgres://postgres:${password}@db:5432/app`;', 'git clone https://${GITHUB_TOKEN}@github.com/acme/app.git', 'const callback = `/callback?access_token=${token}`;',
     'curl --token "$TOKEN" https://api.example.test', "const tokenType = 'Bearer';", "secretPath = '/run/secrets/db'", 'PASSWORD="${DB_PASSWORD}"',
+    // A string that ends with a name and a separator is text: its closing quote opens no literal.
+    'if (!token) throw new Error("Missing token: " + name);\nconst user = await getUser(name);\nreturn { user, message: "Signed in" };',
+    "const LAUNCH = '#secret=', STORED = 'acme-browser-secret';", 'const args = "--token " + token + " --verbose";', 'log("Missing \'token\': " + name + " in the request");',
   ]) assert.equal(redact(line, { code: true }), line, line);
   const cases: [string, string][] = [
     ['const apiKey = "fixture-literal-1";', `const apiKey = ${REDACTED};`],
@@ -98,6 +101,11 @@ test('code keeps what follows a credential name when it is an expression, a type
     // come back the same.
     ['before\nPASSWORD="first line\nsecond line"\nafter', `before\nPASSWORD=${REDACTED}\n${REDACTED}\nafter`],
     ['password = "ab\ncd"', `password = ${REDACTED}\n${REDACTED}`],
+    // A literal after such a string, or nested in one with the other quote, is still hidden.
+    ['throw new Error("Missing token: " + name);\nconst password = "fixture-literal-1";', `throw new Error("Missing token: " + name);\nconst password = ${REDACTED};`],
+    ['exec("deploy --password \'fixture-literal-1\'");', `exec("deploy --password ${REDACTED}");`],
+    ["const hint = 'the token: \"fixture-literal-1\" is set';", `const hint = 'the token: ${REDACTED} is set';`],
+    ['Error: "request failed: {\\"password\\":\\"fixture-literal\\"}"', `Error: "request failed: {\\"password\\":\\"${REDACTED}\\"}"`],
   ];
   for (const [input, output] of cases) {
     assert.equal(redact(input, { code: true }), output, input);
