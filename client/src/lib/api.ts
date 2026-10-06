@@ -36,6 +36,28 @@ export function signIn() {
   addEventListener('hashchange', launched);
 }
 
+/** Recovers this page with a launch link for this exact controller. Refused credentials never replace stored access. */
+export async function connectLaunchLink(input: unknown) {
+  let link: URL;
+  try { link = new URL(typeof input === 'string' && input.length <= 2048 ? input.trim() : ''); }
+  catch { throw new Error('Paste the full launch link from the terminal.'); }
+  if (link.origin !== location.origin || link.username || link.password || link.pathname !== '/' || link.search) {
+    throw new Error('Use the launch link for this address.');
+  }
+  const secret = /^#secret=([0-9a-f]{64})$/.exec(link.hash)?.[1];
+  if (!secret) throw new Error('Paste the full launch link from the terminal.');
+  let response: Response;
+  try { response = await fetch('/api/session', { headers: { 'X-Perpetual-Browser-Secret': secret }, credentials: 'omit', redirect: 'error' }); }
+  catch { throw new Error(UNAVAILABLE); }
+  if (response.status === 401) throw new Error('This launch link is no longer valid. Copy the latest link from the terminal.');
+  if (!response.ok) throw new Error(UNAVAILABLE);
+  browserSecret = secret;
+  sessionToken = undefined;
+  try { localStorage.setItem(STORED, secret); } catch { /* Access still works for this page when storage is unavailable. */ }
+  signedOut = false;
+  changed();
+}
+
 /** A reply's error message, when the controller sent one. */
 export const replyError = (data: unknown) => data !== null && typeof data === 'object' && 'error' in data && typeof data.error === 'string' ? data.error : '';
 /** What a request reads when the controller could not answer it, such as while it is stopped or restarting. */

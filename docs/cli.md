@@ -12,7 +12,7 @@ Every API request needs the controller's launch secret, which the data directory
 
 | Command | What it does |
 | --- | --- |
-| `perpetual serve --repo PATH [--port 4317]` | Starts the controller and the interface on `http://127.0.0.1:<port>`, and prints the launch link that opens it, `http://127.0.0.1:<port>/#secret=…`. The server binds only to loopback. On Ctrl-C it prints `Stopping…` and exits once its work has drained; a second Ctrl-C stops it at once. |
+| `perpetual serve --repo PATH [--port 4317] [--no-open]` | Starts the controller and the interface on `http://127.0.0.1:<port>`, prints the launch link, `http://127.0.0.1:<port>/#secret=…`, and opens it in the default browser. Use `--no-open` for a headless session. The server binds only to loopback. On Ctrl-C it prints `Stopping…` and exits once its work has drained; a second Ctrl-C stops it at once. |
 | `perpetual scan --repo PATH` | Scans the repository: packages and configuration, Git identity, GitHub workflows and jobs, services, workspace dependencies and Vercel/Railway clues. It does not read `.env` files or execute project scripts. |
 | `perpetual twin --repo PATH` | Scans, then reports what the repository's twin would run: the config detection proposes, each detected service with its provenance, the evidence that found it and the inputs a person supplies, and each app's unwired variables, those its code reads that no service provides. Names and paths only, with nothing run; [Onboarding with a coding agent](onboarding.md) reads it. |
 | `perpetual providers --repo PATH` | Scans, then reads GitHub, Vercel and Railway status with the credentials in the environment; see [Provider connections](providers.md). |
@@ -21,6 +21,8 @@ Every API request needs the controller's launch secret, which the data directory
 | `perpetual sandbox …` | The optional desktop sandbox; see [Desktop sandbox](desktop-sandbox.md). |
 
 `npm start -- --repo PATH` builds the interface and then runs `serve`. After changing the client, run `npm run build`; a running server picks up the rebuilt assets.
+
+If the browser cannot be opened, the controller keeps running and asks you to open the printed link. A new browser or cleared browser storage needs that link again: open it directly, or paste it into **Launch link** on the **Connect to Perpetual** page and choose **Connect**. Recovery accepts a full link for the current address, verifies it before saving access, and leaves refused credentials unsaved. Normal restarts over the same data directory preserve access.
 
 ## Examples
 

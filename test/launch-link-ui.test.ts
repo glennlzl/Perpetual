@@ -10,7 +10,49 @@ import { startServer } from '../src/server.ts';
 
 // Test files run concurrently, so each wait allows 10 seconds.
 const expect = baseExpect.configure({ timeout: 10_000 });
-const SIGNED_OUT = 'Open the link perpetual serve printed', SIGNED_IN = 'Connect your GitHub';
+const SIGNED_OUT = 'Connect to Perpetual', SIGNED_IN = 'Connect your GitHub';
+
+// Catches a recovery form that accepts an invalid credential, navigates to another server, or fails to restore the workspace.
+test('the signed-out page recovers through a validated launch link and keeps the session across refreshes', { timeout: 60000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-launch-recovery-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'state') });
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => { await browser.close(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const context = await browser.newContext(), page = await context.newPage();
+  const link = page.getByLabel('Launch link', { exact: true });
+  const connect = page.getByRole('button', { name: 'Connect', exact: true });
+  const foreignRequests: string[] = [];
+  page.on('request', request => { if (request.url().startsWith('https://example.invalid')) foreignRequests.push(request.url()); });
+  await page.goto(app.url);
+  await expect(link).toBeVisible();
+  await expect(connect).toBeDisabled();
+  await link.fill('https://example.invalid/#secret=' + '0'.repeat(64));
+  await connect.click();
+  await expect(page.getByRole('alert')).toContainText('this address');
+  assert.equal(page.url(), `${app.url}/`);
+  assert.deepEqual(foreignRequests, []);
+  await link.fill(`${app.url}/#secret=${'0'.repeat(64)}`);
+  await connect.click();
+  await expect(page.getByRole('alert')).toContainText('no longer valid');
+  assert.equal(await page.evaluate(() => localStorage.getItem('perpetual-browser-secret')), null, 'An invalid credential is not saved.');
+  await link.fill(app.launchUrl);
+  await page.route('**/api/session', route => route.abort());
+  await connect.click();
+  await expect(page.getByRole('alert')).toContainText('unavailable');
+  await expect(connect).toBeEnabled();
+  await page.unroute('**/api/session');
+  await connect.click();
+  await expect(page.getByRole('heading', { name: SIGNED_IN, exact: true })).toBeVisible();
+  assert.equal(page.url(), `${app.url}/`);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: SIGNED_IN, exact: true })).toBeVisible();
+  const other = await context.newPage();
+  await other.goto(app.url);
+  await expect(other.getByRole('heading', { name: SIGNED_IN, exact: true })).toBeVisible();
+  const fresh = await browser.newContext(), freshPage = await fresh.newPage();
+  await freshPage.goto(app.url);
+  await expect(freshPage.getByLabel('Launch link', { exact: true })).toBeVisible();
+});
 
 // The real controller and page: without the browser secret the launch link gives the page, or with another launch
 // secret's, the page shows one message; the link signs the browser in and leaves the address without its secret.
@@ -26,7 +68,7 @@ test('the page asks for the printed link until it is opened, then loads without 
   const signedOut = page.getByRole('heading', { name: SIGNED_OUT, exact: true });
   await page.goto(app.url);
   await expect(signedOut).toBeVisible();
-  await expect(page.getByRole('button')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
   // A link from another launch secret, such as another data directory's, signs nothing in, and leaves the address too.
   await page.goto('about:blank');
   await page.goto(`${app.url}/#secret=${'0'.repeat(64)}`);

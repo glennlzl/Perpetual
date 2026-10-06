@@ -1,6 +1,6 @@
 import React, { lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { ReactFlow, ReactFlowProvider, Handle, Position, BaseEdge, MarkerType, getStraightPath, useNodesInitialized, useReactFlow, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps, type Viewport } from '@xyflow/react';
-import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, KeyRound, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
+import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { BaseNode, BaseNodeHeader, BaseNodeHeaderTitle } from '@/components/base-node';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -11,6 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import PipelineDialogs from './PipelineDialogs';
 import PipelineLoading from './PipelineLoading';
+import SignedOut from './SignedOut';
 import { createAppSettings } from '@/lib/app-settings';
 import DeferredView, { ViewLoadState } from './DeferredView';
 import GitHubActionsCard from './GitHubActionsCard';
@@ -900,11 +901,6 @@ function PipelineApp() {
     <PipelineDialogs dialog={page !== 'pipeline' || loading && dialog?.type === 'git-graph' ? null : dialog} onClose={closeDialog} onAppSettings={openAppSettings} scan={state.scan || { repo: { path: state.defaultRepo } }} pipeline={pipeline} onSourceSave={onSourceSave} onAction={onAction} onStageRemoved={refreshPipeline} busy={busy} />
     {page === 'pipeline' && newTest && pipeline?.stages.some(stage => stage.id === newTest) && <StageNewTest key={`${pipeline.repoPath}\n${newTest}`} repoPath={state.scan?.repo?.path!} stageId={newTest} onClose={closeNewTest} onAppSettings={openAppSettings} />}
   </>;
-}
-
-// Without the browser secret the launch link gives the page, the controller answers nothing: the page says only how to sign in.
-function SignedOut() {
-  return <main className="delivery-app"><div className="pipeline-canvas canvas-empty"><KeyRound size={28} /><h1>Open the link <code>perpetual serve</code> printed</h1></div></main>;
 }
 
 function Workspace() {

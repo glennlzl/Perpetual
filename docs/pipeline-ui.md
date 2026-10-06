@@ -1,6 +1,6 @@
 # Pipeline interface
 
-Start the controller as described in the [README](../README.md) and open the link it prints, `http://127.0.0.1:4317/#secret=…`. The server binds only to loopback. Without the secret that link gives the browser, or with one from another launch secret, the page shows only **Open the link `perpetual serve` printed**; opening the link signs it in again.
+Start the controller as described in the [README](../README.md). It opens the link it prints, `http://127.0.0.1:4317/#secret=…`, in the default browser; use `--no-open` to skip that. The server binds only to loopback. A browser without this link's secret shows **Connect to Perpetual**; open the printed link or paste it into **Launch link** and choose **Connect** to sign in.
 
 ## Canvas
 
