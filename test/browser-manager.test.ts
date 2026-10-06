@@ -167,6 +167,7 @@ test('a discovery keeps its agent\'s counts whether it completes or fails, and o
   const f=await fixture(t,()=>[{type:'diagnostics',diagnostics:counts},{type:'diagnostics',diagnostics:{...counts,inputTokens:'many'}},...completes?[{type:'discovery',summary:'Workspace product',cases:[]}]:[]]);
   const failed=(await f.manager.discover(f.context)).run,report=await completed(f,failed.id);
   assert.equal(report.run.status,'failed');assert.deepEqual(report.run.diagnostics,counts);
+  assert.equal(Object.hasOwn(f.manager.summary(f.context).runs.find(run=>run.id===failed.id)!,'diagnostics'),false,'Source polling leaves the counts to the full run.');
   completes=true;
   const finished=(await f.manager.discover(f.context)).run;
   assert.deepEqual([(await completed(f,finished.id)).run.status,(await f.manager.runProgress(f.context,finished.id)).run.diagnostics],['completed',counts]);

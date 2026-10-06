@@ -73,8 +73,8 @@ export interface PublicRun {
   engine?: 'playwright' | 'browser-use'; concurrency?: number; effectiveConcurrency?: number; concurrencyLimit?: ConcurrencyLimit; specHashes?: Record<string, string>;
   environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; diagnostics?: DiscoveryDiagnostics; frameUpdatedAt?: string; frameCapturedAt?: string;
 }
-/** Source polling omits code hashes and discovery, and includes progress only for active and latest runs. */
-export type RunSummary = Omit<PublicRun, 'progress' | 'specHashes' | 'discovery'> & { progress?: SummaryProgress };
+/** Source polling omits code hashes, discovery and its diagnostics, and includes progress only for active and latest runs. */
+export type RunSummary = Omit<PublicRun, 'progress' | 'specHashes' | 'discovery' | 'diagnostics'> & { progress?: SummaryProgress };
 export interface RunProgressReply { run: PublicRun; results: JourneyResult[]; progress: RunProgress; discovery?: BrowserDiscovery }
 
 export interface SpecVerification { status: 'passed' | 'failed' | 'cancelled' | 'running'; passes: number; control: 'missed' | 'caught' | null; error?: string }

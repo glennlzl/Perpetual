@@ -295,8 +295,9 @@ export function browserConcurrencyLabel(run: Pick<BrowserRun, 'concurrency' | 'e
   return `${run.effectiveConcurrency} of ${run.concurrency} browsers${reason ? ` · ${reason}` : ''}`;
 }
 
-// A discovery's model use, concisely: whether Browser Use forced its final report, and the tokens it spent.
-export function discoveryUsage(run: Pick<BrowserRun, 'mode' | 'diagnostics'> | null | undefined) {
+// A discovery's model use, concisely: whether Browser Use forced its final report, and the tokens it spent. Only the full
+// run carries its counts.
+export function discoveryUsage(run: Pick<PublicRun, 'mode' | 'diagnostics'> | null | undefined) {
   const counts = run?.mode === 'discover' ? run.diagnostics : undefined, tokens = counts ? counts.inputTokens + counts.outputTokens : 0;
   return { endedEarly: counts?.forcedFinalization === true, tokens: tokens > 0 ? `${number(tokens)} tokens` : '' };
 }
