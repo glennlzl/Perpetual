@@ -21,7 +21,7 @@ import type { Repair, RepairGate, RepairOutcome, RepairProgress, RepairPullReque
 /**
  * Updates of the pull request branch per repair, how long its head's checks may stay pending, how often they, the
  * updated head and an unreachable GitHub are read, how long GitHub may take to update the branch, the longest wait for
- * the journey gates, and how long GitHub may stay unreachable.
+ * the journey gates, and how long GitHub may stay unreachable, at each read and in all right before a write.
  */
 export const MERGE = { updates: 2, checksMs: 10 * 60_000, pollMs: 15_000, headMs: 2 * 60_000, gatesMs: 6 * 60 * 60_000, outageMs: 15 * 60_000 };
 export const AUTO_MERGE_OFF = 'Auto-merge is off.';
@@ -80,10 +80,11 @@ export function checksVerdict({ runs, statuses }: Pick<CommitChecks, 'runs' | 's
 export function createRepairMerge({ github, gates, host, timing, clock = Date.now }: { github: MergeGitHub; gates: RepairGates; host: Pick<RepairHost, 'checkout'>; timing?: Partial<typeof MERGE>; clock?: () => number }) {
   const bounds = { ...MERGE, ...timing };
   // GitHub is read and written only as the account that opened the repair, for its repository. GitHub unreachable is
-  // waited out, for up to outageMs; true when it was, so a write never follows reads made before the wait.
-  async function connected(repair: Repair, signal: AbortSignal) {
+  // waited out, for up to waitMs (outageMs unless less is left); true when it was, so a write never follows reads made
+  // before the wait.
+  async function connected(repair: Repair, signal: AbortSignal, waitMs = bounds.outageMs) {
     let reads = 0;
-    const connection = await untilReachable(() => { reads += 1; return github.connection(); }, { signal, pollMs: bounds.pollMs, waitMs: bounds.outageMs, clock });
+    const connection = await untilReachable(() => { reads += 1; return github.connection(); }, { signal, pollMs: bounds.pollMs, waitMs, clock });
     signal.throwIfAborted();
     if (!connection) throw new Error(DISCONNECTED);
     if (connection.login !== repair.login || connection.repository !== repair.repository) throw new Error(CHANGED);
@@ -187,13 +188,15 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
         await connected(repair, signal);
         const before = await moved();
         if (before) return before;
-        const failing = await checksAt(sha, judged.map(gate => gate.context));
-        if (failing) return ready(failing);
-        // Read again after the checks' wait, just before GitHub is written: GitHub's sha guard protects only the head. The
-        // account is read last, right before the write; a wait there for GitHub to answer reads all of it again.
-        let target: Extract<BranchHead, { status: 200 }>, behindBy: number;
-        do {
-          await connected(repair, signal);
+        // Every check on the head, then the pull request again after the checks' wait and the target branch, just before
+        // GitHub is written: GitHub's sha guard protects only the head. The account is read last, right before the write;
+        // a wait there for GitHub to answer reads all of them again, the checks included, and such waits have outageMs in
+        // all, so the write never rests on a read made before a wait.
+        const required = judged.map(gate => gate.context);
+        let target: Extract<BranchHead, { status: 200 }>, behindBy: number, waited = 0;
+        for (;;) {
+          const failing = await checksAt(sha, required);
+          if (failing) return ready(failing);
           const after = await moved();
           if (after) return after;
           // The target branch is read last, so it can move only in the moment between this read and the write, which no
@@ -203,7 +206,10 @@ export function createRepairMerge({ github, gates, host, timing, clock = Date.no
           target = head;
           ({ behindBy } = await github.compare({ repository, base: target.sha, head: sha }));
           signal.throwIfAborted();
-        } while (await connected(repair, signal));
+          const started = clock();
+          if (!(await connected(repair, signal, bounds.outageMs - waited))) break;
+          waited += clock() - started;
+        }
         if (behindBy > 0) {
           // The target branch moved since the pull request's base: GitHub merges it into the repair branch while its
           // head is still the verified one, and the new head is verified again.
