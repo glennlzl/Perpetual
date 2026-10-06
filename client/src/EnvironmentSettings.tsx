@@ -33,11 +33,17 @@ function EnvironmentProgress({ environment, repoPath, stageId, busy, onStop }: {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
+      // Logs are read again while the environment is created. One refused while a source change saves keeps the logs as
+      // last read, without an error, and is read again even once the environment has settled, so its final logs arrive.
+      let again = creating;
       try {
         const reply = await api<EnvironmentLogs>('/api/environments/logs', { repoPath, stageId, id: environment.id }, { signal: controller.signal });
         if (!controller.signal.aborted) { setLogs(reply.logs); setError(''); }
-      } catch (failure) { if (!controller.signal.aborted && !sourceBusy(failure)) setError((failure as Error).message); }
-      if (creating && !controller.signal.aborted) timer = setTimeout(read, 2000);
+      } catch (failure) {
+        if (sourceBusy(failure)) again = true;
+        else if (!controller.signal.aborted) setError((failure as Error).message);
+      }
+      if (again && !controller.signal.aborted) timer = setTimeout(read, 2000);
     };
     void read();
     return () => { controller.abort(); clearTimeout(timer); };

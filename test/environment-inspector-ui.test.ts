@@ -77,4 +77,16 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
   await expect(page.getByText('Stopping', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Failed', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+  // A settled environment reads its logs once; a read refused while a source change saves is read again until they arrive.
+  saving = true;
+  const settled = logReads();
+  await page.getByRole('button', { name: 'Logs', exact: true }).click();
+  await expect.poll(logReads, { timeout: 10_000 }).toBeGreaterThan(settled + 1);
+  await expect(page.getByText('No logs yet.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  saving = false;
+  await expect(page.getByText('Downloading packages', { exact: false })).toBeVisible({ timeout: 10_000 });
+  const arrived = logReads();
+  await page.waitForTimeout(2500);
+  assert.equal(logReads(), arrived, 'Logs that arrived are not read again.');
 });
