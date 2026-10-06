@@ -49,7 +49,7 @@ else if (command.startsWith('container inspect ')) {
 else { process.stderr.write('Unexpected Docker fixture command'); process.exitCode = 82; }
 `, { mode: 0o700 });
   /** Runs one adapter operation in a child whose PATH finds the fake engine, and returns its record or error. */
-  async function run(operation: 'localDocker' | 'inspectSandbox' | 'destroySandbox', env: NodeJS.ProcessEnv = { DOCKER_HOST: socket }): Promise<Outcome> {
+  async function run(operation: 'localDocker' | 'inspectSandbox' | 'startSandbox' | 'destroySandbox', env: NodeJS.ProcessEnv = { DOCKER_HOST: socket }): Promise<Outcome> {
     const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${directory}:${process.env.PATH}`, ...env };
     for (const key of ['DOCKER_HOST', 'DOCKER_CONTEXT']) if (!env[key]) delete environment[key];
     const { stdout, stderr } = await exec(process.execPath, ['--input-type=module', '-e', `
@@ -95,8 +95,15 @@ test('the sandbox adapter refuses a remote Docker endpoint before it sends the e
 test('a sandbox record that another data directory owns is refused before Docker is asked', async t => {
   const fixture = await sandboxFixture(t, ids => owned(ids), { ownerId: randomUUID() });
   assert.equal((await fixture.run('inspectSandbox')).code, 'SANDBOX_OWNERSHIP');
+  assert.equal((await fixture.run('startSandbox')).code, 'SANDBOX_OWNERSHIP');
   assert.equal((await fixture.run('destroySandbox')).code, 'SANDBOX_OWNERSHIP');
   assert.deepEqual(await fixture.calls(), []);
+});
+
+test('start never runs a stopped container that carries another owner’s label', async t => {
+  const fixture = await sandboxFixture(t, ids => owned(ids, { owner: randomUUID() }));
+  assert.equal((await fixture.run('startSandbox')).code, 'SANDBOX_OWNERSHIP');
+  assert.ok((await fixture.calls()).every(call => !call.includes('start') && !call.includes('unpause')), 'No foreign container is started.');
 });
 
 test('destroy leaves a container that carries another owner’s label and records the refusal', async t => {

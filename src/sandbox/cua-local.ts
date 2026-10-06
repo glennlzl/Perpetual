@@ -469,7 +469,7 @@ async function inspectedRecord(store: Store, record: SandboxRecord, { requireRun
   }
   validateContainer(container, record);
   const status = statusOf(container);
-  if (requireRunning && status !== 'running') throw new SandboxError('The sandbox is not running.', 'SANDBOX_NOT_RUNNING');
+  if (requireRunning && status !== 'running') throw new SandboxError('The sandbox is not running. Run sandbox start.', 'SANDBOX_NOT_RUNNING');
   if (requireRunning && !await apiReady(docker, container.Id)) throw new SandboxError('The Cua computer-server is not ready.', 'SANDBOX_NOT_READY');
   return saveRecord(store, { ...record, status, containerId: container.Id, inspectedAt: new Date().toISOString() });
 }
@@ -484,6 +484,31 @@ export async function requireRunningSandbox({ dataDir, id }: { dataDir?: unknown
   sandboxId(id);
   const store = await storeFor(dataDir);
   return withLock(store, id, async () => inspectedRecord(store, await readRecord(store, id), { requireRunning: true }));
+}
+
+/**
+ * Start a desktop that stopped, as it does when Docker or the host restarts, or resume a paused one, in its own
+ * container, so the guest's disk is kept. Returns once computer-server answers inside the guest; a failed start
+ * leaves the record unchanged.
+ */
+export async function startSandbox({ dataDir, id }: { dataDir?: unknown; id?: unknown } = {}): Promise<SandboxRecord> {
+  sandboxId(id);
+  const store = await storeFor(dataDir);
+  return withLock(store, id, async () => {
+    const record = await readRecord(store, id);
+    const docker = await localDocker(record.dockerHost);
+    const container = await lookupContainer(docker, record);
+    if (!container) throw new SandboxError('The sandbox container no longer exists. Create a new sandbox.', 'DOCKER_CONTAINER_MISSING');
+    // Checked before Docker runs it: a container whose isolation changed, or that publishes ports, never starts again.
+    validateContainer(container, record);
+    const status = statusOf(container);
+    if (status === 'paused') await docker.command(['container', 'unpause', container.Id], 'Resuming sandbox', 60_000);
+    else if (status === 'stopped') await docker.command(['container', 'start', container.Id], 'Starting sandbox', 60_000);
+    const ready = await waitUntilReady(docker, record);
+    // A desktop that is running and ready leaves no earlier failure standing.
+    const { error, errorCode, cleanupError, ...retained } = record;
+    return saveRecord(store, { ...retained, status: 'running', containerId: ready.Id, readyAt: new Date().toISOString() });
+  });
 }
 
 export async function destroySandbox({ dataDir, id }: { dataDir?: unknown; id?: unknown } = {}): Promise<SandboxRecord> {

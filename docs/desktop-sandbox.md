@@ -14,7 +14,7 @@ Perpetual CLI (`perpetual sandbox`)
 
 Implementation: [`src/sandbox/cua-local.ts`](../src/sandbox/cua-local.ts), [`src/sandbox/cua.ts`](../src/sandbox/cua.ts), [`integrations/cua/bridge.py`](../integrations/cua/bridge.py), [`integrations/cua/relay.py`](../integrations/cua/relay.py) and the `sandbox` commands in [`src/cli.ts`](../src/cli.ts).
 
-A desktop persists until it is explicitly destroyed. `integrations/cua/Dockerfile` builds a desktop image with the pinned Driver for `--image`; nothing builds it automatically. The sandbox does not provision databases or provider resources and does not enforce release gates.
+A desktop persists until it is explicitly destroyed. Docker never restarts it by itself, so a desktop that stops, such as when Docker or the host restarts, stays stopped until `sandbox start` starts it again. `integrations/cua/Dockerfile` builds a desktop image with the pinned Driver for `--image`; nothing builds it automatically. The sandbox does not provision databases or provider resources and does not enforce release gates.
 
 ## Usage
 
@@ -28,6 +28,9 @@ uv sync --project integrations/cua --frozen
 node src/cli.ts sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]
 node src/cli.ts sandbox list
 node src/cli.ts sandbox inspect --id ID
+
+# Starts a stopped desktop, or resumes a paused one, in its own container; returns once computer-server answers.
+node src/cli.ts sandbox start --id ID
 
 # Commands run inside the owned desktop, not in the original repository.
 node src/cli.ts sandbox exec --id ID --command 'pwd'
@@ -43,7 +46,7 @@ node src/cli.ts sandbox act --id ID --action '{"type":"keypress","keys":["ctrl",
 node src/cli.ts sandbox destroy --id ID
 ```
 
-Use the same absolute `--data` directory for every command. `list` returns saved records, which may be stale; `inspect` checks the actual Docker resource. A failed creation keeps its record, including any cleanup failure. Output files and metadata are private by default. `PERPETUAL_CUA_PYTHON` can name an absolute Python executable whose environment has the pinned SDK.
+Use the same absolute `--data` directory for every command. `list` returns saved records, which may be stale; `inspect` checks the actual Docker resource. A failed creation keeps its record, including any cleanup failure. A started desktop keeps its disk, but its processes start afresh; a paused one resumes as it was. Output files and metadata are private by default. `PERPETUAL_CUA_PYTHON` can name an absolute Python executable whose environment has the pinned SDK.
 
 A desktop publishes no port on the host. Perpetual reaches its computer-server only with `docker exec` on the local engine, the way `sandbox mcp` reaches the Driver: for each request, [`relay.py`](../integrations/cua/relay.py) runs in the guest as UID `1000`, with computer-server's own Python at `/opt/computer-server/venv/bin/python`, and forwards it to computer-server on the guest's loopback. There is no live desktop viewer; use `sandbox screenshot`, or recordings through Driver MCP. A desktop that publishes ports, as earlier versions created them, is refused until it is destroyed.
 

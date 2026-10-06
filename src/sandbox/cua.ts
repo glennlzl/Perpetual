@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { requireRunningSandbox } from './cua-local.ts';
 
-export { createSandbox, listSandboxes, inspectSandbox, destroySandbox } from './cua-local.ts';
+export { createSandbox, listSandboxes, inspectSandbox, startSandbox, destroySandbox } from './cua-local.ts';
 
 const execute = promisify(execFile);
 const integrationDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../integrations/cua');
