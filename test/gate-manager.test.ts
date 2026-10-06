@@ -381,21 +381,19 @@ test('a managed source without its GitHub connection cannot admit a new manual g
 const TIMED_OUT = 'Reading GitHub timed out. Check your connection and try again.';
 
 test('GitHub unreachable keeps a queued gate waiting for Build and its report pending with why, and both go on once it answers', async t => {
-  // The watch and Run now read the connection first; the Build admission that follows finds GitHub unreachable.
-  const account = { login: 'developer', repository: 'owner/app' }, admission = deferred();
-  let reads = 0, unreachable = false;
-  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), connection: async () => {
-    if (++reads === 3) await admission.promise;
-    if (unreachable) throw githubUnreachable(TIMED_OUT);
+  // Run now reads the connection before it queues the gate; from then on, its Build admission first, GitHub does not
+  // answer until the outage ends.
+  const account = { login: 'developer', repository: 'owner/app' };
+  let h: Awaited<ReturnType<typeof harness>> | undefined, outage = true;
+  h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), connection: () => {
+    if (outage && h?.manager.view().stages.beta) throw githubUnreachable(TIMED_OUT);
     return account;
   } });
   await h.manager.run({ stageId: 'beta' });
-  unreachable = true;
-  admission.resolve();
   await until(() => h.manager.view().stages.beta?.status === 'waiting-build' && h.manager.view().stages.beta.statusError === TIMED_OUT, 'GitHub unreachable must keep the gate waiting.');
   assert.equal(h.manager.view().stages.beta.reason, TIMED_OUT);
   assert.deepEqual([h.log, h.posts], [[], []], 'Nothing is prepared or reported while GitHub is unreachable.');
-  unreachable = false;
+  outage = false;
   await until(() => h.manager.view().stages.beta?.status === 'passed' && !h.manager.view().stages.beta.statusError, 'The gate must go on once GitHub answers.');
   await h.manager.idle();
   assert.deepEqual(h.log.slice(0, 1), ['prepare beta a']);
