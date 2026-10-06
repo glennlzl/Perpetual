@@ -32,7 +32,7 @@ import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
 import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
 import { buildChanges, buildForSource, createGitHubBuildPoller, watchedBuildStatus, watchedBuildSummary, type BuildRead } from '@/lib/pipeline-github.ts';
-import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentChanges, deploymentMark, isRecordedDeployment, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
+import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentChanges, deploymentMark, isRecordedDeployment, moreDeployments, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
 import { autopilotChanges, createAutopilotPoller, shareAutopilot, stageActive, type AutopilotView } from '@/lib/pipeline-autopilot.ts';
 import { createStageDataCache, stageNodeData, statusChanges, type PipelineStage, type PipelineView } from '@/lib/pipeline-nodes.ts';
@@ -314,6 +314,12 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
                 <span className="min-w-0 break-words text-left" title={service.label}>{service.label}</span><Settings2 className="size-3.5 text-muted-foreground" />
               </Button>}
           </StepItem>)}
+          {/* GitHub holds older deployment records for the commit than were read; the rest are there. */}
+          {data.moreDeployments && <StepItem icon={<ProviderMark provider="GitHub" />}>
+            <Button asChild variant="ghost" size="sm" className="stage-step-action nodrag nopan h-auto min-h-8 w-full justify-between whitespace-normal">
+              <a href={data.moreDeployments} target="_blank" rel="noopener noreferrer"><span className="min-w-0 break-words text-left">More deployments on GitHub</span><ExternalLink className="size-3.5 text-muted-foreground" /></a>
+            </Button>
+          </StepItem>}
           {changes.map(change => <StepItem key={change.id} icon={<ChangeMark change={change} />}><ChangeRow change={change} repoPath={repoPath} /></StepItem>)}
         </StepList>}
         {!services.length && stage.kind === 'build' && <div className="stage-placeholder"><p>No actions configured</p></div>}
@@ -456,6 +462,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const { view: releases, error: releaseReadError } = useReleases(scan?.repo?.path, scan?.repo?.sha, gates);
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
+  const moreRecords = moreDeployments(deployments);
   const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
   const latest = useMemo(() => Object.fromEntries((pipeline?.stages || []).map(stage => [stage.id, latestEnvironment(stageEnvironments, stage.id)])), [pipeline, stageEnvironments]);
   const activitySnapshot = useMemo(() => ({ environments: stageEnvironments, browserTests, stageRemovals }), [stageEnvironments, browserTests, stageRemovals]);
@@ -484,7 +491,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   const [healthBeat] = useState(createHealthBeats);
   const nodes = useMemo(() => {
     let x = 0;
-    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, buildReadError, gates, production, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
+    const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, buildReadError, gates, production, moreDeployments: moreRecords, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
     return (pipeline?.stages || []).map((stage): StageFlowNode => {
       const position = { x, y: 0 };
       const measured = stageSizes[stage.id];
@@ -496,7 +503,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
         className: 'nopan', style: STAGE_STYLE, data: reuseStageData(stage.id, stageNodeData(stage, context)) as StageData,
       };
     });
-  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, gates, production, releases, releaseReadError, autopilot]);
+  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, gates, production, moreRecords, releases, releaseReadError, autopilot]);
   const edges = useMemo(() => (pipeline?.transitions || []).map((edge): Edge => {
     const flow = transitionFlow(edge, { stages: pipeline.stages, snapshot: activitySnapshot, build, latest, sha, gates });
     const sourceName = pipeline.stages.find(stage => stage.id === edge.source)?.name, targetName = pipeline.stages.find(stage => stage.id === edge.target)?.name;

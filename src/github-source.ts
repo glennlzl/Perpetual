@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub, unanswered, type GitHubFailureKind } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -25,6 +25,8 @@ export type HistorySync = Required<Pick<GitHistory, 'syncedAt'>> & { source: 'gi
 
 class GitHubSourceError extends Error {
   declare code: string;
+  /** Why the gh or git command behind it failed, as github-cli tells it; absent for this module's own refusals. */
+  declare kind?: GitHubFailureKind;
   constructor(message: string, code = 'GITHUB_SOURCE_ERROR') {
     super(redact(message));
     this.name = 'GitHubSourceError';
@@ -39,20 +41,21 @@ export const commandEnvironment = () => githubEnvironment({ strip: ['SSH_ASKPASS
   GIT_CONFIG_GLOBAL: NULL_FILE, GIT_ATTR_NOSYSTEM: '1', GIT_LFS_SKIP_SMUDGE: '1',
 } });
 
-// The failure's kind comes from github-cli; the words and codes for it are this module's, and never the raw output.
+// The failure's kind comes from github-cli and goes with the error; the words and codes for it are this module's, and
+// never the raw output.
 function commandFailure(error: ExecFileException | GitHubSourceError, executable: string, operation: string) {
   if (error instanceof GitHubSourceError) return error;
-  const kind = githubFailureKind(error);
-  if (kind === 'missing') return new GitHubSourceError(
+  const kind = githubFailureKind(error), failure = (message: string, code?: string) => Object.assign(new GitHubSourceError(message, code), { kind });
+  if (kind === 'missing') return failure(
     executable === 'gh' ? GITHUB_MESSAGES.missing : 'Git is unavailable. Install Git before connecting a repository.',
     executable === 'gh' ? 'GH_NOT_FOUND' : 'GIT_NOT_FOUND',
   );
-  if (kind === 'timeout') return new GitHubSourceError(`${operation} timed out. Check your connection and try again.`, 'GITHUB_TIMEOUT');
-  if (kind === 'rate-limit') return new GitHubSourceError(GITHUB_MESSAGES['rate-limit'], 'GITHUB_RATE_LIMIT');
-  if (kind === 'unauthenticated') return new GitHubSourceError(GITHUB_MESSAGES.unauthenticated, 'GITHUB_AUTH_REQUIRED');
-  if (kind === 'not-found') return new GitHubSourceError('The repository or branch is unavailable to your GitHub account. Check the selection and repository access.', 'GITHUB_NOT_FOUND');
-  if (kind === 'denied') return new GitHubSourceError('GitHub denied access. Check repository permissions and any organization SSO authorization for GitHub CLI.', 'GITHUB_FORBIDDEN');
-  return new GitHubSourceError(`${operation} failed. Check your network connection and GitHub CLI account, then try again.`);
+  if (kind === 'timeout') return failure(`${operation} timed out. Check your connection and try again.`, 'GITHUB_TIMEOUT');
+  if (kind === 'rate-limit') return failure(GITHUB_MESSAGES['rate-limit'], 'GITHUB_RATE_LIMIT');
+  if (kind === 'unauthenticated') return failure(GITHUB_MESSAGES.unauthenticated, 'GITHUB_AUTH_REQUIRED');
+  if (kind === 'not-found') return failure('The repository or branch is unavailable to your GitHub account. Check the selection and repository access.', 'GITHUB_NOT_FOUND');
+  if (kind === 'denied') return failure('GitHub denied access. Check repository permissions and any organization SSO authorization for GitHub CLI.', 'GITHUB_FORBIDDEN');
+  return failure(`${operation} failed. Check your network connection and GitHub CLI account, then try again.`);
 }
 
 async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string) {
@@ -114,14 +117,19 @@ async function githubApi(endpoint: string): Promise<{ data: unknown; hasNext: bo
   return { data: response.data, hasNext: hasNextPage(response) };
 }
 
+/**
+ * The CLI's account, as GitHub answers for it. A check GitHub did not answer (`unanswered` in github-cli) says nothing
+ * about the account: that session is unreachable, never signed out.
+ */
 export async function getGitHubSession(): Promise<GitHubSession> {
   try {
     const data = record((await githubApi('user')).data);
     if (!data || typeof data.login !== 'string') throw new GitHubSourceError('GitHub did not return an account. Sign in again with gh auth login --hostname github.com.');
     return { available: true, authenticated: true, account: { login: data.login, name: typeof data.name === 'string' ? data.name : null } };
   } catch (caught) {
-    const error = caught as GitHubSourceError;
-    return { available: error.code !== 'GH_NOT_FOUND', authenticated: false, account: null, message: failureText(error, 500) };
+    const error = caught as GitHubSourceError, message = failureText(error, 500);
+    if (error.kind && unanswered(error.kind)) return { available: true, authenticated: false, account: null, message, unreachable: true };
+    return { available: error.code !== 'GH_NOT_FOUND', authenticated: false, account: null, message };
   }
 }
 

@@ -10,6 +10,8 @@ GitHub uses the GitHub CLI session (`gh auth login`) or `GH_TOKEN`/`GITHUB_TOKEN
 
 For an existing local project with a GitHub remote and no previous connection choice, Perpetual reuses the machine's GitHub CLI session after a successful account check. A remote URL alone never counts as authentication. A source chosen through that reused session stays with the account that chose it: after `gh auth switch` to another account, Perpetual asks you to connect GitHub again. The branch selector and Source settings share this connection state. An explicit **Disconnect** stays in effect, and an explicitly connected account is not silently replaced by a different CLI account.
 
+When GitHub does not answer the account check, on a timeout, a rate limit, or a network or server failure, the connection is **unreachable**, not disconnected: it keeps its account, Source settings shows **Unreachable** with the reason and **Try again**, and the branch selector shows the reason with **Try again** rather than offering to connect. A request that needs the account answers with the reason (HTTP 502). Work in progress waits it out and asks again: the [journey gate](gate.md) keeps its gates waiting and its reports pending, a [build repair](repair.md) and its merge wait up to 15 minutes, and a [release](releases.md) keeps observing its requests. A signed-out CLI, a refused token or another account is still not connected.
+
 ### Connect
 
 In **Source → Settings**, **Connect GitHub** opens a shadcn Dialog:
@@ -35,7 +37,7 @@ The GitHub adapter reads workflow runs, failed steps and redacted error excerpts
 
 ### Deployments
 
-With the connected account, Perpetual reads the [deployments GitHub records](https://docs.github.com/en/rest/deployments/deployments) for the scanned commit and each one's latest status. Vercel, Railway, Netlify and other Git integrations create these records when they build a commit, so Production lists a provider configured on the provider's side, with no file in the repository, by its environment name, state and address. The read needs no provider credential and the standard `repo` scope of the CLI session; it never creates or changes a deployment. A record is the reporting app's account of its own deployment, kept under its name, and a provider that records nothing on GitHub is discovered only from repository files.
+With the connected account, Perpetual reads the [deployments GitHub records](https://docs.github.com/en/rest/deployments/deployments) for the scanned commit and each one's latest status. Vercel, Railway, Netlify and other Git integrations create these records when they build a commit, so Production lists a provider configured on the provider's side, with no file in the repository, by its environment name, state and address. The read needs no provider credential and the standard `repo` scope of the CLI session; it never creates or changes a deployment. GitHub lists a commit's records newest first, and the newest 1,000 are read; when GitHub holds older ones, the reply says so (`more`) and Production links to the repository's deployments on GitHub, since an environment whose records are all older is not among those read. A record is the reporting app's account of its own deployment, kept under its name, and a provider that records nothing on GitHub is discovered only from repository files.
 
 ## Vercel
 

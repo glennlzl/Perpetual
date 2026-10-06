@@ -4,6 +4,7 @@ import { chmod, mkdtemp, readdir, readFile, rm, writeFile, mkdir } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { environmentBusy } from '../src/environments/usage.ts';
+import { githubUnreachable } from '../src/github-cli.ts';
 import { createGateManager, type GateConnection, type GateGitHub, type GateStage, type GateSteps } from '../src/gate/manager.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from '../src/gate/github.ts';
 import type { Gate, GateRef, RunRollup } from '../src/gate/rules.ts';
@@ -19,7 +20,7 @@ type Context = { key: string; stageId: string; sha: string };
 type HttpError = Error & { statusCode?: number };
 type SavedState = { version: number; gates: Gate[]; heads: Record<string, { branch: string; login: string; sha: string; etag: string | null; checkedAt?: string }> };
 type Options = {
-  dataDir?: string; stages?: GateStage[]; sha?: string; repository?: string | null; connection?: GateConnection | null | (() => GateConnection | null);
+  dataDir?: string; stages?: GateStage[]; sha?: string; repository?: string | null; connection?: GateConnection | null | (() => GateConnection | null | Promise<GateConnection | null>);
   journeys?: number | ((context: Context) => number); runs?: Record<string, RunRollup>; heads?: (BranchHead | Error)[]; post?: (status: CommitStatusPost) => Promise<void>;
   pollInterval?: number; retryInterval?: number;
 };
@@ -445,6 +446,59 @@ test('a managed source without its GitHub connection cannot admit a new manual g
   assert.deepEqual(h.manager.view().stages, {});
   assert.deepEqual(h.log, []);
   assert.equal(h.manager.view().production, null);
+});
+
+const TIMED_OUT = 'Reading GitHub timed out. Check your connection and try again.';
+
+test('GitHub unreachable keeps a queued gate waiting for Build and its report pending with why, and both go on once it answers', async t => {
+  // Run now reads the connection before it queues the gate; from then on, its Build admission first, GitHub does not
+  // answer until the outage ends.
+  const account = { login: 'developer', repository: 'owner/app' };
+  let h: Awaited<ReturnType<typeof harness>> | undefined, outage = true;
+  h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma'), connection: () => {
+    if (outage && h?.manager.view().stages.beta) throw githubUnreachable(TIMED_OUT);
+    return account;
+  } });
+  await h.manager.run({ stageId: 'beta' });
+  await until(() => h.manager.view().stages.beta?.status === 'waiting-build' && h.manager.view().stages.beta.statusError === TIMED_OUT, 'GitHub unreachable must keep the gate waiting.');
+  assert.equal(h.manager.view().stages.beta.reason, TIMED_OUT);
+  assert.deepEqual([h.log, h.posts], [[], []], 'Nothing is prepared or reported while GitHub is unreachable.');
+  outage = false;
+  await until(() => h.manager.view().stages.beta?.status === 'passed' && !h.manager.view().stages.beta.statusError, 'The gate must go on once GitHub answers.');
+  await h.manager.idle();
+  assert.deepEqual(h.log.slice(0, 1), ['prepare beta a']);
+  assert.deepEqual([h.posts.at(-1)?.state, h.posts.at(-1)?.description], ['success', 'Passed']);
+  assert.equal(h.posts.some(post => post.description === 'Needs release'), false, 'GitHub unreachable never becomes a verdict.');
+});
+
+test('GitHub unreachable at the account check before the source moves leaves the gate queued, and it runs once GitHub answers', async t => {
+  const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  let outage = 2;
+  h.holds.prepare = () => outage-- > 0 ? githubUnreachable(TIMED_OUT) : null;
+  await h.manager.run({ stageId: 'beta' });
+  await until(() => h.manager.view().stages.beta?.status === 'passed', 'The gate must run once GitHub answers.');
+  await h.manager.idle();
+  assert.equal(outage, -1, 'The move was tried again until GitHub answered.');
+  assert.deepEqual(h.posts.filter(post => post.context === 'perpetual/Beta').map(post => post.description), ['Running', 'Passed']);
+  // A move that fails otherwise, such as a fetch that timed out, is the gate's verdict.
+  const fetching = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') }), timedOut = 'Fetching the commit timed out. Check your connection and try again.';
+  fetching.holds.prepare = () => new Error(timedOut);
+  await fetching.manager.run({ stageId: 'beta' });
+  await until(() => fetching.manager.view().stages.beta?.status === 'needs-release', 'A move that failed must need release.');
+  assert.equal(fetching.manager.view().stages.beta.reason, timedOut);
+});
+
+test('a managed source cannot admit a manual gate while GitHub is unreachable, says so rather than asking to connect, and keeps no watch error', async t => {
+  let outage = false;
+  const h = await harness(t, { connection: () => { if (outage) throw githubUnreachable(TIMED_OUT); return { login: 'developer', repository: 'owner/app' }; }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  await h.manager.watch();
+  outage = true;
+  await assert.rejects(h.manager.run({ stageId: 'beta' }), (error: HttpError) => error.statusCode === 502 && error.message === TIMED_OUT);
+  await h.manager.watch();
+  await h.manager.idle();
+  assert.deepEqual([h.manager.view().stages, h.log, h.manager.view().watchError], [{}, [], undefined]);
+  outage = false;
+  assert.deepEqual(h.manager.watchedHead({ key: KEY, repository: 'owner/app', branch: 'main', login: 'developer' }), { key: KEY, branch: 'main', sha: A }, 'Build reads the watched head as soon as GitHub answers.');
 });
 
 test('a gate interrupted by a restart needs release with the interruption, and queued gates resume', async t => {

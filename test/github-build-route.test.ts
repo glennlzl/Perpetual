@@ -20,11 +20,12 @@ async function fixture(t: TestContext, { managed = true, baseline = true, branch
   const stages = [{ id: 'source', name: 'Source', kind: 'source' }, { id: 'build', name: 'Build', kind: 'build' }, { id: 'beta', name: 'Beta', kind: 'sandbox' }, { id: 'production', name: 'Production', kind: 'production' }].map(stage => ({ ...stage, collapsed: false }));
   await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, providers: [], pipelines: { [key]: { repoPath: dir, stages } }, githubConnection: { login: 'tester', connectedAt: '2026-09-23T09:00:00.000Z' }, ...(managed ? { source: { repository, branch, rootDirectory: '/', scanPath: dir, sha: A, connectedAccount: 'tester', savedAt: '2026-09-23T10:00:00.000Z' } } : {}) } }));
   await writeFile(join(dataDir, 'gates/state.json'), JSON.stringify({ version: 1, gates: [], heads: baseline ? { [key]: { repository, branch, login: 'tester', sha: B, etag: null } } : {} }));
-  let login: string | null = 'tester', nextHead: string | null = null;
+  // outage: why GitHub does not answer the account check, while it does not.
+  let login: string | null = 'tester', nextHead: string | null = null, outage: string | null = null;
   let read: (input: { repository?: unknown; sha?: unknown; login?: unknown }) => Promise<{ repository: string; sha: string | null; runs: WorkflowRun[] }> = async input => ({ repository, sha: String(input.sha), runs: [run('10', { sha: String(input.sha) })] });
   const app = await startServer({ port: 0, repo: dir, dataDir, github: {
     auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
-    runs: { session: async (): Promise<GitHubSession> => login ? { available: true, authenticated: true, account: { login, name: null } } : { available: true, authenticated: false, account: null }, read: input => read(input) },
+    runs: { session: async (): Promise<GitHubSession> => outage ? { available: true, authenticated: false, account: null, message: outage, unreachable: true } : login ? { available: true, authenticated: true, account: { login, name: null } } : { available: true, authenticated: false, account: null }, read: input => read(input) },
     head: async () => nextHead ? { status: 200, sha: nextHead, etag: null } : { status: 304 },
     build: async () => ({ status: 'waiting', reason: 'No completed build.' }), status: async () => {},
   } });
@@ -32,7 +33,7 @@ async function fixture(t: TestContext, { managed = true, baseline = true, branch
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
   const get = async (route = 'build', repoPath = dir) => { const response = await fetch(`${app.url}/api/github/${route}?${new URLSearchParams({ repoPath })}`); return { status: response.status, body: await response.json() }; };
   const post = async (path: string, input: unknown) => { const response = await fetch(`${app.url}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify(input) }); return { status: response.status, body: await response.json() }; };
-  return { dir, app, get, post, setRead(value: typeof read) { read = value; }, setLogin(value: typeof login) { login = value; }, setHead(value: string) { nextHead = value; } };
+  return { dir, app, get, post, setRead(value: typeof read) { read = value; }, setLogin(value: typeof login) { login = value; }, setHead(value: string) { nextHead = value; }, setOutage(value: typeof outage) { outage = value; } };
 }
 
 test('Build follows the verified watched head while raw runs stay on the scanned commit', async t => {
@@ -101,4 +102,15 @@ test('a watched head change while Build is reading refuses the older green reply
   release.resolve();
   const result = await reading;
   assert.equal(result.status, 409); assert.equal(result.body.runs, undefined);
+});
+
+test('GitHub unreachable while Run now reads the head leaves no error behind, so Build reads the watched head as soon as GitHub answers', async t => {
+  const f = await fixture(t), timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  assert.equal((await f.get()).status, 200);
+  f.setOutage(timedOut);
+  assert.deepEqual(await f.post('/api/gate/run', { repoPath: f.dir, stageId: 'beta' }), { status: 502, body: { error: timedOut } });
+  assert.deepEqual(await f.get(), { status: 502, body: { error: timedOut } });
+  f.setOutage(null);
+  const answered = await f.get();
+  assert.deepEqual([answered.status, answered.body.sha, answered.body.source], [200, B, 'watched']);
 });

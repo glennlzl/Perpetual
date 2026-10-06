@@ -120,7 +120,8 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
       const source = connection.source;
       if (!connection.connected || !source?.repository) {
         cache.current = null;
-        setList({ ...emptyList, connection });
+        // GitHub not answering is no disconnect: the list says so, with Try again, rather than offering to connect.
+        setList({ ...emptyList, connection, error: connection.unreachable ? connection.message || 'GitHub is unreachable.' : '' });
         return;
       }
       const key = `${connection.account?.login || ''}\n${source.repository}\n${source.rootDirectory || '/'}\n${branch}`;
@@ -155,7 +156,7 @@ export default function BranchSwitcher({ scan, busy = false, onSourceSave, onLoc
 
   function configure() {
     setOpen(false);
-    onConfigureSource?.({ connect: list.connection ? !list.connection.connected : false });
+    onConfigureSource?.({ connect: list.connection ? !list.connection.connected && !list.connection.unreachable : false });
   }
 
   async function change(apply: () => Promise<unknown>, fallback: string) {
