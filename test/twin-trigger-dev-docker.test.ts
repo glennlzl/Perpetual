@@ -10,10 +10,12 @@ import { execCommand } from '../src/twin/runtime.ts';
 import type { ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import trigger, { VERSION, cliImage, ensureCli } from '../src/twin/services/trigger-dev.ts';
+import { desktopSkip } from './fixtures/docker-engine.ts';
 
 // Opt-in: builds the pinned CLI image and runs the dev worker command in a disposable perpetual-smoke-* container.
 // A local listener stands in for the webapp only to observe the CLI's first sign-in request, then refuses it.
 const skip = process.env.PERPETUAL_DOCKER_TESTS === '1' ? false : 'Set PERPETUAL_DOCKER_TESTS=1 to run against the local Docker engine.';
+const desktopOnly = desktopSkip(skip);
 const docker = (...args: string[]) => execCommand('docker', args);
 const TOKEN = `tr_pat_${randomBytes(20).toString('hex')}`;
 
@@ -42,6 +44,8 @@ test('the dev worker runs the CLI from its pinned image, which signs in from its
   await ensureCli({ shared: dir, exec: (file, args) => execCommand(file, args) }, version);
   const offline = await docker('run', '--rm', '--network', 'none', image, 'trigger', '--version');
   assert.match(offline.stdout, new RegExp(version.replaceAll('.', '\\.')), 'The CLI is in the image; starting it downloads nothing.');
+  // From here the worker reaches the listener on the host's loopback through host.docker.internal, which only Docker Desktop routes.
+  if (desktopOnly) return t.skip(desktopOnly);
 
   const outputs = { apiUrl: `http://host.docker.internal:${(server.address() as AddressInfo).port}`, secretKey: 'tr_dev_smoke', projectRef: 'proj_smoke', accessToken: TOKEN };
   // The worker container reads only its options and outputs.

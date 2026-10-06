@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTwinRuntime } from '../src/twin/runtime.ts';
 import { failureText, redact } from '../src/redaction.ts';
+import { desktopSkip } from './fixtures/docker-engine.ts';
 
-const skip = process.env.PERPETUAL_DOCKER_TESTS === '1' ? false : 'Set PERPETUAL_DOCKER_TESTS=1 to test public URLs on Docker Desktop.';
+// Apps reach public URLs on the host's loopback through host.docker.internal, which only Docker Desktop routes.
+const skip = desktopSkip(process.env.PERPETUAL_DOCKER_TESTS === '1' ? false : 'Set PERPETUAL_DOCKER_TESTS=1 to test public URLs on Docker Desktop.');
 
 // Actual Supabase, reached through exactly the same URL by the build, SSR and host browser.
 // The second app covers public app-to-app addresses without any service-specific routing.

@@ -12,12 +12,14 @@ import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
 import { scanRepository } from '../src/scanner.ts';
 import { repositoryCache } from '../src/twin/compose.ts';
 import type { DetectedConfig } from '../src/twin/detect.ts';
+import { desktopSkip } from './fixtures/docker-engine.ts';
 
 type Environment = { id: string; sandboxId?: string; plan?: DetectedConfig; pipelineKey?: string };
 
 const exec = promisify(execFile);
 // Opt-in: starts one disposable Compose project, perpetual-smoke-*, on the local Docker engine.
 const skip = process.env.PERPETUAL_DOCKER_TESTS === '1' ? false : 'Set PERPETUAL_DOCKER_TESTS=1 to run against the local Docker engine.';
+const desktopOnly = desktopSkip(skip);
 
 // The app reaches Mailpit through the address the twin gives it, from inside its own container.
 const SERVER = `import { createServer } from 'node:http';
@@ -53,7 +55,9 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
   assert.equal(url.hostname, '127.0.0.1');
   const reply = await (await fetch(new URL('/journey', url))).json();
   assert.match(reply.smtp, /^host\.docker\.internal:\d+$/);
-  assert.equal(reply.mail, 200, 'The app reached Mailpit through its twin address.');
+  // Mailpit is published on the host's loopback, which the app reaches through host.docker.internal only where Docker
+  // Desktop routes it. Everything else here runs on every engine.
+  await t.test('the app reaches Mailpit through its twin address', { skip: desktopOnly }, () => assert.equal(reply.mail, 200));
   assert.deepEqual(await runtime.environmentHealth({ dataDir, environment }), { status: 'ready' });
   assert.match(await runtime.environmentLogs({ dataDir, environment }), /request \/journey/);
   // Built for no repository, the twin's package cache is its own, a volume of its project beside its workspace.

@@ -74,4 +74,6 @@ Journey tests in `npm test` run a real headless Chromium, which `npm run setup` 
 
 `PERPETUAL_REPAIR_DOCKER_TESTS=1 node --test test/repair-box-docker.test.ts` runs real [repair boxes](repair.md): a whole repair of a type error in a tiny repository, a box's confinement, and a box removed for writing past its limit.
 
+The Docker tests workflow, `.github/workflows/docker.yml`, sets both variables and runs every `test/*-docker.test.ts` file, one at a time, every night and when started by hand. It is not a required check. Its runner's native Linux engine does not route a container to the host's loopback, which [twins](twins.md) need, so there the twin tests skip the parts that use that route, with the note setup gives for such an engine; any other skip fails the job.
+
 The repair-agent bench under `bench/repair` is a dev-only package with its own dependencies; `npm ci`, `npm ci --prefix adapters/pi`, `npm run typecheck` and `npm test` there, which CI runs as its own job, and `BENCH_DOCKER=1 npm test` for the tests that start boxes. Its [README](../bench/repair/README.md) explains the paid bake-off.
