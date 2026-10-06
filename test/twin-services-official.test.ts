@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import supabase, { CLI as SUPABASE_CLI, setToml } from '../src/twin/services/supabase.ts';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parse as parseToml } from 'smol-toml';
+import supabase, { CLI_VERSION as SUPABASE_VERSION, cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import { APP_IMAGE } from '../src/twin/compose.ts';
+import { createTwinRuntime } from '../src/twin/runtime.ts';
 import stripe, { CLI as STRIPE_CLI, EVENTS, SANDBOX_FAILED } from '../src/twin/services/stripe.ts';
 import { detectTwinConfig } from '../src/twin/detect.ts';
+import { missingInputs } from '../src/twin/inputs.ts';
 import type { CommandOutput, DockerCommand, EnvInput, ServiceContext } from '../src/twin/registry.ts';
 import { serviceOptionErrors, type Json, type JsonObject } from '../src/twin/config.ts';
 
@@ -29,6 +33,7 @@ const context = async <C extends ServiceContext<object, object>>({ respond = () 
   return {
     project: 'perpetual-beta1', dir: join(root, 'twin'), source: join(root, 'source'), shared: join(root, 'shared', 'trigger-dev'),
     options: {}, inputs: {}, outputs: {}, host: HOST, port, url: (name: string, path = '') => `http://${HOST}:${port(name)}${path}`,
+    apps: [] as string[], app: (id: string) => ({ url: `http://${HOST}:${port(`app:${id}`)}`, publicUrl: `http://127.0.0.1:${port(`app:${id}`)}`, port: port(`app:${id}`) }),
     run: (image: string, args: string[], options?: Call['options']) => call({ image, args, options }), exec: (command: string, args: string[], options?: Call['options']) => call({ command, args, options }),
     calls, ...values,
   } as Fake<C>;
@@ -73,13 +78,14 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   ctx.outputs = await supabase.setup(ctx);
-  const workdir = join(ctx.dir, 'supabase');
+  const workdir = join(ctx.dir, 'supabase'), entry = await cliEntry();
+  // The installed release's own launcher, run with the controller's Node.
   assert.deepEqual(ctx.calls.filter(call => call.command).map(({ command, args }) => [command, ...args]), [
-    ['npx', '--yes', SUPABASE_CLI, 'stop', '--no-backup', '--project-id', 'perpetual-beta1'],
-    ['npx', '--yes', SUPABASE_CLI, 'start', '--workdir', workdir],
-    ['npx', '--yes', SUPABASE_CLI, 'status', '--output', 'env', '--workdir', workdir],
+    [process.execPath, entry, 'stop', '--no-backup', '--project-id', 'perpetual-beta1'],
+    [process.execPath, entry, 'start', '--workdir', workdir],
+    [process.execPath, entry, 'status', '--output', 'env', '--workdir', workdir],
   ]);
-  assert.match(SUPABASE_CLI, /^supabase@\d+\.\d+\.\d+$/);
+  assert.match(SUPABASE_VERSION, /^\d+\.\d+\.\d+$/);
   assert.ok(ctx.calls.every(({ args }) => !args.some(arg => SOCKET.test(arg))));
   assert.equal(ctx.calls[1].image, APP_IMAGE);
   assert.deepEqual(ctx.calls[1].options, { mounts: 'service-only' });
@@ -89,7 +95,8 @@ test('Supabase runs the pinned CLI on the host, never in a container with the Do
 test('Supabase starts its stack with every env() name of its config.toml and SUPABASE_ setting unset, whatever the controller exports', async t => {
   // The controller's environment, as a developer's shell exports it: stack settings and a credential the CLI would take
   // over the config, and the CLI's own image mirror and telemetry choice, which stay.
-  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1' };
+  const host = { SUPABASE_DB_PORT: '5999', SUPABASE_PROJECT_ID: 'host-project', SUPABASE_ACCESS_TOKEN: 'host-access-value', SUPABASE_INTERNAL_IMAGE_REGISTRY: 'registry.example.test', SUPABASE_TELEMETRY_DISABLED: '1',
+    SUPABASE_CLI_BINARY_OVERRIDE: '/opt/acme/bin/supabase' };
   const exported = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('SUPABASE_')));
   for (const name of Object.keys(exported)) delete process.env[name];
   Object.assign(process.env, host);
@@ -107,10 +114,11 @@ additional_redirect_urls = ["env(REDIRECT_URL)", "http://127.0.0.1:3000"]
 token = "env(GH_TOKEN)"
 `);
   await supabase.setup(ctx);
-  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written.
-  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '' };
-  const cli = (name: string) => ctx.calls.find(call => call.command === 'npx' && call.args.includes(name));
-  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, {}]);
+  // The CLI reads an empty variable as unset, so the stack gets each reference and setting as written. The launcher's
+  // binary override is always cleared, so the locked release runs.
+  const unset = { OPENAI_API_KEY: '', REDIRECT_URL: '', GH_TOKEN: '', SUPABASE_DB_PORT: '', SUPABASE_PROJECT_ID: '', SUPABASE_ACCESS_TOKEN: '', SUPABASE_CLI_BINARY_OVERRIDE: '' };
+  const cli = (name: string) => ctx.calls.find(call => call.command === process.execPath && call.args.includes(name));
+  assert.deepEqual([cli('start')?.options?.env, cli('status')?.options?.env, cli('stop')?.options?.env], [unset, unset, { SUPABASE_CLI_BINARY_OVERRIDE: '' }]);
 });
 
 test('Supabase names its project directory before running the CLI when the repository has no project there', async () => {
@@ -152,6 +160,141 @@ test('Supabase copies the project with twin ports, id and a host.docker.internal
   await assert.rejects(stat(join(target, '.temp')));
 });
 
+// A project whose Auth settings are the CLI template's development addresses, one list spread over several lines.
+const AUTH_CONFIG = `${CONFIG}
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+  "http://localhost:3000/auth/callback",
+]
+jwt_expiry = 3600
+`;
+
+test('Supabase Auth sends a browser to the twin\'s only app, or to the Site URL and redirect URLs its options name', async () => {
+  const prepared = async (apps: string[], auth?: Json) => {
+    const ctx = await context<SupabaseContext>({ apps, respond: ({ args }) => args.includes('status') ? STATUS : '' });
+    await supabaseSource(ctx);
+    await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), AUTH_CONFIG);
+    if (auth !== undefined) ctx.options = { ...ctx.options, auth };
+    await supabase.setup(ctx);
+    const settings = parseToml(await readFile(join(ctx.dir, 'supabase/supabase/config.toml'), 'utf8')).auth as Record<string, unknown>;
+    return { ctx, settings };
+  };
+  // The twin's only app, at its browser address, replaces the development address; the allowed redirects stay the project's.
+  const single = await prepared(['web']);
+  assert.equal(single.settings.site_url, single.ctx.app('web').publicUrl);
+  assert.match(String(single.settings.site_url), /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.deepEqual(single.settings.additional_redirect_urls, ['https://127.0.0.1:3000', 'http://localhost:3000/auth/callback']);
+  assert.deepEqual([single.settings.jwt_expiry, single.settings.enabled], [3600, true]);
+  // With several apps no default is unambiguous, so the project's Site URL stays.
+  assert.equal((await prepared(['web', 'api'])).settings.site_url, 'http://127.0.0.1:3000');
+  // Named addresses, as placeholders resolve them, replace both, and the list spread over several lines is replaced whole.
+  const redirectUrls = ['http://127.0.0.1:43180/auth/callback', 'http://127.0.0.1:43180/**', 'acme://callback'];
+  const named = await prepared(['web', 'api'], { siteUrl: 'http://127.0.0.1:43180', redirectUrls });
+  assert.deepEqual([named.settings.site_url, named.settings.additional_redirect_urls, named.settings.jwt_expiry], ['http://127.0.0.1:43180', redirectUrls, 3600]);
+  assert.deepEqual((await prepared(['web'], { redirectUrls: [] })).settings.additional_redirect_urls, []);
+  // A Site URL that is not a web address stops setup before the CLI starts the stack.
+  const ctx = await context<SupabaseContext>({ apps: ['web'], respond: ({ args }) => args.includes('status') ? STATUS : '' });
+  await supabaseSource(ctx);
+  ctx.options = { ...ctx.options, auth: { siteUrl: 'acme://welcome' } };
+  await assert.rejects(supabase.setup(ctx), { message: 'supabase.auth.siteUrl must be an http or https URL.' });
+  assert.ok(!ctx.calls.some(call => call.args.includes('start')));
+});
+
+test('Supabase auth options are checked before setup, with placeholders as text', () => {
+  const refused: [Json, RegExp][] = [
+    ['http://127.0.0.1:3000', /supabase\.auth must be an object with siteUrl, redirectUrls\./],
+    [{ site: 'http://127.0.0.1:3000' }, /supabase\.auth has unsupported field site; use siteUrl, redirectUrls\./],
+    [{ siteUrl: 'http://127.0.0.1:3000 /x' }, /supabase\.auth\.siteUrl must be a URL/],
+    [{ siteUrl: 3000 }, /supabase\.auth\.siteUrl must be a URL/],
+    [{ redirectUrls: 'http://127.0.0.1:3000' }, /supabase\.auth\.redirectUrls must list URLs/],
+    [{ redirectUrls: ['http://127.0.0.1:3000', 3000] }, /supabase\.auth\.redirectUrls must list URLs/],
+  ];
+  for (const [auth, error] of refused) assert.match(serviceOptionErrors({ services: { supabase: { auth } } }).join('\n'), error, JSON.stringify(auth));
+  assert.deepEqual(serviceOptionErrors({ services: { supabase: { auth: { siteUrl: '{{apps.web.publicUrl}}', redirectUrls: ['{{apps.web.publicUrl}}/auth/callback'] } } } }), []);
+});
+
+// A project's config.toml as `supabase init` lays it out, shortened: comments, nested tables and a list over several lines.
+const INIT_CONFIG = `# For detailed configuration reference documentation, visit:
+# https://supabase.com/docs/guides/local-development/cli/config
+project_id = "acme-app"
+
+[api]
+enabled = true
+# Port to use for the API URL.
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+port = 54329
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[realtime]
+enabled = true
+
+[studio]
+enabled = true
+port = 54323
+
+[local_smtp]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+]
+jwt_expiry = 3600
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+
+[edge_runtime]
+enabled = true
+policy = "per_worker"
+
+[experimental]
+orioledb_version = ""
+`;
+
+test('Supabase keeps every setting of a config.toml with CRLF line endings, as a repository may commit it', async () => {
+  const written = async (text: string) => {
+    const ctx = await context<SupabaseContext>({ apps: ['web'], respond: ({ args }) => args.includes('status') ? STATUS : '' });
+    await supabaseSource(ctx);
+    ctx.options = { ...ctx.options, auth: { redirectUrls: ['http://127.0.0.1:43180/**'] } };
+    await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), text);
+    await supabase.setup(ctx);
+    return readFile(join(ctx.dir, 'supabase/supabase/config.toml'), 'utf8');
+  };
+  const lf = await written(INIT_CONFIG), crlf = await written(INIT_CONFIG.replaceAll('\n', '\r\n'));
+  // The twin's id, addresses and ports, line for line as in the same file with LF endings, and every line ends in CRLF.
+  assert.equal(crlf, lf.replaceAll('\n', '\r\n'));
+  // Nothing of the project's is lost: each of its settings is still there.
+  const settings = (value: unknown, path = ''): string[] => value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? Object.entries(value).flatMap(([key, item]) => settings(item, `${path}.${key}`)) : [path];
+  const kept = new Set(settings(parseToml(crlf)));
+  assert.deepEqual(settings(parseToml(INIT_CONFIG)).filter(path => !kept.has(path)), []);
+  assert.deepEqual((parseToml(crlf).auth as Record<string, unknown>).additional_redirect_urls, ['http://127.0.0.1:43180/**']);
+});
+
 test('Supabase provides its standard variables from supabase status', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
@@ -185,7 +328,55 @@ test('Supabase teardown stops the twin project without a backup', async () => {
   const ctx = await context<SupabaseContext>();
   await supabase.teardown(ctx);
   assert.deepEqual(ctx.calls.map(({ command, args }) => [command, ...args]),
-    [['npx', '--yes', SUPABASE_CLI, 'stop', '--no-backup', '--project-id', 'perpetual-beta1']]);
+    [[process.execPath, await cliEntry(), 'stop', '--no-backup', '--project-id', 'perpetual-beta1']]);
+});
+
+test('The Supabase CLI is an exact dependency that package-lock.json locks with its platform binaries and dependencies', async () => {
+  const root = new URL('../', import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8')) as { dependencies: Record<string, string> };
+  const lock = JSON.parse(await readFile(new URL('package-lock.json', root), 'utf8')) as { packages: Record<string, { version?: string; integrity?: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }> };
+  assert.equal(manifest.dependencies.supabase, SUPABASE_VERSION, 'An exact version, never a range.');
+  const cli = lock.packages['node_modules/supabase'];
+  assert.equal(cli.version, SUPABASE_VERSION);
+  const binaries = Object.keys(cli.optionalDependencies ?? {});
+  assert.ok(binaries.length && binaries.every(name => name.startsWith('@supabase/cli-') && lock.packages[`node_modules/${name}`].version === SUPABASE_VERSION), 'The platform binaries are packages of the same release.');
+  // Every package the release installs, its own dependencies' dependencies included, is locked with an integrity hash.
+  const located = (from: string, name: string) => lock.packages[`${from}/node_modules/${name}`] ? `${from}/node_modules/${name}` : `node_modules/${name}`;
+  const seen = new Set<string>(), queue = ['node_modules/supabase'];
+  for (let path = queue.shift(); path !== undefined; path = queue.shift()) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const entry = lock.packages[path];
+    assert.match(entry?.integrity ?? '', /^sha512-/, path);
+    queue.push(...Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }).map(name => located(path!, name)));
+  }
+  assert.ok(seen.size > binaries.length + 1, 'The release\'s JavaScript dependencies are locked too.');
+  // The installed launcher runs, with no download.
+  const entry = await cliEntry();
+  assert.equal(entry, fileURLToPath(new URL('node_modules/supabase/dist/supabase.js', root)));
+  await stat(entry);
+});
+
+test('The Supabase CLI is refused with the command that installs it unless its launcher and binary are the locked release', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'supabase-cli-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const install = async (name: string, manifest: object) => {
+    await mkdir(join(root, 'node_modules', name), { recursive: true });
+    await writeFile(join(root, 'node_modules', name, 'package.json'), JSON.stringify(manifest));
+  };
+  // This machine's binary package, the optional dependency npm installs beside the launcher.
+  const binary = `@supabase/cli-${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
+  const launcher = { name: 'supabase', version: SUPABASE_VERSION, bin: { supabase: 'dist/supabase.js' }, optionalDependencies: { [binary]: SUPABASE_VERSION } };
+  const from = pathToFileURL(join(root, 'perpetual.ts')), missing = { message: `Supabase CLI ${SUPABASE_VERSION} is not installed: run npm run setup in Perpetual.` };
+  await assert.rejects(cliEntry(from), missing, 'Nothing is installed.');
+  await install('supabase', launcher);
+  await assert.rejects(cliEntry(from), missing, 'No binary package, as npm leaves when an optional install fails.');
+  await install(binary, { name: binary, version: '2.117.0' });
+  await assert.rejects(cliEntry(from), missing, 'The binary of another release.');
+  await install(binary, { name: binary, version: SUPABASE_VERSION });
+  assert.equal(await cliEntry(from), join(root, 'node_modules/supabase/dist/supabase.js'));
+  await install('supabase', { ...launcher, version: '2.117.0' });
+  await assert.rejects(cliEntry(from), missing, 'Another release, as a node_modules older than package.json holds.');
 });
 
 test('A long twin project gets a Supabase project id the CLI keeps whole, used by start and stop alike', async () => {
@@ -211,6 +402,21 @@ test('TOML rewrite adds missing keys and sections and uses [local_smtp] for curr
   assert.equal(setToml('[api]\nenabled = true\n\n[db]\nport = 2\n', 'api', 'port', 3), '[api]\nenabled = true\nport = 3\n\n[db]\nport = 2\n');
   assert.equal(setToml('[api] # gateway\nport = 1\n', 'api', 'port', 5), '[api] # gateway\nport = 5\n');
   assert.equal(setToml('[db]\nport = 2\n', 'db.pooler', 'port', 4), '[db]\nport = 2\n\n[db.pooler]\nport = 4\n');
+  // A value spread over several lines, an array or a multi-line string, is replaced whole.
+  assert.equal(setToml('[auth]\nurls = [\n  "a", # first\n  "b",\n]\nport = 1\n', 'auth', 'urls', ['c']), '[auth]\nurls = ["c"]\nport = 1\n');
+  assert.equal(setToml('[auth]\nsite = """\nhttp://a\n"""\nport = 1\n', 'auth', 'site', 'http://b'), '[auth]\nsite = "http://b"\nport = 1\n');
+  // One that does not parse within its section is replaced on its own line, and the next section stays.
+  assert.equal(setToml('[auth]\nurls = [\n  "a",\n[db]\nport = 2\n', 'auth', 'urls', ['c']), '[auth]\nurls = ["c"]\n  "a",\n[db]\nport = 2\n');
+  // CRLF line endings: only the key's own lines change, and the lines written end in CRLF too.
+  assert.equal(setToml('project_id = "acme"\r\n\r\n[auth]\r\nsite_url = "a"\r\njwt_expiry = 3600\r\n', '', 'project_id', 'perpetual-beta'),
+    'project_id = "perpetual-beta"\r\n\r\n[auth]\r\nsite_url = "a"\r\njwt_expiry = 3600\r\n');
+  assert.equal(setToml('[auth]\r\nurls = [\r\n  "a",\r\n]\r\nport = 1\r\n', 'auth', 'urls', ['c']), '[auth]\r\nurls = ["c"]\r\nport = 1\r\n');
+  assert.equal(setToml('[api] # gateway\r\nport = 1\r\n', 'api', 'port', 5), '[api] # gateway\r\nport = 5\r\n');
+  assert.equal(setToml('[auth]\r\nport = 1\r\n', 'auth', 'site_url', 'x'), '[auth]\r\nport = 1\r\nsite_url = "x"\r\n');
+  assert.equal(setToml('[api]\r\nport = 1\r\n', 'studio', 'port', 2), '[api]\r\nport = 1\r\n\r\n[studio]\r\nport = 2\r\n');
+  // Mixed endings: a CRLF line is replaced alone, and every other line keeps its own ending.
+  assert.equal(setToml('a = 1\r\nb = 2\nc = 3\n', '', 'a', 5), 'a = 5\r\nb = 2\nc = 3\n');
+  assert.equal(setToml('[auth]\nsite = "a"\r\nport = 1\n[db]\r\nport = 2\r\n', 'auth', 'site', 'b'), '[auth]\nsite = "b"\r\nport = 1\n[db]\r\nport = 2\r\n');
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), '[api]\nport = 54321\n');
@@ -223,7 +429,10 @@ test('Stripe accepts only test keys', () => {
   assert.deepEqual({ name: secret.name, secret: secret.secret }, { name: 'secretKey', secret: true });
   for (const key of ['sk_test_123', 'rk_test_123', 'rkcs_test_123']) assert.ok(secret.pattern.test(key), key);
   for (const key of ['sk_live_123', 'rk_live_123', 'rkcs_live_123', 'pk_test_123', 'whsec_123', ' sk_test_123']) assert.ok(!secret.pattern.test(key), key);
-  assert.ok(publishable.optional && publishable.pattern.test('pk_test_1') && !publishable.pattern.test('pk_live_1'));
+  assert.ok(publishable.pattern.test('pk_test_1') && !publishable.pattern.test('pk_live_1'));
+  // Required, like the secret key: a Stripe service that is not blocked always provides STRIPE_PUBLISHABLE_KEY.
+  assert.deepEqual(missingInputs(stripe, { secretKey: 'sk_test_123' }), ['publishableKey']);
+  assert.deepEqual(missingInputs(stripe, { secretKey: 'sk_test_123', publishableKey: 'pk_test_123' }), []);
 });
 
 // What `stripe sandbox create --non-interactive` prints; the keys are fixtures, never real ones.
@@ -295,7 +504,7 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
     if (args[0] === 'fixtures') await writeFile(join(ctx.dir, '.env'), 'STRIPE_PRICE_PRO_MONTHLY="price_month"\nSTRIPE_PRODUCT_PRO="prod_pro"\n');
     return args.includes('--print-secret') ? 'whsec_abc123\n' : '';
   };
-  ctx = await context<StripeContext>({ respond, inputs: { secretKey: 'sk_test_key' }, options: { fixtures: 'billing/stripe.json', webhook: 'http://host.docker.internal:43150/stripe/webhook' } });
+  ctx = await context<StripeContext>({ respond, inputs: { secretKey: 'sk_test_key', publishableKey: 'pk_test_pub' }, options: { fixtures: 'billing/stripe.json', webhook: 'http://host.docker.internal:43150/stripe/webhook' } });
   await mkdir(join(ctx.source, 'billing'), { recursive: true }); await mkdir(ctx.dir, { recursive: true });
   await writeFile(join(ctx.source, 'billing/stripe.json'), '{"_meta":{"template_version":0},"fixtures":[]}');
   ctx.outputs = await stripe.setup(ctx);
@@ -310,10 +519,67 @@ test('Stripe setup runs fixtures and prints the webhook secret through the pinne
   assert.equal(await readFile(join(dir, 'fixtures.json'), 'utf8'), '{"_meta":{"template_version":0},"fixtures":[]}');
   assert.equal(await mode(join(dir, '.env')), 0o600);
   assert.deepEqual(stripe.env(ctx), {
-    STRIPE_PRICE_PRO_MONTHLY: 'price_month', STRIPE_PRODUCT_PRO: 'prod_pro', STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_WEBHOOK_SECRET: 'whsec_abc123',
+    STRIPE_PRICE_PRO_MONTHLY: 'price_month', STRIPE_PRODUCT_PRO: 'prod_pro', STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_WEBHOOK_SECRET: 'whsec_abc123', STRIPE_PUBLISHABLE_KEY: 'pk_test_pub',
   });
-  ctx.inputs.publishableKey = 'pk_test_pub';
-  assert.equal(stripe.env(ctx).STRIPE_PUBLISHABLE_KEY, 'pk_test_pub');
+});
+
+test('Stripe fixtures run once per sandbox and fixtures document, and later twins reuse the ids that run exported', async t => {
+  const shared = await mkdtemp(join(tmpdir(), 'twin-stripe-shared-')), record = join(shared, 'stripe', 'fixtures.json');
+  t.after(() => rm(shared, { recursive: true, force: true }));
+  let runs = 0, failing = false;
+  // One twin's Stripe setup: each run of the CLI creates the price again, under a new id.
+  const setup = async (inputs: Record<string, string>, fixtures: Json, file?: string) => {
+    let ctx: Fake<StripeContext>;
+    const respond: Respond = async ({ args }) => {
+      if (args[0] !== 'fixtures') return '';
+      if (failing) throw new Error('resource_already_exists');
+      runs += 1;
+      await writeFile(join(ctx.dir, '.env'), `STRIPE_PRICE_PRO="price_${runs}"\n`);
+      return '';
+    };
+    ctx = await context<StripeContext>({ respond, inputs, options: { fixtures }, shared: join(shared, 'stripe') });
+    await mkdir(join(ctx.source, 'billing'), { recursive: true }); await mkdir(ctx.dir, { recursive: true });
+    if (file !== undefined) await writeFile(join(ctx.source, 'billing/stripe.json'), file);
+    ctx.outputs = await stripe.setup(ctx);
+    return { calls: ctx.calls.length, price: (stripe.env(ctx) as Record<string, string | undefined>).STRIPE_PRICE_PRO };
+  };
+  const document: JsonObject = { fixtures: [{ name: 'pro', path: '/v1/prices', method: 'post', params: { lookup_key: 'pro_monthly', currency: 'usd', unit_amount: 2000 } }], env: { STRIPE_PRICE_PRO: '${pro:id}' } };
+  const sandbox = { secretKey: 'rkcs_test_fixture_sandbox_1', publishableKey: 'pk_test_fixture_sandbox_1' };
+  assert.deepEqual(await setup(sandbox, document), { calls: 1, price: 'price_1' });
+  // A rebuild, another stage's twin and the claimed sandbox's full secret key reuse that run, so the price exists once.
+  for (const inputs of [sandbox, sandbox, { ...sandbox, secretKey: 'sk_test_fixture_claimed_1' }]) assert.deepEqual(await setup(inputs, document), { calls: 0, price: 'price_1' });
+  // A changed document, or another sandbox, runs them again.
+  assert.deepEqual(await setup(sandbox, { ...document, env: { STRIPE_PRICE_PRO: '${pro:id}', STRIPE_PRICE_PRO_AGAIN: '${pro:id}' } }), { calls: 1, price: 'price_2' });
+  const other = { secretKey: 'rkcs_test_fixture_sandbox_2', publishableKey: 'pk_test_fixture_sandbox_2' };
+  assert.deepEqual(await setup(other, document), { calls: 1, price: 'price_3' });
+  assert.deepEqual(await setup(other, document), { calls: 0, price: 'price_3' });
+  // A repository file counts by its contents, not its path.
+  const file = JSON.stringify(document);
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', file), { calls: 1, price: 'price_4' });
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', file), { calls: 0, price: 'price_4' });
+  assert.deepEqual(await setup(sandbox, 'billing/stripe.json', `${file}\n`), { calls: 1, price: 'price_5' });
+  // Twins prepared at the same time run them once.
+  const third = { secretKey: 'rkcs_test_fixture_sandbox_3', publishableKey: 'pk_test_fixture_sandbox_3' };
+  const together = await Promise.all([setup(third, document), setup(third, document)]);
+  assert.deepEqual([together[0].calls + together[1].calls, together[0].price, together[1].price], [1, 'price_6', 'price_6']);
+  // A failed run keeps nothing, so the next twin runs them again.
+  const fourth = { secretKey: 'rkcs_test_fixture_sandbox_4', publishableKey: 'pk_test_fixture_sandbox_4' };
+  failing = true;
+  await assert.rejects(setup(fourth, document), /resource_already_exists/);
+  failing = false;
+  assert.deepEqual(await setup(fourth, document), { calls: 1, price: 'price_7' });
+  // The record is private and holds what the runs exported, never a key.
+  assert.equal(await mode(record), 0o600);
+  assert.equal(await mode(join(shared, 'stripe')), 0o700);
+  const text = await readFile(record, 'utf8');
+  assert.ok(!/(?:sk|rk|rkcs|pk)_test_/.test(text), text);
+  assert.ok(text.includes('"STRIPE_PRICE_PRO": "price_1"'));
+  // A record Perpetual cannot read stops setup before the CLI runs, rather than running the fixtures again.
+  await writeFile(record, '{"0": {"env": "price_1"}}');
+  const ctx = await context<StripeContext>({ inputs: sandbox, options: { fixtures: document }, shared: join(shared, 'stripe') });
+  await mkdir(ctx.dir, { recursive: true });
+  await assert.rejects(stripe.setup(ctx), { message: 'The Stripe fixtures record (twin-services/stripe/fixtures.json in Perpetual\'s data directory) is invalid; remove it to run the fixtures again.' });
+  assert.deepEqual(ctx.calls, []);
 });
 
 test('Stripe names a fixtures file the repository does not have before running its CLI', async () => {
@@ -389,11 +655,28 @@ test('Stripe listen forwards explicit events to the configured webhook', async (
   }
 });
 
-test('Stripe without a webhook or fixtures only provides the key', async () => {
-  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key' } });
+test('Stripe without a webhook or fixtures only provides the keys', async () => {
+  const ctx = await context<StripeContext>({ inputs: { secretKey: 'sk_test_key', publishableKey: 'pk_test_key' } });
   ctx.outputs = await stripe.setup(ctx);
   assert.deepEqual(ctx.calls, []);
-  assert.deepEqual(stripe.env(ctx), { STRIPE_SECRET_KEY: 'sk_test_key' });
+  assert.deepEqual(stripe.env(ctx), { STRIPE_SECRET_KEY: 'sk_test_key', STRIPE_PUBLISHABLE_KEY: 'pk_test_key' });
+});
+
+test('Stripe without its publishable key is blocked on it, so an app that maps the key leaves it out instead of failing', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  const runtime = createTwinRuntime({ exec: async () => ({ stdout: '', stderr: '' }), owner: 'owner-1', isFree: async () => true });
+  const config = { services: { stripe: {} }, apps: { web: { start: 'npm start', port: 3000, env: { NEXT_PUBLIC_STRIPE_KEY: '{{stripe.STRIPE_PUBLISHABLE_KEY}}' } } } };
+  const prepare = (stripe: Record<string, string>) => runtime.prepare({ dataDir, id: 'beta', config, source, inputs: { stripe } });
+  const dotenv = () => readFile(join(dataDir, 'environments', 'beta', 'twin', '.env'), 'utf8');
+  const blocked = await prepare({ secretKey: 'sk_test_own_key' });
+  assert.deepEqual(blocked.services, [{ id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['publishableKey'] }]);
+  assert.doesNotMatch(await dotenv(), /STRIPE/);
+  const ready = await prepare({ secretKey: 'sk_test_own_key', publishableKey: 'pk_test_own_key' });
+  assert.equal(ready.status, 'ready');
+  assert.match(await dotenv(), /^WEB__NEXT_PUBLIC_STRIPE_KEY="pk_test_own_key"$/m);
+  assert.match(await dotenv(), /^WEB__STRIPE_PUBLISHABLE_KEY="pk_test_own_key"$/m);
 });
 
 test('Stripe setup fails when the CLI prints no signing secret', async () => {

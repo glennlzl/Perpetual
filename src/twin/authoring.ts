@@ -162,8 +162,9 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
 
 ## What to write
 
-1. Make the repository's own apps run against the twin's services. Each app runs its \`build\` and then its \`start\`
-   command in its directory; take them from the repository's manifests and scripts.
+1. Make the repository's own apps run against the twin's services. Each app's \`build\` runs once in its directory,
+   as a step of its own before any app starts, and its container then runs its \`start\` command there; take them
+   from the repository's manifests and scripts.
 2. Wire each variable an app's code reads (process.env, import.meta.env, os.environ, its config files) to a service
    variable or an address. A variable with a service's standard name gets its value without a mapping; map any other
    name in the app's \`env\`, such as \`"VITE_API_URL": "{{apps.api.publicUrl}}"\` or \`"DB_URL": "{{postgres.DATABASE_URL}}"\`.
@@ -239,7 +240,11 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
 - Directories and files are relative to the repository root, \`${REPO}/\` here, and stay inside it.
 - An app runs on a Node.js image with corepack enabled, from a copy of the repository: \`node\` is its major version,
   the one the repository asks for (.nvmrc, .node-version or package.json's engines), else the current LTS. It must
-  listen on \`port\`, also given as PORT, on all interfaces (0.0.0.0), not only localhost. \`build\` is optional.
+  listen on \`port\`, also given as PORT, on all interfaces (0.0.0.0), not only localhost, and answer there below 500
+  within 5 minutes of starting. \`build\` is optional and runs in a container of its own: files it writes outside the
+  repository's copy, such as a global install or a browser a postinstall script downloads to the home directory, do
+  not reach the app. It can reach the twin's services, except one that runs the repository's code, such as a
+  Trigger.dev worker, which starts with the apps after the builds, and no other app, which has not started yet.
 - \`install\` is optional: one install that several apps share, such as a workspace's; it runs once before fixtures and
   apps start, and those apps' builds then leave it out.
 - Placeholders in service options and app env: \`{{<service id>.<VARIABLE>}}\` is a variable that service provides,

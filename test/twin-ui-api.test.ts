@@ -16,6 +16,8 @@ type Body = { error?: string; token: string; services: Service[]; pipeline: { st
 const EXAMPLE_SECRET = 'example-password-in-env-file';
 const PRIVATE_KEY = 'tr_dev_private_value';
 const STRIPE_KEY = 'sk_test_saved_value_123';
+const STRIPE_PUBLISHABLE_KEY = 'pk_test_saved_value_123';
+const STRIPE_KEYS = [{ name: 'secretKey', label: 'Stripe test secret key', secret: true }, { name: 'publishableKey', label: 'Stripe test publishable key', secret: false }];
 const unset = { apiKey: '', model: '', baseUrl: 'https://openrouter.ai/api/v1' };
 const configured = { apiKey: 'sk-or-v1-test-only', model: 'openai/gpt-4o-mini', baseUrl: 'https://openrouter.ai/api/v1' };
 
@@ -78,7 +80,7 @@ test('Services lists the stage twin config with only missing inputs and never fi
   for (const id of ['redis', 'mongodb', 'mailpit', 'llm', 'supabase', 'stripe']) assert.ok(services[id], id);
   assert.equal(services['trigger-dev'], undefined);
   assert.equal(services.postgres, undefined, 'Supabase includes PostgreSQL.');
-  assert.deepEqual(services.stripe, { id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox', blocked: true, missing: [{ name: 'secretKey', label: 'Stripe test secret key', secret: true }],
+  assert.deepEqual(services.stripe, { id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox', blocked: true, missing: STRIPE_KEYS,
     provision: { inputs: [{ name: 'email', label: 'Email', value: EMAIL }] } });
   assert.deepEqual(services.mailpit, { id: 'mailpit', title: 'Mailpit', fidelity: 'actual', blocked: false, missing: [] });
   assert.equal(services.supabase.fidelity, 'official-sandbox');
@@ -123,9 +125,14 @@ test('Inputs are saved with the session token, validated by the service and show
   const saved = await f.request('/api/twin/inputs', { method: 'PUT', body });
   assert.equal(saved.status, 200);
   assert.equal(saved.body.services.find(service => service.id === 'stripe')?.inputs[0].set, true);
+  // The publishable key is required too: Connect asks for it alone, and it joins the saved secret key.
+  const half = byId((await f.services()).body.services).stripe;
+  assert.deepEqual([half.blocked, half.missing], [true, [STRIPE_KEYS[1]]]);
+  assert.equal((await f.request('/api/twin/inputs', { method: 'PUT', body: { service: 'stripe', inputs: { publishableKey: STRIPE_PUBLISHABLE_KEY } } })).status, 200);
   const view = await f.request('/api/twin/inputs');
   const services = await f.services();
   for (const text of [saved.text, view.text, services.text]) assert.equal(text.includes(STRIPE_KEY), false);
+  assert.deepEqual(view.body.services.find(service => service.id === 'stripe')?.inputs.map(input => [input.name, input.set]), [['secretKey', true], ['publishableKey', true]]);
   assert.deepEqual([byId(services.body.services).stripe.blocked, byId(services.body.services).stripe.missing], [false, []]);
   assert.equal((await stat(join(f.dataDir, 'twin-inputs.json'))).mode & 0o777, 0o600);
 });
@@ -144,12 +151,12 @@ test('A Stripe sandbox is created with the session token and shown with its expi
   assert.deepEqual(byId(created.body.services).stripe.provisioned, claim);
   const services = await f.services();
   assert.deepEqual(byId(services.body.services).stripe, { id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox', blocked: false, missing: [],
-    provision: { inputs: [{ name: 'email', label: 'Email', value: EMAIL }] }, provisioned: claim, keys: [{ name: 'secretKey', label: 'Stripe test secret key', secret: true }] });
+    provision: { inputs: [{ name: 'email', label: 'Email', value: EMAIL }] }, provisioned: claim, keys: STRIPE_KEYS });
   for (const text of [created.text, services.text, (await f.request('/api/twin/inputs')).text]) assert.ok(!text.includes(SANDBOX_KEY) && !text.includes('pk_test_route') && !text.includes('acct_route'));
   assert.equal((await stat(join(f.dataDir, 'twin-provisions.json'))).mode & 0o777, 0o600);
 
-  // Claimed keys replace the sandbox.
-  assert.equal((await f.request('/api/twin/inputs', { method: 'PUT', body: { service: 'stripe', inputs: { secretKey: STRIPE_KEY } } })).status, 200);
+  // Claimed keys, both of them, replace the sandbox.
+  assert.equal((await f.request('/api/twin/inputs', { method: 'PUT', body: { service: 'stripe', inputs: { secretKey: STRIPE_KEY, publishableKey: STRIPE_PUBLISHABLE_KEY } } })).status, 200);
   const own = byId((await f.services()).body.services).stripe;
   assert.deepEqual([own.blocked, own.provisioned, own.keys], [false, undefined, undefined]);
 });

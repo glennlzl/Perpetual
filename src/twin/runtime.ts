@@ -18,8 +18,9 @@ import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 
 // A twin is <dataDir>/environments/<id>/twin/{compose.yaml,.env,twin.json}: service setup in
-// placeholder order; once services are up, their test accounts, the shared install and fixtures;
-// then `docker compose up --wait`.
+// placeholder order; once services are up, their test accounts, the shared install, fixtures and
+// each app's build; then `docker compose up --wait` starts the apps and the services that run
+// repository code.
 
 export const PORT_BASE = 43100;
 export const PORT_BLOCK = 48;
@@ -305,13 +306,30 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       port, url: (name, path = '') => hostUrl(port(name), path),
       // A port for this service's machine-wide instance, the same for every twin and outside all their blocks.
       sharedPort: (name, current) => reserveSharedPort(twin.root, portKey(service, name), current, { start: portBase, isFree }),
-      app: id => { const appPort = ports[portKey(APPS, id)] ?? fail(`No app "${id}" is configured.`); return { url: hostUrl(appPort), port: appPort }; },
+      // Every app's port is allocated before any setup, so its key names each app.
+      apps: Object.keys(ports).flatMap(key => key.startsWith(`${APPS}.`) ? [key.slice(APPS.length + 1)] : []),
+      app: id => { const appPort = ports[portKey(APPS, id)] ?? fail(`No app "${id}" is configured.`); return { url: hostUrl(appPort), publicUrl: addressUrl({ app: id, public: true }, appPort), port: appPort }; },
       run: (image, args, { env, mounts } = {}) => dockerRun(twin, image, args, { env: variables(env, `${service} run`),
         volumes: mounts === 'service-only' ? [`${dir}:${dir}:ro`] : [`${dir}:${dir}`, `${source}:${source}:ro`], workdir: dir, redact }),
       // A pinned CLI on the host, for tools that drive Docker themselves; the Docker socket is never mounted into a container.
       exec: (file, args, { cwd = dir, env } = {}) => host(file, args, { cwd, env, redact }),
       fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([AbortSignal.timeout(READ_TIMEOUT_MS), ...(operations.getStore()?.signal ? [operations.getStore()!.signal!] : []), ...(init?.signal ? [init.signal] : [])]) }),
     };
+  }
+
+  /**
+   * Runs a one-shot Compose service once, as the install and each app's build are: a command of its own, so it has its own
+   * time limit and exit code. Package managers and builds report on stdout or stderr, so its error keeps the end of both;
+   * a time limit or Stop is the cause, so it leads.
+   */
+  async function oneShot(twin: Twin, service: string, what: string, redact: Redact) {
+    try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', service, 'run', '--rm', '--no-TTY', service), { redact }); }
+    catch (error) {
+      const failed = error as Partial<ExecFileException> & { timedOut?: true };
+      const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
+      const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
+      throw Object.assign(new Error(redact(`${what} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
+    }
   }
 
   const sqlEnv = (fixture: TwinFixture, env: Record<string, string>) => ({ [SQL_URL]: env[SQL_URL] ?? fail(`${fixture.service} does not provide ${SQL_URL}, which SQL fixtures use.`) });
@@ -422,12 +440,15 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await onStep('Loading source');
       await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
     }
-    // Service containers that run repository code, like apps, wait for the install; the others start first.
-    const names = Object.keys(result.compose.services).filter(name => name !== INSTALL && name !== SOURCE);
+    // Service containers that run repository code, like apps, wait for the install; the others start first. One-shot
+    // services, the install, the source copy and the builds, never start with them.
+    const oneShots = new Set([INSTALL, SOURCE, ...result.builds.map(build => build.service)]);
+    const names = Object.keys(result.compose.services).filter(name => !oneShots.has(name));
     const serviceNames = names.filter(name => !Object.hasOwn(config.apps, name) && !result.workspace.includes(name));
     const fixtures = config.fixtures.filter(fixture => resolved[fixture.service].status === 'ready');
     const withAccounts = state.services.filter(record => services[record.id].accounts);
-    if ((fixtures.length || config.install || withAccounts.length) && serviceNames.length) {
+    // Builds, like fixtures, may read the services, such as a page rendered from the database while it builds.
+    if ((fixtures.length || config.install || withAccounts.length || result.builds.length) && serviceNames.length) {
       await onStep('Starting services');
       await docker(composeArgs(twin, 'up', '--wait', ...serviceNames), { redact });
     }
@@ -452,16 +473,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     }
     // Command fixtures, such as seed scripts, run with the workspace dependencies the install provides.
     if (config.install) {
-      const { directory, command } = config.install;
       await onStep('Installing dependencies');
-      try { await host('docker', composeArgs(twin, '--progress', 'quiet', '--profile', INSTALL, 'run', '--rm', '--no-TTY', INSTALL), { redact }); }
-      catch (error) {
-        // Package managers report on stdout or stderr, so keep the end of both. A time limit or Stop is the cause: it leads.
-        const failed = error as Partial<ExecFileException> & { timedOut?: true };
-        const output = tail(`${failed.stdout ?? ''}${failed.stderr ?? ''}`);
-        const detail = failed.timedOut || operations.getStore()?.signal?.aborted ? [String(failed.message).split('\n')[0], output].filter(Boolean).join('\n') : output || errorText(error);
-        throw Object.assign(new Error(redact(`Install "${command}" in ${directory} failed${Number.isInteger(failed.code) ? ` with exit code ${failed.code}` : ''}: ${detail}`)), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true } : {});
-      }
+      await oneShot(twin, INSTALL, `Install "${config.install.command}" in ${config.install.directory}`, redact);
     }
     // Command fixtures share the twin's package cache: the repository's, or the twin's own, which Compose made with the
     // source copy. A twin without a workspace has no cache of its own, so a fixture's container keeps one, removed with it.
@@ -469,6 +482,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     for (const [index, fixture] of fixtures.entries()) {
       await onStep(`Loading fixture ${index + 1} of ${fixtures.length}`);
       await loadFixture(twin, fixture, (resolved[fixture.service] as Ready).env, source, redact, workspace, nodeImage(config, appImage), fixtureCache);
+    }
+    // Each app's build runs once, in config order, after the install and fixtures and before any app starts; its output
+    // stays in the workspace the app starts from.
+    for (const build of result.builds) {
+      await onStep(`Building ${build.app}`);
+      await oneShot(twin, build.service, `Build "${build.command}" of app ${build.app}`, redact);
     }
     if (names.length) {
       await onStep('Starting twin');

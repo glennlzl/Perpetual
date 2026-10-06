@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
 import { createTwinRuntime } from '../src/twin/runtime.ts';
-import supabase, { CLI as SUPABASE_CLI } from '../src/twin/services/supabase.ts';
+import supabase, { cliEntry } from '../src/twin/services/supabase.ts';
 import { CLI as STRIPE_CLI } from '../src/twin/services/stripe.ts';
 import type { Json } from '../src/twin/config.ts';
 import type { InputValues } from '../src/twin/registry.ts';
@@ -41,7 +41,7 @@ async function context(options: { directory?: string; functions?: Json }): Promi
     root, calls, project: 'perpetual-beta1', dir: join(root, 'twin'), shared: join(root, 'shared'), source: join(root, 'source'), options, inputs: {},
     outputs: { url: '', anonKey: '', serviceRoleKey: '', jwtSecret: '', dbUrl: '' },
     host: HOST, port, url: (name: string, path = '') => `http://${HOST}:${port(name)}${path}`,
-    sharedPort: async () => { throw new Error('Unexpected shared port'); }, app: () => { throw new Error('Unexpected app'); },
+    sharedPort: async () => { throw new Error('Unexpected shared port'); }, apps: [], app: () => { throw new Error('Unexpected app'); },
     run: async () => ({ stdout: '' }),
     exec: async (command: string, args: string[]) => { calls.push(args); return { stdout: args.includes('status') ? STATUS : '' }; },
   };
@@ -64,9 +64,8 @@ test('Supabase serves edge functions with the twin env file, and only the listed
   const env = join(project(ctx), 'functions/.env');
   assert.equal(await readFile(env, 'utf8'), "STRIPE_WEBHOOK_SECRET='whsec_twin'\nRETRIES='3'\nNOTE='a \"b\" $HOME #c \\n'\n");
   assert.equal(await mode(env), 0o600);
-  assert.deepEqual(ctx.calls.map(args => args[2]), ['stop', 'start', 'status']);
+  assert.deepEqual(ctx.calls.map(args => args.slice(0, 2)), [[await cliEntry(), 'stop'], [await cliEntry(), 'start'], [await cliEntry(), 'status']]);
   assert.equal(ctx.calls[1].at(-1), join(ctx.dir, 'supabase'));
-  assert.match(SUPABASE_CLI, /^supabase@/);
 });
 
 test('Supabase takes functions from their own repository directory in place of the project copy', async t => {
@@ -304,7 +303,7 @@ async function twin(respond: (file: string, args: string[]) => string | undefine
     const stdout = await respond(file, args);
     if (stdout !== undefined) return { stdout, stderr: '' };
     if (args.includes('--print-secret')) return { stdout: 'whsec_twin_1\n', stderr: '' };
-    return { stdout: file === 'npx' && args.includes('status') ? STATUS : '', stderr: '' };
+    return { stdout: file === process.execPath && args.includes('status') ? STATUS : '', stderr: '' };
   };
   const runtime = createTwinRuntime({ exec, owner: 'o', isFree: async () => true });
   const config = {
@@ -317,7 +316,7 @@ async function twin(respond: (file: string, args: string[]) => string | undefine
   const prepare = (inputs: Record<string, InputValues>) => runtime.prepare({ dataDir, id: 'beta', config, source, inputs, onStep: step => steps.push(step) });
   return { dataDir, calls, steps, prepare, dir, functionsEnv: join(dir, 'services/supabase/supabase/supabase/functions/.env'), toml: join(dir, 'services/supabase/supabase/supabase/config.toml') };
 }
-const KEYS = { stripe: { secretKey: 'sk_test_twin_key' } };
+const KEYS = { stripe: { secretKey: 'sk_test_twin_key', publishableKey: 'pk_test_twin_key' } };
 
 test('A Stripe webhook targets the Supabase functions URL while the functions get the signing secret Stripe setup prints', async t => {
   const { dataDir, calls, steps, prepare, dir, functionsEnv, toml } = await twin();
@@ -336,7 +335,7 @@ test('A Stripe webhook targets the Supabase functions URL while the functions ge
 
 test('Supabase failures never reveal the secrets its functions receive', async t => {
   const { dataDir, prepare } = await twin((file, args) => {
-    if (file === 'npx' && args.includes('start')) throw Object.assign(new Error('Command failed'), { stderr: 'edge runtime exited: STRIPE_WEBHOOK_SECRET=whsec_twin_1 STRIPE_SECRET_KEY=sk_test_twin_key\n' });
+    if (file === process.execPath && args.includes('start')) throw Object.assign(new Error('Command failed'), { stderr: 'edge runtime exited: STRIPE_WEBHOOK_SECRET=whsec_twin_1 STRIPE_SECRET_KEY=sk_test_twin_key\n' });
   });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await assert.rejects(prepare(KEYS), (error: Error) => error.message === 'Supabase: edge runtime exited: STRIPE_WEBHOOK_SECRET=[REDACTED] STRIPE_SECRET_KEY=[REDACTED]');
@@ -349,7 +348,7 @@ test('Without a Stripe key Stripe is blocked, while Supabase still serves its fu
   assert.equal(result.status, 'blocked');
   assert.deepEqual(result.services, [
     { id: 'supabase', fidelity: 'official-sandbox', status: 'ready' },
-    { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey'] },
+    { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey', 'publishableKey'] },
   ]);
   assert.equal(await readFile(functionsEnv, 'utf8'), "SITE='twin'\n");
   assert.equal(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services?.['stripe-listen'], undefined);

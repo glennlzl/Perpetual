@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_IMAGE, HOST_GATEWAY, LABELS, hostUrl } from '../src/twin/compose.ts';
 import { createTwinRuntime } from '../src/twin/runtime.ts';
-import { CLI, setToml } from '../src/twin/services/supabase.ts';
+import { cliEntry, setToml } from '../src/twin/services/supabase.ts';
 
 const exec = promisify(execFile);
 // Opt-in: prepares one disposable twin, perpetual-smoke-*, whose official local Supabase stack serves an edge function.
@@ -32,14 +32,14 @@ test('a Supabase twin serves an edge function that takes a webhook POST through 
   t.after(async () => {
     try { await runtime.destroy({ dataDir, id }); }
     finally {
-      await exec('npx', ['--yes', CLI, 'stop', '--no-backup', '--project-id', project], { cwd: dataDir }).catch(() => {});
+      await exec(process.execPath, [await cliEntry(), 'stop', '--no-backup', '--project-id', project], { cwd: dataDir }).catch(() => {});
       await rm(dataDir, { recursive: true, force: true });
     }
   });
 
   // A stock project with two functions; unused optional services stay off.
   await mkdir(source);
-  await exec('npx', ['--yes', CLI, 'init'], { cwd: source });
+  await exec(process.execPath, [await cliEntry(), 'init'], { cwd: source });
   const file = join(source, 'supabase', 'config.toml');
   await writeFile(file, UNUSED.reduce((toml, section) => setToml(toml, section, 'enabled', false), await readFile(file, 'utf8')));
   for (const name of ['hello', 'private']) {

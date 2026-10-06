@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
 import { validateTwinConfig } from '../src/twin/config.ts';
-import { APP_IMAGE, PACKAGE_CACHE_ENV, composeTwin, formatEnv, repositoryCache } from '../src/twin/compose.ts';
+import { APP_IMAGE, APP_START_PERIOD, PACKAGE_CACHE_ENV, composeTwin, formatEnv, repositoryCache } from '../src/twin/compose.ts';
 import { services as fixtures } from './fixtures/twin/services.ts';
 import type { ResolvedService } from '../src/twin/compose.ts';
 import type { AddressInfo } from 'node:net';
@@ -42,7 +42,7 @@ test('Apps, their install and the source copy run on the twin config\'s Node ver
 test('Compose output runs apps from the snapshot beside service containers on loopback ports', () => {
   const { compose: file, apps } = compose([database, mail, payments]);
   assert.equal(file.name, 'perpetual-t1');
-  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'web', 'api', 'source']);
+  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'build-web', 'web', 'api', 'source']);
   const labels = { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' };
   for (const service of Object.values(file.services)) {
     assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } });
@@ -67,12 +67,37 @@ test('Compose output runs apps from the snapshot beside service containers on lo
     { type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }], ['sh', '-c', 'cp -a /snapshot/. /workspace/'], ['source']]);
   assert.equal(web.environment?.npm_config_cache, '/perpetual-cache/npm');
   assert.equal(file.services.database.volumes, undefined);
-  assert.deepEqual(web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
+  assert.deepEqual(web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm start --port $$PORT']);
   assert.deepEqual(web.ports, ['127.0.0.1:43100:3000']);
   assert.equal(web.healthcheck?.test[0], 'CMD');
   assert.match(web.healthcheck!.test.at(-1)!, /127\.0\.0\.1:3000\//);
+  // The container only starts the app, so an app that never answers fails once a start period of minutes ends.
+  assert.equal(web.healthcheck?.start_period, APP_START_PERIOD);
+  assert.equal(APP_START_PERIOD, '5m');
   assert.deepEqual(web.depends_on, { database: { condition: 'service_healthy' }, mail: { condition: 'service_healthy' }, 'payments-listener': { condition: 'service_started' } });
   assert.deepEqual(apps, [{ id: 'web', url: 'http://127.0.0.1:43100', directory: 'web' }, { id: 'api', url: 'http://127.0.0.1:43101', directory: 'api' }]);
+});
+
+test('An app\'s build is a one-shot service a plain up never starts, with the app\'s directory, variables and workspace', () => {
+  const { compose: file, builds } = compose([database, mail, payments]);
+  const { web } = file.services;
+  assert.deepEqual(builds, [{ app: 'web', service: 'build-web', command: 'pnpm build' }], 'Only an app with a build has the step.');
+  assert.deepEqual(file.services['build-web'], {
+    image: APP_IMAGE, working_dir: '/workspace/web', volumes: web.volumes,
+    command: ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build'],
+    environment: web.environment, profiles: ['build-web'],
+    extra_hosts: ['host.docker.internal:host-gateway'], labels: { 'perpetual.owner': 'owner-1', 'perpetual.environment': 't1' },
+    logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },
+  });
+  assert.equal(file.services['build-api'], undefined);
+  assert.equal(Object.hasOwn(web.depends_on!, 'build-web'), false, 'The runtime runs it before the apps start.');
+  // A build reaches the public addresses its app's variables name through the same relays as the app.
+  const relayed = validateTwinConfig({ apps: { web: { build: 'npm run build', start: 'npm start', port: 3000, env: { API: '{{apps.api.publicUrl}}' } }, api: { start: 'node api.js', port: 8080 } } }, { services: fixtures });
+  const { compose: relays } = composeTwin({ project: 'p', owner: 'o', environment: 'e', source: '/s', config: relayed, services: [], ports: { 'apps.web': 43100, 'apps.api': 43101 } });
+  const [node, flag, , ports, command] = relays.services['build-web'].command as string[];
+  assert.deepEqual([node, flag, ports], ['node', '-e', '[43101]']);
+  assert.match(command, /npm run build$/);
+  assert.deepEqual((relays.services.web.command as string[]).slice(3, 4), ['[43101]']);
 });
 
 test('The twins of one repository share its package cache, named from a digest of the repository, which another repository never names', () => {
@@ -106,7 +131,7 @@ test('An app\'s health check counts a redirect as an answer without following it
 test('A shared install is a one-shot service that a plain up never starts', () => {
   const shared = validateTwinConfig({ ...structuredClone(config), install: { directory: '.', command: 'pnpm install --frozen-lockfile' } }, { services: fixtures });
   const { compose: file, apps } = composeTwin({ project: 'perpetual-t1', owner: 'owner-1', environment: 't1', source: '/data/source', config: shared, services: [database, mail, payments], ports });
-  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'install', 'web', 'api', 'source']);
+  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'payments-listener', 'install', 'build-web', 'web', 'api', 'source']);
   assert.deepEqual(file.services.install, {
     image: APP_IMAGE, working_dir: '/workspace', volumes: [{ type: 'volume', source: 'workspace', target: '/workspace' }, { type: 'volume', source: 'package-cache', target: '/perpetual-cache' }],
     command: ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm install --frozen-lockfile'], environment: PACKAGE_CACHE_ENV, profiles: ['install'],
@@ -114,7 +139,7 @@ test('A shared install is a one-shot service that a plain up never starts', () =
     logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } },
   });
   // Apps keep their own commands and never wait on the install; the runtime runs it before they start.
-  assert.deepEqual(file.services.web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm build && pnpm start --port $$PORT']);
+  assert.deepEqual(file.services.web.command, ['sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $$?; pnpm start --port $$PORT']);
   assert.equal(Object.hasOwn(file.services.web.depends_on!, 'install'), false);
   assert.equal(apps.some(app => app.id === 'install'), false);
   assert.equal(compose([database, mail, payments]).compose.services.install, undefined);
