@@ -221,7 +221,7 @@ test('Settings refuses a new key OpenRouter does not accept, and saves one it co
   assert.equal(checked.length,5);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
 });
 
-test('a key that is not printable ASCII is refused before anything is sent',async t=>{
+test('a key that is not printable ASCII is refused and never sent',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-openrouter-key-shape-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
   const requests:string[]=[];
   t.mock.method(globalThis,'fetch',async(url:string|URL)=>{requests.push(String(url));return Response.json({data:[{id:'openai/gpt-6-luna',name:'Luna',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]});});
