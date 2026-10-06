@@ -113,8 +113,13 @@ export const GITHUB_MESSAGES = {
 } as const;
 
 /**
- * GitHub did not answer the account check for now, such as on a timeout, a rate limit or a network failure: that says
- * nothing about the account, so it is no disconnect. A refusal answers 502, and work that needs GitHub waits it out.
+ * Whether a failure of this kind is GitHub not answering for now, on a timeout, a rate limit, or a network or server
+ * failure, rather than an answer such as a refusal or a missing CLI.
+ */
+export const unanswered = (kind: GitHubFailureKind) => kind === 'timeout' || kind === 'rate-limit' || kind === 'other';
+/**
+ * GitHub did not answer the account check for now (`unanswered`): that says nothing about the account, so it is no
+ * disconnect. A refusal answers 502, and work that needs GitHub waits it out.
  */
 export const githubUnreachable = (message?: string) => Object.assign(new Error(message || GITHUB_MESSAGES.unreachable), { statusCode: 502, unreachable: true as const });
 export const isUnreachable = (error: unknown) => Boolean(error) && typeof error === 'object' && (error as { unreachable?: unknown }).unreachable === true;

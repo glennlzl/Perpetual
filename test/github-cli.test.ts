@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, githubUnreachable, hasNextPage, isRepository, isUnreachable, notModified, parseGitHubResponse, runGitHub, untilReachable } from '../src/github-cli.ts';
+import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, githubUnreachable, hasNextPage, isRepository, isUnreachable, notModified, parseGitHubResponse, runGitHub, unanswered, untilReachable, type GitHubFailureKind } from '../src/github-cli.ts';
 
 test('gh runs with its own configuration and none of the inherited git or debug settings', () => {
   const saved = { ...process.env };
@@ -91,6 +91,10 @@ test('GitHub unreachable is a refusal of its own, which work waits out, and noth
   assert.deepEqual([unreachable.message, unreachable.statusCode, isUnreachable(unreachable)], ['Reading GitHub timed out. Check your connection and try again.', 502, true]);
   assert.deepEqual([githubUnreachable().message, githubUnreachable('').message], [GITHUB_MESSAGES.unreachable, GITHUB_MESSAGES.unreachable]);
   assert.deepEqual([new Error('Connect GitHub to repair builds.'), Object.assign(new Error('x'), { statusCode: 502 }), null, 'unreachable'].map(isUnreachable), [false, false, false, false]);
+  // GitHub not answering is a timeout, a rate limit, or a network or server failure; a refusal, a missing CLI or output
+  // too large to read is an answer.
+  const kinds: GitHubFailureKind[] = ['missing', 'timeout', 'too-large', 'rate-limit', 'unauthenticated', 'not-found', 'denied', 'other'];
+  assert.deepEqual(kinds.filter(unanswered), ['timeout', 'rate-limit', 'other']);
   let reads = 0;
   assert.equal(await untilReachable(async () => { reads += 1; if (reads < 3) throw unreachable; return 'answered'; }, { pollMs: 1 }), 'answered');
   assert.equal(reads, 3, 'GitHub is asked again until it answers.');

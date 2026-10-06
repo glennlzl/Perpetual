@@ -403,7 +403,7 @@ test('GitHub unreachable keeps a queued gate waiting for Build and its report pe
   assert.equal(h.posts.some(post => post.description === 'Needs release'), false, 'GitHub unreachable never becomes a verdict.');
 });
 
-test('GitHub unreachable while the source moves leaves the gate queued, and it runs once GitHub answers', async t => {
+test('GitHub unreachable at the account check before the source moves leaves the gate queued, and it runs once GitHub answers', async t => {
   const h = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') });
   let outage = 2;
   h.holds.prepare = () => outage-- > 0 ? githubUnreachable(TIMED_OUT) : null;
@@ -412,6 +412,12 @@ test('GitHub unreachable while the source moves leaves the gate queued, and it r
   await h.manager.idle();
   assert.equal(outage, -1, 'The move was tried again until GitHub answered.');
   assert.deepEqual(h.posts.filter(post => post.context === 'perpetual/Beta').map(post => post.description), ['Running', 'Passed']);
+  // A move that fails otherwise, such as a fetch that timed out, is the gate's verdict.
+  const fetching = await harness(t, { stages: STAGES.filter(stage => stage.id !== 'gamma') }), timedOut = 'Fetching the commit timed out. Check your connection and try again.';
+  fetching.holds.prepare = () => new Error(timedOut);
+  await fetching.manager.run({ stageId: 'beta' });
+  await until(() => fetching.manager.view().stages.beta?.status === 'needs-release', 'A move that failed must need release.');
+  assert.equal(fetching.manager.view().stages.beta.reason, timedOut);
 });
 
 test('a managed source cannot admit a manual gate while GitHub is unreachable, says so rather than asking to connect, and keeps no watch error', async t => {
