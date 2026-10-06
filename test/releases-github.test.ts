@@ -124,6 +124,16 @@ test('the adapter exposes a fresh commit preflight rather than relying on cached
   assert.equal(typeof Reflect.get(createReleaseGitHub(),'verifyCommit'),'function');
 });
 
+test('a commit GitHub Actions has no push or dispatch run for is not deployed, and the refusal says what to do',async()=>{
+  // Only a pull request built it, as for a commit released past its gate's Build wait.
+  const run:GitHubRun=async(_file,args)=>{const endpoint=args.at(-1)!;
+    if(endpoint.includes('/branches/'))return reply({commit:{sha:SHA}});
+    return reply({total_count:1,workflow_runs:[{id:7,workflow_id:3,path:'.github/workflows/ci.yml',head_sha:SHA,head_branch:'main',event:'pull_request',status:'completed',conclusion:'success'}]});
+  };
+  const github=createReleaseGitHub({run,session:async()=>({available:true,authenticated:true,account:{login:'owner',name:null}})});
+  await assert.rejects(github.verifyCommit(input.source),{message:'GitHub Actions has no push or dispatch run for this commit. Dispatch a workflow at it, then deploy.'});
+});
+
 test('fresh branch and Build preflight rejects pending, failed or changed heads without any mutation',async()=>{
   for(const scenario of ['passed','pending','failed','changed','changes-after-build'] as const){
     let heads=0;const run:GitHubRun=async(_file,args)=>{

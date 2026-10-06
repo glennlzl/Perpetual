@@ -73,6 +73,8 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
       const current=async()=>{const head=await readBranchHead({repository:source.repository,branch:source.branch,etag:null},{request:get});
         if(head.status!==200||head.sha!==source.sha)throw new Error('The branch head changed. Run its gates before deploying.');};
       await current();const build=await readBuild(source,{request:get,session});
+      // A gate released for a commit GitHub Actions never built does not stand in for Build.
+      if(build.status==='none')throw new Error('GitHub Actions has no push or dispatch run for this commit. Dispatch a workflow at it, then deploy.');
       if(build.status!=='passed')throw new Error(build.reason||'GitHub Actions Build has not passed for this commit.');
       await current();
     },
