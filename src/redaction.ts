@@ -78,16 +78,17 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
 // hidden: a quoted string of eight or more characters, or one that spans lines, that names no reference, template, path
 // or address, set to the name with = := => : || or ?? (`password = "…"`, `"api_key": "…"`), passed to a flag
 // (`--token "…"`), or given to Authorization (`headers.set("Authorization", "…")`); an Authorization header's scheme and
-// credential; a Bearer credential with a digit in it; a query parameter's value. URL user info is hidden unless its
-// password, or its user when it has none, is only references. A literal goes with its quotes, line by line, so text
-// redacted again, such as numbered lines, comes back the same.
+// credential; a Bearer credential with a digit in it; the value of a query parameter whose name holds a credential
+// name (`?access_token=…`, `&client_secret=…`). URL user info is hidden unless its password, or its user when it has
+// none, is only references. A literal goes with its quotes, line by line, so text redacted again, such as numbered
+// lines, comes back the same.
 const LITERAL_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'|\`(?:\\\\.|[^\`\\\\])*\``;
 const NAMED_LITERAL = new RegExp(`((?<![\\w-])${SECRET_NAME}["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?::=|=>|[=:]|\\|\\|=?|\\?\\?=?)\\s*)(${LITERAL_VALUE})`, 'gi');
 const FLAG_LITERAL = new RegExp(`((?<![\\w-])--?${SECRET_NAME}(?:\\s*=\\s*|\\s+))(${LITERAL_VALUE})`, 'gi');
 const AUTHORIZATION_LITERAL = new RegExp(`((?:\\(\\s*["']Authorization["']\\s*,|\\[\\s*["']Authorization["']\\s*\\]\\s*=)\\s*)(${LITERAL_VALUE})`, 'gi');
 const HEADER_LITERAL = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[A-Za-z][\w-]*[ \t]+[^\s"'`$]{8,}/gim;
 const BEARER_LITERAL = /\bBearer[ \t]+(?=[\w.~+/-]*\d)[\w.~+/-]{8,}=*/gi;
-const QUERY_LITERAL = new RegExp(`([?&](?:${SECRET_NAMES})=)(?![$<{%#(])[^&\\s"'<>\`]{8,}`, 'gi');
+const QUERY_LITERAL = new RegExp(`([?&]${SECRET_NAME}=)(?![$<{%#(])[^&\\s"'<>\`]{8,}`, 'gi');
 const REFERENCE = /\$\{[^}]*\}|\$[A-Za-z_]\w*|\{\{[^}]*\}\}|#\{[^}]*\}|\{\w*\}|%(?:\(\w+\))?s/g;
 const literal = (value: string) => (value.length >= 8 || value.includes('\n')) && !/^(?:[$<{%/]|\w+:\/\/)|\$\{|\{\{|#\{/.test(value);
 const literalValue = (match: string, prefix: string, quoted: string) => literal(quoted.slice(1, -1)) ? prefix + redactedLines(quoted) : match;

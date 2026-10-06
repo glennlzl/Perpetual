@@ -85,6 +85,8 @@ test('code keeps what follows a credential name when it is an expression, a type
     ['export DB_PASSWORD="fixture literal value"', `export DB_PASSWORD=${REDACTED}`],
     ['deploy --password "fixture-literal-1"', `deploy --password ${REDACTED}`],
     ['GET /callback?access_token=fixture123&other=keep', `GET /callback?access_token=${REDACTED}&other=keep`],
+    ['POST /oauth/token?grant_type=refresh&client_secret=0123456789abcdef&refresh_token=fixture-literal', `POST /oauth/token?grant_type=refresh&client_secret=${REDACTED}&refresh_token=${REDACTED}`],
+    ['GET /session?id_token=fixture-literal&x-api-key=fixture-literal', `GET /session?id_token=${REDACTED}&x-api-key=${REDACTED}`],
     ['curl -H "Authorization: token 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
     ['headers.set("Authorization", "Basic Zml4dHVyZTpsaXRlcmFs");', `headers.set("Authorization", ${REDACTED});`],
     ['request: Bearer abc123def456ghi', `request: Bearer ${REDACTED}`],
