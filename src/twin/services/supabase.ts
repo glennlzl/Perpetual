@@ -82,11 +82,10 @@ export async function cliEntry(from: string | URL = import.meta.url) {
   const entry = join(dirname(launcher.file), launcher.bin.supabase);
   // The launcher's candidates, in its order: this platform's package, then on Linux its musl build.
   const platform = `${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
-  for (const name of [`@supabase/cli-${platform}`, `@supabase/cli-${platform}-musl`].filter(item => Object.hasOwn(launcher.optionalDependencies ?? {}, item))) {
-    const binary = await installed(entry, name);
-    if (binary) { if (binary.version === CLI_VERSION) return entry; break; }
-  }
-  throw new Error(CLI_MISSING);
+  const candidates = [`@supabase/cli-${platform}`, `@supabase/cli-${platform}-musl`].filter(name => Object.hasOwn(launcher.optionalDependencies ?? {}, name));
+  const binary = (await Promise.all(candidates.map(name => installed(entry, name)))).find(item => item !== undefined);
+  if (binary?.version !== CLI_VERSION) throw new Error(CLI_MISSING);
+  return entry;
 }
 const cli = async (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) =>
   ctx.exec(process.execPath, [await cliEntry(), ...args], { cwd: ctx.dir, env: { [BINARY_OVERRIDE]: '', ...env } });
