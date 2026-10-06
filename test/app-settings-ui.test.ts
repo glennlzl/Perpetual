@@ -15,7 +15,7 @@ test('Settings save completion survives leaving and reopening the page', { timeo
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  const warning = 'OpenRouter could not be reached to check this key.';
+  const warning = 'OpenRouter could not check this key.';
   for (const outcome of ['success', 'unchecked key', 'failure'] as const) await t.test(outcome, async t => {
     const saved = Promise.withResolvers<void>(), submitted: Record<string, unknown>[] = [];
     t.after(() => saved.resolve());

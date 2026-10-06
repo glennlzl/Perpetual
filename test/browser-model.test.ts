@@ -189,11 +189,12 @@ test('OpenRouter answers whether it accepts a key, and anything else leaves it u
 
 test('Settings refuses a new key OpenRouter does not accept, and saves one it could not check with a warning',async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'perpetual-openrouter-key-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
-  let answer:'accepted'|'rejected'|'offline'='rejected';const checked:string[]=[];
+  let answer:'accepted'|'rejected'|'offline'|'unavailable'='rejected';const checked:string[]=[];
   t.mock.method(globalThis,'fetch',async(url:string|URL,options:RequestInit={})=>{
     if(String(url).endsWith('/models'))return Response.json({data:[{id:'openai/gpt-6-luna',name:'Luna',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]});
     checked.push(new Headers(options.headers).get('Authorization')!);
     if(answer==='offline')throw new TypeError('fetch failed');
+    if(answer==='unavailable')return new Response('',{status:503});
     return answer==='accepted'?Response.json({data:{label:'fixture'}}):Response.json({error:{message:'User not found.',code:401}},{status:401});
   });
   // A stub runtime: saving settings starts no worker.
@@ -204,14 +205,34 @@ test('Settings refuses a new key OpenRouter does not accept, and saves one it co
   await assert.rejects(access(join(dataDir,'browser-model.json')),'A refused key is not saved.');
   answer='offline';
   const unchecked=await manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-unchecked-fixture'});
-  assert.deepEqual([unchecked.warning,unchecked.capabilities.keyConfigured,await saved()],['OpenRouter could not be reached to check this key.',true,'sk-or-v1-unchecked-fixture']);
+  assert.deepEqual([unchecked.warning,unchecked.capabilities.keyConfigured,await saved()],['OpenRouter could not check this key.',true,'sk-or-v1-unchecked-fixture']);
+  // An answer about something else, such as an outage, checks nothing either.
+  answer='unavailable';
+  const unanswered=await manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-unanswered-fixture'});
+  assert.deepEqual([unanswered.warning,await saved()],['OpenRouter could not check this key.','sk-or-v1-unanswered-fixture']);
   answer='accepted';
   const accepted=await manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-accepted-fixture'});
   assert.equal(Object.hasOwn(accepted,'warning'),false);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
-  assert.deepEqual(checked,['Bearer sk-or-v1-refused-fixture','Bearer sk-or-v1-unchecked-fixture','Bearer sk-or-v1-accepted-fixture']);
+  assert.deepEqual(checked,['Bearer sk-or-v1-refused-fixture','Bearer sk-or-v1-unchecked-fixture','Bearer sk-or-v1-unanswered-fixture','Bearer sk-or-v1-accepted-fixture']);
   // Choosing a model alone asks nothing; a refused key never replaces the saved one.
   await manager.saveModelSettings({model:'openai/gpt-6-luna'});
   answer='rejected';
   await assert.rejects(manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey:'sk-or-v1-other-fixture'}),{message:'OpenRouter did not accept this key.'});
-  assert.equal(checked.length,4);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
+  assert.equal(checked.length,5);assert.equal(await saved(),'sk-or-v1-accepted-fixture');
+});
+
+test('a key that is not printable ASCII is refused before anything is sent',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-openrouter-key-shape-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const requests:string[]=[];
+  t.mock.method(globalThis,'fetch',async(url:string|URL)=>{requests.push(String(url));return Response.json({data:[{id:'openai/gpt-6-luna',name:'Luna',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]});});
+  // A stub runtime: saving settings starts no worker.
+  const manager=await createBrowserManager({dataDir,runtime:{capabilities:async()=>({runtimeInstalled:true,browserInstalled:true,modelConfigured:true}),start(){throw new Error('No worker starts.');}}});
+  t.after(()=>manager.close());
+  // A pasted ellipsis cannot travel in an HTTP header at all, and no key holds an accented letter.
+  for(const apiKey of ['sk-or-v1-pasted\u2026','sk-or-v1-caf\u00e9'])await assert.rejects(manager.saveModelSettings({model:'openai/gpt-6-luna',apiKey}),{message:'Enter a valid model API key.'},apiKey);
+  assert.deepEqual(requests.filter(url=>!url.endsWith('/models')),[],'OpenRouter is never asked about a key that cannot be sent.');
+  await assert.rejects(access(join(dataDir,'browser-model.json')),'Nothing is saved.');
+  // An exported one configures no model either.
+  const exported=await createBrowserModelSettings({dataDir,env:{OPENROUTER_API_KEY:'sk-or-v1-exported\u2026'}});
+  assert.deepEqual([exported.view().modelConfigured,exported.view().modelError],[false,'Enter a valid model API key.']);
 });

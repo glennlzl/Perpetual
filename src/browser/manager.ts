@@ -741,7 +741,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     try{await save();return await viewModel();}finally{modelSaving=false;resumePreparations();}
   }
   // A newly entered key is checked with OpenRouter, which spends nothing: one it refuses is not saved, and one it could
-  // not be asked about is saved with a warning.
+  // not check, unreachable or answering anything but whether it accepts the key, is saved with a warning.
   async function saveModelSettings(input:unknown):Promise<ModelSettingsReply>{
     if(!isRecord(input)||Object.keys(input).some(key=>!['model','apiKey','escalationModel'].includes(key)))throw new Error('Provide an OpenRouter model and API key.');
     if(typeof input.model!=='string'||!input.model.trim())throw new Error('Choose an OpenRouter model.');
@@ -753,7 +753,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       await modelSettings.saveOpenRouter(input,{async checkKey(apiKey){
         const answer=await checkOpenRouterKey(apiKey);
         if(answer==='rejected')throw new Error('OpenRouter did not accept this key.');
-        if(answer==='unknown')warning='OpenRouter could not be reached to check this key.';
+        if(answer==='unknown')warning='OpenRouter could not check this key.';
       }});
     });
     return warning?{...reply,warning}:reply;
