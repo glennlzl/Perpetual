@@ -8,7 +8,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Separator } from '@/components/ui/separator';
-import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
+import Pipelines from './Pipelines';
+import { githubConnectionChanges } from '@/lib/github-connection-changes';
 import PipelineDialogs from './PipelineDialogs';
 import PipelineLoading from './PipelineLoading';
 import SignedOut from './SignedOut';
@@ -48,7 +50,7 @@ import type { BrowserView, Environment, PipelineAction, StageRemoval, WorkspaceS
 import type { SourceSelection } from './SourceSettings';
 import type { GitHubSource } from '../../contract/github.ts';
 import type { Scan as ScanReply } from '../../contract/scanner.ts';
-import type { PipelineStateReply, SourceReply } from '../../contract/pipeline.ts';
+import type { PipelineRemovalReply, PipelineStateReply, SourceReply } from '../../contract/pipeline.ts';
 
 const AppSettings = lazy(() => import('./AppSettings'));
 
@@ -74,8 +76,13 @@ export type PipelineDialog = {
   connect?: boolean; connectRequest?: number; tab?: string; runId?: string; watch?: boolean; caseId?: string; caseRequestKey?: number; error?: string;
 };
 export type OpenDialog = (next: PipelineDialog | null) => void;
-export type SourceResult = Omit<SourceReply, 'scan' | 'pipeline'> & { scan: Scan; pipeline: PipelineView; environments?: PipelineStateReply['environments'] };
-type Page = 'pipeline' | 'settings';
+export type SourceResult = Omit<SourceReply, 'scan' | 'pipeline'> & { scan: Scan; pipeline: PipelineView | null; environments?: PipelineStateReply['environments'] };
+type Page = 'pipelines' | 'pipeline' | 'settings';
+const initialPage = (): Page => {
+  const query = new URLSearchParams(window.location.search);
+  if (query.has('watch') || query.has('preview') || query.get('view') === 'environments') return 'pipeline';
+  return window.location.hash === '#settings' ? 'settings' : window.location.hash === '#pipeline' ? 'pipeline' : 'pipelines';
+};
 /** The dialog Settings was opened from, handed back on return to the Pipeline. */
 type SettingsReturn = { dialog: PipelineDialog | null; newTest: string };
 type Theme = 'light' | 'dark';
@@ -134,7 +141,7 @@ function AppSidebar({ theme, page, onNavigate }: { theme: Theme; page: Page; onN
 
   return <Sidebar collapsible="icon">
     <SidebarHeader>
-      <a href="#pipeline" aria-label="Perpetual" onClick={() => navigate('pipeline')} className={`flex h-12 items-center overflow-hidden ${compact ? 'justify-center' : 'px-2'}`}>
+      <a href="#pipelines" aria-label="Perpetual" onClick={() => navigate('pipelines')} className={`flex h-12 items-center overflow-hidden ${compact ? 'justify-center' : 'px-2'}`}>
         <img src={`/assets/brand/perpetual-${compact ? 'mark-small' : 'lockup'}-${brandVariant}.svg`} alt="Perpetual" width={compact ? 24 : 180} className={compact ? 'h-6 w-6 shrink-0' : 'h-auto w-[180px] max-w-none shrink-0'} />
       </a>
     </SidebarHeader>
@@ -142,9 +149,10 @@ function AppSidebar({ theme, page, onNavigate }: { theme: Theme; page: Page; onN
       <SidebarGroup>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton isActive={page === 'pipeline'} tooltip="Project" aria-current={page === 'pipeline' ? 'page' : undefined} onClick={() => navigate('pipeline')}>
+            <SidebarMenuButton isActive={page !== 'settings'} tooltip="Project" aria-current={page !== 'settings' ? 'page' : undefined} onClick={() => navigate('pipelines')}>
               <Workflow /><span>Project</span>
             </SidebarMenuButton>
+            <SidebarMenuSub><SidebarMenuSubItem><SidebarMenuSubButton href="#pipelines" isActive={page !== 'settings'} onClick={event => { event.preventDefault(); navigate('pipelines'); }}><Workflow /><span>Pipelines</span></SidebarMenuSubButton></SidebarMenuSubItem></SidebarMenuSub>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>
@@ -389,16 +397,17 @@ function useGitHubDeployments(repoPath: string | undefined, sha: string | null, 
 // Autopilot's modes and changes, read once the controller reports them in the
 // pipeline state; before that the cards show nothing about Autopilot. The state's
 // view stands only until the first read: a failed read shows nothing, never that older view.
-function useAutopilot(repoPath: string | undefined, initial: AutopilotView | null | undefined) {
-  const [read, setRead] = useState<{ repoPath: string; view: AutopilotView | null } | null>(null);
+function useAutopilot(repoPath: string | undefined, initial: AutopilotView | null | undefined, pipelineId?: string) {
+  const key = JSON.stringify([repoPath, pipelineId]);
+  const [read, setRead] = useState<{ key: string; view: AutopilotView | null } | null>(null);
   const enabled = initial !== undefined;
   useEffect(() => {
     if (!repoPath || !enabled) return undefined;
-    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setRead(previous => ({ repoPath, view: shareAutopilot(previous?.repoPath === repoPath ? previous.view : null, next) })) });
+    const poller = createAutopilotPoller({ controller: api, repoPath, onChange: next => setRead(previous => ({ key, view: shareAutopilot(previous?.key === key ? previous.view : null, next) })) });
     const stop = autopilotChanges.subscribe(() => poller.refresh());
     return () => { stop(); poller.stop(); };
-  }, [repoPath, enabled]);
-  const current = read && read.repoPath === repoPath ? read.view : initial ?? null;
+  }, [repoPath, enabled, key]);
+  const current = read?.key === key ? read.view : initial ?? null;
   return enabled && current?.repoPath === repoPath ? current : null;
 }
 
@@ -679,7 +688,7 @@ function PipelineApp() {
     return () => window.removeEventListener('beforeunload', guard);
   }, [settings]);
   const [workspace, tests] = useTestWorkspace();
-  const [page, setPage] = useState<Page>(() => window.location.hash === '#settings' ? 'settings' : 'pipeline');
+  const [page, setPage] = useState<Page>(initialPage);
   const pageRef = useRef(page), settingsReturn = useRef<SettingsReturn | null>(null);
   useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Project'}`; }, [page]);
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
@@ -748,13 +757,14 @@ function PipelineApp() {
     else { closeDialog(); setNewTest(''); }
   }, [closeDialog]);
   const navigate = useCallback((next: Page, from?: SettingsReturn) => {
-    showPage(next, from);
-    window.location.hash = next;
+    const target = next === 'pipelines' && pageRef.current === 'settings' && settingsReturn.current ? 'pipeline' : next;
+    showPage(target, from);
+    window.location.hash = target;
   }, [showPage]);
   const openAppSettings = useCallback(() => navigate('settings', { dialog, newTest }), [navigate, dialog, newTest]);
   // Back and Forward change the hash; navigate's own hash change finds the page already shown.
   useEffect(() => {
-    const changed = () => { const next = window.location.hash === '#settings' ? 'settings' : 'pipeline'; if (next !== pageRef.current) showPage(next); };
+    const changed = () => { const next = initialPage(); if (next !== pageRef.current) showPage(next); };
     window.addEventListener('hashchange', changed);
     return () => window.removeEventListener('hashchange', changed);
   }, [showPage]);
@@ -789,6 +799,41 @@ function PipelineApp() {
     finally { setLoading(false); }
   }, [workspace]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setState(previous => ({ ...previous,
+      ...(Object.hasOwn(tests, 'githubConnection') ? { githubConnection: tests.githubConnection } : {}),
+      ...(Object.hasOwn(tests, 'pipelineRemoval') ? { pipelineRemoval: tests.pipelineRemoval } : {}),
+      ...(Object.hasOwn(tests, 'pipelineId') ? { pipelineId: tests.pipelineId } : {}),
+    }));
+  }, [tests.githubConnection, tests.pipelineRemoval, tests.pipelineId]);
+  const connected = state.githubConnection !== null;
+  // An explicit disconnect ends the canvas visit. Retained configuration belongs in the table.
+  useEffect(() => {
+    if (!loading && page === 'pipeline' && (!connected || state.scan && !pipeline || state.pipelineRemoval && state.pipelineRemoval.status !== 'completed')) navigate('pipelines');
+  }, [loading, page, connected, pipeline, state.scan, state.pipelineRemoval, navigate]);
+  useEffect(() => githubConnectionChanges.subscribe(change => {
+    if (change === 'disconnect') { closeDialog(); navigate('pipelines'); }
+    void api<PipelineState>('/api/state').then(fresh => {
+      setState(fresh);
+      if (change === 'connect' && fresh.scan) closeDialog();
+    }).catch(failure => setError((failure as Error).message));
+  }), [closeDialog, navigate, setError]);
+  // Only an accepted deletion polls quickly; a failed one waits for Retry deletion.
+  useEffect(() => {
+    if (!['queued', 'removing'].includes(state.pipelineRemoval?.status || '')) return;
+    const path = state.scan?.repo.path;
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const fresh = await api<PipelineState>('/api/state');
+        if (!alive || fresh.scan?.repo.path !== path) return;
+        setState(fresh);
+        if (fresh.pipelineRemoval?.status === 'completed') workspace.activate(fresh.scan?.repo, fresh);
+      } catch (failure) { if (alive) setError((failure as Error).message); }
+    };
+    const timer = setInterval(() => void refresh(), 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [state.pipelineRemoval?.status, state.scan?.repo.path, workspace, setError]);
 
   const refreshPipeline = useCallback(async () => {
     if (mutation.current) return;
@@ -809,8 +854,9 @@ function PipelineApp() {
     } catch (failure) { if (source.isCurrent()) setError((failure as Error).message, () => setScanRetry(value => value + 1)); }
     return true;
   }, [state.scan, workspace, setError]);
-  const gates = useStageGates(state.scan?.repo, refreshScan, scanRetry);
-  const autopilot = useAutopilot(state.scan?.repo?.path, state.autopilot);
+  const pipelineScope = pipeline ? state.pipelineId || pipeline.id || pipeline.repoPath : undefined;
+  const gates = useStageGates(pipeline ? state.scan?.repo : undefined, refreshScan, scanRetry, pipelineScope);
+  const autopilot = useAutopilot(pipeline ? state.scan?.repo?.path : undefined, state.autopilot, pipelineScope);
   // A failed refresh is the workspace's own poll error, which its next poll repeats.
   useEffect(() => {
     if (tests.stageRemovals?.some(item => item.status === 'completed' && pipeline?.stages.some(stage => stage.id === item.stageId))) void refreshPipeline();
@@ -855,7 +901,7 @@ function PipelineApp() {
     try {
       const result = await api<SourceResult>('/api/source/github', selection);
       workspace.activate(result.scan.repo, result);
-      setState(previous => ({ ...previous, scan: result.scan, source: result.source, environments: result.environments || [], browserTests: {} }));
+      setState(previous => ({ ...previous, scan: result.scan, source: result.source, pipelineId: result.pipelineId || result.pipeline?.id, pipelineRemoval: null, environments: result.environments || [], browserTests: {} }));
       setError('');
       return result;
     } catch (failure) { setError((failure as Error).message); throw failure; }
@@ -885,6 +931,20 @@ function PipelineApp() {
     } catch (failure) { setError((failure as Error).message); throw failure; }
     finally { mutation.current = false; setBusy(false); }
   }, [workspace]);
+  const removePipeline = async () => {
+    if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
+    mutation.current = true; setBusy(true);
+    try {
+      const result = await api<PipelineRemovalReply>('/api/pipeline/remove', { repoPath: state.scan?.repo.path, pipelineId: state.pipelineId || pipeline?.id || state.scan?.repo.path });
+      setState(previous => ({ ...previous, pipelineRemoval: result.removal }));
+    } finally { mutation.current = false; setBusy(false); }
+  };
+  const createPipeline = async () => {
+    if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
+    mutation.current = true; setBusy(true);
+    try { await api('/api/pipeline/create', { repoPath: state.scan?.repo.path }); await load(); }
+    finally { mutation.current = false; setBusy(false); }
+  };
 
   // The canvas shows its own failure first, then workspace and Autopilot poll
   // failures the viewer has not dismissed. Polls retry on their own, so only
@@ -903,12 +963,12 @@ function PipelineApp() {
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
-      <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Project'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
+      <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Project'}</span>{page !== 'settings' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span><ChevronRight size={14} /><Button variant="ghost" className="h-7 px-1" onClick={() => navigate('pipelines')}>Pipelines</Button>{page === 'pipeline' && <><ChevronRight size={14} /><span className="workspace-repo">Delivery</span></>}</>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
       {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
-        {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
+        {loading ? <PipelineLoading /> : page === 'pipelines' && state.scan ? <Pipelines key={state.scan.repo.path} pipeline={pipeline} repository={state.source?.repository || state.scan.repo.name || ''} branch={state.scan.repo.branch} connected={connected} removal={state.pipelineRemoval} busy={busy} readError={error?.message} onOpen={() => navigate('pipeline')} onConnect={() => openDialog({ type: 'source', connect: true })} onCreate={createPipeline} onDelete={removePipeline} /> : pipeline && connected ? <ReactFlowProvider key={`${pipeline.repoPath}:${pipeline.id || ''}`} ><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
     </div>
-    <PipelineDialogs dialog={page !== 'pipeline' || loading && dialog?.type === 'git-graph' ? null : dialog} onClose={closeDialog} onAppSettings={openAppSettings} scan={state.scan || { repo: { path: state.defaultRepo } }} pipeline={pipeline} onSourceSave={onSourceSave} onAction={onAction} onStageRemoved={refreshPipeline} busy={busy} />
+    <PipelineDialogs dialog={page === 'settings' || loading && dialog?.type === 'git-graph' ? null : dialog} onClose={closeDialog} onAppSettings={openAppSettings} scan={state.scan || { repo: { path: state.defaultRepo } }} pipeline={pipeline} onSourceSave={onSourceSave} onAction={onAction} onStageRemoved={refreshPipeline} busy={busy} />
     {page === 'pipeline' && newTest && pipeline?.stages.some(stage => stage.id === newTest) && <StageNewTest key={`${pipeline.repoPath}\n${newTest}`} repoPath={state.scan?.repo?.path!} stageId={newTest} onClose={closeNewTest} onAppSettings={openAppSettings} />}
   </>;
 }

@@ -741,6 +741,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const guard = () => { if (closed) throw conflict('The controller is shutting down.'); };
   return {
     view,
+    hasWork(key: string) { return state.repairs.some(item=>item.key===key&&(controllers.has(item.id)||ACTIVE.includes(item.status)||Boolean(item.cleanup))); },
     check,
     /**
      * Repair: a person starts one for a failed run of the branch at its current watched head, even a baseline, whichever

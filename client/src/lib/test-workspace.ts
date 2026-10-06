@@ -8,7 +8,7 @@ import type { PipelineView } from './pipeline-nodes.ts';
 import type { Environment, StageRemoval as PublicStageRemoval } from '../../../contract/environment.ts';
 import type { BrowserConfig as PublicBrowserConfig, BrowserAnalysis, BrowserViewReply } from '../../../contract/browser.ts';
 export type { BrowserPreparation, BrowserAnalysis } from '../../../contract/browser.ts';
-import type { PipelineActionReply } from '../../../contract/pipeline.ts';
+import type { PipelineActionReply, PipelineStateReply } from '../../../contract/pipeline.ts';
 export type { Environment, EnvironmentHealth, EnvironmentService } from '../../../contract/environment.ts';
 
 export type Resource = 'browser' | 'environment';
@@ -32,7 +32,8 @@ export type StageRemoval = Pick<PublicStageRemoval, 'stageId'> & Partial<Omit<Pu
 /** A source's pipeline, as far as draft pruning reads it. */
 export interface PipelineStages { repoPath?: string; stages?: { id: string }[] }
 /** The source summary GET /api/state returns, as far as the workspace reads it; an activation seed has the same fields. */
-export interface SourceState {
+type SourceLifecycle = Pick<PipelineStateReply, 'githubConnection' | 'pipelineRemoval' | 'pipelineId'>;
+export interface SourceState extends SourceLifecycle {
   scan?: { repo?: { path?: string; branch?: string | null } | null; nodes?: (PreviewNode | null)[] } | null; pipeline?: PipelineView | null;
   browserTests?: Record<string, Partial<BrowserView>>; environments?: Environment[]; stageRemovals?: StageRemoval[];
 }
@@ -45,7 +46,7 @@ export type StageView = {
   pending: string; error: string; pollErrors: Record<Resource, string>; pollError: string;
 };
 /** The source-scoped state every view subscribes to. */
-export type WorkspaceSnapshot = { pipeline: PipelineView | null; browserTests: Record<string, BrowserView>; environments: Environment[]; stageRemovals: StageRemoval[]; busyStages: string[]; previews: PreviewTarget[]; branch: string; error: string };
+export type WorkspaceSnapshot = SourceLifecycle & { pipeline: PipelineView | null; browserTests: Record<string, BrowserView>; environments: Environment[]; stageRemovals: StageRemoval[]; busyStages: string[]; previews: PreviewTarget[]; branch: string; error: string };
 /** A stage action's requests: post sends one; save also clears the draft it saved unless it was edited meanwhile. */
 export interface StageTransaction {
   post(action: string, input?: Record<string, unknown>, options?: ApiOptions): Promise<ActionReply>;
@@ -106,6 +107,8 @@ const sameEntries = (left: Record<string, unknown>, right: Record<string, unknow
 export function createTestWorkspace({ controller, pollInterval = 3000, document = globalThis.document, pruneDrafts = pruneStageDrafts }: { controller: Controller; pollInterval?: number; document?: PageVisibility | null; pruneDrafts?: (repoPath: string, stageIds: string[]) => void }) {
   let source: { path?: string; branch?: string | null } | null = null, identity = '', generation = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, summaryRevision = 0, sourceError = '', polling = false;
   let stageRemovals: StageRemoval[] = [], previews: PreviewTarget[] = [], foreignReplies = 0;
+  let lifecycle: SourceLifecycle = {};
+  const lifecycleOf = (value: SourceLifecycle) => Object.fromEntries(['githubConnection', 'pipelineRemoval', 'pipelineId'].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key as keyof SourceLifecycle]])) as SourceLifecycle;
   // Errors are ordered by this clock. The page shows none from before the viewer last dismissed them.
   let errorClock = 0, sourceErrorAt = 0, dismissedAt = 0;
   let pipeline: PipelineView | null = null, confirmedPipeline: PipelineView | null = null, pipelineRevision = 0;
@@ -119,6 +122,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   const current = (entry: StageEntry) => !disposed && entry.generation === generation;
   // Drafts of stages the source's pipeline no longer lists are dropped; an unknown pipeline prunes nothing.
   function prunePipeline(pipeline: PipelineStages | null | undefined) {
+    if (source?.path && pipeline === null) { listed = new Set(); pruneDrafts(source.path, []); return; }
     if (!source?.path || !Array.isArray(pipeline?.stages) || (pipeline.repoPath && pipeline.repoPath !== source.path)) return;
     listed = new Set(pipeline.stages.map(stage => stage?.id));
     pruneDrafts(source.path, [...listed]);
@@ -141,6 +145,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
   function publish(entry?: StageEntry) {
     if (disposed) return;
     const next: WorkspaceSnapshot = {
+      ...lifecycle,
       pipeline,
       browserTests: Object.fromEntries([...entries].map(([id, value]) => [id, value.view.browser])),
       environments: [...entries.values()].flatMap(value => value.view.environment.environments),
@@ -181,7 +186,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     pipeline = share(pipeline, next);
   }
   function changePipeline(input: PipelineAction): Promise<PipelineActionReply> {
-    const ownGeneration = generation, repoPath = source?.path;
+    const ownGeneration = generation, repoPath = source?.path, pipelineId = confirmedPipeline?.id;
     const isCurrent = () => !disposed && generation === ownGeneration;
     const assertSource = () => { if (!isCurrent()) throw Object.assign(new Error('The source changed. Reopen this stage.'), { name: 'AbortError' }); };
     if (disposed || !repoPath || !confirmedPipeline) return Promise.reject(new Error('Connect a repository first.'));
@@ -190,7 +195,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     const operation = pipelineQueue.then(async () => {
       assertSource();
       try {
-        const result = await controller('/api/pipeline/action', { ...change.input, repoPath }) as PipelineActionReply;
+        const result = await controller('/api/pipeline/action', { ...change.input, repoPath, ...(pipelineId ? { pipelineId } : {}) }) as PipelineActionReply;
         assertSource();
         if (result.pipeline.repoPath !== repoPath) throw new Error('The saved pipeline belongs to another repository.');
         confirmedPipeline = result.pipeline;
@@ -252,9 +257,10 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       }
       foreignReplies = 0;
       sourceError = '';
+      lifecycle = share(lifecycle, lifecycleOf(next));
       stageRemovals = share(stageRemovals, next.stageRemovals || []);
       previews = share(previews, previewTargets(next.scan));
-      if (graphIdle && !pipelineChanges.length && graphRevision === pipelineRevision && next.pipeline?.repoPath === source?.path) {
+      if (graphIdle && !pipelineChanges.length && graphRevision === pipelineRevision && (next.pipeline === null || next.pipeline?.repoPath === source?.path)) {
         confirmedPipeline = next.pipeline;
         projectPipeline();
         prunePipeline(confirmedPipeline);
@@ -344,7 +350,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
     entry.handle = {
       getSnapshot: () => entry.view,
       subscribe(listener) { entry.listeners.add(listener); return () => entry.listeners.delete(listener); },
-      isCurrent: () => current(entry),
+      isCurrent: () => current(entry) && !gone(entry),
       observe(resources) {
         assertCurrent(entry);
         // Summaries carry no configuration, accounts or capabilities, so a view no one observed may be out of date:
@@ -391,6 +397,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       confirmedPipeline = seed.pipeline && seed.pipeline.repoPath === source.path ? seed.pipeline : null;
       projectPipeline();
       stageRemovals = seed.stageRemovals || [];
+      lifecycle = lifecycleOf(seed);
       previews = share(previews, previewTargets(seed.scan));
       prunePipeline(seed.pipeline);
       const previous = [...entries.values()]; entries.clear();

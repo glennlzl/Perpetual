@@ -17,6 +17,7 @@ import { BranchName, BranchOptions } from './BranchSwitcher';
 import GitHubConnectDialog from './GitHubConnectDialog';
 import type { Scan } from './App';
 import type { GitHubSource, GitHubConnection, GitHubRepositoryChoice, GitHubRepositoryPage, GitHubBranch, GitHubBranchPage } from '../../contract/github.ts';
+import { githubConnectionChanges } from '@/lib/github-connection-changes';
 
 /** A GitHub source choice as POST /api/source/github takes it. */
 export type SourceSelection = { repository: string; branch: string; rootDirectory: string };
@@ -183,7 +184,10 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     onBusyChange?.(true);
     try {
       const result = await api<GitHubConnection>(`/api/github/${action}`, {});
-      if (active.current && request === connectionRequest.current) applyConnection(result, action === 'connect');
+      if (active.current && request === connectionRequest.current) {
+        applyConnection(result, action === 'connect');
+        githubConnectionChanges.notify(action);
+      }
       return result;
     } catch (failure) {
       if (active.current && request === connectionRequest.current) setConnectionError(messageOf(failure));

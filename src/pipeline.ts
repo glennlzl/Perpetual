@@ -10,7 +10,7 @@ const FIXED = Object.freeze([
   { id: 'production', name: 'Production', kind: 'production' },
 ]);
 const ACTIONS = new Set<unknown>(['add-stage', 'rename-stage', 'remove-stage', 'toggle-stage', 'set-transition', 'set-github-workflow']);
-const INPUT_FIELDS = new Set(['repoPath', 'action', 'stageId', 'afterStageId', 'name', 'kind', 'sourceStageId', 'targetStageId', 'blocked', 'reason', 'workflowFile']);
+const INPUT_FIELDS = new Set(['repoPath', 'pipelineId', 'action', 'stageId', 'afterStageId', 'name', 'kind', 'sourceStageId', 'targetStageId', 'blocked', 'reason', 'workflowFile']);
 
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function checkedName(value: unknown, maximum: number, label: string) {
@@ -49,6 +49,7 @@ export function defaultPipeline(repoPath: unknown): Pipeline {
 
 function validatePipeline(pipeline: unknown): asserts pipeline is PipelineDefinition {
   if (!record(pipeline) || typeof pipeline.repoPath !== 'string' || !Array.isArray(pipeline.stages) || pipeline.stages.length < 3 || pipeline.stages.length > 12) throw new Error('Invalid pipeline definition.');
+  if (pipeline.id !== undefined && (typeof pipeline.id !== 'string' || !/^pipeline:[a-f0-9-]{36}$/.test(pipeline.id))) throw new Error('Invalid pipeline identity.');
   if (pipeline.stages[0]?.id !== 'source' || pipeline.stages.at(-1)?.id !== 'production') throw new Error('Source and Production must remain the first and last fixed stages.');
   const ids = new Set(), names = new Set();
   for (const stage of pipeline.stages) {
@@ -103,6 +104,7 @@ export function applyPipelineAction(definition: unknown, input: unknown): Pipeli
   if (!record(input) || !ACTIONS.has(input.action)) throw new Error('Unsupported pipeline action.');
   for (const field of Object.keys(input)) if (!INPUT_FIELDS.has(field)) throw new Error(`Unsupported pipeline action field: ${field}`);
   if (input.repoPath !== undefined && input.repoPath !== pipeline.repoPath) throw new Error('Pipeline action targets a different repository.');
+  if (input.pipelineId !== undefined && input.pipelineId !== pipeline.id) throw new Error('Pipeline action targets a different pipeline.');
   const next = normalizedPipeline(pipeline);
   if (input.action === 'set-transition') {
     if (typeof input.blocked !== 'boolean') throw new Error('Transition blocked must be a boolean.');

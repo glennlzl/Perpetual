@@ -54,7 +54,8 @@ async function openApp(t: TestContext, handle: Handler) {
     await (await response).finished();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   };
-  return { page, posts, pageErrors, refresh, open: () => page.goto(`${origin}/build/`) };
+  const url = `${origin}/build/#pipeline`;
+  return { page, posts, pageErrors, refresh, open: () => page.url() === url ? page.reload() : page.goto(url) };
 }
 
 test('pausing a transition names the transition and leaves the stage status in its Badge', { timeout: 60000 }, async t => {

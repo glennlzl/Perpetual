@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepository, createPreviewPlan, DISCOVERY_VERSION, repositoryPath } from './scanner.ts';
@@ -25,6 +25,7 @@ import { createBrowserManager, type BrowserManagerOptions } from './browser/mana
 import { sendVideo } from './browser/video-file.ts';
 import {holdsResources, createEnvironmentUsage } from './environments/usage.ts';
 import { createStageRemovalManager } from './environments/stage-removal.ts';
+import { createPipelineRemovalManager, type PipelineRemovalManager } from './pipeline-removal.ts';
 import { acquireControllerOwnership } from './controller-ownership.ts';
 import { BROWSER_HEADER, SECRET_HEADER, launchSecret } from './launch-secret.ts';
 import { environmentInputs, fromAppSettings } from './environments/runtime.ts';
@@ -67,6 +68,7 @@ export type GitHubConnectionRecord = NonNullable<PipelineStateReply['githubConne
 /** state.json (schema 1). Saved pipelines are normalized again on every read. */
 export interface ControllerState {
   scan: Scan | null; pipelines: Record<string, Pipeline>;
+  removedPipelines?: string[];
   source?: GitHubSource | null; githubConnection?: GitHubConnectionRecord | null;
   /** Retired repair reports, HTTP checks and provider observations: removed on load, so the next save omits them. */
   runs?: unknown; checks?: unknown; providers?: unknown;
@@ -209,6 +211,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     }
   }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
+  if(state.removedPipelines!==undefined&&(!Array.isArray(state.removedPipelines)||state.removedPipelines.some(key=>typeof key!=='string'||!key||key.length>4096)))throw new Error(INVALID_STATE);
   // Retired repair reports, HTTP checks and their stage drafts; the next save omits them. Provider observations, once
   // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
   delete state.runs;delete state.checks;delete state.providers;
@@ -231,19 +234,24 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   onCleanup(()=>environments.close());
   const saves=createSaveQueue();
   let tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
+  let pipelineRemoval: PipelineRemovalManager | undefined;
   // A fresh checkout must not reset stage definitions for the same repository/root.
   const sourceKey=(source: {repository: string; rootDirectory: string})=>`github:${source.repository.toLowerCase()}:${source.rootDirectory}`;
   // Every caller has a scanned repository, so a key always exists.
-  const pipelineKey=(current: ControllerState)=>current.source?.scanPath===current.scan?.repo?.path
+  const projectKey=(current: ControllerState)=>current.source?.scanPath===current.scan?.repo?.path
     ? sourceKey(current.source!) : current.scan?.repo?.path as string;
+  const pipelineKey=(current: ControllerState)=>current.pipelines[projectKey(current)]?.id??projectKey(current);
+  const hasPipeline=(current: ControllerState)=>Boolean(current.scan)&&!current.removedPipelines?.includes(projectKey(current));
+  const pipelineAvailable=()=>hasPipeline(state)&&!pipelineRemoval?.blocks(projectKey(state));
   function currentPipeline(current: ControllerState) {
     const repoPath=current.scan?.repo?.path;
     if(!repoPath)throw new Error('Scan a repository first.');
-    return normalizedPipeline({... (current.pipelines[pipelineKey(current)] ?? defaultPipeline(repoPath)),repoPath});
+    if(!hasPipeline(current))throw Object.assign(new Error('Create a pipeline for this project first.'),{statusCode:409});
+    return normalizedPipeline({... (current.pipelines[projectKey(current)] ?? defaultPipeline(repoPath)),repoPath});
   }
   // A repair gate's twin is built from its pull request checkout, never the scanned source, so only its pipeline and stage count.
   function isPreparationSourceCurrent(context: {key: string; stageId: string; repair?: string; scan: {repo: Pick<ScanRepo, 'path'> & Partial<Pick<ScanRepo, 'sha' | 'branch'>>}}) {
-    return !closed&&!sourceBusy&&pipelineKey(state)===context.key
+    return !closed&&!sourceBusy&&pipelineAvailable()&&pipelineKey(state)===context.key
       &&(context.repair!==undefined||state.scan?.repo.path===context.scan.repo.path&&state.scan?.repo.sha===context.scan.repo.sha&&state.scan?.repo.branch===context.scan.repo.branch)
       &&currentPipeline(state).stages.some(stage=>stage.id===context.stageId&&stage.kind==='sandbox');
   }
@@ -255,9 +263,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // The refusal while a source change saves is marked in its reply, so a page's poll keeps what it last read.
   const busy=():HttpError=>Object.assign(conflict(SOURCE_BUSY),{sourceBusy:true as const});
   function requireNoPendingSignIn(){if(githubAuth.isPending())throw conflict('Finish or cancel GitHub sign-in first.');}
-  function requireSourceIdle() {
+  function requireSourceIdle({allowRemoval=false}: {allowRemoval?:boolean}={}) {
     if(sourceBusy)throw busy();
     requireNoPendingSignIn();
+    if(!allowRemoval&&state.scan&&pipelineRemoval?.blocks(projectKey(state)))throw conflict('Pipeline deletion is in progress. Retry its deletion if cleanup failed.');
   }
   function requireSourceChangeIdle(){
     requireSourceIdle();
@@ -370,13 +379,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // The watcher moves a managed source whose pipeline has no Sandbox stage to its branch head, never during a stage's
   // removal or another source change: it tries again at its next poll.
   async function followHead({key,branch,sha}: SourceHead) {
-    if(!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch||state.scan.repo.sha===sha||currentPipeline(state).stages.some(stage=>stage.kind==='sandbox'))return;
+    if(!pipelineAvailable()||!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch||state.scan.repo.sha===sha||currentPipeline(state).stages.some(stage=>stage.kind==='sandbox'))return;
     if(removals.summaries(key).some(item=>item.status==='queued'||item.status==='removing'))throw conflict('A stage is being removed.');
     await moveSource(sha);
   }
   const gates=await createGateManager({dataDir,pollInterval:gate.pollInterval,follow:followHead,
     source(){
-      if(!state.scan)return null;
+      if(!state.scan||!pipelineAvailable())return null;
       const managed=state.source?.scanPath===state.scan.repo.path;
       return {key:pipelineKey(state),branch:state.scan.repo.branch||null,sha:state.scan.repo.sha||null,repository:managed?state.source!.repository:null,stages:currentPipeline(state).stages.map(({id,name,kind})=>({id,name,kind}))};
     },
@@ -410,7 +419,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // A deployment is a separate, explicitly requested operation. Gate readiness alone never starts one.
   const releases=await createReleaseManager({dataDir,...releaseOptions,async getEvidence():Promise<ReleaseEvidence>{
     const scan=state.scan,source=state.source;
-    if(!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    if(!pipelineAvailable()||!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
     const connection=await connectedAccount();
     if(!connection||state.scan!==scan||state.source!==source||sourceBusy||closed)return {source:null,ready:false,gates:[]};
     const evidence=gates.releaseEvidence(scan.repo.sha);
@@ -447,7 +456,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   });
   const repairs=await createRepairManager({dataDir,
     source(){
-      if(!state.scan)return null;
+      if(!state.scan||!pipelineAvailable())return null;
       const managed=state.source?.scanPath===state.scan.repo.path?state.source:null;
       return {key:pipelineKey(state),branch:state.scan.repo.branch||null,repository:managed?.repository??null,checkoutPath:managed?.checkoutPath??null,rootDirectory:managed?.rootDirectory??null};
     },
@@ -465,20 +474,52 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   });
   onCleanup(()=>repairs.close());
   // Autopilot as the pipeline reads it: the Build stage carries the repairs, and its mode is the pipeline's auto-merge switch.
-  const buildStage=()=>state.scan?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
+  const buildStage=()=>hasPipeline(state)?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
   const autopilotView=(scan: Scan)=>autopilotOf(repairs.view(),{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
   function autopilotStage(stageId: unknown){const build=buildStage();if(!build||build.id!==stageId)throw new Error('Autopilot is available for Build.');return build;}
   const removals=await createStageRemovalManager({dataDir,usage,environments,browser,removeStage:context=>save(current=>{
     // Deletion belongs to the confirmed source, even after the user changes
     // repositories or closes the browser. A prior final commit is idempotent.
-    const existing=current.pipelines[context.key];
+    const entry=Object.entries(current.pipelines).find(([key,pipeline])=>(pipeline.id??key)===context.key);
+    const existing=entry?.[1];
     if(!existing||!existing.stages.some(stage=>stage.id===context.stageId))return {result:null};
     if(browser.isActive(context)||environments.summaries(context.key).some(item=>item.stageId===context.stageId&&holdsResources(item)))throw new Error('Stage cleanup is not complete.');
     const pipeline=applyPipelineAction(existing,{action:'remove-stage',stageId:context.stageId});
-    const pipelines={...current.pipelines,[context.key]:pipeline};
+    const pipelines={...current.pipelines,[entry![0]]:pipeline};
     return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
   })});
   onCleanup(()=>removals.close());
+  pipelineRemoval=await createPipelineRemovalManager({dataDir,
+    guard(scope){
+      requireSourceIdle({allowRemoval:true});
+      if(browser.hasPendingInput())throw conflict('Finish adding this test before deleting the pipeline.');
+      if(Object.values(gates.view().stages).some(item=>['rebuilding','running'].includes(item.status)))throw conflict('Wait for the journey gate to finish before deleting the pipeline.');
+      if(repairs.hasWork(scope.key))throw conflict('Stop the Build change and finish its cleanup before deleting the pipeline.');
+      if(releases.hasWork(scope.key))throw conflict('Resolve or abandon the deployment request before deleting the pipeline.');
+      for(const stageId of scope.stageIds) {
+        if(browser.isActive({key:scope.key,stageId}))throw conflict('Stop the browser run before deleting the pipeline.');
+        if(!pipelineRemoval?.blocks(scope.project))usage.assertAvailable({key:scope.key,stageId});
+      }
+    },
+    async cleanStage(scope,stageId){
+      await removals.start({key:scope.key,stageId});
+      const result=await removals.awaitIdle({key:scope.key,stageId});
+      if(result.removal?.status!=='completed')throw new Error(result.removal?.error||'Sandbox cleanup did not finish. Retry deleting the pipeline.');
+    },
+    async removePipeline(scope){
+      if(environments.summaries(scope.key).some(holdsResources))throw new Error('A sandbox still belongs to this pipeline. Retry its deletion.');
+      await save(current=>{
+        const existing=current.pipelines[scope.project];
+        if(existing&&(existing.id??scope.project)!==scope.key)throw conflict('The pipeline changed. Reload the Pipelines table.');
+        if(existing?.stages.some(stage=>stage.kind==='sandbox'))throw new Error('Sandbox stage cleanup is not complete. Retry deleting the pipeline.');
+        const pipelines={...current.pipelines};delete pipelines[scope.project];
+        const removedPipelines=[...new Set([...(current.removedPipelines??[]),scope.project])];
+        return {state:{...current,pipelines,removedPipelines},commit(){state.pipelines=pipelines;state.removedPipelines=removedPipelines;}};
+      });
+    },
+  });
+  onCleanup(()=>pipelineRemoval!.close());
+  pipelineRemoval.resume();
   // A paused recording stream would otherwise hold shutdown open.
   const videoStreams=new Set<ServerResponse>();
   const reply=(res: ServerResponse,status: number,data: unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
@@ -566,7 +607,24 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           return {services,generated:'provenance' in plan} satisfies TwinServicesReply;
         }));
       }
-      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo} satisfies PipelineStateReply);
+      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:hasPipeline(state)?currentPipeline(state):null,environments:hasPipeline(state)?environments.summaries(pipelineKey(state)):[],stageRemovals:hasPipeline(state)?removals.summaries(pipelineKey(state)):[],browserTests:hasPipeline(state)?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:hasPipeline(state)?autopilotView(state.scan!):null,pipelineRemoval:state.scan?pipelineRemoval!.view(projectKey(state)):null,pipelineId:hasPipeline(state)?pipelineKey(state):null,defaultRepo:repo} satisfies PipelineStateReply);
+      if(req.method==='POST'&&path==='/api/pipeline/remove') {
+        const input=await body(req);requireSourceIdle({allowRemoval:true});activeScan(input.repoPath);
+        const project=projectKey(state),key=pipelineKey(state),pipeline=hasPipeline(state)?currentPipeline(state):null;
+        if(input.pipelineId!==key)throw conflict('The pipeline changed. Reload the Pipelines table.');
+        const stageIds=[...new Set([...(pipeline?.stages.filter(stage=>stage.kind==='sandbox').map(stage=>stage.id)??[]),...environments.summaries(key).map(item=>item.stageId).filter((id):id is string=>Boolean(id))])];
+        return reply(res,202,{removal:await pipelineRemoval!.start({project,key,stageIds})});
+      }
+      if(req.method==='POST'&&path==='/api/pipeline/create') {
+        const input=await body(req);requireSourceChangeIdle();activeScan(input.repoPath);
+        const pipeline=await save(current=>{
+          if(hasPipeline(current))throw conflict('This project already has a pipeline.');
+          const key=projectKey(current),pipeline={...defaultPipeline(current.scan!.repo.path),id:`pipeline:${randomUUID()}`};
+          const pipelines={...current.pipelines,[key]:pipeline},removedPipelines=(current.removedPipelines??[]).filter(item=>item!==key);
+          return {state:{...current,pipelines,removedPipelines},commit(){state.pipelines=pipelines;state.removedPipelines=removedPipelines;},result:pipeline};
+        });
+        return reply(res,200,{pipeline});
+      }
       if(path==='/api/stages/remove'||path==='/api/stages/removal'){
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         // Admitted once the body has arrived, so a source change that began meanwhile is seen.
@@ -754,11 +812,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             }
             // A root saved as it was typed, before roots were saved as the checkout spells them, keeps its pipeline.
             const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
-            const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
-            pipelines[key]=pipeline;
+            const pipeline=current.removedPipelines?.includes(key)?null:normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
+            if(pipeline)pipelines[key]=pipeline;
             return {state:{...current,scan,source,pipelines},
               commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;},
-              result:{scan,source,pipeline} satisfies SourceReply};
+              result:{scan,source,pipeline,pipelineId:pipeline?.id??(pipeline?key:null)} satisfies SourceReply};
           }).catch(discard);
           return reply(res,200,result);
         });
@@ -771,7 +829,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         });
       }
       if(req.method==='GET'&&path==='/api/pipeline') {
-        return reply(res,200,{pipeline:currentPipeline(state)});
+        if(!state.scan)throw new Error('Scan a repository first.');
+        return reply(res,200,{pipeline:hasPipeline(state)?currentPipeline(state):null});
       }
       if(req.method==='GET'&&path==='/api/git-history') {
         requireSourceIdle();
@@ -806,19 +865,21 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         const input=await body(req);
         requireSourceIdle();
         const pipeline=await save(current=>{
+          requireSourceIdle();
           const repoPath=current.scan?.repo?.path;
           if(!repoPath || input?.repoPath!==repoPath) {
             const error: HttpError=new Error('The active repository changed. Reload its pipeline before editing.');
             error.statusCode=409;throw error;
           }
           if(input.action==='remove-stage')throw new Error('Use confirmed stage deletion to remove this stage and its sandbox.');
+          if(currentPipeline(current).id&&input.pipelineId!==pipelineKey(current))throw conflict('The pipeline changed. Reload the Pipelines table.');
           // Only a stage ID can be in use; any other value names no stage and the action rejects it.
           for(const stageId of [input.stageId,input.afterStageId,input.sourceStageId,input.targetStageId].filter((id): id is string=>typeof id==='string'&&Boolean(id)))usage.assertAvailable({key:pipelineKey(current),stageId});
           const pipeline=applyPipelineAction(currentPipeline(current),input);
           if(input.action==='set-github-workflow' && input.workflowFile!==null && !current.scan!.workflows?.some(workflow=>workflow.file===input.workflowFile)) {
             throw new Error('The selected GitHub Actions workflow is no longer available. Reload the pipeline.');
           }
-          const pipelines={...current.pipelines,[pipelineKey(current)]:pipeline};
+          const pipelines={...current.pipelines,[projectKey(current)]:pipeline};
           return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
         });
         return reply(res,200,{pipeline});
@@ -898,7 +959,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    const draining=[releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),tickTask];
     // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
     // still unfinished a moment later, such as one whose body never arrives, is cut off.
     closing=(async()=>{

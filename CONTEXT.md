@@ -2,7 +2,9 @@
 
 ## Language
 
-**Pipeline** — The connected stages through which a project's source, delivery and business verification progress.
+**Project** — A configured repository and source root whose delivery and business verification Perpetual manages. A Project initially owns one Pipeline and remains when that Pipeline is removed.
+
+**Pipeline** — A Project's connected stages through which its source, delivery and business verification progress. Disconnecting GitHub retains the Pipeline; removing it cleans up its owned environments and test workspace.
 
 **Stage** — A named point in a pipeline, such as Source, Build, Beta or Production. A stage's environment readiness and test results are separate states.
 

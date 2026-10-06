@@ -142,6 +142,7 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
   });
   const manager={
     view,
+    hasWork(key:string){return busy||state.releases.some(item=>item.source.key===key&&active(item.record));},
     async configure(input:unknown){
       await exclusive(async()=>{const target=releaseTarget(input),before=await getEvidence();if(!sourceValid(before.source))throw new Error('Connect a GitHub source before configuring a deployment.');
         if(own(before.source).some(entry=>active(entry.record)))throw conflict('A deployment is unresolved. Check its status or abandon it before changing the target.');

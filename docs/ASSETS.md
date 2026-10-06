@@ -70,7 +70,9 @@ Other scripts use system fallbacks. Upstream: [Geist Font](https://github.com/ve
 
 ## Registry components
 
-The React interface in `client/` uses components installed with the official shadcn CLI, not HTML imitations:
+The React interface in `client/` uses components from the official shadcn registries:
+
+- [shadcn Table](https://ui.shadcn.com/docs/components/table): `client/src/components/ui/table.tsx` is the unchanged `table` component from the [official new-york-v4 registry](https://ui.shadcn.com/r/styles/new-york-v4/table.json), downloaded on 2026-10-06. Its responsive wrapper and semantic table primitives compose the Pipelines table. It shares the shadcn MIT notice below.
 
 - [shadcn/ui](https://ui.shadcn.com/): Alert, Alert Dialog, Badge, Button, Card, Checkbox, Collapsible, Dialog, Dropdown Menu, Input, Item, Label, Select, Separator, Sheet, Sidebar, Skeleton, Spinner, Switch, Tabs, Textarea and Tooltip in `client/src/components/ui/`, and Sidebar's mobile hook in `client/src/hooks/use-mobile.ts`. Item was installed from the official new-york-v4 registry with `npx shadcn add item --yes`, and Spinner with `npx shadcn add spinner --yes`; its one local adaptation puts the spin under `motion-safe:`, so it stops with reduced motion like every other spinner here. shadcn/ui is MIT, copyright 2023 shadcn; the notice, from [`LICENSE.md`](https://github.com/shadcn-ui/ui/blob/6ea6856f5a1082d4d9c231559b6bc3ee73827493/LICENSE.md) in `shadcn-ui/ui`, is in `public/assets/licenses/shadcn-ui-LICENSE.txt`.
 - [React Flow UI Base Node](https://reactflow.dev/ui/components/base-node): `client/src/components/base-node.tsx`, installed from `https://ui.reactflow.dev/base-node`. MIT, copyright webkid GmbH; the notice is in `public/assets/licenses/React-Flow-LICENSE.txt`. The graph runtime is `@xyflow/react`. The paid React Flow Workflow Editor template is not included.

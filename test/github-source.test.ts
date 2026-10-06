@@ -163,7 +163,7 @@ test('a root saved as it was typed keeps its pipeline when the source is saved a
   // Saved under the root as typed; the branch selector posts that root again.
   await withController(t, { pipelines: { 'github:acme/app:/backend': { repoPath: '/earlier/copy/backend', stages } } }, async ({ connect }) => {
     const { status, body } = await connect({ repository: 'acme/app', branch: 'main', rootDirectory: '/backend' });
-    assert.deepEqual([status, body.source.rootDirectory, body.pipeline.stages.map(stage => stage.name)], [200, '/Backend', ['Source', 'Build', 'Beta', 'Production']]);
+    assert.deepEqual([status, body.source.rootDirectory, body.pipeline!.stages.map(stage => stage.name)], [200, '/Backend', ['Source', 'Build', 'Beta', 'Production']]);
   });
 });
 

@@ -16,15 +16,17 @@ const ICONS: Record<string, LucideIcon> = { idle: CircleDashed, passed: CircleCh
  * second later while it reports that it could not reload yet, such as while a pipeline change saves. A new `retryKey`
  * starts it over, as Try again after a failed reload does.
  */
-export function useStageGates(repo: ScanRepo | null | undefined, onSourceMoved: () => Promise<boolean>, retryKey = 0) {
-  const [view, setView] = useState<GateView | null>(null);
+export function useStageGates(repo: ScanRepo | null | undefined, onSourceMoved: () => Promise<boolean>, retryKey = 0, pipelineId?: string) {
+  const [read, setRead] = useState<{ key: string; view: GateView | null } | null>(null);
   const path = repo?.path;
+  const key = JSON.stringify([path, pipelineId]);
+  const view = read?.key === key ? read.view : null;
   useEffect(() => {
     if (!path) return undefined;
-    const poller = createGatePoller({ controller: api, onChange: next => setView(previous => shareGates(previous, next)) });
+    const poller = createGatePoller({ controller: api, onChange: next => setRead(previous => ({ key, view: shareGates(previous?.key === key ? previous.view : null, next) })) });
     const stop = gateChanges.subscribe(() => poller.refresh());
     return () => { stop(); poller.stop(); };
-  }, [path]);
+  }, [path, key]);
   // Reload once per commit the gate view reports, not on every new callback identity.
   const moved = sourceMoved(view, repo);
   const reload = useRef(onSourceMoved);

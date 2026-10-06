@@ -12,7 +12,7 @@ import { githubRepositoryUrl } from '../../../src/github-remote.ts';
 export type PipelineStage = Pick<Stage, 'id' | 'name'> & Partial<Pick<Stage, 'collapsed'>> & { kind: string };
 export type PipelineTransition = Pick<Transition, 'id' | 'source' | 'target'> & Partial<Pick<Transition, 'blocked'>>;
 /** A source's pipeline: its stages in order and the transitions between them. */
-export type PipelineView = Partial<Pick<Pipeline, 'repoPath'>> & { stages: PipelineStage[]; transitions: PipelineTransition[] };
+export type PipelineView = Partial<Pick<Pipeline, 'repoPath' | 'id'>> & { stages: PipelineStage[]; transitions: PipelineTransition[] };
 /** A scan as stage cards read it. R is a delivery row the scan projects for Source, Build or Production. */
 export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null; branch?: string | null; remote?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
 

@@ -8,7 +8,13 @@ import type { AutopilotView } from './autopilot.ts';
 export type StageKind = 'source' | 'build' | 'production' | 'sandbox';
 export interface Stage { id: string; name: string; kind: StageKind; collapsed: boolean; githubWorkflow?: string | null }
 export interface Transition { id: string; source: string; target: string; blocked: boolean; reason: string }
-export interface Pipeline { repoPath: string; stages: Stage[]; transitions: Transition[] }
+export interface Pipeline { repoPath: string; id?: string; stages: Stage[]; transitions: Transition[] }
+/** A confirmed deletion, pinned to one project and one generation of its pipeline. */
+export interface PipelineRemoval {
+  id: string; status: 'queued' | 'removing' | 'completed' | 'failed'; error?: string;
+  createdAt: string; updatedAt: string;
+}
+export interface PipelineRemovalReply { removal: PipelineRemoval | null }
 /** POST /api/pipeline/action returns the definition after the saved change. */
 export interface PipelineActionReply { pipeline: Pipeline }
 /**
@@ -19,6 +25,8 @@ export interface PipelineStateReply {
   scan: Scan | null; defaultRepo: string; pipeline: Pipeline | null; source?: GitHubSource | null;
   pipelines: Record<string, Pipeline>; githubConnection?: { login: string; connectedAt: string } | null;
   environments: Environment[]; stageRemovals: StageRemoval[]; browserTests: Record<string, BrowserSummaryReply>; autopilot: AutopilotView | null;
+  pipelineRemoval?: PipelineRemoval | null;
+  pipelineId?: string | null;
 }
 /** POST /api/source/github replies after the source and its pipeline are durably saved. */
-export interface SourceReply { scan: Scan; source: GitHubSource; pipeline: Pipeline }
+export interface SourceReply { scan: Scan; source: GitHubSource; pipeline: Pipeline | null; pipelineId?: string | null }
