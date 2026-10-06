@@ -63,16 +63,30 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
   return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
     .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
 }
+/** A package's manifest as `require` from `from` finds it, or undefined when it finds none it can read. */
+async function installed(from: string | URL, name: string) {
+  try {
+    const file = createRequire(from).resolve(`${name}/package.json`);
+    return { file, ...JSON.parse(await readFile(file, 'utf8')) as { version?: unknown; bin?: { supabase?: unknown }; optionalDependencies?: object } };
+  } catch { return undefined; }
+}
 /**
- * The installed CLI's launcher, which runs the platform binary of the same locked release; it refuses any other
- * version, as a node_modules older than package.json would hold.
+ * The installed CLI's launcher, as `from` resolves it (Perpetual's own modules by default). The launcher runs the first
+ * binary package for this platform that it resolves from its own file, so that package is resolved the same way. Both
+ * must be the locked release; otherwise, as with a node_modules older than package.json or a binary package npm skipped
+ * when its optional install failed, the error names the command that installs them rather than leaving the launcher to fail.
  */
-export async function cliEntry() {
-  let manifest: string;
-  try { manifest = createRequire(import.meta.url).resolve('supabase/package.json'); } catch { throw new Error(CLI_MISSING); }
-  const { version, bin } = JSON.parse(await readFile(manifest, 'utf8')) as { version?: unknown; bin?: { supabase?: unknown } };
-  if (version !== CLI_VERSION || typeof bin?.supabase !== 'string') throw new Error(CLI_MISSING);
-  return join(dirname(manifest), bin.supabase);
+export async function cliEntry(from: string | URL = import.meta.url) {
+  const launcher = await installed(from, 'supabase');
+  if (launcher?.version !== CLI_VERSION || typeof launcher.bin?.supabase !== 'string') throw new Error(CLI_MISSING);
+  const entry = join(dirname(launcher.file), launcher.bin.supabase);
+  // The launcher's candidates, in its order: this platform's package, then on Linux its musl build.
+  const platform = `${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
+  for (const name of [`@supabase/cli-${platform}`, `@supabase/cli-${platform}-musl`].filter(item => Object.hasOwn(launcher.optionalDependencies ?? {}, item))) {
+    const binary = await installed(entry, name);
+    if (binary) { if (binary.version === CLI_VERSION) return entry; break; }
+  }
+  throw new Error(CLI_MISSING);
 }
 const cli = async (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) =>
   ctx.exec(process.execPath, [await cliEntry(), ...args], { cwd: ctx.dir, env: { [BINARY_OVERRIDE]: '', ...env } });

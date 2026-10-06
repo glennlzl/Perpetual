@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
 import supabase, { CLI_VERSION as SUPABASE_VERSION, cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import { APP_IMAGE } from '../src/twin/compose.ts';
@@ -355,6 +355,28 @@ test('The Supabase CLI is an exact dependency that package-lock.json locks with 
   const entry = await cliEntry();
   assert.equal(entry, fileURLToPath(new URL('node_modules/supabase/dist/supabase.js', root)));
   await stat(entry);
+});
+
+test('The Supabase CLI is refused with the command that installs it unless its launcher and binary are the locked release', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'supabase-cli-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const install = async (name: string, manifest: object) => {
+    await mkdir(join(root, 'node_modules', name), { recursive: true });
+    await writeFile(join(root, 'node_modules', name, 'package.json'), JSON.stringify(manifest));
+  };
+  // This machine's binary package, the optional dependency npm installs beside the launcher.
+  const binary = `@supabase/cli-${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
+  const launcher = { name: 'supabase', version: SUPABASE_VERSION, bin: { supabase: 'dist/supabase.js' }, optionalDependencies: { [binary]: SUPABASE_VERSION } };
+  const from = pathToFileURL(join(root, 'perpetual.ts')), missing = { message: `Supabase CLI ${SUPABASE_VERSION} is not installed: run npm run setup in Perpetual.` };
+  await assert.rejects(cliEntry(from), missing, 'Nothing is installed.');
+  await install('supabase', launcher);
+  await assert.rejects(cliEntry(from), missing, 'No binary package, as npm leaves when an optional install fails.');
+  await install(binary, { name: binary, version: '2.117.0' });
+  await assert.rejects(cliEntry(from), missing, 'The binary of another release.');
+  await install(binary, { name: binary, version: SUPABASE_VERSION });
+  assert.equal(await cliEntry(from), join(root, 'node_modules/supabase/dist/supabase.js'));
+  await install('supabase', { ...launcher, version: '2.117.0' });
+  await assert.rejects(cliEntry(from), missing, 'Another release, as a node_modules older than package.json holds.');
 });
 
 test('A long twin project gets a Supabase project id the CLI keeps whole, used by start and stop alike', async () => {
