@@ -130,7 +130,10 @@ export async function createReleaseManager({dataDir,getEvidence,github=createRel
     const pending=own(before.source).filter(entry=>active(entry.record)||all&&entry.source.sha===before.source!.sha&&entry.record.status!=='abandoned').slice(-20);
     for(const entry of pending){
       try{const remote=await github.read({...entry,...(entry.record.deploymentId?{deploymentId:entry.record.deploymentId}:{})});await unchanged(before);
-        const changes=remote&&{...remote,error:remote.error};
+        // A deployment that ended without a status of its own, such as one GitHub no longer has, ends only an unresolved
+        // release. A release that already ended keeps the status GitHub reported, with why it can no longer be read, so a
+        // deployed commit is never offered again.
+        const changes=remote&&(remote.error&&!active(entry.record)?{error:remote.error}:{...remote,error:remote.error});
         if(changes&&differs(entry.record,changes))await update(entry.id,changes);
       }catch(error){if(closed||!same(before,await getEvidence()))throw conflict('The source changed. Reload the pipeline.');
         const message=failureText(error,500)||'Could not confirm the deployment status. Check the connection and try again.';

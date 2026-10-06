@@ -48,7 +48,8 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
       throw Object.assign(new Error(method==='POST'?'Could not confirm the GitHub deployment request.':'Could not read the GitHub deployment configuration or status.'),{definitive,status});}
   }
   // GitHub answers 404 for a deployment it no longer has, and for a repository the account cannot read: only a readable
-  // repository makes it the former, which ends the release. Any other failure is thrown as it was.
+  // repository makes it the former, which is reported with why it ended (the manager ends only an unresolved release with
+  // it). Any other failure is thrown as it was.
   async function gone(error:unknown,repository:string,deploymentId:string):Promise<ReleaseRemote>{
     if((error as {status?:unknown}|null)?.status!==404)throw error;
     await request('GET',`repos/${repository}`);

@@ -325,3 +325,19 @@ test('a deployment deleted on GitHub ends its release as failed, so Deploy and C
   assert.deepEqual([ended.current?.status,ended.current?.error,ended.canDeploy],['failed','The deployment no longer exists on GitHub.',true]);
   assert.deepEqual((await f.manager.configure({...target,environment:'staging'})).target?.environment,'staging');
 });
+
+test('a deployed release whose deployment GitHub later deleted stays deployed, so its commit is not offered again',async t=>{
+  let deleted=false,release='';
+  const adapter=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    if(endpoint==='repos/acme/app')return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify({default_branch:'main'})}`};
+    if(deleted)throw Object.assign(new Error('failed'),{stderr:'gh: Not Found (HTTP 404)'});
+    const data=endpoint.includes('/statuses')?[{id:51,state:'success'}]:{id:12,sha:SHA,environment:target.environment,production_environment:target.productionEnvironment,task:'deploy',payload:{perpetual:{releaseId:release,workflowPath:target.workflowPath,sha:SHA}}};
+    return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify(data)}`};}});
+  const f=await fixture(t,{read:adapter.read});await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});release=f.requests[0].id;
+  assert.equal((await f.manager.refresh()).current?.status,'deployed');
+  deleted=true; // a person deleted the deployment on GitHub after it succeeded
+  const checked=await f.manager.refresh();
+  assert.deepEqual([checked.current?.status,checked.current?.statusId,checked.current?.error,checked.canDeploy,checked.blockedReason],
+    ['deployed','51','The deployment no longer exists on GitHub.',false,'This commit is already deployed to this target.']);
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);assert.equal(f.requests.length,1);
+});
