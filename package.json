@@ -51,7 +51,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@babel/types": "^7.29.8",
+    "@babel/types": "^8.0.6",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "24.12.4",
     "@types/react": "^19.3.0",
