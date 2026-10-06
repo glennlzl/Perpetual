@@ -2,7 +2,7 @@ import type {OpenRouterModel,OpenRouterModelView} from '../../contract/settings.
 
 export const OPENROUTER_BASE_URL='https://openrouter.ai/api/v1';
 export const isOpenRouterEndpoint=(value:unknown):boolean=>typeof value==='string'&&value.replace(/\/$/,'')===OPENROUTER_BASE_URL;
-const CATALOG_URL=`${OPENROUTER_BASE_URL}/models`;
+const CATALOG_URL=`${OPENROUTER_BASE_URL}/models`,KEY_URL=`${OPENROUTER_BASE_URL}/key`;
 export const DEFAULT_MODEL='openai/gpt-6-luna';
 /** Strong coding models a build repair escalates to, in order of preference; the first the catalog has is the default. */
 export const ESCALATION_MODELS=['anthropic/claude-sonnet-5','openai/gpt-6','anthropic/claude-sonnet-4.6','openai/gpt-5.4','google/gemini-3-pro-preview'];
@@ -22,6 +22,19 @@ function eligible(model:unknown,time:number):model is CatalogModel{
   return Array.isArray(input)&&input.includes('text')&&input.includes('image')
     &&Array.isArray(output)&&output.includes('text')
     &&Array.isArray(model.supported_parameters)&&model.supported_parameters.includes('tools');
+}
+
+/**
+ * What OpenRouter says of a key, asked of its key endpoint, which spends no credits: accepted, rejected when it answers
+ * that the key is not valid, or unknown when it cannot be reached or answers anything else.
+ */
+export async function checkOpenRouterKey(apiKey:string):Promise<'accepted'|'rejected'|'unknown'>{
+  try{
+    // The key goes to this endpoint only, never on through a redirect.
+    const response=await fetch(KEY_URL,{headers:{Accept:'application/json',Authorization:`Bearer ${apiKey}`},credentials:'omit',redirect:'error',signal:AbortSignal.timeout(10000)});
+    await response.body?.cancel().catch(()=>{});
+    return response.ok?'accepted':[401,403].includes(response.status)?'rejected':'unknown';
+  }catch{return 'unknown';}
 }
 
 export function createOpenRouterModelCatalog(){

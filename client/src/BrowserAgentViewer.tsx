@@ -9,7 +9,7 @@ import { Separator } from '@/components/ui/separator';
 import { UNAVAILABLE, api, controllerFetch, replyError, type ApiError } from '@/lib/api';
 import { useReturnFocus } from '@/lib/journey-focus';
 import RunJourneyGallery from './RunJourneyGallery';
-import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
+import { CHECKS, browserActionFailure, browserActionLabel, browserConcurrencyLabel, browserRunLabel, browserRunTitle, checkedOutcome, discoveryUsage, journeyCheckFailed, journeyCheckState, type BrowserAction, type BrowserCase } from '@/lib/browser-test-ui';
 
 // A finished run's frame is its last one, never a paused stream, so it says when the run ended.
 const endedLabel = (at: string | undefined) => { const time = at ? new Date(at) : null; return time && !Number.isNaN(time.getTime()) ? `Ended ${time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Ended'; };
@@ -116,6 +116,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
   }, [repoPath, stageId, runId, mode, snapshot?.run?.concurrency]);
 
   const run = snapshot?.run;
+  const usage = discoveryUsage(run);
   const finished = Boolean(run && !ACTIVE.has(run.status));
   const approvedCases = run?.caseSummaries || (run ? [] : cases);
   const freshFrame = Boolean(run?.frameUpdatedAt && Date.now() - new Date(run.frameUpdatedAt).getTime() < 3000);
@@ -150,6 +151,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
         <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
           {run?.verification?.control && <Badge variant="outline">Control</Badge>}
           {browserConcurrencyLabel(run) && <Badge variant="outline">{browserConcurrencyLabel(run)}</Badge>}
+          {usage.endedEarly && <Badge variant="outline">Ended early</Badge>}
           {!unavailable && <Badge variant={run?.status === 'failed' || startingError ? 'destructive' : 'secondary'}>{startingError ? 'Failed' : error ? 'Reconnecting' : run ? browserRunLabel(run) : 'Starting'}</Badge>}
           {startingError && mode === 'discover' && onTestSettings && <Button size="sm" variant="outline" onClick={onTestSettings}>Test settings</Button>}
           {/* Cancelling stops every journey in the run, so it is confirmed with Keep running focused first. */}
@@ -174,7 +176,7 @@ export default function BrowserAgentViewer({ repoPath, stageId, runId, mode = 'r
           {frameError && <p role="status" className="absolute bottom-3 right-3 rounded bg-background px-3 py-2 text-sm text-destructive">{frameError}</p>}
         </div>}
         <aside className={`min-h-0 w-full overflow-y-auto ${evidenceOnly ? "" : "border-t lg:border-t-0 lg:border-l"}`} aria-label="Agent activity">
-          <div className="sticky top-0 z-10 flex items-center justify-between bg-background px-4 py-3"><span className="text-sm font-medium">{mode === 'discover' ? 'Exploration' : 'Cases'}</span></div><Separator />
+          <div className="sticky top-0 z-10 flex items-center justify-between gap-3 bg-background px-4 py-3"><span className="text-sm font-medium">{mode === 'discover' ? 'Exploration' : 'Cases'}</span>{usage.tokens && <span className="text-xs tabular-nums text-muted-foreground">{usage.tokens}</span>}</div><Separator />
           {!displayedCases.length && !unavailable && <p role="status" className="p-4 text-sm text-muted-foreground">{finished ? (run!.status === 'completed' ? 'Cases ready for review' : browserRunLabel(run!.status)) : 'Waiting for agent'}</p>}
           {orderedCases.map((item, index) => {
             const caseId = item.caseId || item.id;

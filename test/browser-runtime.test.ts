@@ -4,7 +4,7 @@ import {access,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {validateBrowserTarget,createBrowserRuntime,superviseWorker,browserError} from '../src/browser/runtime.ts';
+import {validateBrowserTarget,createBrowserRuntime,superviseWorker,browserError,ownedStart} from '../src/browser/runtime.ts';
 import {createBrowserModelSettings} from '../src/browser/model.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 
@@ -234,6 +234,45 @@ test('cancelling a worker leaves none of its process running',async()=>{
   await started;job.cancel();
   await assert.rejects(job.promise,{message:'Browser operation cancelled.'});
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
+test('a worker reports the process group it leads as it starts, which is gone once its job settles',{skip:process.platform==='win32'},async()=>{
+  const groups:number[]=[];let pid=0;
+  const job=superviseWorker({command:process.execPath,args:['-e','console.log(JSON.stringify({type:"status",pid:process.pid,group:require("node:child_process").execSync("ps -o pgid= -p "+process.pid).toString().trim()}));'],env:{PATH:process.env.PATH},timeoutMs:20000,cleanupGraceMs:200,onGroup:group=>{groups.push(group);},onEvent:event=>{pid=event.pid as number;assert.equal(Number(event.group),pid,'The worker leads its own process group.');}});
+  assert.equal(groups.length,1,'The group is reported as the worker starts, before any of its output.');
+  await job.promise;
+  assert.deepEqual(groups,[pid]);
+  assert.throws(()=>process.kill(-pid,0),{code:'ESRCH'});
+});
+
+test('an owned worker starts only once its start is recorded, reports its group and how it ended, and a claim is released only when nothing started',async()=>{
+  const log:string[]=[];let recorded!:()=>void;const saved=new Promise<void>(resolve=>{recorded=resolve;});
+  const owner={async claim(){log.push('claim');await saved;log.push('recorded');return {started:(group:number)=>{log.push(`group ${group}`);},release:()=>{log.push('release');},ended:(incomplete:boolean)=>{log.push(incomplete?'ended incomplete':'ended');}};}};
+  const job=ownedStart(owner,({onGroup})=>{log.push('start');onGroup?.(4242);return {promise:Promise.resolve('done'),cancel(){}};});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(log,['claim'],'Nothing starts before its start is recorded.');
+  recorded();
+  assert.equal(await job.promise,'done');
+  assert.deepEqual(log,['claim','recorded','start','group 4242','ended']);
+  // A worker that ends without reporting its group leaves its claim open: it may have started one.
+  log.length=0;
+  await assert.rejects(ownedStart(owner,()=>({promise:Promise.reject(new Error('The browser stopped.')),cancel(){}})).promise,{message:'The browser stopped.'});
+  assert.deepEqual(log,['claim','recorded','ended']);
+  // A worker whose cleanup is incomplete, as after its supervisor killed it, says so as it fails.
+  log.length=0;
+  const forced=Object.assign(new Error('Cleanup incomplete after forced termination.'),{cleanupIncomplete:true as const});
+  await assert.rejects(ownedStart(owner,({onGroup})=>{onGroup?.(4343);return {promise:Promise.reject(forced),cancel(){}};}).promise,forced);
+  assert.deepEqual(log,['claim','recorded','group 4343','ended incomplete']);
+  // Cancelled while its start is recorded, or refused at once, it starts nothing and releases its claim.
+  log.length=0;
+  const cancelled=ownedStart(owner,()=>{log.push('start');return {promise:Promise.resolve('done'),cancel(){}};});
+  cancelled.cancel();
+  await assert.rejects(cancelled.promise,{message:'Browser operation cancelled.'});
+  await assert.rejects(ownedStart(owner,()=>{throw new Error('A Playwright journey needs its approved case and spec.');}).promise,{message:'A Playwright journey needs its approved case and spec.'});
+  assert.deepEqual(log,['claim','recorded','release','claim','recorded','release']);
+  // Without an owner it starts at once.
+  let started=false;ownedStart(undefined,()=>{started=true;return {promise:Promise.resolve(),cancel(){}};});
+  assert.equal(started,true);
 });
 
 test('error text drops URL queries and fragments in time linear in its length',{timeout:20000},()=>{

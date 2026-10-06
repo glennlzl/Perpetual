@@ -2,11 +2,12 @@ import test from 'node:test';
 import type {TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm,mkdir,writeFile,readFile,access,symlink,readdir} from 'node:fs/promises';
-import {writeFileSync} from 'node:fs';
+import {readFileSync,writeFileSync} from 'node:fs';
 import {randomBytes,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createBrowserManager} from '../src/browser/manager.ts';
+import {scopeId} from '../src/environments/usage.ts';
 import {draftCode,manual} from './fixtures/journey-code.ts';
 import type {WorkerEvent} from '../src/browser/runtime.ts';
 import type {JourneyRunInput} from '../src/journeys/playwright/runtime.ts';
@@ -43,6 +44,21 @@ test('scoped reviewed cases run without Docker and require matching immutable as
   await f.manager.saveCases(f.context,[{...scenario,name:'Updated case',expectedOutcomes:['A different outcome']}]);
   assert.equal((await f.manager.runProgress(f.context,run.id)).run.caseSummaries[0].name,'Open workspace');
   assert.equal((await f.manager.view({...f.context,stageId:'gamma'})).cases.length,0);
+});
+
+test('a person runs an unselected reviewed journey by naming it, without selecting it, and nothing else may',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  await f.manager.saveCases(f.context,[{...scenario,selected:false}]);
+  // The gate runs the saved selection, which is empty, and a journey it names is refused.
+  await assert.rejects(f.manager.run(f.context,{}),/Choose 1–30/);
+  await assert.rejects(f.manager.run(f.context,{caseIds:[scenario.id]}),/Review and select each case/);
+  const {run}=await f.manager.run(f.context,{caseIds:[scenario.id]},manual);
+  assert.equal((await completed(f,run.id)).run.status,'passed');
+  assert.deepEqual(run.caseIds,[scenario.id]);
+  assert.equal((await f.manager.view(f.context)).cases[0].selected,false,'Running it saves no selection.');
+  // A journey that needs review stays refused when a person names it.
+  await f.manager.saveCases(f.context,[{...scenario,selected:false,needsReview:true}]);
+  await assert.rejects(f.manager.run(f.context,{caseIds:[scenario.id]},manual),/Review each case before running/);
 });
 
 test('results survive public run history, changed case drafts and controller restart',async t=>{
@@ -161,6 +177,25 @@ test('discovery adds unselected drafts, preserving reviewed cases and persisted 
   await f.manager.close();const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());assert.deepEqual((await restarted.view(f.context)).cases,view.cases);
 });
 
+test('a discovery keeps its agent\'s counts whether it completes or fails, and only counts of their exact shape',async t=>{
+  const counts={modelCalls:3,modelFailures:{timeout:0,invalid_output:2,provider:0,other:0},stepsWithoutActions:2,actionCount:4,modelMs:5200,inputTokens:12000,outputTokens:800,forcedFinalization:true};
+  let completes=false;
+  const f=await fixture(t,()=>[{type:'diagnostics',diagnostics:counts},{type:'diagnostics',diagnostics:{...counts,inputTokens:'many'}},...completes?[{type:'discovery',summary:'Workspace product',cases:[]}]:[]]);
+  const failed=(await f.manager.discover(f.context)).run,report=await completed(f,failed.id);
+  assert.equal(report.run.status,'failed');assert.deepEqual(report.run.diagnostics,counts);
+  assert.equal(Object.hasOwn(f.manager.summary(f.context).runs.find(run=>run.id===failed.id)!,'diagnostics'),false,'Source polling leaves the counts to the full run.');
+  completes=true;
+  const finished=(await f.manager.discover(f.context)).run;
+  assert.deepEqual([(await completed(f,finished.id)).run.status,(await f.manager.runProgress(f.context,finished.id)).run.diagnostics],['completed',counts]);
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8'));
+  state.runs.find((run:{id:string})=>run.id===finished.id).diagnostics={...counts,modelCalls:-1};
+  await writeFile(file,JSON.stringify(state));
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  assert.deepEqual((await restarted.runProgress(f.context,failed.id)).run.diagnostics,counts,'Counts survive a restart.');
+  assert.equal(Object.hasOwn((await restarted.runProgress(f.context,finished.id)).run,'diagnostics'),false,'Stored counts of another shape are dropped.');
+});
+
 test('scoped frames never cross stages and cancelling preserves terminal status on restart',async t=>{
   const jpeg=Buffer.from([0xff,0xd8,0xff,0xd9]);
   const f=await fixture(t,[{type:'frame',data:jpeg.toString('base64')},{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
@@ -206,6 +241,111 @@ test('journeys keep the recordings they report for the stage\'s latest runs only
   await assert.rejects(access(orphan));
   for(const path of [linked,join(outside,'clip.mp4'),join(videos,'Holiday'),join(videos,'notes.txt')])await access(path);
   assert.equal((await restarted.video(f.context,latest,scenario.id,name)).size,4);
+});
+
+test('a stage keeps its latest gate run\'s and latest repair gate run\'s recordings and its latest verification\'s apart from its five latest runs',async t=>{
+  const facts={caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]};
+  const f=await fixture(t,input=>{
+    const name=`page@${randomBytes(16).toString('hex')}.webm`;writeFileSync(join(input.videoDir!,name),'webm');
+    return [{type:'video',caseId:scenario.id,files:[name]},...milestones,{type:'result',result:facts}];
+  });
+  // A run nobody started by hand is a gate's: draft code needs review without a browser, and the mark stays private. A
+  // repair's gate, at its pull request head, names its repair, and its runs are marked apart.
+  const unapproved=(await f.manager.run(f.context,{})).run;
+  const report=await completed(f,unapproved.id);
+  assert.equal(report.run.status,'needs_review');assert.equal(Object.hasOwn(report.run,'gate'),false);
+  const repairing=(await f.manager.run({...f.context,repair:'repair-1'},{})).run;await completed(f,repairing.id);
+  const file=join(f.dataDir,'browser','state.json'),stored=()=>JSON.parse(readFileSync(file,'utf8')).runs as {id:string;gate?:true|'repair';verification?:{id:string}}[];
+  assert.deepEqual([unapproved.id,repairing.id].map(id=>stored().find(run=>run.id===id)!.gate),[true,'repair']);
+  // Recorded gate runs run approved code; these are a person's runs that the saved state then marks as the gates'.
+  const gate=(await f.manager.run(f.context,{},manual)).run;await completed(f,gate.id);
+  const repairGate=(await f.manager.run(f.context,{},manual)).run;await completed(f,repairGate.id);
+  assert.equal(stored().find(run=>run.id===gate.id)!.gate,undefined,'A person\'s run is not the gate\'s.');
+  await f.manager.close();
+  // The repair gate ran after the target branch's gate, whose run the stage's gate Badge and commit status refer to.
+  const state=JSON.parse(await readFile(file,'utf8'));
+  state.runs.find((run:{id:string})=>run.id===gate.id).gate=true;state.runs.find((run:{id:string})=>run.id===repairGate.id).gate='repair';
+  state.runs=state.runs.filter((run:{id:string})=>![unapproved.id,repairing.id].includes(run.id));
+  await writeFile(file,JSON.stringify(state));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  const idle=async()=>{for(const deadline=Date.now()+WAIT;manager.isActive(f.context);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The stage did not become idle.');};
+  const runs:string[]=[];
+  for(let i=0;i<7;i++){const {run}=await manager.run(f.context,{},manual);runs.push(run.id);await idle();}
+  // Two verifications of the draft, four attempts each: three passing runs and a control run.
+  for(let i=0;i<2;i++){await manager.verifySpec(f.context,{caseId:scenario.id,hash:(await manager.view(f.context)).specs[scenario.id].draft!.hash});await idle();}
+  const attempts=stored().filter(run=>run.verification),latest=attempts[0].verification!.id;
+  assert.equal(attempts.length,8);
+  const videos=join(f.dataDir,'browser','videos');
+  const kept=[...attempts.filter(run=>run.verification!.id===latest).map(run=>run.id),...runs.slice(2),gate.id,repairGate.id];
+  for(const id of [gate.id,repairGate.id,...runs,...attempts.map(run=>run.id)]){
+    const recorded=(await manager.runProgress(f.context,id)).progress.cases[0].videos;
+    if(kept.includes(id)){assert.equal(recorded?.length,1,id);await access(join(videos,id,recorded![0]));}
+    else{assert.equal(recorded,undefined,id);await removed(join(videos,id));}
+  }
+});
+
+test('verification attempts keep a history of their own, and each stage keeps its latest gate run and latest repair gate run',async t=>{
+  const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
+  const first=(await f.manager.run(f.context,{},manual)).run;await completed(f,first.id);await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),[stored]=state.runs;
+  const names=new Map<string,string>();
+  const copy=(name:string,changes:Record<string,unknown>={})=>{const id=randomUUID();names.set(id,name);return {...structuredClone(stored),id,...changes};};
+  const attempt=(index:number)=>copy(`attempt ${index}`,{verification:{id:`verification-${Math.floor(index/4)}`,hash:'a'.repeat(64),caseHash:'b'.repeat(64),attempt:index%4+1,control:index%4===3}});
+  // Newest first: 50 runs and 50 verification attempts interleaved, the stage's latest repair gate run and latest gate run,
+  // a run and an attempt past each history, an older repair gate run and gate run, a run whose stored mark is no gate's,
+  // and another stage's only gate run.
+  state.runs=[...Array.from({length:50},(_,index)=>[copy(`run ${index}`),attempt(index)]).flat(),copy('repair gate',{gate:'repair'}),copy('gate',{gate:true}),copy('run 50'),attempt(50),
+    copy('older repair gate',{gate:'repair'}),copy('older gate',{gate:true}),copy('unknown mark',{gate:'nightly'}),copy('other stage gate',{gate:true,scope:scopeId({key:'repo',stageId:'gamma'})})];
+  await writeFile(file,JSON.stringify(state));
+  const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
+  const {run}=await restarted.run(f.context,{},manual);names.set(run.id,'new');
+  for(const deadline=Date.now()+WAIT;['queued','running'].includes((await restarted.runProgress(f.context,run.id)).run.status);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The run did not finish.');
+  // A finished run still saves and prunes recordings after its status; closing waits for both, so the file is final and
+  // nothing writes into the data directory once the fixture removes it.
+  await restarted.close();
+  const history=JSON.parse(await readFile(file,'utf8')).runs.map((item:{id:string})=>names.get(item.id));
+  // The new run is the latest of the 50 runs, so the oldest of them leaves; no attempt takes a run's place.
+  const expected=['new',...Array.from({length:50},(_,index)=>[...index<49?[`run ${index}`]:[],`attempt ${index}`]).flat(),'repair gate','gate','other stage gate'];
+  assert.deepEqual(history,expected);
+});
+
+test('deleting a stage deletes its tests, code, settings, runs and recordings, and nothing of another stage',async t=>{
+  const facts={caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]};
+  const f=await fixture(t,input=>{
+    const name=`page@${randomBytes(16).toString('hex')}.webm`;writeFileSync(join(input.videoDir!,name),'webm');
+    return [{type:'video',caseId:scenario.id,files:[name]},...milestones,{type:'result',result:facts}];
+  });
+  const gamma={...f.context,stageId:'gamma'},idle=async(context:typeof f.context)=>{for(const deadline=Date.now()+WAIT;f.manager.isActive(context);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The stage did not become idle.');};
+  await f.manager.saveConfig(gamma,{targetUrl:'http://localhost:3001'});await f.manager.saveCases(gamma,[scenario]);await draftCode(f.manager,gamma,[scenario]);
+  const kept=(await f.manager.run(gamma,{},manual)).run;await idle(gamma);
+  const running=(await f.manager.run(f.context,{},manual)).run;
+  await assert.rejects(f.manager.removeStage(f.context),{statusCode:409},'A stage running journeys keeps its data.');
+  await idle(f.context);
+  // Its analysis, preparation, automatic target and an external cleanup hold, as earlier operations leave them.
+  await f.manager.close();
+  const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),scope=scopeId(f.context);
+  Object.assign(state.analyses,{[scope]:{cases:[],summary:'Workspace product',authenticated:false,createdAt:'2026-10-01T00:00:00.000Z',sourceRevision:'abc'}});
+  Object.assign(state.preparations,{[scope]:{environmentId:'twin',status:'completed',createdAt:'2026-10-01T00:00:00.000Z'}});
+  Object.assign(state.preparationAttempts,{[`${scope}:twin`]:true,[`${scopeId(gamma)}:twin`]:true});
+  Object.assign(state.configTargets,{[scope]:{environmentId:'twin',url:'http://localhost:3000/'}});
+  state.externalOperations={'http://127.0.0.1:3999':{id:randomUUID(),scope,operation:'run',startedAt:'2026-10-01T00:00:00.000Z'}};
+  await writeFile(file,JSON.stringify(state));
+  const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
+  await manager.removeStage(f.context);
+  const view=await manager.view(f.context);
+  assert.deepEqual([view.cases,view.runs,view.specs,view.config.targetUrl,view.preparation,view.analysis],[[],[],{},'',null,null]);
+  const saved=JSON.parse(await readFile(file,'utf8'));
+  for(const key of ['configs','cases','analyses','preparations','configTargets','specs','generationFailures','authoring'])assert.equal(Object.hasOwn(saved[key],scope),false,key);
+  assert.deepEqual(Object.keys(saved.preparationAttempts),[`${scopeId(gamma)}:twin`]);
+  assert.deepEqual(saved.runs.map((run:{id:string})=>run.id),[kept.id]);
+  assert.deepEqual(Object.keys(saved.externalOperations),['http://127.0.0.1:3999'],'A cleanup hold keeps its application.');
+  const videos=join(f.dataDir,'browser','videos');
+  await assert.rejects(access(join(videos,running.id)));
+  assert.equal((await manager.view(gamma)).cases.length,1);
+  await access(join(videos,kept.id,(await manager.runProgress(gamma,kept.id)).progress.cases[0].videos![0]));
+  // Deleting it again, as a retried stage removal does, changes nothing.
+  await manager.removeStage(f.context);
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')).runs.map((run:{id:string})=>run.id),[kept.id]);
 });
 
 test('a symbolically linked recording folder is refused, and its target is left intact',async t=>{

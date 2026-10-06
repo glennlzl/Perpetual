@@ -9,10 +9,10 @@ import {hide,redact} from '../redaction.ts';
 import {validateCallbackBindings,callbackPolicyHash,callbackApplication,resolveCallbackOrigins} from './callbacks.ts';
 import type {AutomaticCallbackTarget,CallbackResolutionInput} from './callbacks.ts';
 import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
-import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
+import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys,ownedStart} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
-import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
+import {checkOpenRouterKey,createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
 import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
@@ -34,9 +34,9 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {ModelSettingsReply} from '../../contract/settings.ts';
-import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
+import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,BrowserCleanupHold,BrowserCleanupReply,DiscoveryDiagnostics,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
 export type {BrowserConfig,PublicRun,RunSummary} from '../../contract/browser.ts';
-import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
+import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob,WorkerOwner,WorkerStartOptions} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
 import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
@@ -45,16 +45,16 @@ import type {ScanRepo,ScanService} from '../scanner.ts';
 
 /** The active source scan, as far as browser tests read it (src/scanner.ts). */
 type StageScan={repo:Pick<ScanRepo,'path'>&Partial<Pick<ScanRepo,'sha'>>;services?:readonly (Pick<ScanService,'id'>&Partial<Pick<ScanService,'framework'|'path'>>)[]};
-/** The Sandbox stage a browser operation belongs to, with its active source. */
-export type BrowserStageContext={key:string;stageId:string;scan:StageScan;controllerOrigin?:string};
+/** The Sandbox stage a browser operation belongs to, with its active source; a repair gate's names its repair. */
+export type BrowserStageContext={key:string;stageId:string;scan:StageScan;controllerOrigin?:string;repair?:string};
 /** The environment behind a target URL, as the environments manager resolves it (src/environments/manager.ts). */
 export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
 /** What the manager uses of environment leases. */
 type Leases=Pick<EnvironmentUsage,'assertAvailable'|'acquire'>;
 /** Runs one journey's approved Playwright code (src/journeys/playwright/runtime.ts). */
-type JourneyRuntime={capabilities():Promise<{browserInstalled?:boolean}>;start(input:JourneyRunInput,onEvent:(event:WorkerEvent)=>void):WorkerJob<unknown>};
+type JourneyRuntime={capabilities():Promise<{browserInstalled?:boolean}>;start(input:JourneyRunInput,onEvent:(event:WorkerEvent)=>void,options?:Pick<WorkerStartOptions,'onGroup'>):WorkerJob<unknown>};
 /** The browser agent, which discovers journeys; an absent capability is unknown. */
-type AgentRuntime={capabilities():Promise<Partial<BrowserCapabilities>>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void):WorkerJob<unknown>};
+type AgentRuntime={capabilities():Promise<Partial<BrowserCapabilities>>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void,options?:Pick<WorkerStartOptions,'onGroup'>):WorkerJob<unknown>};
 
 type CheckResult=MilestoneCheckResult&{provenance:'independent'};
 type StepProgress=Omit<PublicStepProgress,'checks'>&{title:string;checks?:CheckResult[]};
@@ -64,13 +64,22 @@ export type CaseProgress=Omit<PublicCaseProgress,'steps'>&{actionCount:number;st
 export type RunProgress=Omit<PublicRunProgress,'cases'>&{revision:number;cases:CaseProgress[]};
 type Discovery=BrowserDiscovery;
 type Analysis=BrowserAnalysis;
-/** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. */
+/**
+ * A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. gate marks a run a
+ * journey gate started: true for the target branch's gate, repair for a repair's gate at its pull request head.
+ */
 export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engine'>&{
-  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;
+  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;gate?:true|'repair';
 };
 type Preparation=BrowserPreparation;
-/** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
-type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
+/**
+ * Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. groups are the
+ * process groups its workers lead and pending counts the worker starts saved before their groups were, so a restart can
+ * prove the operation's workers gone; an older record without groups never proves it. workerCleanupIncomplete says a
+ * worker, or the supervisor that stopped it, reported its cleanup incomplete: the browser a worker starts leads a process
+ * group of its own and outlives a killed worker, so no restart proves it gone and only a person's confirmation does.
+ */
+type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workerCleanupIncomplete?:true;workspace?:string;groups?:number[];pending?:number};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
   preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;applicationId?:string;signInPath?:string;suspendedReads?:{applicationId?:string;requests:ReadOnlyRequest[]}}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
@@ -105,7 +114,7 @@ const messageOf=(error:unknown):unknown=>typeof error==='object'&&error!==null&&
 const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
-const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
+const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,gate,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
 const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit','callbackPolicy','callbackOrigins']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
@@ -119,13 +128,36 @@ const defaults:BrowserConfig={targetUrl:'',signInUrl:'',scope:'',requirements:''
 // The twin a verification started on is gone or no longer ready, so its attempts cannot go on there.
 const TWIN_CHANGED='The environment changed during its verification. Verify its code again.';
 const active=(run:StoredRun)=>['queued','running'].includes(run.status);
-// Playwright names each tab's recording; a stage keeps the recordings of its latest runs.
-const VIDEO_RUNS_PER_STAGE=5,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+// A stage's gate runs of one kind, the target branch's or a repair's, of which the latest is always kept.
+const gateKind=(run:StoredRun)=>run.gate?`${run.scope}\0${run.gate}`:'';
+// Playwright names each tab's recording; a stage keeps the recordings of its latest runs, and the history the latest runs.
+const VIDEO_RUNS_PER_STAGE=5,HISTORY=50,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const safeText=(value:unknown,limit:number)=>value?browserError(String(value),process.env,limit):'';
+// An external operation's workers: up to a run's 30 journeys, or a generation's seed and two harness runs.
+const MAX_WORKERS=64;
+const processGroup=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>1&&value<2**31;
+// A process group no longer exists once signalling it fails with ESRCH; any other answer, a permission error included, keeps it.
+const groupGone=(group:number)=>{try{process.kill(-group,0);return false;}catch(error){return (error as NodeJS.ErrnoException).code==='ESRCH';}};
+// A process group this controller can still signal, as the group of a worker it started that still runs is.
+const groupRuns=(group:number)=>{try{process.kill(-group,0);return true;}catch{return false;}};
+/**
+ * Whether every worker an external operation started is proven gone. Windows workers lead no process group, so they never
+ * are; nor are those of an operation whose worker reported its cleanup incomplete, since its browser may outlive them.
+ */
+const workersGone=(operation:ExternalOperation)=>process.platform!=='win32'&&!operation.workerCleanupIncomplete&&Array.isArray(operation.groups)&&!operation.pending&&operation.groups.every(groupGone);
 const touch=(run:BrowserRun)=>{run.progress.revision=(run.progress.revision||0)+1;};
 const settleSteps=(progress:{steps?:StepProgress[]},status:string)=>{for(const step of progress.steps||[])if(step.status==='running')step.status=['skipped','cancelled'].includes(status)?status:'unconfirmed';};
 const actionErrorCodes:ReadonlySet<string>=new Set(['action_not_allowed','navigation_not_allowed','attachments_not_allowed','credential_literal_rejected','credential_reference_invalid','credential_origin_mismatch','credential_field_unavailable','credential_target_mismatch','credential_frame_mismatch','credential_field_type_mismatch','credential_verification_failed','browser_action_failed','action_result_missing','journey_progress_invalid']);
 const controls=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+// A discovery agent's counts as its worker reports them, or null when they have another shape.
+const COUNTS=['modelCalls','stepsWithoutActions','actionCount','modelMs','inputTokens','outputTokens'] as const,FAILURES=['timeout','invalid_output','provider','other'] as const;
+const isCount=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0;
+function discoveryDiagnostics(value:unknown):DiscoveryDiagnostics|null{
+  if(!isRecord(value)||!isRecord(value.modelFailures)||typeof value.forcedFinalization!=='boolean')return null;
+  const failures=value.modelFailures;
+  if(!COUNTS.every(key=>isCount(value[key]))||!FAILURES.every(key=>isCount(failures[key])))return null;
+  return {...Object.fromEntries(COUNTS.map(key=>[key,value[key]])),modelFailures:Object.fromEntries(FAILURES.map(key=>[key,failures[key]])),forcedFinalization:value.forcedFinalization} as DiscoveryDiagnostics;
+}
 const webFrontend=/^(?:next(?:\.js)?|vite|nuxt|react|sveltekit|astro|remix)$/i;
 const originOf=(value:string)=>{try{return new URL(value).origin;}catch{return null;}};
 const externalOrigin=(value:string)=>{const origin=applicationOrigin(value);if(!origin)throw new Error('Invalid application origin.');return origin;};
@@ -295,11 +327,15 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       }catch{throw new Error('Invalid stored read-only POST requests.');}
     }
   }
+  // Only true or repair marks a gate run; any other stored value marks none.
+  for(const run of state.runs){const marker:unknown=run.gate;if(marker!==undefined&&marker!==true&&marker!=='repair')delete run.gate;}
   for(const run of state.runs)if(run.codeFeedback!==undefined){
     const feedback:unknown=run.codeFeedback;
     if(!isRecord(feedback)||Object.keys(feedback).length>30||Object.entries(feedback).some(([id,error])=>!run.caseIds.includes(id)||typeof error!=='string'||!error||error.length>4000))throw new Error('Invalid stored code feedback.');
     run.codeFeedback=Object.fromEntries(Object.entries(feedback).map(([id,error])=>[id,generationDiagnostic(error,4000)]));
   }
+  // Stored counts are file data too: only their exact shape is kept.
+  for(const run of state.runs)if(run.diagnostics!==undefined){const diagnostics=discoveryDiagnostics(run.diagnostics);if(diagnostics)run.diagnostics=diagnostics;else delete run.diagnostics;}
   for(const run of state.runs)if(run.blockedRequests!==undefined){
     const found:BlockedRequest[]=[];
     for(const item of Array.isArray(run.blockedRequests)?run.blockedRequests:[]){
@@ -311,14 +347,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const external:unknown=state.externalOperations??{};
   if(!isRecord(external)||Object.entries(external).some(([origin,item])=>{
     if(!isRecord(item)||typeof item.id!=='string'||typeof item.scope!=='string'||typeof item.startedAt!=='string'||typeof item.operation!=='string'||!['run','discover','generate'].includes(item.operation)||item.cleanupIncomplete!==undefined&&item.cleanupIncomplete!==true)return true;
+    if(item.workerCleanupIncomplete!==undefined&&item.workerCleanupIncomplete!==true)return true;
     try{if(externalOrigin(origin)!==origin)return true;}catch{return true;}
+    if(item.groups!==undefined&&(!Array.isArray(item.groups)||item.groups.length>MAX_WORKERS||!item.groups.every(processGroup)))return true;
+    if(item.pending!==undefined&&(typeof item.pending!=='number'||!Number.isSafeInteger(item.pending)||item.pending<0||item.pending>MAX_WORKERS))return true;
     return item.workspace!==undefined&&(typeof item.workspace!=='string'||!runFolder.test(item.workspace));
   }))throw new Error('Unsupported external browser ownership state.');
   state.externalOperations=external as Record<string,ExternalOperation>;
-  // A restart cannot prove that the previous controller's processes exited. Preserve their hold and workspace.
-  for(const operation of Object.values(state.externalOperations))operation.cleanupIncomplete=true;
-  const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
-  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   // Add current draft defaults without rewriting immutable historical approvals.
   for(const [scope,cases] of Object.entries(state.cases))state.cases[scope]=validateBrowserCases(cases,{draft:true});
   const failures:unknown=state.generationFailures??{};
@@ -337,8 +372,18 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   // is derived from its runs; this marker only says it is still between or inside attempts, or why it could not go on.
   const verifications=new Map<string,VerificationEntry>(),verificationJobs=new Set<Promise<void>>();
   const verifying=(scope?:string,caseId?:string)=>[...verifications.values()].some(entry=>!entry.done&&(scope===undefined||entry.scope===scope)&&(caseId===undefined||entry.caseId===caseId));
-  // The run history keeps the controller's latest 50 runs, and every attempt of a verification still running.
-  const kept=(run:BrowserRun,index:number)=>index<50||active(run)||[...verifications.values()].some(entry=>!entry.done&&entry.id===run.verification?.id);
+  // The run history keeps the controller's latest 50 runs and, counted apart from them, its latest 50 verification
+  // attempts, so verifying code never pushes a gate or a person's run out of it. Each stage's latest gate run and latest
+  // repair gate run stay too, as does every active run and every attempt of a verification still running. runs is newest
+  // first.
+  function keptRuns(runs:BrowserRun[]){
+    const counts={runs:0,attempts:0},gates=new Set<string>();
+    return runs.filter(run=>{
+      const kind=gateKind(run),latestGate=Boolean(kind)&&!gates.has(kind);if(latestGate)gates.add(kind);
+      const recent=run.verification?counts.attempts++<HISTORY:counts.runs++<HISTORY;
+      return recent||latestGate||active(run)||[...verifications.values()].some(entry=>!entry.done&&entry.id===run.verification?.id);
+    });
+  }
   // An operation holds its stage in busy until it ends; whenFree(scope) resolves once the stage's holder lets go.
   const waiters=new Map<string,(()=>void)[]>();
   const free=(scope:string)=>{busy.delete(scope);const resolved=waiters.get(scope)||[];waiters.delete(scope);for(const resolve of resolved)resolve();resumePreparations();};
@@ -355,23 +400,36 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     let promise:Promise<T>;try{promise=Promise.resolve(work());}catch(error){return Promise.reject(error);}admissions.add(promise);
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
-  // Recordings of each stage's latest runs are kept; a run's recordings go with it.
-  async function pruneVideos(){
-    const kept=new Set<string>(),count=new Map<string,number>();
+  // Each stage keeps the recordings of its latest runs, apart from verification attempts, of its latest gate run and latest
+  // repair gate run, and of its latest verification's attempts; a run's recordings go with it. strict reports a folder it
+  // could not remove.
+  async function pruneVideos({strict=false}={}){
+    const kept=new Set<string>(),count=new Map<string,number>(),gates=new Set<string>(),verified=new Map<string,string>();
     for(const run of state.runs){
       if(active(run)){kept.add(run.id);continue;}
       if(run.mode!=='run')continue;
-      const n=count.get(run.scope)||0;
-      if(n<VIDEO_RUNS_PER_STAGE){kept.add(run.id);count.set(run.scope,n+1);}
+      let keep:boolean;
+      if(run.verification){
+        // Runs are newest first, so a stage's first attempt seen is of its latest verification.
+        if(!verified.has(run.scope))verified.set(run.scope,run.verification.id);
+        keep=verified.get(run.scope)===run.verification.id;
+      }else{
+        const n=count.get(run.scope)||0;count.set(run.scope,n+1);
+        const kind=gateKind(run);
+        keep=n<VIDEO_RUNS_PER_STAGE||Boolean(kind)&&!gates.has(kind);
+        if(kind)gates.add(kind);
+      }
+      if(keep)kept.add(run.id);
       else for(const item of run.progress?.cases||[])delete item.videos;
     }
     // Only run folders are removed; anything else placed here is left alone.
-    const names=(await readdir(videoRoot).catch(()=>[])).filter(name=>runFolder.test(name)&&!kept.has(name));
-    await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(()=>{});}));
+    const failed=(error:unknown)=>{if(strict&&(error as NodeJS.ErrnoException|null)?.code!=='ENOENT')throw error;};
+    const names=(await readdir(videoRoot).catch(error=>{failed(error);return [];})).filter(name=>runFolder.test(name)&&!kept.has(name));
+    await Promise.all(names.map(name=>{const path=join(videoRoot,name);return lstat(path).then((info):unknown=>info.isDirectory()&&rm(path,{recursive:true,force:true})).catch(failed);}));
   }
   function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const projected=project(),authoring=retainAuthoring(projected.authoring??{},projected.cases);const content=JSON.stringify({...projected,authoring});if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();state.authoring=authoring;});}
   const externalLeases=new Set<string>();
-  const externalCleanup='Browser cleanup for this application is unconfirmed. Stop the remaining browser processes and confirm cleanup before using this URL again.';
+  const externalCleanup='Browser cleanup for this application is unconfirmed. Stop its remaining browser processes, then choose Cleanup done.';
   function takeTarget(context:BrowserStageContext,url:string,environmentId:string|null|undefined,operation:string){
     const origin=externalOrigin(url);
     // An earlier external operation may still be acting on an origin that a newly owned twin now uses.
@@ -386,10 +444,59 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   async function beginExternal(context:BrowserStageContext,url:string,environment:TargetEnvironment|null|undefined,operation:ExternalOperation['operation'],workspace?:string){
     if(environment)return null;
-    const origin=externalOrigin(url),entry:ExternalOperation={id:randomUUID(),scope:scopeId(context),operation,startedAt:now(),...(workspace?{workspace:basename(workspace)}:{})};
+    const origin=externalOrigin(url),entry:ExternalOperation={id:randomUUID(),scope:scopeId(context),operation,startedAt:now(),groups:[],...(workspace?{workspace:basename(workspace)}:{})};
     await persist(()=>({...state,externalOperations:{...state.externalOperations,[origin]:entry}}),()=>{state.externalOperations[origin]=entry;});
     return {origin,entry};
   }
+  /**
+   * Records an external operation's workers as they start: each start is saved as pending before the worker starts, then
+   * the process group it leads, so a restart can tell whether the operation's workers are gone. A start that never reports
+   * a group stays pending, as does one whose group could not be saved, and either keeps the hold. A worker's group that is
+   * gone as the worker ends is dropped, so neither a restart nor a person waits for its number, which another process may
+   * take; a worker that reports its cleanup incomplete is saved as such and keeps the hold until a person confirms cleanup.
+   */
+  function workerOwner(owned:Awaited<ReturnType<typeof beginExternal>>):WorkerOwner|undefined{
+    if(!owned)return undefined;
+    const {entry}=owned;
+    return {async claim(){
+      entry.pending=(entry.pending??0)+1;
+      try{await persist();}catch(error){entry.pending-=1;throw error;}
+      let settled=false,own:number|undefined;
+      const settle=(group?:number)=>{
+        if(settled)return;settled=true;own=group;
+        entry.pending=Math.max(0,(entry.pending??1)-1);if(group!==undefined)entry.groups=[...entry.groups??[],group];
+        persist().catch(()=>{});
+      };
+      return {started:group=>settle(group),release:()=>settle(),ended(incomplete){
+        const gone=own!==undefined&&groupGone(own);
+        if(gone)entry.groups=(entry.groups??[]).filter(group=>group!==own);
+        if(incomplete)entry.workerCleanupIncomplete=true;
+        if(gone||incomplete)persist().catch(()=>{});
+      }};
+    }};
+  }
+  // The stage's application as external operations hold it, or null without a valid application URL.
+  const applicationOf=(scope:string)=>{try{const target=state.configs[scope]?.targetUrl;return target?externalOrigin(target):null;}catch{return null;}};
+  // What holds the stage's application while no operation of this controller does: an unconfirmed cleanup, or a hold an
+  // earlier controller left.
+  function cleanupHold(scope:string){const origin=applicationOf(scope),held=origin?state.externalOperations[origin]:undefined;return origin&&held&&!externalLeases.has(origin)?{origin,held}:null;}
+  /**
+   * A person confirms that the browser processes an operation left on the stage's application are stopped: its hold goes,
+   * and a generation's retained workspace with it. An operation still in progress keeps its application, and so does a
+   * worker process group the operation saved while it still runs, as an earlier controller's worker may still act there.
+   */
+  function confirmCleanup(context:BrowserStageContext){return admit(async():Promise<BrowserCleanupReply>=>{
+    const scope=scopeId(context),application=applicationOf(scope);
+    if(application&&externalLeases.has(application))throw conflict('This application has a browser operation in progress.');
+    const hold=cleanupHold(scope);
+    if(!hold)throw Object.assign(new Error('No browser cleanup is waiting for confirmation.'),{statusCode:404});
+    const {origin,held}=hold,running=(held.groups??[]).filter(groupRuns);
+    if(running.length)throw conflict(running.length===1?`Browser process group ${running[0]} is still running. Stop it, then choose Cleanup done.`:`Browser process groups ${running.join(', ')} are still running. Stop them, then choose Cleanup done.`);
+    await persist(()=>({...state,externalOperations:Object.fromEntries(Object.entries(state.externalOperations).filter(([key])=>key!==origin))}),()=>{delete state.externalOperations[origin];});
+    // A workspace that cannot be removed now goes at the next start, as nothing retains it any more.
+    if(held.workspace)await rm(join(generationRoot,held.workspace),{recursive:true,force:true}).catch(()=>{});
+    return {cleanup:null};
+  });}
   async function finishExternal(owned:Awaited<ReturnType<typeof beginExternal>>,uncertain=false){
     if(!owned||state.externalOperations[owned.origin]?.id!==owned.entry.id)return;
     if(uncertain){owned.entry.cleanupIncomplete=true;await persist();return;}
@@ -414,6 +521,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     }
     if(run.progress)touch(run);
   }
+  // A restart keeps an external operation's hold and workspace unless every worker it started is proven gone: each start
+  // was saved before the worker started, then with the process group it leads, and none of those groups exists any more.
+  // That proves only the workers' own groups gone, so a hold whose worker reported its cleanup incomplete stays until a
+  // person confirms cleanup.
+  for(const [origin,operation] of Object.entries(state.externalOperations)){if(workersGone(operation))delete state.externalOperations[origin];else operation.cleanupIncomplete=true;}
+  const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
+  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   for(const preparation of Object.values(state.preparations))if(['preparing','discovering'].includes(preparation.status))Object.assign(preparation,{status:'failed',error:'The controller stopped while preparing integration tests. Discover cases to try again.',completedAt:now()});
   // Also removes folders left by a crash or by runs past the history limit.
   await pruneVideos();
@@ -575,7 +689,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         external=await beginExternal(context,config.targetUrl,environment,'generate',workspace.path);
         const reasoning=await modelCatalog.generationReasoning(configuration.model);
         // The seed signs in first with the runtime that runs journeys, on the stage's sign-in page when one is set.
-        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,reasoning,feedback,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
+        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,owner:workerOwner(external),apiKey:configuration.apiKey,model:configuration.model,reasoning,feedback,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
         entry.cancel=()=>{entry.cancelled=true;entry.step='cancelling';job.cancel();};
         if(entry.cancelled)job.cancel();
         const generated=await job.promise;
@@ -644,15 +758,23 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     modelSaving=true;
     try{await save();return await viewModel();}finally{modelSaving=false;resumePreparations();}
   }
-  async function saveModelSettings(input:unknown){
+  // A newly entered key is checked with OpenRouter, which spends nothing: one it refuses is not saved, and one it could
+  // not check, unreachable or answering anything but whether it accepts the key, is saved with a warning.
+  async function saveModelSettings(input:unknown):Promise<ModelSettingsReply>{
     if(!isRecord(input)||Object.keys(input).some(key=>!['model','apiKey','escalationModel'].includes(key)))throw new Error('Provide an OpenRouter model and API key.');
     if(typeof input.model!=='string'||!input.model.trim())throw new Error('Choose an OpenRouter model.');
-    return updateModel(async()=>{
+    let warning='';
+    const reply=await updateModel(async()=>{
       const {models}=await listModels();
       if(!models.some(model=>model.id===input.model))throw new Error('Choose an available OpenRouter model from the list.');
       if(input.escalationModel!==undefined&&!models.some(model=>model.id===input.escalationModel))throw new Error('Choose an available OpenRouter escalation model from the list.');
-      await modelSettings.saveOpenRouter(input);
+      await modelSettings.saveOpenRouter(input,{async checkKey(apiKey){
+        const answer=await checkOpenRouterKey(apiKey);
+        if(answer==='rejected')throw new Error('OpenRouter did not accept this key.');
+        if(answer==='unknown')warning='OpenRouter could not check this key.';
+      }});
     });
+    return warning?{...reply,warning}:reply;
   }
   function withInput<T>(context:BrowserStageContext,work:(operation:{scope:string;configuration:BrowserModelConfiguration;signal:AbortSignal;assertCurrent:()=>void})=>Promise<T>,{signal,isCurrent=()=>true}:InputOptions={}):Promise<T>{
     requireIdle(context,{duringRun:true});const scope=scopeId(context),controller=new AbortController();
@@ -749,8 +871,10 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(mode==='run'){
         const available=state.cases[scope]||[],ids=input.caseIds??available.filter(c=>c.selected&&!c.needsReview).map(c=>c.id);
         if(!Array.isArray(ids)||!ids.length||ids.length>30||new Set(ids).size!==ids.length)throw new Error('Choose 1–30 distinct reviewed cases.');
-        // A verification attempt runs its one reviewed case, selected or not.
-        cases=ids.map(id=>{const item=available.find(c=>c.id===id);if(!item||item.needsReview||!item.selected&&!options.verification)throw new Error('Review and select each case before running.');return item;});
+        // A person's run and a verification attempt run the reviewed cases they name, selected or not, and change no
+        // selection; anything else, such as the gate, runs only selected cases.
+        const named=Boolean(options.manual||options.verification);
+        cases=ids.map(id=>{const item=available.find(c=>c.id===id);if(!item||item.needsReview||!item.selected&&!named)throw new Error(named?'Review each case before running.':'Review and select each case before running.');return item;});
         cases=validateBrowserCases(cases,{draft:false});
       }
       // What each journey runs, kept in memory for this run; a journey without code is settled without a browser.
@@ -760,14 +884,17 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(closed)throw conflict('The controller is shutting down.');
       if(options.isCurrent&&!options.isCurrent())throw conflict('The active source changed. Open this source and discover cases to continue.');
       external=await beginExternal(context,config.targetUrl,environment,mode);
+      const owner=workerOwner(external);
       const progressCases:CaseProgress[]=mode==='discover'?[{id:'discovery',caseId:'discovery',name:'Explore application',status:'pending',actions:[],actionCount:0}]:cases.map(c=>({id:c.id,caseId:c.id,name:c.name,status:'queued',actions:[],actionCount:0,steps:c.steps.map(({id,title})=>({id,title,status:'pending'}))}));
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(callbackOrigins.length){run.callbackOrigins=[...callbackOrigins];run.callbackPolicy=callbackPolicyHash(scope,config.callbackBindings);}
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
+      // Only a person's run is manual; any other run of journeys is a journey gate's, a repair's when it names one.
+      else if(mode==='run'&&!options.manual)run.gate=context.repair===undefined?true:'repair';
       const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
       if(preparation){Object.assign(preparation,{status:'discovering',targetUrl:config.targetUrl,runId:run.id});delete preparation.error;delete preparation.completedAt;}
-      const admittedRuns=()=>[run,...state.runs].filter(kept);
+      const admittedRuns=()=>keptRuns([run,...state.runs]);
       // A discovery that could not be admitted leaves the stage's preparation as it was.
       try{await persist(()=>({...state,runs:admittedRuns()}),()=>{state.runs=admittedRuns();});}
       catch(error){if(preparation){delete preparation.runId;delete preparation.targetUrl;Object.assign(preparation,before);}throw error;}
@@ -886,7 +1013,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const {code,hash,checkVersion}=codes[item.id] as {code:string;hash:string;checkVersion:number};
                 // A control run blocks every state-changing request, so a reviewed check of a journey that keeps something fails.
                 // The account signs in on the sign-in page when the application URL shows no sign-in form.
-                const job=playwright.start({...workerInput,case:item,spec:{code,hash},checkVersion,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),...(videoDir?{videoDir}:{}),...(run.verification?.control?{blockWrites:true}:{})},onEvent);
+                // An external application's journey starts once its start is recorded.
+                const job=ownedStart(owner,options=>playwright.start({...workerInput,case:item,spec:{code,hash},checkVersion,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),...(videoDir?{videoDir}:{}),...(run.verification?.control?{blockWrites:true}:{})},onEvent,options));
                 return {cancel:()=>job.cancel(),promise:job.promise.then(()=>{
                   assertCurrent();if(!facts)throw new Error('Browser runtime did not return results.');
                   return journeyResult(item,facts,steps());
@@ -912,7 +1040,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             // Every journey has a result row by now.
             run.status=runStatus(run.results!,run.caseIds);
           }else{
-            const job=runtime!.start(workerInput,event=>{
+            const job=ownedStart(owner,options=>runtime!.start(workerInput,event=>{
               if(event.type==='discovery'){
                 if(discovery)throw new Error('Browser runtime returned unexpected discovery.');
                 // A journey the controller cannot accept is named in the summary; the valid ones are kept.
@@ -921,6 +1049,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const blockedNote=run.blockedRequests?.length?`Blocked ${run.blockedRequests.slice(0,3).map(item=>`${item.method} ${item.url}`).join('; ')}. Review read-only POST requests in Test settings.`:'';
                 const suffix=[note,blockedNote].filter(Boolean).join('\n');
                 discovery={cases:drafts,summary:[safeText(event.summary,4000-(suffix?1+suffix.length:0)),suffix].filter(Boolean).join('\n'),authenticated:!!credentials&&event.authenticated===true};omittedCount=omitted.length;
+              }else if(event.type==='diagnostics'){
+                // The agent's counts are kept on the run whether discovery completes or fails; others are ignored.
+                const diagnostics=discoveryDiagnostics(event.diagnostics);if(diagnostics){run.diagnostics=diagnostics;touch(run);}
               }else if(event.type==='result')throw new Error('Browser runtime returned unexpected results.');
               else if(event.type==='sign-in-page'){
                 // Where the account signed in becomes the stage's sign-in page while it has none, so a person's value
@@ -929,7 +1060,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 if(page&&stored?.targetUrl===config.targetUrl&&!stored.signInUrl)state.configs[scope]={...stored,signInUrl:page};
               }
               else progressEvent(event,'discovery');
-            });
+            },options));
             entry.cancel=()=>job.cancel();if(entry.cancelled)job.cancel();
             await job.promise;
             if(entry.cancelled)throw new Error('Browser operation cancelled.');
@@ -991,6 +1122,29 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const promise=startWork(...args);admissions.add(promise);
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
+  const stageActive=(context:{key:string;stageId:string})=>{const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&(active(r)||jobs.has(r.id)));};
+  /**
+   * Deletes a Sandbox stage's tests, journey code, test settings, preparation, runs and recordings, once the stage's
+   * removal has cleaned up its twins. A cleanup hold its operations left stays: it holds an application, not the stage.
+   * Done again, as a retried removal does, it removes recordings an earlier attempt could not.
+   */
+  function removeStage(context:{key:string;stageId:string}){return admit(async()=>{
+    if(stageActive(context))throw conflict('Stop the browser run before deleting this stage.');
+    const scope=scopeId(context),attempts=`${scope}:`,removed=new Set(state.runs.filter(run=>run.scope===scope).map(run=>run.id));
+    const keyed=['configs','cases','analyses','preparations','configTargets','specs','generationFailures','authoring'] as const;
+    const without=(records:Record<string,unknown>)=>Object.fromEntries(Object.entries(records).filter(([key])=>key!==scope));
+    await persist(()=>({...state,...Object.fromEntries(keyed.map(key=>[key,without(state[key])])),
+      preparationAttempts:Object.fromEntries(Object.entries(state.preparationAttempts).filter(([key])=>!key.startsWith(attempts))),runs:state.runs.filter(run=>run.scope!==scope)}),()=>{
+      for(const key of keyed)delete (state[key] as Record<string,unknown>)[scope];
+      for(const key of Object.keys(state.preparationAttempts))if(key.startsWith(attempts))delete state.preparationAttempts[key];
+      state.runs=state.runs.filter(run=>run.scope!==scope);
+    });
+    for(const id of removed)frames.delete(id);
+    for(const [key,entry] of generations)if(entry.scope===scope)generations.delete(key);
+    for(const [key,entry] of verifications)if(entry.scope===scope)verifications.delete(key);
+    pendingPreparations.delete(scope);
+    await pruneVideos({strict:true});
+  });}
   // The target twin's test accounts for the account choice, without passwords.
   function targetAccounts(url:string|undefined){const environment=url?resolveEnvironment(url):null;return environment?.status==='ready'?(environment.accounts||[]).map(({id,label,username})=>({id,label,username})):[];}
   function callbackResolution(context:BrowserStageContext,config:BrowserConfig,target:AutomaticCallbackTarget|undefined):CallbackResolutionInput{
@@ -1096,7 +1250,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     interruptedEnvironmentIds:()=>[...new Set(state.runs.filter((run):run is BrowserRun&{environmentId:string}=>Boolean(run.environmentUseUncertain&&run.environmentId)).map(run=>run.environmentId))],
     draft:(...args:Parameters<typeof draft>)=>admit(()=>draft(...args)),transcribe:(...args:Parameters<typeof transcribe>)=>admit(()=>transcribe(...args)),
     hasPendingInput:()=>inputJobs.size>0,
-    async view(context:BrowserStageContext):Promise<BrowserViewReply>{const scope=scopeId(context);return {config:publicConfig(scope),callbacks:callbackReview(context),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
+    async view(context:BrowserStageContext):Promise<BrowserViewReply>{
+      const scope=scopeId(context),held=cleanupHold(scope)?.held,cleanup:BrowserCleanupHold|null=held?{operation:held.operation,startedAt:held.startedAt}:null;
+      return {config:publicConfig(scope),callbacks:callbackReview(context),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities(),...(cleanup?{cleanup}:{})};
+    },
+    confirmCleanup,
     saveModel(context:BrowserStageContext,input:unknown){return admit(()=>{requireIdle(context);return updateModel(()=>modelSettings.save(input));});},
     async saveConfig(context:BrowserStageContext,config:unknown){
       requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context);
@@ -1169,7 +1327,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     async skip(context:BrowserStageContext,id:unknown,caseId:unknown){const run=find(context,id);if(run.mode!=='run'||!includes(run.caseIds,caseId))throw Object.assign(new Error('Journey not found in this run.'),{statusCode:404});const journey=caseId,entry=jobs.get(run.id);if(entry){entry.skips.add(journey);if(entry.scheduler)entry.scheduler.skip(journey);else if(!run.results?.some(result=>result.caseId===journey)){/* A journey settled before the scheduler started keeps its verdict. */const item=run.progress.cases.find(item=>item.id===journey)!;item.status='skipped';item.completedAt=now();touch(run);}}return report(run);},
     async stop(context:BrowserStageContext,id:unknown){const run=find(context,id),entry=jobs.get(run.id);if(entry){entry.cancelled=true;entry.cancel();}return {run:publicRun(run)};},
     // A terminal verdict can still be saving results and releasing its target.
-    isActive(context:{key:string;stageId:string}){const scope=scopeId(context);return busy.has(scope)||generating(scope)||verifying(scope)||state.runs.some(r=>r.scope===scope&&(active(r)||jobs.has(r.id)));},
+    isActive:stageActive,
+    removeStage,
     close(){
       if(closing)return closing;closed=true;
       const cancel=()=>{for(const entry of verifications.values())entry.cancelled=true;for(const entry of jobs.values()){entry.cancelled=true;entry.cancel();}for(const controller of inputJobs.keys())controller.abort();for(const entry of generations.values())if(entry.status==='running')entry.cancel();};cancel();

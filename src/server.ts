@@ -672,6 +672,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(operation==='run')return reply(res,202,await browser.run(context,input,{manual:true}));
           if(operation==='skip')return reply(res,200,await browser.skip(context,input.id,input.caseId));
           if(operation==='stop')return reply(res,200,await browser.stop(context,input.id));
+          if(operation==='cleanup')return reply(res,200,await browser.confirmCleanup(context));
         }
         return reply(res,404,{error:'Browser operation not found.'});
       }

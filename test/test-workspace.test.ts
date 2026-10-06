@@ -358,18 +358,26 @@ test('a source another window switched to is reported once a second poll names i
   assert.equal(workspace.getSnapshot().error, '');
 });
 
-test('a case conflict inside a one-off run or a replacing Generate reads the changed list at once', async t => {
-  let cases = [{ ...scenario, name: 'Before' }];
-  const workspace = createTestWorkspace({ pollInterval: 0, controller: async (path, input) => {
-    if (input) throw Object.assign(new Error('Tests changed. Reopen Generate and try again.'), { statusCode: 409 });
-    return { cases, runs: [] };
+test('a run the controller refuses, or a replacing Generate whose tests changed, reads the stage again at once', async t => {
+  let view: Record<string, unknown> = { cases: [{ ...scenario, name: 'Before' }], runs: [] };
+  const refusals: Partial<Record<string, string>> = {
+    '/api/browser/run': 'Browser cleanup for this application is unconfirmed. Stop its remaining browser processes, then choose Cleanup done.',
+    '/api/browser/discover': 'Tests changed. Reopen Generate and try again.',
+  };
+  const workspace = createTestWorkspace({ pollInterval: 0, controller: async path => {
+    const refusal = refusals[path];
+    if (refusal) throw Object.assign(new Error(refusal), { statusCode: 409 });
+    return view;
   } });
   t.after(() => workspace.dispose());
-  workspace.activate(source, { browserTests: { beta: { cases, runs: [] } } });
+  workspace.activate(source, { browserTests: { beta: { cases: [{ ...scenario, name: 'Before' }], runs: [] } } });
   const stage = workspace.stage('beta');
-  for (const [mode, name] of [['run', 'After a run'], ['discover', 'After Generate']]) {
-    cases = [{ ...scenario, name }];
-    await assert.rejects(stage.perform('browser', mode, tx => tx.post('cases', { cases: [], baseCases: [] })), /Tests changed/);
-    assert.equal(stage.getSnapshot().browser.cases[0].name, name, `${mode}: a retry starts from the controller's list`);
-  }
+  // A run is refused because an operation another stage ran left an unconfirmed cleanup, which the stage then shows.
+  view = { ...view, cleanup: { operation: 'run', startedAt: '2026-10-01T00:00:00.000Z' } };
+  await assert.rejects(stage.perform('browser', 'run', tx => tx.post('run', { caseIds: [scenario.id], concurrency: 2 })), /choose Cleanup done/);
+  assert.equal(stage.getSnapshot().browser.cleanup?.operation, 'run', 'run: the stage shows the hold that refused it');
+  // A replacing Generate whose tests changed meanwhile: a retry starts from the controller's list.
+  view = { cases: [{ ...scenario, name: 'After Generate' }], runs: [] };
+  await assert.rejects(stage.perform('browser', 'discover', tx => tx.post('discover', { replaceCaseIds: [scenario.id], baseCases: [] })), /Tests changed/);
+  assert.equal(stage.getSnapshot().browser.cases[0].name, 'After Generate', 'discover: a retry starts from the controller\'s list');
 });

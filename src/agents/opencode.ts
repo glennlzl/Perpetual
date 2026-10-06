@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { browserError, superviseWorker, type WorkerError, type WorkerJob } from '../browser/runtime.ts';
+import { browserError, ownedStart, superviseWorker, type WorkerError, type WorkerJob, type WorkerOwner } from '../browser/runtime.ts';
 import { hide as hideValues } from '../redaction.ts';
 import { captureAuthoringEvidence } from './authoring-evidence.ts';
 import type { HarnessEvidence } from '../../contract/authoring.ts';
@@ -99,11 +99,11 @@ export type RunFailure = Error & { reason: string; output: string; timedOut?: tr
 /**
  * Runs a use's agent, once per call to run(prompt), which resolves with the end of its output. cancel() stops the current
  * run and refuses later ones. A failed run rejects with a RunFailure, redacted of `secrets` and of the model key in
- * `env`; `cleanupIncomplete` says an owned process may remain.
+ * `env`; `cleanupIncomplete` says an owned process may remain. owner records each run's process before it starts.
  */
-export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeoutMs, cleanupGraceMs, settleMs = 0, messages, structuredOutput = false }: {
+export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeoutMs, cleanupGraceMs, settleMs = 0, messages, structuredOutput = false, owner }: {
   harness: Harness; model: string; cwd: string; env: Record<string, string>; secrets: (string | undefined)[];
-  timeoutMs: number; cleanupGraceMs: number; settleMs?: number; messages: RunMessages; structuredOutput?: boolean;
+  timeoutMs: number; cleanupGraceMs: number; settleMs?: number; messages: RunMessages; structuredOutput?: boolean; owner?: WorkerOwner;
 }) {
   const abort = new AbortController(), hidden = secrets.filter((value): value is string => Boolean(value));
   const hide = hideValues(hidden);
@@ -123,14 +123,14 @@ export function createOpencodeRunner({ harness, model, cwd, env, secrets, timeou
       // browserError owns the environment's model keys and text redaction. Let it see the complete capture first.
       return capture.truncated ? OUTPUT_WITHHELD : capture.text ? browserError(hide(capture.text), childEnv, Infinity).slice(-TAIL).trim() : '';
     };
-    job = superviseWorker({ command, args, cwd, env: childEnv, timeoutMs, cleanupGraceMs, settleMs, secrets: hidden, unavailable: messages.unavailable,
+    job = ownedStart(owner, ({ onGroup }) => superviseWorker({ command, args, cwd, env: childEnv, timeoutMs, cleanupGraceMs, settleMs, secrets: hidden, unavailable: messages.unavailable, onGroup,
       onOutput(chunk, stream) {
         evidence.write(chunk, stream);
         const capture = captures[stream];
         if (capture.truncated) return;
         if (Buffer.byteLength(capture.text) + Buffer.byteLength(chunk) > CAPTURE_BYTES) { capture.text = ''; capture.truncated = true; }
         else capture.text += chunk;
-      } });
+      } }));
     try {
       await job.promise;
       const output = structuredOutput ? reportedRefusal ?? '' : [tail('stdout'), tail('stderr')].filter(Boolean).join('\n');

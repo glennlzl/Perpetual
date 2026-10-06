@@ -14,7 +14,7 @@ test('browser API uses controller session and source/stage scope, keeps provider
   const stage=(await request('/api/pipeline/action',{repoPath:repo,action:'add-stage',name:'Beta'})).body.pipeline.stages.find((item:{id:string;name:string})=>item.name==='Beta').id;
   const query=new URLSearchParams({repoPath:repo,stageId:stage}),context={repoPath:repo,stageId:stage};
   assert.equal((await request(`/api/browser?${query}`,undefined,{Origin:'https://other.example'})).status,403);
-  for(const operation of ['model','config','cases','discover','run','stop'])assert.equal((await request(`/api/browser/${operation}`,context,{'X-Perpetual-Token':'wrong'})).status,403);
+  for(const operation of ['model','config','cases','discover','run','stop','cleanup'])assert.equal((await request(`/api/browser/${operation}`,context,{'X-Perpetual-Token':'wrong'})).status,403);
   assert.equal((await request('/api/browser/config',{...context,stageId:'production',config:{targetUrl:'http://localhost:3000'}})).status,400);
   assert.equal((await request('/api/browser/config',{...context,repoPath:'/not-active',config:{targetUrl:'http://localhost:3000'}})).status,409);
   assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:app.url}})).status,400);
@@ -32,6 +32,9 @@ test('browser API uses controller session and source/stage scope, keeps provider
   const configured=await request('/api/browser/model',{...context,apiKey:key});assert.equal(configured.status,200);assert.equal(configured.body.capabilities.model,'openai/gpt-6-luna');assert.equal(JSON.stringify(configured).includes(key),false);
   let view=await request(`/api/browser?${query}`);assert.equal(view.body.config.targetUrl,'http://localhost:3000/');assert.equal(view.body.capabilities.keyConfigured,true);assert.equal(JSON.stringify(view).includes(key),false);
   assert.equal((await request(`/api/browser/runs/00000000-0000-0000-0000-000000000000/frame?${query}`)).status,404);
+  // Nothing holds the application, so there is no cleanup to confirm.
+  assert.equal(Object.hasOwn(view.body,'cleanup'),false);
+  const confirmed=await request('/api/browser/cleanup',context);assert.equal(confirmed.status,404);assert.equal(confirmed.body.error,'No browser cleanup is waiting for confirmation.');
   const recording=`/api/browser/runs/00000000-0000-0000-0000-000000000000/video?${new URLSearchParams({...context,caseId:'x',file:`page@${'0'.repeat(32)}.webm`})}`;
   assert.equal((await request(recording)).status,404);
   assert.equal((await request(recording,undefined,{Origin:'https://other.example'})).status,403);

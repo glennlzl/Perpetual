@@ -7,11 +7,11 @@ import { chromium, expect } from '@playwright/test';
 import { browserCaseFixture, browserRunFixture } from './fixtures/browser-view.ts';
 
 // Mount the actual panel and workspace. HTTP outcomes are controlled; no business journey or model runs.
-test('one-off selection can be restored after a failed save without starting the journey again', { timeout: 60000 }, async t => {
-  let item = browserCaseFixture({ id: 'save', name: 'Save a workspace', goal: 'Save and reopen the workspace', expectedOutcomes: ['The saved workspace is shown'], assertions: [{ type: 'text-visible', value: 'Workspace {run}' }],
+test('running one unselected journey names it in the run and leaves the saved selection unchanged', { timeout: 60000 }, async t => {
+  const item = browserCaseFixture({ id: 'save', name: 'Save a workspace', goal: 'Save and reopen the workspace', expectedOutcomes: ['The saved workspace is shown'], assertions: [{ type: 'text-visible', value: 'Workspace {run}' }],
     steps: [{ id: 'save', title: 'Save workspace' }, { id: 'reopen', title: 'Reopen workspace' }] });
-  const original = structuredClone(item);
-  let runs: ReturnType<typeof browserRunFixture>[] = [], failRestore = true, startFails = false, restoreAttempts = 0, starts = 0;
+  let runs: ReturnType<typeof browserRunFixture>[] = [];
+  const posts: { path: string; input: Record<string, unknown> }[] = [];
   const state = () => ({ cases: [item], runs, accounts: [], specs: { save: { draft: { hash: 'a'.repeat(64), stale: false } } },
     config: { targetUrl: 'http://127.0.0.1:3000/', signInUrl: '', scope: '', requirements: '', maxSteps: 60, journeyTimeoutSeconds: 60, externalOrigins: [], authEndpoints: [] },
     capabilities: { provider: 'openrouter', modelConfigured: true, runtimeInstalled: true, browserInstalled: true, playwright: { browserInstalled: true } } });
@@ -47,22 +47,16 @@ test('one-off selection can be restored after a failed save without starting the
       server.middlewares.use(async (req, res, next) => {
         if (req.url?.includes('/__controller')) {
           const path = req.url.split('/__controller')[1].split('?')[0];
-          let result: unknown = state(), status = 200;
+          let result: unknown = state();
           if (req.method === 'POST') {
             let body = ''; for await (const chunk of req) body += chunk;
             const input = JSON.parse(body);
-            if (path === '/api/browser/cases') {
-              assert.deepEqual(input.baseCases, [item], 'Every write carries the current controller conflict base.');
-              if (!input.cases[0].selected) restoreAttempts++;
-              if (!input.cases[0].selected && failRestore) { status = 503; result = { error: 'Selection could not be restored.' }; }
-              else { item = input.cases[0]; result = { cases: [item] }; }
-            } else if (path === '/api/browser/run') {
-              starts++;
-              if (startFails) { status = 409; result = { error: 'The run could not start.' }; }
-              else { const run = browserRunFixture({ id: 'one-off', status: 'passed', caseIds: ['save'], caseSummaries: [item] }); runs = [run]; result = { run }; }
-            } else if (path === '/api/browser/config') result = { config: input.config };
+            posts.push({ path, input });
+            if (path === '/api/browser/run') { const run = browserRunFixture({ id: 'one-off', status: 'passed', caseIds: input.caseIds, caseSummaries: [item] }); runs = [run]; result = { run }; }
+            else if (path === '/api/browser/config') result = { config: input.config };
+            else result = { error: 'Unexpected write.' };
           }
-          res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(result)); return;
+          res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(result)); return;
         }
         if (req.url === '/build/__selection-ui') {
           res.setHeader('Content-Type', 'text/html'); res.end(await server.transformIndexHtml('/__selection-ui', '<div id="root"></div><script type="module" src="/build/__selection-ui.tsx"></script>')); return;
@@ -73,46 +67,20 @@ test('one-off selection can be restored after a failed save without starting the
   }] });
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
-  for (const scenario of ['retry after remount', 'failed start then reload', 'user deselects and selects again']) await t.test(scenario, async t => {
-    item = structuredClone(original); runs = []; failRestore = true; startFails = scenario === 'failed start then reload'; restoreAttempts = 0; starts = 0;
-    const context = await browser.newContext(); t.after(() => context.close());
-    const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__selection-ui`);
-    const selection = page.getByRole('checkbox', { name: `Select ${item.name}` });
-    await expect(selection).not.toBeChecked();
-    await page.getByRole('button', { name: `Actions for ${item.name}` }).click();
-    await page.getByRole('menuitem', { name: 'Run', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Run', exact: true }).click();
-    await expect.poll(() => restoreAttempts).toBe(1);
-    await expect(page.getByRole('alert')).toContainText('Selection could not be restored.');
-    if (startFails) await expect(page.getByRole('alert')).toContainText('The run could not start.');
-    await expect(selection).toBeChecked();
-    const runSelected = page.getByRole('button', { name: 'Run selected (1)', exact: true });
-    await expect(runSelected).toHaveAttribute('aria-disabled', 'true');
-    await runSelected.focus(); await page.keyboard.press('Enter');
-    await expect(page.getByRole('dialog')).toHaveCount(0);
-    if (scenario === 'retry after remount') {
-      await page.getByRole('button', { name: 'Close tests', exact: true }).click();
-      await page.getByRole('button', { name: 'Open tests', exact: true }).click();
-      await expect(page.getByRole('button', { name: 'Restore selection', exact: true })).toBeVisible();
-      assert.equal(restoreAttempts, 1, 'Mounting does not repeatedly retry a known failed save.');
-      failRestore = false;
-      await page.getByRole('button', { name: 'Restore selection', exact: true }).click();
-    } else if (startFails) {
-      failRestore = false;
-      await page.reload();
-    } else {
-      failRestore = false;
-      await selection.click();
-    }
-    await expect(selection).not.toBeChecked();
-    assert.equal(restoreAttempts, 2);
-    if (scenario === 'user deselects and selects again') {
-      await selection.click(); await expect(selection).toBeChecked();
-      await page.reload(); await expect(selection).toBeChecked();
-      await expect(page.getByRole('button', { name: 'Restore selection', exact: true })).toHaveCount(0);
-      assert.equal(restoreAttempts, 2, 'A later user selection is not an owned temporary choice.');
-    }
-    assert.equal(starts, 1, 'Restoring a choice never retries a business journey.');
-  });
+  const page = await browser.newPage(); t.after(() => page.close());
+  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}/build/__selection-ui`);
+  const selection = page.getByRole('checkbox', { name: `Select ${item.name}` });
+  await expect(selection).not.toBeChecked();
+  await page.getByRole('button', { name: `Actions for ${item.name}` }).click();
+  await page.getByRole('menuitem', { name: 'Run', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Run', exact: true }).click();
+  await expect.poll(() => posts.filter(post => post.path === '/api/browser/run').length).toBe(1);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // The run names its journey; no case write selects it first or deselects it afterwards.
+  assert.deepEqual(posts.find(post => post.path === '/api/browser/run')!.input.caseIds, ['save']);
+  await page.getByRole('button', { name: 'Close tests', exact: true }).click();
+  await page.getByRole('button', { name: 'Open tests', exact: true }).click();
+  await expect(selection).not.toBeChecked();
+  await expect(page.getByRole('button', { name: 'Restore selection', exact: true })).toHaveCount(0);
+  assert.deepEqual(posts.map(post => post.path).filter(path => path !== '/api/browser/config'), ['/api/browser/run']);
 });

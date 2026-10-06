@@ -17,7 +17,8 @@ const endpoint=(value:string)=>{try{const url=new URL(value);url.hash='';value=u
 /** The settings once every field is checked, or why they configure no model. */
 function checked({apiKey,model,baseUrl}:BrowserModelInput):BrowserModelSettings|string{
   if(typeof apiKey!=='string'||!apiKey.trim())return 'Configure a model API key to use the browser agent.';
-  if(apiKey.length>4096||/\s/.test(apiKey))return 'Enter a valid model API key.';
+  // A key is sent as an HTTP header value, so it is printable ASCII: one with a pasted ellipsis could never be sent.
+  if(apiKey.length>4096||!/^[\x21-\x7e]+$/.test(apiKey))return 'Enter a valid model API key.';
   if(typeof model!=='string'||!model.trim()||model.length>200||/[\s\u0000-\u001f]/.test(model))return 'Enter a model ID.';
   if(/(?:^|\/)jev(?:-|$)/i.test(model))return 'Choose a chat model; Jev uses a separate decisions API.';
   if(typeof baseUrl!=='string'||!validUrl(baseUrl))return 'Enter a valid model API URL without embedded credentials.';

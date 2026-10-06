@@ -21,7 +21,7 @@ export type PipelineAction =
 /** Unsaved/loading settings may not have received all normalized controller defaults yet. */
 export type BrowserConfig = Pick<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'> & Partial<Omit<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'>>;
 /** The workspace starts from source summaries before the inspector has loaded its full view. */
-export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
+export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation' | 'cleanup'> & {
   runs: BrowserRun[]; capabilities: BrowserCapabilities | null; config: BrowserConfig;
   specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[]; callbacks?: BrowserViewReply['callbacks'];
 };
@@ -333,7 +333,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         return result;
       } catch (failure) {
         const error = failure as ApiError;
-        // A stale case list conflicts in a case save, and in the case writes a one-off run or a replacing Generate makes.
+        // A stale case list conflicts in a case save and in the case write a replacing Generate makes, and a refused
+        // operation, such as a run an unconfirmed cleanup holds, means the stage changed too.
         if (resource === 'browser' && error.statusCode === 409) await refresh(entry, resource, true);
         if (error.name !== 'AbortError') update(entry, { error: error.message });
         throw failure;
