@@ -45,3 +45,9 @@ test('untrusted bindings reject extra authority and count separately from fixed 
  for(const value of [null,{},[42],[{...bindings[0],port:41000}],[{...bindings[0],hostname:'*.localhost'}],[{...bindings[0],hostname:'host.docker.internal'}],[{...bindings[0],pipelineKey:'other'}],[bindings[0],bindings[0]],[{applicationId:'',hostname:'localhost'}],[{applicationId:'x'.repeat(1025),hostname:'localhost'}]]) assert.throws(()=>validateCallbackBindings(value));
  assert.throws(()=>validateCallbackBindings(bindings,10));assert.deepEqual(validateCallbackBindings(bindings,9),bindings);
 });
+test('callback hosts must be exact strings and cannot create duplicate origins through coercion',()=>{
+ for(const hostname of [['localhost'],[['localhost']],['127.0.0.1'],null,42,{}]){
+  assert.throws(()=>validateCallbackBindings([{applicationId:'web',hostname}]),/supported callback host/);
+ }
+ assert.throws(()=>validateCallbackBindings([...bindings,{applicationId:'web',hostname:['localhost']}]),/supported callback host/);
+});

@@ -55,10 +55,13 @@ test('queued settings edit cannot change policy after verification admission',as
  const save=f.manager.saveConfig(f.context,{...config,callbackBindings:[]});const refusal=assert.rejects(save,{statusCode:409});await f.manager.verifySpec(f.context,{caseId:f.item.id,hash,accountId:null});await refusal;assert.deepEqual((await f.manager.view(f.context)).config.callbackBindings,bindings);await f.manager.cancelSpecVerification(f.context,{caseId:f.item.id});
 });
 test('malformed stored bindings and run provenance are refused before views',async t=>{
- for(const corrupt of ['binding','origins','policy','verification']){
+ for(const corrupt of ['binding','array-binding','nested-binding','duplicate-binding','origins','policy','verification']){
  const f=await fixture(t);await f.bind();const {run}=await f.manager.run(f.context,{accountId:null},{manual:true});await terminal(f.manager,f.context,run.id);await f.manager.close();
  const state=await readStateFile(f.file,{limit:16*1024*1024,invalid:'Invalid'}) as {configs:Record<string,{callbackBindings:unknown}>;runs:{callbackOrigins?:unknown;callbackPolicy?:unknown;verification?:unknown}[]};
  if(corrupt==='binding')Object.values(state.configs)[0].callbackBindings=[{applicationId:'web',hostname:'*.localhost'}];if(corrupt==='origins')state.runs[0].callbackOrigins=['http://localhost:41000/path'];if(corrupt==='policy')state.runs[0].callbackPolicy='bad';if(corrupt==='verification')state.runs[0].verification={callbackPolicy:'bad'};
+ if(corrupt==='array-binding')Object.values(state.configs)[0].callbackBindings=[{applicationId:'web',hostname:['localhost']}];
+ if(corrupt==='nested-binding')Object.values(state.configs)[0].callbackBindings=[{applicationId:'web',hostname:[['localhost']]}];
+ if(corrupt==='duplicate-binding')Object.values(state.configs)[0].callbackBindings=[...bindings,{applicationId:'web',hostname:['localhost']}];
  await writeStateFile(f.file,JSON.stringify(state));await assert.rejects(f.reopen());
  }
 });

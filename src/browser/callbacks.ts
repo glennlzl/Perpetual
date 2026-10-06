@@ -11,8 +11,8 @@ export function validateCallbackBindings(value:unknown,fixedOriginsCount=0):Appl
  if(!Array.isArray(value)||!Number.isInteger(fixedOriginsCount)||fixedOriginsCount<0||fixedOriginsCount+value.length>10)throw new Error('Review at most ten fixed sites and application callbacks.');
  const seen=new Set<string>();
  return value.map((item:unknown)=>{
-  if(!record(item)||Object.keys(item).length!==2||typeof item.applicationId!=='string'||!item.applicationId.length||item.applicationId.length>1024||!['localhost','127.0.0.1'].includes(String(item.hostname)))throw new Error('Choose an application and a supported callback host.');
-  const binding:ApplicationCallbackBinding={applicationId:item.applicationId,hostname:item.hostname as ApplicationCallbackBinding['hostname']};
+  if(!record(item)||Object.keys(item).length!==2||typeof item.applicationId!=='string'||!item.applicationId.length||item.applicationId.length>1024||(item.hostname!=='localhost'&&item.hostname!=='127.0.0.1'))throw new Error('Choose an application and a supported callback host.');
+  const binding:ApplicationCallbackBinding={applicationId:item.applicationId,hostname:item.hostname};
   const key=JSON.stringify([binding.applicationId,binding.hostname]);if(seen.has(key))throw new Error('Review each application callback once.');seen.add(key);return binding;
  });
 }
