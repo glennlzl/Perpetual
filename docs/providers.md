@@ -27,7 +27,7 @@ This uses [GitHub CLI's browser authorization](https://cli.github.com/manual/gh_
 
 After connecting, choose a repository, a branch and a Root Directory (`/` or a subdirectory such as `/apps/web`). The repository and branch lists come from GitHub, with pagination.
 
-Saving clones the selected branch into a private directory under the server's data directory (`.perpetual/sources` by default) and scans only the selected root, and the repository's GitHub Actions workflows at its top level, without executing project scripts. Your local checkout is untouched. The root must exist inside the managed checkout and cannot pass through symbolic links. A failed selection leaves the previously saved source and graph in place. Saving the same repository and root again keeps its pipeline definitions across branch changes.
+Saving clones the selected branch into a private directory under the server's data directory (`.perpetual/sources` by default) and scans only the selected root, and the repository's GitHub Actions workflows at its top level, without executing project scripts. Your local checkout is untouched. The root must exist inside the managed checkout and cannot pass through symbolic links. A failed selection leaves the previously saved source and graph in place. Saving the same repository and root again keeps its pipeline definitions and its stages' twins across branch changes; another repository or root deletes the outgoing source's twins (see [Twins](twins.md#shared-use-and-recovery)).
 
 Selecting a branch does not create a webhook or turn on automatic deployments.
 

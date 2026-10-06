@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { createEnvironmentManager } from '../src/environments/manager.ts';
-import { createEnvironmentUsage, holdsResources } from '../src/environments/usage.ts';
+import { createEnvironmentUsage, holdsResources, scopeId } from '../src/environments/usage.ts';
 import type { EnvironmentManager, EnvironmentRecord, ManagedRuntime } from '../src/environments/manager.ts';
 import type { EnvironmentUsage } from '../src/environments/usage.ts';
 
@@ -225,6 +225,18 @@ test('a creation first deletes the stage’s earlier twin that still holds resou
   assert.deepEqual(manager.summaries(context.key).filter(holdsResources).map(item => item.id), [third.id]);
 });
 
+test('a creation from another checkout of the same source replaces the twin an earlier checkout built', async t => {
+  const destroyed: string[] = [];
+  const { manager } = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
+  const earlier = await createReady(manager);
+  // The source saved again on dev is checked out afresh, under the same pipeline and stage.
+  const switched = { ...context, scan: { repo: { path: '/fixture/source-dev', sha: 'fixture-dev-revision', branch: 'dev' }, services: [] } };
+  const replaced = await manager.awaitIdle((await manager.create(switched)).environment.id);
+  assert.deepEqual([replaced.status, replaced.repoPath, replaced.sourceBranch], ['ready', '/fixture/source-dev', 'dev']);
+  assert.deepEqual(destroyed, [earlier.id]);
+  assert.deepEqual(manager.summaries(context.key).filter(holdsResources).map(item => item.id), [replaced.id]);
+});
+
 test('a creation after a controller crash deletes the twin the interrupted operation left', async t => {
   const destroyed: string[] = [];
   const f = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
@@ -354,6 +366,152 @@ test('environments without twin ownership preserve their application URLs', asyn
   const { manager } = await fixture(t, { prepareEnvironment: async () => structuredClone(ready) });
   const environment = await createReady(manager);
   assert.equal(environment.apps[0].url, ready.apps[0].url);
+});
+
+test('a stage keeps the records of its newest ten twins that are gone, and one a stage removal still names', async t => {
+  let fail = false;
+  const { manager, usage, dataDir } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    if (fail) throw new Error('The app did not start.');
+    return structuredClone(ready);
+  } });
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const { environment: other } = await manager.create(gamma);
+  assert.equal((await manager.awaitIdle(other.id)).status, 'ready');
+  await manager.destroy(gamma, other.id);
+  assert.equal((await manager.awaitIdle(other.id)).status, 'destroyed');
+  // Each creation deletes the stage's twin before it: twelve leave eleven deleted twins, and the oldest record goes.
+  const ids: string[] = [];
+  for (let index = 0; index < 12; index += 1) ids.push((await createReady(manager)).id);
+  const beta = (records: { id: string; stageId: string }[]) => records.filter(item => item.stageId === 'beta').map(item => item.id).sort();
+  assert.deepEqual(beta(manager.summaries(context.key)), [...ids.slice(1)].sort());
+  const saved = async () => JSON.parse(await readFile(join(dataDir, 'environments/state.json'), 'utf8')).environments as { id: string; stageId: string }[];
+  assert.deepEqual(beta(await saved()), [...ids.slice(1)].sort());
+  assert.ok(manager.summaries(context.key).some(item => item.id === other.id), 'Another stage keeps its own.');
+  // A record a stage removal names stays while the removal holds it.
+  const token = usage.beginRemoval(context, [ids[11], ids[1]]);
+  await manager.destroy(context, ids[11], { removalToken: token });
+  assert.equal((await manager.awaitIdle(ids[11])).status, 'destroyed');
+  assert.deepEqual(beta(manager.summaries(context.key)), [...ids.slice(1)].sort());
+  usage.endRemoval(token);
+  // A failed creation's twin is gone too, once it is cleaned up: the two oldest go, and its record is the newest.
+  fail = true;
+  const { environment: failed } = await manager.create(context);
+  assert.equal((await manager.awaitIdle(failed.id)).status, 'failed');
+  assert.deepEqual(beta(await saved()), [...ids.slice(3), failed.id].sort());
+});
+
+test('an application URL of a twin whose record was dropped resolves to the stage’s twin that is not ready, never to an external app', async t => {
+  let port = 50200;
+  const { manager, dataDir } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    return { status: 'ready', services: [], apps: [{ id: 'app', url: `http://host.docker.internal:${port++}` }] };
+  } });
+  const ids: string[] = [];
+  for (let index = 0; index < 12; index += 1) ids.push((await createReady(manager)).id);
+  assert.ok(!manager.summaries(context.key).some(item => item.id === ids[0]), 'The oldest gone twin’s record is dropped.');
+  const dropped = manager.resolveTarget('http://localhost:50200/');
+  assert.deepEqual([dropped?.status, dropped?.stageId], ['destroyed', 'beta']);
+  assert.equal(manager.resolveTarget('http://localhost:50211/')?.id, ids[11]);
+  assert.equal(manager.resolveTarget('http://localhost:50212/'), null, 'An address no twin had is an external app.');
+  // A restart keeps them, and the newest gone twin keeps at most 50 such addresses, the newest.
+  await manager.close();
+  const file = join(dataDir, 'environments/state.json'), state = JSON.parse(await readFile(file, 'utf8'));
+  const oldest = state.environments.find((item: { id: string }) => item.id === ids[1]);
+  oldest.origins = Array.from({ length: 60 }, (_, index) => `http://127.0.0.1:${51000 + index}`);
+  await writeFile(file, JSON.stringify(state));
+  const restarted = await createEnvironmentManager({ dataDir, runtime: { prepareEnvironment: async ({ environment, onUpdate }) => { await onUpdate({ sandboxId: environment.id }); return structuredClone(ready); },
+    environmentLogs: async () => '', environmentHealth: async () => ({ status: 'ready' }), destroySandbox: async () => {} } });
+  try {
+    assert.equal(restarted.resolveTarget('http://localhost:50200/')?.status, 'destroyed');
+    // The next creation deletes the ready twin, and the record that held the 60 addresses is dropped.
+    await createReady(restarted);
+    assert.ok(!restarted.summaries(context.key).some(item => item.id === ids[1]));
+    assert.equal(restarted.resolveTarget('http://localhost:51048/')?.status, 'destroyed');
+    assert.equal(restarted.resolveTarget('http://localhost:51049/'), null);
+  } finally { await restarted.close(); }
+});
+
+test('a removed stage’s twin config, the scan it was detected from and its draft go, and other stages keep theirs', async t => {
+  const { manager, dataDir } = await fixture(t);
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  await manager.close();
+  // Beta's config is still detected, and its last generation failed.
+  const file = join(dataDir, 'environments/state.json'), state = JSON.parse(await readFile(file, 'utf8')), beta = scopeId(context);
+  Object.assign(state, { plans: { ...state.plans, [beta]: plan }, detected: { [beta]: 'scan' }, drafts: { [beta]: { text: '{}', feedback: '# Attempt 4 of 4' } } });
+  await writeFile(file, JSON.stringify(state));
+  const restarted = await createEnvironmentManager({ dataDir, runtime: only({}) });
+  try { await restarted.forget([context]); } finally { await restarted.close(); }
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual([Object.keys(saved.plans), saved.detected, saved.drafts], [[scopeId(gamma)], {}, {}]);
+});
+
+test('the twins of a pipeline the active source left are deleted once free, and a creation under way is stopped', async t => {
+  const entered = deferred(), cleaned: string[] = [], failing = new Set<string>();
+  let active: string | null = context.key;
+  const stage = (stageId: string) => ({ ...context, stageId });
+  const { manager, usage } = await fixture(t, {
+    prepareEnvironment: async ({ environment, onUpdate, signal }) => {
+      await onUpdate({ sandboxId: environment.id });
+      // Gamma's creation is under way until it is stopped.
+      if (environment.stageId === 'gamma') {
+        entered.resolve();
+        await new Promise((_resolve, reject) => { if (signal?.aborted) reject(signal.reason); else signal?.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+      }
+      return structuredClone(ready);
+    },
+    destroySandbox: async ({ environment }) => { if (failing.has(environment.id)) throw new Error('compose down failed'); cleaned.push(environment.id); },
+  }, { activeKey: () => active });
+  for (const id of ['gamma', 'delta', 'epsilon', 'zeta']) await manager.savePlan(stage(id), plan);
+  const readyIn = async (stageId: string) => { const { environment } = await manager.create(stage(stageId)); return (await manager.awaitIdle(environment.id)).id; };
+  const beta = (await createReady(manager)).id, delta = await readyIn('delta'), epsilon = await readyIn('epsilon'), zeta = await readyIn('zeta');
+  // Epsilon's cleanup failed, a journey run holds delta, and a stage removal holds zeta.
+  failing.add(epsilon);
+  await manager.destroy(stage('epsilon'), epsilon);
+  assert.equal((await manager.awaitIdle(epsilon)).status, 'cleanup_failed');
+  failing.clear();
+  const releaseRun = usage.acquire(stage('delta'), { environmentId: delta, operation: 'browser-run' });
+  const removal = usage.beginRemoval(stage('zeta'), [zeta]);
+  const { environment: { id: gamma } } = await manager.create(stage('gamma'));
+  await entered.promise;
+  // The active source keeps its twins.
+  await manager.tick();
+  assert.deepEqual(cleaned, []);
+  // Another source becomes active.
+  active = 'github:acme/app:/';
+  await manager.tick();
+  assert.deepEqual([(await manager.awaitIdle(beta)).status, (await manager.awaitIdle(gamma)).status], ['destroyed', 'failed']);
+  assert.equal((await manager.awaitIdle(gamma)).step, 'Stopped', 'The creation under way is stopped and cleans up its twin.');
+  const statuses = () => Object.fromEntries(manager.summaries(context.key).map(item => [item.id, item.status]));
+  assert.deepEqual([statuses()[delta], statuses()[epsilon], statuses()[zeta]], ['ready', 'cleanup_failed', 'ready']);
+  // The run ends, and the next pass deletes its twin; the removal deletes its own.
+  releaseRun();
+  await manager.tick();
+  assert.equal((await manager.awaitIdle(delta)).status, 'destroyed');
+  assert.deepEqual(cleaned.sort(), [beta, gamma, delta].sort());
+  usage.endRemoval(removal);
+  // While no source is active, nothing is deleted.
+  active = null;
+  await manager.tick();
+  assert.equal(statuses()[zeta], 'ready');
+});
+
+test('a pass that deletes the twins of a source the pipeline left stops when that source is selected again', async t => {
+  let active: string | null = context.key;
+  const destroyed: string[] = [];
+  // The person selects this source again while the pass deletes its first twin.
+  const { manager } = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); active = context.key; } }, { activeKey: () => active });
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const beta = (await createReady(manager)).id, { environment } = await manager.create(gamma), other = (await manager.awaitIdle(environment.id)).id;
+  active = 'github:acme/app:/';
+  await manager.tick();
+  assert.equal(destroyed.length, 1);
+  assert.equal((await manager.awaitIdle(destroyed[0] === beta ? other : beta)).status, 'ready', 'The other twin of the source stays.');
+  await manager.tick();
+  assert.equal(destroyed.length, 1);
 });
 
 test('owned-target resolution canonicalizes loopback aliases and retains stale ownership after deletion', async t => {

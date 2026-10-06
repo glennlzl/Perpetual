@@ -109,6 +109,8 @@ export interface GenerationSteps<Result> {
   checkpoint?(draft: GenerationDraft): Promise<void>;
   /** Tears the failed twin down before the next attempt. */
   teardown(config: TwinConfig): Promise<void>;
+  /** Why no twin can be built now, such as Docker's engine not answering, or null when one can. */
+  available?(): Promise<string | null>;
   /** Redacts the secrets the controller knows: the model key and the twin's secret inputs. */
   hide(text: string): string;
   cancelled(): boolean;
@@ -117,16 +119,19 @@ export interface GenerationSteps<Result> {
 /**
  * Runs the loop until an attempt's twin counts as ready: resolves its config, the prepared result and how many attempts
  * it took. After the last failed attempt it rejects with a GenerationFailure, and the last twin is left for the caller's
- * usual failure cleanup. A cancellation, or an agent that cannot run, ends the loop at once; running out of time does
- * not. Its log, in `logs` of the result and of each rejection, holds every attempt's output and each failed attempt's
- * feedback, all redacted.
+ * usual failure cleanup. A cancellation, an agent that cannot run, or a twin that cannot be built, before an attempt or
+ * when a preparation failed, ends the loop at once; running out of time does not. Its log, in `logs` of the result and
+ * of each rejection, holds every attempt's output and each failed attempt's feedback, all redacted.
  */
-export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, hide, cancelled }: GenerationSteps<Result>) {
+export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, available = async () => null, hide, cancelled }: GenerationSteps<Result>) {
   let text = draft, notes = feedback;
   const output: string[] = [];
   const record = (attempt: number, what: string, tail: unknown) => { if (typeof tail === 'string' && tail.trim()) output.push(`${writingStep(attempt)}: ${hide(what)}\n${hide(tail).trim()}`); };
   const withLogs = <Failure extends Error>(error: Failure) => output.length ? Object.assign(error, { logs: output.join('\n\n') }) : error;
   for (let attempt = 1; ; attempt += 1) {
+    // Every attempt builds its config's twin, so none is paid for while no twin can be built, as when Docker is not running.
+    const unavailable = await available();
+    if (unavailable) throw withLogs(new Error(unavailable));
     await step(writingStep(attempt));
     let written: Authored;
     try { written = await author({ draft: text, feedback: notes, attempt }); }
@@ -154,6 +159,9 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
           failure = { ...found, heading: 'the twin started, but does not count as ready', logs: await logs(app) };
         } catch (error) {
           if (cancelled() || error instanceof Error && 'cleanupIncomplete' in error && error.cleanupIncomplete === true) throw error instanceof Error ? withLogs(error) : error;
+          // A preparation that failed while no twin can be built, as when Docker stopped, is not the config's to fix, whatever
+          // its error names: generation ends with it rather than paying for another attempt, and leaves no draft of it.
+          if (await available()) throw withLogs(error instanceof Error ? error : new Error(String(error)));
           const { step: at, ...found } = await diagnose(built, error);
           failure = { ...found, heading: `preparing the twin failed at "${at}"`, error: String((error as Error).message ?? error) };
         }

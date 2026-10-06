@@ -30,7 +30,7 @@ import { TestWorkspaceContext, useTestStage, useTestWorkspace } from '@/lib/use-
 import { hasCaseDrafts, newTestDraftKey } from '@/lib/case-drafts';
 import { MAX_CASES } from '@/lib/journey-config';
 import { environmentWorking } from '@/lib/stage-activity.ts';
-import { readyArrivals, sourceEnvironments, transitionFlow } from '@/lib/pipeline-flow.ts';
+import { readyArrivals, transitionFlow } from '@/lib/pipeline-flow.ts';
 import { buildChanges, buildForSource, createGitHubBuildPoller, watchedBuildStatus, watchedBuildSummary, type BuildRead } from '@/lib/pipeline-github.ts';
 import { DEPLOYMENT_MARK_LABELS, createGitHubDeploymentsPoller, deploymentChanges, deploymentMark, isRecordedDeployment, moreDeployments, productionRows, type DeploymentGroupRow, type DeploymentMark, type GitHubDeployments, type RecordedDeployment } from '@/lib/pipeline-deployments.ts';
 import { createHealthBeats, healthLabel, healthWarning } from '@/lib/pipeline-health.ts';
@@ -326,7 +326,7 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
         {stage.kind === 'production' && <div className="px-3 pb-3"><ProductionRelease key={repoPath} repoPath={repoPath} view={data.releases ?? null} readError={data.releaseReadError} disabled={busy} /></div>}
         {sandbox && <div className="flex min-w-0 flex-col gap-3 px-3 pb-3">
           <TwinServices repoPath={repoPath} scannedAt={scannedAt} stageId={stage.id} environment={environment} />
-          {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status)) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{`Create ${stage.name} environment`}</Button>}
+          {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status) || behind) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{`Create ${stage.name} environment`}</Button>}
           <div className="flex items-center justify-between gap-3">
             <Button variant="ghost" size="sm" className="nodrag nopan h-8 justify-start gap-2 px-1 text-xs" aria-label={`Integration tests, ${businessCases.length}`} onClick={openTests}>Integration tests<Badge variant="outline" className="tabular-nums">{businessCases.length}</Badge></Button>
             {preparingTests || activeBrowserRun ? <Badge variant="outline"><LoaderCircle className="motion-safe:animate-spin" />{activeBrowserRun?.mode === 'run' ? 'Running' : 'Generating'}</Badge>
@@ -463,9 +463,10 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
   // Production's rows with the deployments GitHub records for the scanned commit; without records, the scan's rows stand.
   const production = useMemo(() => deployments ? productionRows<ScanNode>(scan?.delivery?.production || [], deployments, sha) : null, [scan, deployments, sha]);
   const moreRecords = moreDeployments(deployments);
-  const stageEnvironments = useMemo(() => sourceEnvironments(environments, scan?.repo?.path), [environments, scan]);
-  const latest = useMemo(() => Object.fromEntries((pipeline?.stages || []).map(stage => [stage.id, latestEnvironment(stageEnvironments, stage.id)])), [pipeline, stageEnvironments]);
-  const activitySnapshot = useMemo(() => ({ environments: stageEnvironments, browserTests, stageRemovals }), [stageEnvironments, browserTests, stageRemovals]);
+  // A stage's twin is its newest environment of the pipeline, as its inspector shows it, whichever checkout of the source
+  // built it: one from before a branch switch stays on the card, behind, until Create replaces it.
+  const latest = useMemo(() => Object.fromEntries((pipeline?.stages || []).map(stage => [stage.id, latestEnvironment(environments, stage.id)])), [pipeline, environments]);
+  const activitySnapshot = useMemo(() => ({ environments, browserTests, stageRemovals }), [environments, browserTests, stageRemovals]);
   // One-shot arrival ring when an observed provisioning environment becomes
   // ready. A new key replays the ring.
   const readiness = useRef<ReturnType<typeof readyArrivals>['seen'] | null>(null), arrivalTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -481,10 +482,10 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, op
     arrivalTimers.current.add(timer);
   }, []);
   useEffect(() => {
-    const { seen, arrived } = readyArrivals(readiness.current, stageEnvironments);
+    const { seen, arrived } = readyArrivals(readiness.current, environments);
     readiness.current = seen;
     arrive(arrived);
-  }, [stageEnvironments, arrive]);
+  }, [environments, arrive]);
   // Reuse unchanged stage data so memoized cards skip unrelated polls. Heartbeat
   // baselines live here, above each card, so a remounted badge keeps its beat.
   const [reuseStageData] = useState(createStageDataCache);

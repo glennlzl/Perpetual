@@ -312,6 +312,28 @@ test('a refused Create environment is one canvas error that one Dismiss clears',
   assert.deepEqual(pageErrors, []);
 });
 
+test('a twin an earlier checkout built stays on its Sandbox card as behind, and Create replaces it', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  // Switching to dev saved the source again in a new checkout; Beta's twin was built from main's.
+  const earlier = { id: 'env-earlier', stageId: beta, status: 'ready', step: 'Ready', repoPath: '/data/sources/github-old/app', sourceBranch: 'main', sourceRevision: 'b'.repeat(40),
+    services: [], apps: [{ id: 'web', url: 'http://127.0.0.1:43100/' }], createdAt: '2026-10-01T00:00:00.000Z' };
+  const state = pipelineState(pipeline, { scan: { repo: { path: repoPath, name: 'app', branch: 'dev', sha }, delivery: { source: [], build: [], production: [] } }, environments: [earlier] });
+  const { page, posts, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: state };
+    if (path === '/api/environments/create') return { status: 202, json: { environment: { ...earlier, id: 'env-new', status: 'queued', step: 'Queued', repoPath, sourceBranch: 'dev', sourceRevision: sha } } };
+    if (path === '/api/environments') return { json: { environments: [earlier], plan: null } };
+  });
+  await open();
+  const card = page.getByRole('group', { name: 'Beta', exact: true });
+  const behind = card.getByRole('button', { name: 'Behind', exact: true });
+  await expect(behind).toBeVisible();
+  await behind.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('main · bbbbbbb → dev · aaaaaaa');
+  await card.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
+  await expect.poll(() => posts.filter(item => item.path === '/api/environments/create').map(item => item.body)).toEqual([{ repoPath, stageId: beta }]);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a view that failed for one stage does not stand in for the next stage opened in the same sheet', { timeout: 60000 }, async t => {
   const beta = withBeta(), betaId = beta.stages.find(stage => stage.kind === 'sandbox')!.id;
   const pipeline = applyPipelineAction(beta, { action: 'add-stage', afterStageId: betaId, name: 'Gamma' });
