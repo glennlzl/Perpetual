@@ -138,6 +138,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
 
   function applyConnection(result: GitHubConnection, restoreSelection = false) {
     setConnection(result);
+    if (result.connected) setConnectOpen(false);
     savedSource.current = result.source || null;
     if (restoreSelection && result.source) {
       setRepository(result.source.repository || '');

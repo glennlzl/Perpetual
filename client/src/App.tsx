@@ -142,8 +142,8 @@ function AppSidebar({ theme, page, onNavigate }: { theme: Theme; page: Page; onN
       <SidebarGroup>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton isActive={page === 'pipeline'} tooltip="Pipeline" aria-current={page === 'pipeline' ? 'page' : undefined} onClick={() => navigate('pipeline')}>
-              <Workflow /><span>Pipeline</span>
+            <SidebarMenuButton isActive={page === 'pipeline'} tooltip="Project" aria-current={page === 'pipeline' ? 'page' : undefined} onClick={() => navigate('pipeline')}>
+              <Workflow /><span>Project</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -311,9 +311,9 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
               ? <GitHubActionsCard repoPath={repoPath} scannedAt={scannedAt} scannedSha={sha} runs={github} readError={data.buildReadError} stageId={stage.id} autopilot={autopilot} onConnect={data.buildUnreachable ? undefined : () => openDialog({ type: 'source', connect: true })} />
               : isDeploymentGroup(service)
               ? <DeploymentGroup service={service} repoPath={repoPath} stageId={stage.id} selection={selection} openDialog={openDialog} />
-              : <Button variant="ghost" size="sm" className="stage-step-action nodrag nopan h-auto min-h-8 w-full justify-between whitespace-normal aria-pressed:bg-accent" onClick={() => openDialog({ type: stage.kind === 'source' ? 'source' : 'service', nodeId: service.id, stageId: stage.id })} aria-pressed={selection?.nodeId === service.id || (stage.kind === 'source' && selection?.type === 'source')} aria-label={`Configure ${service.label}`}>
+              : <div className="flex min-w-0 flex-1 items-center gap-1"><Button variant="ghost" size="sm" className="stage-step-action nodrag nopan h-auto min-h-8 min-w-0 flex-1 justify-between whitespace-normal aria-pressed:bg-accent" onClick={() => openDialog({ type: stage.kind === 'source' ? 'source' : 'service', nodeId: service.id, stageId: stage.id })} aria-pressed={selection?.nodeId === service.id || (stage.kind === 'source' && selection?.type === 'source')} aria-label={`Configure ${service.label}`}>
                 <span className="min-w-0 break-words text-left" title={service.label}>{service.label}</span><Settings2 className="size-3.5 text-muted-foreground" />
-              </Button>}
+              </Button>{stage.kind === 'source' && data.repositoryUrl && <Hint text="Open on GitHub"><Button asChild variant="ghost" size="icon" className="nodrag nopan size-8 shrink-0"><a href={data.repositoryUrl} target="_blank" rel="noopener noreferrer" aria-label={`Open ${service.label} on GitHub`}><ExternalLink className="size-3.5" /></a></Button></Hint>}</div>}
           </StepItem>)}
           {/* GitHub holds older deployment records for the commit than were read; the rest are there. */}
           {data.moreDeployments && <StepItem icon={<ProviderMark provider="GitHub" />}>
@@ -681,7 +681,7 @@ function PipelineApp() {
   const [workspace, tests] = useTestWorkspace();
   const [page, setPage] = useState<Page>(() => window.location.hash === '#settings' ? 'settings' : 'pipeline');
   const pageRef = useRef(page), settingsReturn = useRef<SettingsReturn | null>(null);
-  useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Pipeline'}`; }, [page]);
+  useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Project'}`; }, [page]);
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
   const pipeline = tests.pipeline;
   const [loading, setLoading] = useState(true);
@@ -903,7 +903,7 @@ function PipelineApp() {
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
-      <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Pipeline'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
+      <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Project'}</span>{page === 'pipeline' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span></>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
       {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
         {loading ? <PipelineLoading /> : pipeline ? <ReactFlowProvider key={pipeline.repoPath}><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}

@@ -39,7 +39,7 @@ test('Source read recovery keeps keyboard focus and the user’s draft', { timeo
       await expect(dialog.getByRole('button', { name: 'Sign in with GitHub', exact: true })).toBeVisible();
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeFocused();
-    } else await dialog.getByRole('button', { name: 'Continue as acme', exact: true }).click();
+    } else await expect(dialog).toBeHidden();
     const retry = page.getByRole('button', { name: kind === 'connection' ? 'Try again' : `Retry ${kind}`, exact: true });
     const recovered = kind === 'connection' ? page.getByRole('button', { name: 'Disconnect', exact: true })
       : page.getByRole('combobox', { name: kind === 'repositories' ? 'Repository' : 'Branch', exact: true });

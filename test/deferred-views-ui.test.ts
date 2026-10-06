@@ -58,7 +58,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     await expect(page.getByRole('heading', { name: 'OpenRouter', exact: true })).toBeVisible();
     assert.equal(requested.has(chunks.AppSettings), true);
     assert.equal(requested.has(chunks.EnvironmentSettings), false);
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     await expect(page.getByText('No commits found', { exact: true })).toBeVisible();
     assert.equal(requested.has(chunks.GitGraphPanel), true);
@@ -140,7 +140,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     const key = page.getByLabel('OpenRouter API Key', { exact: true });
     await key.fill('unsaved-ui-draft');
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
     await expect(sheet.getByRole('alert')).toHaveText('Could not load this view.');
@@ -159,7 +159,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     await expect(page.getByRole('alert')).toHaveText('Could not load this view.');
     // The mobile sidebar remains reachable outside the failed route.
     await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Configure source', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();

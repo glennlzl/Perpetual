@@ -7,13 +7,14 @@ import type { SavedSource } from './source-selection.ts';
 import type { BrowserView, Environment } from './test-workspace.ts';
 import type { ReleaseReply } from '../../../contract/releases.ts';
 import type { Pipeline, Stage, Transition } from '../../../contract/pipeline.ts';
+import { githubRepositoryUrl } from '../../../src/github-remote.ts';
 
 export type PipelineStage = Pick<Stage, 'id' | 'name'> & Partial<Pick<Stage, 'collapsed'>> & { kind: string };
 export type PipelineTransition = Pick<Transition, 'id' | 'source' | 'target'> & Partial<Pick<Transition, 'blocked'>>;
 /** A source's pipeline: its stages in order and the transitions between them. */
 export type PipelineView = Partial<Pick<Pipeline, 'repoPath'>> & { stages: PipelineStage[]; transitions: PipelineTransition[] };
 /** A scan as stage cards read it. R is a delivery row the scan projects for Source, Build or Production. */
-export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null; branch?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
+export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null; branch?: string | null; remote?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
 
 // One shared empty list: a fresh [] per recompute would give every sandbox card, and a
 // Production card without deployment targets, new data on each unrelated poll.
@@ -79,7 +80,7 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
     activity: stageActivity(stage, snapshot), behind: environment && sha && environmentBehind(environment, sha) ? behindCommits(environment, sha, scan?.repo?.branch) : '', repairHead: repairHead(environment),
     arrival: arrivals[stage.id] || '', beat: stage.kind === 'sandbox' ? healthBeat(environment) : '',
     gate: stage.kind === 'sandbox' ? gates?.stages?.[stage.id] || null : stage.kind === 'production' ? gates?.production || null : null,
-    ...(stage.kind === 'source' ? sourceProvenance(scan, source) : {}),
+    ...(stage.kind === 'source' ? { ...sourceProvenance(scan, source), repositoryUrl: githubRepositoryUrl(scan?.repo?.remote) } : {}),
     // Whether a Sandbox stage gates commits before Production, and whether the repository names a deployment target, which
     // the recorded deployments joining its rows never do; its badge says so when either is missing.
     ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), discovered: stageServices(scan, stage).length > 0, releases, releaseReadError, moreDeployments } : {}),

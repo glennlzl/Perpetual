@@ -1,4 +1,5 @@
 import { runGitHub } from './github-cli.ts';
+import { parseGitHubRemote } from './github-remote.ts';
 import type { Scan } from './scanner.ts';
 import { redact } from './redaction.ts';
 import type { ProviderRun, ProviderStatus, FailureDiagnosis } from '../contract/providers.ts';
@@ -16,10 +17,7 @@ function records(value: unknown,provider: string): Record<string, unknown>[] {
 
 // Redaction lives in src/redaction.ts; the name stays exported here for its callers.
 export { redact };
-export function parseGitHubRemote(remote: unknown=''): string | null {
-  const match=String(remote).match(/^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/);
-  return match?.[1] || null;
-}
+export { parseGitHubRemote };
 export function normalizeGitHubRuns(runs: unknown,sha: unknown): ProviderRun[] {
   return records(runs,'GitHub').map(r=>{
     if(typeof r.id!=='number'&&typeof r.id!=='string')throw new Error('GitHub returned an unreadable reply.');
