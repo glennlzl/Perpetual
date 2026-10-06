@@ -71,11 +71,39 @@ const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
 // A package manager's setting that holds or points to a registry credential: a token, password, user name or email, a
-// client certificate or its key, or a token helper. In npm's and pnpm's .npmrc it may be scoped to a registry
-// (`//registry.example/:_authToken=…`), in Yarn 1's .yarnrc quoted and set with a space, and in Yarn's .yarnrc.yml nested
-// or in a flow mapping (`npmAuthToken: …`); a commented-out one counts too.
-const REGISTRY_CREDENTIAL = new RegExp(`(?:^\\s*(?:[#;]\\s*)?|[{,]\\s*)["']?(?:[^\\s"'=,{}]*:)?(?:_authToken|_auth|_password|username|email|certfile|keyfile|cert|key|tokenHelper|npmAuthToken|npmAuthIdent|httpsCertFilePath|httpsKeyFilePath)["']?(?:\\s*[=:]|\\s|$)`, 'im');
+// client certificate or its key, or a token helper. npm's and pnpm's .npmrc and Yarn 1's .yarnrc set one on a line of its
+// own, scoped to a registry or not (`//registry.example/:_authToken=…`), in .yarnrc quoted and set with a space. Yarn's
+// .yarnrc.yml has settings of its own, nested under a scope or registry, or in a flow mapping (`{ npmAuthToken: … }`). A
+// commented-out one counts too.
+const NPM_CREDENTIAL = /^\s*(?:[#;]\s*)?["']?(?:[^\s"'=]*:)?(?:_authToken|_auth|_password|username|email|certfile|keyfile|cert|key|tokenHelper)["']?(?:\s*[=:]|\s|$)/i;
+const YARN_KEY = `["']?(?:npmAuthToken|npmAuthIdent|httpsCertFilePath|httpsKeyFilePath)["']?\\s*:`;
+const YARN_CREDENTIAL = new RegExp(`^\\s*(?:#\\s*)?${YARN_KEY}`), YARN_FLOW_CREDENTIAL = new RegExp(`[{,]\\s*${YARN_KEY}`);
+// A URL with user info, a user alone or with a password, literal or a reference: a registry or proxy that signs in.
+const URL_USER = new RegExp(USER_INFO.source, 'i');
+// The catalogue's time grows faster than a line's length, so a longer line of a config is removed without being read.
+const CONFIG_LINE = 4096;
 const indentation = (line: string) => /^[ \t]*/.exec(line)![0].length;
+/**
+ * How many flow collections ({…} or […]) are open after a line of YAML, `depth` being those open before it, and whether
+ * one opened on it. One opens where a node starts, at the start of the line or after `: `, `- ` or `? `, and anywhere
+ * inside another; quoted text and comments are skipped.
+ */
+function flowCollections(line: string, depth: number) {
+  let start = true, opened = false, quote = '';
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote) {
+      if (quote === '"' && char === '\\' || quote === "'" && char === "'" && line[index + 1] === "'") index += 1;
+      else if (char === quote) { quote = ''; start = false; }
+    } else if (char === ' ' || char === '\t' || char === '\r') continue;
+    else if (char === '#' && (index === 0 || /\s/.test(line[index - 1]))) break;
+    else if (start && (char === '"' || char === "'")) quote = char;
+    else if ((start || depth > 0) && (char === '{' || char === '[')) { depth += 1; opened = true; start = true; }
+    else if (depth > 0 && (char === '}' || char === ']')) { depth -= 1; start = false; }
+    else start = depth > 0 ? char === ',' || char === ':' : ':-?'.includes(char) && /^\s?$/.test(line.slice(index + 1, index + 2));
+  }
+  return { depth, opened };
+}
 
 /**
  * Text with every secret-shaped value replaced by the marker: ANSI colour removed; private key and
@@ -129,22 +157,35 @@ export function hasCredential(input: string, { code = false, url = false }: { co
 }
 
 /**
- * A package manager's config (.npmrc, .yarnrc or .yarnrc.yml) without its credentials: each line that sets a registry
- * credential, or holds a credential as a literal (a known token shape, a private key block, a URL with a password), is
- * removed, with the rest of a key block it opens and the lines indented beneath it, which continue its value. Every
- * other line, such as a registry, Yarn's nodeLinker or pnpm's hoisting, is kept as written, so an install resolves as
- * the repository's does.
+ * A package manager's config without its credentials, `file` being its name (.npmrc, .yarnrc or .yarnrc.yml): each line
+ * that sets a registry credential, holds a credential as a literal (a known token shape, a private key block) or a URL
+ * with user info, or is over 4 KB, is removed, with the rest of a key block it opens and the lines indented beneath it,
+ * which continue its value; a comment continues nothing. In YAML, a flow collection that holds one, such as
+ * `{ npmAlwaysAuth: true, npmAuthToken: … }`, is removed whole, over every line it spans and with the key on its first
+ * line, so the file stays YAML. Every other line, such as a registry, Yarn's nodeLinker or pnpm's hoisting, is kept as
+ * written, so an install resolves as the repository's does.
  */
-export function withoutRegistryCredentials(text: string): string {
-  const lines = text.split('\n'), kept: string[] = [];
+export function withoutRegistryCredentials(text: string, file: string): string {
+  const yaml = /\.ya?ml$/i.test(file), lines = text.split('\n'), kept: string[] = [];
+  const comment = yaml ? /^\s*#/ : /^\s*[#;]/, setting = yaml ? YARN_CREDENTIAL : NPM_CREDENTIAL;
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!REGISTRY_CREDENTIAL.test(line) && !hasCredential(line)) { kept.push(line); continue; }
-    if (line.includes('-----BEGIN ')) while (!lines[index].includes('-----END ') && index + 1 < lines.length) index += 1;
+    // What a line sets: the line, or in YAML every line a flow collection opened on it spans.
+    const first = index;
+    let flow = false;
+    if (yaml) for (let depth = 0; ; index += 1) {
+      const open = flowCollections(lines[index], depth);
+      flow ||= open.opened;
+      depth = open.depth;
+      if (!depth || index + 1 === lines.length) break;
+    }
+    const unit = lines.slice(first, index + 1);
+    if (!unit.some(line => line.length > CONFIG_LINE || setting.test(line) || flow && YARN_FLOW_CREDENTIAL.test(line) || URL_USER.test(line) || hasCredential(line))) { kept.push(...unit); continue; }
+    if (lines[index].includes('-----BEGIN ')) while (!lines[index].includes('-----END ') && index + 1 < lines.length) index += 1;
+    if (comment.test(lines[first])) continue;
     // Blank lines inside a continued value go with it; those after it stay.
     for (let next = index + 1; next < lines.length; next += 1) {
       if (!lines[next].trim()) continue;
-      if (indentation(lines[next]) <= indentation(line)) break;
+      if (indentation(lines[next]) <= indentation(lines[first])) break;
       index = next;
     }
   }

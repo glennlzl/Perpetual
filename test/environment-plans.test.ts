@@ -343,6 +343,19 @@ test('package manager configs are copied at every depth with their settings and 
   assert.deepEqual([other.hash, other.bytes], [one.hash, one.bytes]);
 });
 
+test('a package manager’s config over 128 KB is left out of the snapshot, and a line over 4 KB is removed from one', async t => {
+  const { root, repoPath } = await fixture(t, {
+    'package.json': '{}',
+    '.npmrc': `legacy-peer-deps=true\nca="${'A'.repeat(5000)}"\n`,
+    'packages/web/.yarnrc.yml': `nodeLinker: node-modules\n# ${'x'.repeat(128 * 1024)}\n`,
+  });
+  const destination = path.join(root, 'snapshot');
+  const result = await snapshotSource(repoPath, destination);
+  assert.deepEqual(await filesIn(destination), ['.npmrc', 'package.json']);
+  assert.equal(await readFile(path.join(destination, '.npmrc'), 'utf8'), 'legacy-peer-deps=true\n');
+  assert.deepEqual([result.files, result.bytes], [2, Buffer.byteLength('legacy-peer-deps=true\n') + 2]);
+});
+
 test('a git checkout’s snapshot leaves out the local files git ignores, whatever their names', async t => {
   const committed = { '.gitignore': '.envrc\n.dev.vars\nterraform.tfstate\nlocal-dump/\n*.log\n', 'package.json': '{}', 'src/app.mjs': 'export const app = true;\n' };
   const { root, repoPath } = await fixture(t, {

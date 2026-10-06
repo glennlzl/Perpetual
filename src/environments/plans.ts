@@ -17,8 +17,10 @@ const SKIP = new Set(['.git', 'node_modules', '.next', '.nuxt', '.output', '.per
 const BUILD_OUTPUT = new Set(['dist', 'build', 'coverage']);
 const PRIVATE = /^(?:\.env(?:\..*)?|\.netrc|\.pypirc|id_(?:rsa|ed25519)(?:\..*)?|(?:AGENTS(?:\.override)?|CLAUDE(?:\.local)?)\.md)$|\.(?:pem|key|p12|pfx|sqlite|sqlite3|db)$/i;
 const PRIVATE_NAME = /^(?:credentials|secrets?)(?:\..*)?$/i;
-// A package manager's config holds settings an install needs beside registry credentials, so it is copied without those.
+// A package manager's config holds settings an install needs beside registry credentials, so it is copied without those;
+// one larger than this is left out.
 const REGISTRY_CONFIG = /^\.(?:npmrc|yarnrc(?:\.yml)?)$/i;
+export const REGISTRY_CONFIG_BYTES = 128 * 1024;
 const SOURCE_MODULE = /\.(?:[cm]?[jt]sx?|pyi?)$/i;
 /** Whether the snapshot keeps every folder on a repository path's way, by snapshotSource's rules. */
 export const keptFolders = (path: string) => path.split('/').slice(0, -1).every((name, index, folders) => !SKIP.has(name) && !PRIVATE.test(name) && !PRIVATE_NAME.test(name)
@@ -279,16 +281,17 @@ async function ignoredPaths(root: string, folder = '') {
   }
 }
 
-/** A package manager's config as the snapshot copies it: the same bytes, unless it held a credential line. */
-function withoutCredentials(buffer: Buffer) {
-  const text = buffer.toString('utf8'), kept = withoutRegistryCredentials(text);
+/** A package manager's config without its credential lines, `name` being its file name: the same bytes, unless it held one. */
+function withoutCredentials(name: string, buffer: Buffer) {
+  const text = buffer.toString('utf8'), kept = withoutRegistryCredentials(text, name);
   return kept === text ? buffer : Buffer.from(kept);
 }
 
 /**
  * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
  * git ignores stay out whatever their names, since local files such as credentials are never committed; so do those a
- * repository or submodule inside it ignores. A package manager's config is copied without its credential lines.
+ * repository or submodule inside it ignores. A package manager's config is copied without its credential lines, and left
+ * out unread when it is larger than REGISTRY_CONFIG_BYTES, which bounds the time its lines take to check.
  */
 export async function snapshotSource(repoPath: string, destination: string) {
   const root = await realpath(repoPath), target = resolve(destination);
@@ -329,8 +332,9 @@ export async function snapshotSource(repoPath: string, destination: string) {
       if (await realpath(original) !== original) throw new Error('Source links changed during snapshot creation.');
       const handle = await open(original, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        const stat = await handle.stat();
+        const stat = await handle.stat(), config = REGISTRY_CONFIG.test(entry.name);
         if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error(`Snapshot file is too large: ${name}`);
+        if (config && stat.size > REGISTRY_CONFIG_BYTES) continue;
         if (++count > 20000 || (bytes += stat.size) > 256 * 1024 * 1024) throw new Error('Source snapshot exceeds 20,000 files or 256 MiB.');
         const buffer = Buffer.alloc(stat.size);
         let offset = 0;
@@ -340,7 +344,7 @@ export async function snapshotSource(repoPath: string, destination: string) {
           offset += result.bytesRead;
         }
         if ((await handle.stat()).size !== stat.size || await realpath(original) !== original) throw new Error('Source changed during snapshot creation. Retry the operation.');
-        const content = REGISTRY_CONFIG.test(entry.name) ? withoutCredentials(buffer) : buffer;
+        const content = config ? withoutCredentials(entry.name, buffer) : buffer;
         bytes -= buffer.length - content.length;
         hash.update(relative(root, original)).update('\0').update(content).update('\0');
         const out = await open(output, 'wx', stat.mode & 0o111 ? 0o700 : 0o600);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
+import { parseDocument } from 'yaml';
 import { REDACTED, failureText, hasCredential, hasSecretLiteral, hide, redact, withoutRegistryCredentials } from '../src/redaction.ts';
 
 test('redact knows every secret shape once: named values, tokens, key blocks, user info', () => {
@@ -254,18 +255,51 @@ test('a package manager\'s config keeps every setting but its registry credentia
     '//registry.example.test:8443/npm/:_password=Zml4dHVyZQ==', '//registry.example.test:8443/npm/:username=fixture', '_auth = Zml4dHVyZTpmaXh0dXJl', 'email=owner@example.test',
     '; //registry.npmjs.org/:_authToken=fixture-old-token', '//registry.example.test/:tokenHelper=/home/fixture/token.sh', 'key="-----BEGIN PRIVATE KEY-----\\nMIIfixture\\n-----END PRIVATE KEY-----"',
     'certfile=/home/fixture/client.crt', '@private:registry=https://fixture:fixture-password@registry.example.test/', 'node-linker=hoisted', 'auto-install-peers=true', 'init-author-email=owner@example.test', ''].join('\n');
-  assert.equal(withoutRegistryCredentials(npmrc), ['registry=https://registry.npmjs.org/', '@acme:registry=https://npm.pkg.github.com/', 'node-linker=hoisted', 'auto-install-peers=true', 'init-author-email=owner@example.test', ''].join('\n'));
+  assert.equal(withoutRegistryCredentials(npmrc, '.npmrc'), ['registry=https://registry.npmjs.org/', '@acme:registry=https://npm.pkg.github.com/', 'node-linker=hoisted', 'auto-install-peers=true', 'init-author-email=owner@example.test', ''].join('\n'));
   // Yarn 1: quoted keys set with a space.
-  assert.equal(withoutRegistryCredentials('registry "https://registry.yarnpkg.com"\n"//registry.yarnpkg.com/:_authToken" "fixture-yarn-token"\nemail owner@example.test\n--install.frozen-lockfile true\n'),
+  assert.equal(withoutRegistryCredentials('registry "https://registry.yarnpkg.com"\n"//registry.yarnpkg.com/:_authToken" "fixture-yarn-token"\nemail owner@example.test\n--install.frozen-lockfile true\n', '.yarnrc'),
     'registry "https://registry.yarnpkg.com"\n--install.frozen-lockfile true\n');
   // Yarn: nested, folded over lines, in a flow mapping, and a key block a value holds.
   const yarnrc = ['nodeLinker: node-modules', 'npmScopes:', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', '    npmAuthToken: "${GITHUB_TOKEN}"', '    npmAlwaysAuth: true',
     'npmAuthIdent: >-', '  fixture:', '', '  fixture-password', '', 'npmRegistries: { "//registry.example.test": { npmAuthToken: fixture-flow-token } }', 'clientKey: |', '  -----BEGIN PRIVATE KEY-----', '  MIIfixture',
     '  -----END PRIVATE KEY-----', 'yarnPath: .yarn/releases/yarn-4.5.0.cjs', ''].join('\n');
-  assert.equal(withoutRegistryCredentials(yarnrc), ['nodeLinker: node-modules', 'npmScopes:', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', '    npmAlwaysAuth: true', '',
+  assert.equal(withoutRegistryCredentials(yarnrc, '.yarnrc.yml'), ['nodeLinker: node-modules', 'npmScopes:', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', '    npmAlwaysAuth: true', '',
     'clientKey: |', 'yarnPath: .yarn/releases/yarn-4.5.0.cjs', ''].join('\n'));
   // Windows line endings stay, and a config without a credential comes back as it was.
-  assert.equal(withoutRegistryCredentials('legacy-peer-deps=true\r\n//registry.npmjs.org/:_authToken=fixture\r\nshamefully-hoist=true\r\n'), 'legacy-peer-deps=true\r\nshamefully-hoist=true\r\n');
+  assert.equal(withoutRegistryCredentials('legacy-peer-deps=true\r\n//registry.npmjs.org/:_authToken=fixture\r\nshamefully-hoist=true\r\n', '.npmrc'), 'legacy-peer-deps=true\r\nshamefully-hoist=true\r\n');
   const plain = '# Hoist for the bundler.\npublic-hoist-pattern[]=*eslint*\nenableTelemetry: false\n';
-  assert.equal(withoutRegistryCredentials(plain), plain);
+  for (const file of ['.npmrc', '.yarnrc', '.yarnrc.yml']) assert.equal(withoutRegistryCredentials(plain, file), plain, file);
+});
+
+test('a package manager\'s config loses every registry address that signs in, and nothing a comment, a flow mapping or another setting holds', () => {
+  // Gemfury's documented forms put the token where a user goes, with an empty password or none; a reference signs in too.
+  const fury = ['registry=https://registry.npmjs.org/', '@acme:registry=https://fixture-fury-token:@npm.fury.io/acme/', '@beta:registry=https://fixture-fury-token@npm.fury.io/acme/',
+    '@gamma:registry=https://${FURY_TOKEN}@npm.fury.io/acme/', 'always-auth=true', ''].join('\n');
+  assert.equal(withoutRegistryCredentials(fury, '.npmrc'), 'registry=https://registry.npmjs.org/\nalways-auth=true\n');
+  assert.equal(withoutRegistryCredentials('npmRegistryServer: "https://fixture-fury-token:@npm.fury.io/acme/"\nnodeLinker: node-modules\n', '.yarnrc.yml'), 'nodeLinker: node-modules\n');
+  // A comment continues nothing: the scope after a commented-out token stays, and an npm key in a Yarn comment is no setting.
+  const scoped = ['npmScopes:', '# key scope for acme', '# npmAuthToken: fixture-old-token', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', ''].join('\n');
+  assert.equal(withoutRegistryCredentials(scoped, '.yarnrc.yml'), ['npmScopes:', '# key scope for acme', '  acme:', '    npmRegistryServer: "https://npm.pkg.github.com"', ''].join('\n'));
+  assert.equal(withoutRegistryCredentials('# email for publishing\n  @acme:registry=https://npm.pkg.github.com/\n', '.npmrc'), '  @acme:registry=https://npm.pkg.github.com/\n');
+  // A flow mapping that holds a credential goes whole, over every line it spans and with the key on its first line, so the
+  // file stays YAML; one that holds none stays.
+  const flow = ['npmScopes: { acme: { npmAlwaysAuth: true,', '  npmAuthToken: fixture-flow-token } }', 'npmRegistries:', '  "//npm.example.test":', '    { npmAlwaysAuth: true,',
+    '      npmAuthToken: "fixture-flow-token" }', '  "//registry.example.test": { npmAlwaysAuth: true, npmRegistryServer: "https://registry.example.test/{scope}" }', 'nodeLinker: node-modules', ''].join('\n');
+  const kept = withoutRegistryCredentials(flow, '.yarnrc.yml');
+  assert.equal(kept, ['npmRegistries:', '  "//npm.example.test":', '  "//registry.example.test": { npmAlwaysAuth: true, npmRegistryServer: "https://registry.example.test/{scope}" }', 'nodeLinker: node-modules', ''].join('\n'));
+  assert.deepEqual(parseDocument(kept).errors, []);
+  // An npm or pnpm value that names a credential's key, and a dependency Yarn's packageExtensions name email, are no credentials.
+  const hoisting = 'public-hoist-pattern[]=*types*,key\npublic-hoist-pattern[]=*eslint*\n';
+  assert.equal(withoutRegistryCredentials(hoisting, '.npmrc'), hoisting);
+  const extensions = ['packageExtensions:', '  "fixture-mailer@*":', '    dependencies:', '      email: "*"', '      username: "^1.0.0"', ''].join('\n');
+  assert.equal(withoutRegistryCredentials(extensions, '.yarnrc.yml'), extensions);
+});
+
+test('a package manager\'s config line over 4 KB is removed unread, so a crafted one cannot hold the controller', () => {
+  assert.equal(withoutRegistryCredentials(`strict-ssl=true\nca="${'A'.repeat(5000)}"\n`, '.npmrc'), 'strict-ssl=true\n');
+  for (const file of ['.npmrc', '.yarnrc.yml']) {
+    const started = performance.now();
+    assert.equal(withoutRegistryCredentials(`nodeLinker: node-modules\n${'token'.repeat(200_000)}\n`, file), 'nodeLinker: node-modules\n');
+    assert.ok(performance.now() - started < 2000, `${file} took ${Math.round(performance.now() - started)} ms`);
+  }
 });
