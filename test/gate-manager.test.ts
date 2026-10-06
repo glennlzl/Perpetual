@@ -405,6 +405,29 @@ test('a status report GitHub refused for good is not retried until another accou
   assert.equal((await restarted.gates('beta'))[0].refused, undefined);
 });
 
+test('after a restart, a refused report stays held back and a superseded gate still ends the pending status it left', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-gate-'));
+  await mkdir(join(dataDir, 'gates'));
+  const at = '2026-09-23T09:00:00.000Z', waiting = { state: 'pending', context: 'perpetual/Beta', description: 'Waiting for Build' };
+  const base = { key: KEY, branch: 'main', stageId: 'beta', context: 'perpetual/Beta', createdAt: at, detectedAt: at, updatedAt: at };
+  await writeFile(join(dataDir, 'gates', 'state.json'), JSON.stringify({ version: 1, heads: {}, gates: [
+    { ...base, id: '3', sha: C, status: 'passed', statusError: 'GitHub refused the commit status. Check that the commit is on GitHub, then run the gate again.',
+      refused: { state: 'success', context: 'perpetual/Beta', description: 'Passed', login: 'developer', repository: 'owner/app' } },
+    { ...base, id: '2', sha: B, status: 'superseded', reason: `Superseded by ${C.slice(0, 7)}.`, supersededBy: C, posted: waiting },
+    // Saved without the commit that superseded it, as an earlier version of the controller saved such a gate.
+    { ...base, id: '1', sha: A, status: 'superseded', reason: `Superseded by ${B.slice(0, 7)}.`, posted: waiting },
+  ] }));
+  let reads = 0;
+  const h = await harness(t, { dataDir, repository: null, pollInterval: 10, connection: () => { reads++; return { login: 'developer', repository: 'owner/app' }; } });
+  h.manager.start();
+  // The refused report keeps every poll reading the connection.
+  await until(() => reads >= 4, 'The polls must read the connection.');
+  await h.manager.idle();
+  assert.deepEqual(h.posts.map(post => [post.sha, post.state, post.context, post.description]).sort(),
+    [[A, 'error', 'perpetual/Beta', 'Superseded'], [B, 'error', 'perpetual/Beta', `Superseded by ${C.slice(0, 7)}`]], 'Each pending status ends once; the refused report is not sent.');
+  assert.match(h.manager.view().stages.beta.statusError ?? '', /^GitHub refused/);
+});
+
 test('a local checkout gate still runs without a GitHub connection and shows that no status was reported', async t => {
   const h = await harness(t, { repository: null, connection: null, stages: STAGES.filter(stage => stage.id !== 'gamma') });
   await h.manager.run({ stageId: 'beta' });

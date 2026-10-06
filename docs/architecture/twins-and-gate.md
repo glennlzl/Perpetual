@@ -152,7 +152,7 @@ Detection alone does not give a new user a working twin: it finds services and a
   - `pending` "Running" while rebuilding or running;
   - `success` for passed, `failure` for failed;
   - blocked or needs-review stays `pending` with "Needs release" until a person releases it in Perpetual, then becomes `success` ("Released by <user>");
-  - queued gates report nothing; a superseded gate reports only to end a `pending` status it left, with `error` "Superseded by <sha7>". A failed report is kept on the gate and retried; it never holds back the gate or its promotion.
+  - queued gates report nothing; a superseded gate reports only to end a `pending` status it left, with `error` "Superseded by <sha7>", or "Superseded" when it records no newer commit (a stopped repair's gate, or one an earlier version superseded). A failed report is kept on the gate and retried; it never holds back the gate or its promotion.
 - **Release** needs the connected GitHub account. A failed gate is never released.
 - **Promotion:**
   - A passed or released gate starts the next Sandbox stage at the same commit. A commit older than one that already reached that stage is recorded there as superseded.

@@ -67,7 +67,8 @@ const STATUSES: Partial<Record<GateStatus, [CommitState, string]>> = {
 
 /**
  * The GitHub commit status a gate reports. A queued gate reports nothing, and so does a superseded one unless its commit
- * was left pending: that status ends in an error naming the newer commit, under the context it was reported with.
+ * was left pending: that status ends in an error, under the context it was reported with, naming the newer commit when
+ * the gate records one.
  */
 export function commitStatus(gate: Pick<Gate, 'status' | 'context' | 'releasedBy' | 'posted' | 'supersededBy'> | null | undefined): CommitStatus | null {
   if (gate?.status === 'released') return { state: 'success', context: gate.context, description: `Released by ${gate.releasedBy}` };
