@@ -165,3 +165,32 @@ test('a failed last frame is fetched again after 1, 2 and 4 seconds, and once mo
   t.mock.timers.tick(60000); store.resume(); await flush();
   assert.equal(calls.length, 5, 'A fetched last frame is final.');
 });
+// The controller refuses a frame only while it saves a source change, as it refuses every read of that source.
+const busy = () => Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true });
+test('a live frame refused while a source change saves stays as last read, without an error, and is fetched at its interval', async t => {
+  let refuse = false, notified = 0;
+  const { store, calls } = harness(t, { load: () => { if (refuse) throw busy(); return jpeg(); } });
+  store.subscribe(source(), () => notified++, { status:'running' });
+  await flush();
+  refuse = true;
+  t.mock.timers.tick(350); await flush();
+  assert.deepEqual([calls.length, store.getSnapshot(source()).url, store.getSnapshot(source()).error, notified], [2, 'blob:1', '', 1]);
+  refuse = false;
+  t.mock.timers.tick(350); await flush();
+  assert.deepEqual([calls.length, store.getSnapshot(source()).url, store.getSnapshot(source()).error, notified], [3, 'blob:2', '', 2]);
+});
+test('a last frame refused while a source change saves is fetched again every second, without spending its retries', async t => {
+  let refused = 0;
+  const { store, calls } = harness(t, { load: () => { if (refused < 5) { refused++; throw busy(); } return jpeg(); } });
+  store.subscribe(source('done'), () => {}, { status:'failed' });
+  await flush();
+  for (let fetched = 2; fetched <= 6; fetched++) {
+    t.mock.timers.tick(999); await flush();
+    assert.equal(calls.length, fetched - 1);
+    t.mock.timers.tick(1); await flush();
+    assert.equal(calls.length, fetched);
+  }
+  assert.deepEqual([store.getSnapshot(source('done')).url, store.getSnapshot(source('done')).error], ['blob:1', '']);
+  t.mock.timers.tick(60000); await flush();
+  assert.equal(calls.length, 6, 'A fetched last frame is final.');
+});
