@@ -16,7 +16,7 @@
     "@ai-sdk/openai": "4.0.77",
     "@openai/agents": "0.18.0",
     "@openai/agents-extensions": "0.18.0",
-    "ai": "7.0.114",
+    "ai": "7.0.127",
     "jsonc-parser": "3.3.1",
     "openai": "7.23.0",
     "yaml": "2.9.1",
