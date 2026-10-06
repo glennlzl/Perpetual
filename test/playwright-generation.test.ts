@@ -947,3 +947,13 @@ test('a long-lived controller expires authoring on read and prunes it at the nex
   const stored=JSON.parse(await readFile(join(f.dataDir,'browser','state.json'),'utf8'));
   assert.deepEqual(stored.authoring,{});assert.equal((await lines(f.log)).length,1);
 });
+
+test('code authoring receives exact owned callbacks and refuses substituted targets before seed or harness',async t=>{
+ const f=await setup(t,{target:'http://127.0.0.1:41000/',environment:{sandboxId:'twin-1',pipelineKey:'repo'}});
+ await f.manager.saveConfig(f.context,{targetUrl:''});await f.manager.prepareEnvironment(f.context,f.environment);
+ await f.manager.saveConfig(f.context,{...(await f.manager.view(f.context)).config,callbackBindings:[{applicationId:'web',hostname:'localhost'}]});
+ await f.manager.generateSpec(f.context,{caseId:journey.id});assert.ok((await settled(f))?.draft);assert.ok(f.launches[0].allowedOrigins!.includes('http://localhost:41000'));
+ const calls=(await lines(f.log)).length,launches=f.launches.length;
+ await f.manager.saveConfig(f.context,{...(await f.manager.view(f.context)).config,targetUrl:'http://127.0.0.1:41001/'});
+ await assert.rejects(f.manager.generateSpec(f.context,{caseId:journey.id}),/ready managed/);assert.equal(f.launches.length,launches);assert.equal((await lines(f.log)).length,calls);
+});
