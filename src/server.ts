@@ -567,14 +567,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(path==='/api/releases'||path.startsWith('/api/releases/')) {
         const operation=path.slice('/api/releases'.length);
-        if(!['','/configure','/deploy','/refresh'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Release operation not found.'});
+        if(!['','/configure','/deploy','/refresh','/abandon'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Release operation not found.'});
         requireSourceIdle();
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/deploy'?202:200,await withActiveScan(input.repoPath,async scan=>{
           requireSourceIdle();
           const view=operation==='/configure'?await releases.configure(input.target)
             :operation==='/deploy'?await releases.deploy({sha:input.sha,target:input.target})
-            :operation==='/refresh'?await releases.refresh():await releases.view();
+            :operation==='/refresh'?await releases.refresh()
+            :operation==='/abandon'?await releases.abandon({id:input.id}):await releases.view();
           return {repoPath:scan.repo.path,...view} satisfies ReleaseReply;
         }));
       }

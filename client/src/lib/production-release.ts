@@ -13,11 +13,21 @@ type ReleaseTone = 'idle' | 'working' | 'passed' | 'failed' | 'blocked';
 const STATES: Record<ReleaseRecord['status'], { label: string; tone: ReleaseTone }> = {
   requesting: { label: 'Requesting', tone: 'working' }, queued: { label: 'Queued', tone: 'working' }, deploying: { label: 'Deploying', tone: 'working' },
   deployed: { label: 'Deployed', tone: 'passed' }, failed: { label: 'Deploy failed', tone: 'failed' }, inactive: { label: 'Inactive', tone: 'idle' }, unknown: { label: 'Check deployment', tone: 'blocked' },
+  abandoned: { label: 'Abandoned', tone: 'idle' },
 };
 export function releaseBadge(record: ReleaseRecord | null | undefined) {
   if (!record) return null;
   const state = STATES[record.status];
-  return { ...state, active: state.tone === 'working', hint: record.error || '', sha: record.sha.slice(0, 7) };
+  return { ...state, active: state.tone === 'working', hint: record.error || (record.abandonedBy ? `Abandoned by ${record.abandonedBy}` : ''), sha: record.sha.slice(0, 7) };
+}
+
+/** A release a person may abandon: one still queued, deploying or unknown. */
+export const releaseAbandonable = (record: ReleaseRecord | null | undefined) => ['unknown', 'queued', 'deploying'].includes(record?.status ?? '');
+export interface ReleaseAbandonment { id: string; sha: string; environment: string }
+/** Polling never moves a confirmation to another release: Abandon sends only the confirmed one, while it is still unresolved. */
+export function abandonRequest(view: ReleaseView | null | undefined, confirmed: ReleaseAbandonment): { id: string } | null {
+  const record = [view?.current, view?.unresolved].find(item => item?.id === confirmed.id);
+  return releaseAbandonable(record) ? { id: confirmed.id } : null;
 }
 
 /** Polling never changes the commit or target a person is about to confirm. */
@@ -34,8 +44,10 @@ export const releaseChanges = {
   notify() { listeners.forEach(listener => listener()); },
 };
 
-/** Whether the release a person requested is still being requested, queued, deployed or resolved. */
-export const releasePending = (view: ReleaseReply | null | undefined) => ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
+/** Whether a release a person requested, for this commit or an earlier one, is still being requested, queued, deployed or resolved. */
+export const releasePending = (view: ReleaseReply | null | undefined) => Boolean(view?.unresolved) || ['requesting', 'queued', 'deploying', 'unknown'].includes(view?.current?.status ?? '');
+/** The release Production shows: an earlier commit's while it is unresolved, since it blocks Deploy, else this commit's. */
+export const shownRelease = (view: ReleaseView | null | undefined) => view?.unresolved ?? view?.current ?? null;
 
 /**
  * Whether the journey gates allow a release of the scanned commit as far as the page can read them: Production is Ready

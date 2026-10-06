@@ -11,10 +11,12 @@ const read = (runs: ReturnType<typeof run>[]) => readBuild(input, { session, req
 
 test('Build admission requires actual branch Actions success and ignores another SHA, branch or PR result', async () => {
   assert.equal((await read([run(1)])).status, 'passed');
+  // Complete evidence without a push or dispatch run of the branch at the commit: Build has not run for it.
   for (const fields of [{ head_sha: OTHER }, { head_branch: 'other' }, { event: 'pull_request' }, { event: 'schedule' }, { path: 'dynamic/codeql' }]) {
-    assert.equal((await read([run(1, 1, fields)])).status, 'waiting');
+    assert.deepEqual(await read([run(1, 1, fields)]), { status: 'none', reason: 'Waiting for GitHub Actions to build this branch commit.' });
   }
-  assert.equal((await read([])).status, 'waiting');
+  assert.equal((await read([])).status, 'none');
+  assert.equal((await read([run(1, 1, { event: 'workflow_dispatch' })])).status, 'passed');
 });
 
 test('pending, cancelled, failure and all-skipped workflow sets never admit a twin', async () => {
@@ -53,7 +55,8 @@ test('a failure beyond the first page blocks admission and only Actions endpoint
 test('incomplete, malformed or unreadable CI evidence never becomes a successful build', async () => {
   for (const data of [{}, { total_count: 1, workflow_runs: [] }, { total_count: 0, workflow_runs: [run(1)] }, { total_count: 1, workflow_runs: [{ ...run(1), workflow_id: null }] }, { total_count: 1001, workflow_runs: Array.from({ length: 100 }, (_, index) => run(index + 1)) }]) {
     const result = await readBuild(input, { session, request: async () => ({ status: 200, data }) });
-    assert.notEqual(result.status, 'passed');
+    // Nor a commit Build has not run for: only complete evidence can tell that.
+    assert.equal(result.status, 'waiting');
   }
   await assert.rejects(readBuild(input, { session, request: async () => { throw new Error('offline'); } }), /offline/);
 });

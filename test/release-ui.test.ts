@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReleasePoller, gatesReleasable, releaseBadge, releaseForSource, releaseRequest } from '../client/src/lib/production-release.ts';
+import { abandonRequest, createReleasePoller, gatesReleasable, releaseAbandonable, releaseBadge, releaseForSource, releaseRequest, shownRelease } from '../client/src/lib/production-release.ts';
 import type { GateView, StageGate } from '../contract/gate.ts';
 import type { ReleaseRecord, ReleaseReply, ReleaseView } from '../contract/releases.ts';
 import type { PageVisibility, Timers } from '../client/src/lib/utils.ts';
 
 const SHA = 'c'.repeat(40);
 const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
-const view = (extra: Partial<ReleaseView> = {}): ReleaseView => ({ sha: SHA, target, canDeploy: true, blockedReason: null, current: null, recent: [], ...extra });
+const view = (extra: Partial<ReleaseView> = {}): ReleaseView => ({ sha: SHA, target, canDeploy: true, blockedReason: null, current: null, unresolved: null, recent: [], ...extra });
 const record = (status: ReleaseRecord['status']): ReleaseRecord => ({ id: 'release-1', sha: SHA, ...target, status, createdAt: '2026-09-29T12:00:00.000Z', updatedAt: '2026-09-29T12:00:00.000Z' });
 
 test('a new commit in the same checkout immediately hides the previous commit deployment and eligibility', () => {
@@ -30,6 +30,19 @@ test('only recorded deployment work spins; an unknown result remains unresolved 
   assert.equal(releaseBadge({ ...record('failed'), error: 'The deployment workflow failed.' })?.hint, 'The deployment workflow failed.');
   assert.equal(releaseBadge(record('deployed'))?.sha, 'ccccccc');
   assert.equal(releaseBadge(null), null);
+});
+
+test('an abandoned release reads Abandoned with who abandoned it, and Abandon stays bound to the confirmed release', () => {
+  assert.deepEqual(releaseBadge({ ...record('abandoned'), abandonedBy: 'owner' }), { label: 'Abandoned', tone: 'idle', active: false, hint: 'Abandoned by owner', sha: 'ccccccc' });
+  for (const status of ['unknown', 'queued', 'deploying'] as const) assert.equal(releaseAbandonable(record(status)), true, status);
+  for (const status of ['requesting', 'deployed', 'failed', 'inactive', 'abandoned'] as const) assert.equal(releaseAbandonable(record(status)), false, status);
+  assert.equal(releaseAbandonable(null), false);
+  const confirmed = { id: 'release-1', sha: SHA, environment: 'production' };
+  assert.deepEqual(abandonRequest(view({ current: record('queued') }), confirmed), { id: 'release-1' });
+  assert.deepEqual(abandonRequest(view({ current: record('failed'), unresolved: { ...record('deploying'), id: 'release-0' } }), { ...confirmed, id: 'release-0' }), { id: 'release-0' }, 'An earlier commit\'s unresolved release.');
+  assert.equal(abandonRequest(view({ current: record('deployed') }), confirmed), null, 'It ended meanwhile.');
+  assert.equal(abandonRequest(view({ current: { ...record('queued'), id: 'release-2' } }), confirmed), null, 'Another release is never abandoned in its place.');
+  assert.equal(abandonRequest(null, confirmed), null);
 });
 
 test('a deployment confirmation remains bound to the reviewed commit and target across polling', () => {
@@ -118,6 +131,25 @@ test('a release is read every 3 seconds only while it is pending, and otherwise 
   assert.equal(delays.at(-1), 60000, 'With nothing requested, each read checking the GitHub session waits a minute.');
   for (const pending of ['requesting', 'queued', 'deploying', 'unknown'] as const) { status = pending; poller.refresh(); await tick(); assert.equal(delays.at(-1), 3000, pending); }
   for (const settled of ['deployed', 'failed', 'inactive'] as const) { status = settled; poller.refresh(); await tick(); assert.equal(delays.at(-1), 60000, settled); }
+});
+
+test('an earlier commit\'s unresolved release is shown before this commit\'s and read every 3 seconds until it ends', async t => {
+  const earlier: ReleaseRecord = { ...record('deploying'), id: 'release-0', sha: 'd'.repeat(40), logUrl: 'https://ci.example.test/runs/7' };
+  assert.equal(shownRelease(view({ current: record('failed'), unresolved: earlier })), earlier, 'The release that blocks Deploy is the one shown.');
+  assert.equal(releaseBadge(shownRelease(view({ unresolved: earlier })))?.sha, 'ddddddd');
+  assert.equal(shownRelease(view({ current: record('deployed') }))?.status, 'deployed');
+  assert.equal(shownRelease(view()), null);
+  assert.equal(shownRelease(null), null);
+  const delays: number[] = [];
+  const timers: Timers = { setTimeout(_fn, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} };
+  let unresolved: ReleaseRecord | null = earlier;
+  const poller = createReleasePoller({ repoPath: '/sources/app', timers, document: null, onChange() {}, controller: async () => ({ repoPath: '/sources/app', ...view({ unresolved }) }) });
+  t.after(() => poller.stop());
+  const tick = () => new Promise(done => setImmediate(done));
+  await tick();
+  assert.equal(delays.at(-1), 3000);
+  unresolved = null; poller.refresh(); await tick();
+  assert.equal(delays.at(-1), 60000);
 });
 
 test('a release the gates allow but Deploy cannot use yet is read every 3 seconds, until their commit statuses reach it', async t => {

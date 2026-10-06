@@ -25,7 +25,7 @@ const pipelineState = (pipeline: Pipeline, extra: Record<string, unknown> = {}) 
   defaultRepo: repoPath, scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [], production: [] } },
   pipeline, environments: [], browserTests: {}, stageRemovals: [], ...extra,
 });
-const release: ReleaseReply = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, recent: [] };
+const release: ReleaseReply = { repoPath, sha, target: null, canDeploy: false, blockedReason: null, current: null, unresolved: null, recent: [] };
 
 // The actual App on Vite, with its own polls. Only HTTP replies are fixtures; a handler answers first.
 async function openApp(t: TestContext, handle: Handler) {
@@ -364,6 +364,17 @@ test('the Pipeline opens with its navigation collapsed, zoom and Fit view only, 
   await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
   await expect(production.getByText('Deployingaaaaaaa', { exact: true })).toBeVisible();
   await expect(production.getByText('Readyaaaaaaa', { exact: true })).toHaveCount(0);
+  // An earlier commit's deployment still unresolved after the source moved on keeps the Badge, with its own commit and logs.
+  const earlier = 'b'.repeat(40);
+  releaseView = { ...releaseView, canDeploy: false, current: null, unresolved: { id: 'release-0', sha: earlier, ...target, status: 'deploying', logUrl: 'https://ci.example.test/runs/7', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } };
+  await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
+  await expect(production.getByText('Deployingbbbbbbb', { exact: true })).toBeVisible();
+  await expect(production.getByRole('link', { name: 'Logs', exact: true })).toHaveAttribute('href', 'https://ci.example.test/runs/7');
+  // Once it ends, Production reads the gates' readiness again.
+  releaseView = { ...releaseView, canDeploy: true, unresolved: null };
+  await refresh('/api/releases', '/build/src/lib/production-release.ts', 'releaseChanges');
+  await expect(production.getByText('Readyaaaaaaa', { exact: true })).toBeVisible();
+  await expect(production.getByRole('link', { name: 'Logs', exact: true })).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });
 

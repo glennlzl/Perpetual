@@ -14,7 +14,7 @@ The design is recorded in [Twins and the journey gate](architecture/twins-and-ga
 ## Requirements
 
 - A managed GitHub source: a repository and branch chosen in **Source → Settings** (see [Provider connections](providers.md#choose-a-source)), and a connected GitHub account that may write commit statuses.
-- For a managed source, a GitHub Actions workflow that runs on `push` to the target branch, or is dispatched on it. A commit without such a run, such as one built only by a pull request or skipped by CI, waits for Build until a newer push or a dispatched run at that commit.
+- For a managed source, a GitHub Actions workflow that runs on `push` to the target branch, or is dispatched on it. A commit that gets no such run within 15 minutes, such as one built only by a pull request or skipped by CI, needs release: a person releases it, or dispatches a workflow at it and runs the gate again.
 - A Sandbox stage with a twin config and at least one reviewed, selected journey.
 - An application URL that points at the stage's twin. When a new twin becomes Ready with one web-frontend app, or only one app, and a person has not chosen another URL, the URL points at it automatically.
 - Playwright's Chromium (`npx playwright install chromium`) and [approved code](journeys.md#journey-code) for each journey. The journeys' runs need no model; Perpetual uses the model to draft journeys and write their code, and an application that calls a model does so through its twin's `llm` service.
@@ -34,7 +34,7 @@ While the controller runs, it polls the head of the managed source's branch thro
 
 Before moving the managed source or creating a twin, the gate reads the branch's GitHub Actions runs for its exact commit. Only `push` and `workflow_dispatch` runs backed by a repository workflow count. The newest run of each workflow replaces its older runs; every counted workflow must succeed, conclude neutral or be skipped, and at least one must succeed or conclude neutral. Pull-request, scheduled, other-branch and other-commit runs cannot authorize the target branch's gate. The reader checks all pages, up to 1,000 runs, and incomplete evidence never passes.
 
-No runs yet, a running workflow, a disconnected account or an unreadable response leaves an already queued gate **Waiting for Build**. Failed, cancelled, action-required and all-skipped builds show **Build failed**. Both states are rechecked while the controller runs, so a successful rerun at the same commit can proceed without another push. Neither state offers Release, neither starts a journey, and a newer push supersedes it. A restart resumes these checks. An already-finished journey is never retried this way; a manual release rechecks Build before accepting the release.
+No runs yet, a running workflow, a disconnected account or an unreadable response leaves an already queued gate **Waiting for Build**. Failed, cancelled, action-required and all-skipped builds show **Build failed**. Both states are rechecked while the controller runs, so a successful rerun at the same commit can proceed without another push. Neither state offers Release, neither starts a journey, and a newer push supersedes it. A restart resumes these checks. A commit for which complete evidence still shows no counted run 15 minutes after a push or **Run now** queued it needs release (`GitHub Actions has no push or dispatch run for this commit. …`): no twin or journey starts, and the commit moves on only when a person releases it. The next stage counts from the same time, so a released commit that still has no run needs release there at once. **Run now** on a gate that needs release waits another 15 minutes for a run. An already-finished journey is never retried this way; a manual release rechecks Build before accepting the release, refusing a failed or unfinished Build and accepting a commit that still has no counted run.
 
 Build admission reads Actions runs, never the `perpetual/*` commit statuses its own journeys must produce. A deployment workflow that waits for these statuses must start after the gates, rather than join the branch's Build runs; otherwise it would wait on its own prerequisite. This admission covers the workflow runs GitHub has reported, not a configured list of required workflows that have yet to appear. Repair gates keep their existing CI-first admission through the repair controller, and may verify the repair while the target branch is waiting for Build. Local, unmanaged checkouts retain manual gates without GitHub CI.
 
@@ -50,11 +50,11 @@ Gates run one at a time, the furthest stage first, so a commit finishes its way 
 
 | Gate | When |
 | --- | --- |
-| `waiting-build` | Build is still running, has no runs, or its evidence cannot be read. No twin or journey has started. |
+| `waiting-build` | Build is still running, has no runs yet, or its evidence cannot be read. No twin or journey has started. |
 | `build-failed` | Build did not pass. It is checked again for a successful rerun; it cannot be manually released. |
 | `passed` | The run passed. |
 | `failed` | A journey failed. |
-| `needs-release` | Anything else, with its reason: a blocked or needs-review journey (including one without current approved code), a skipped journey, a cancelled run, a run that stopped without a failed journey (for example a browser runtime error), no reviewed journeys, a twin that could not be rebuilt, an application URL that is not the rebuilt twin, or a gate interrupted by a controller restart. |
+| `needs-release` | Anything else, with its reason: a commit with no push or dispatch Build run 15 minutes after a push or Run now queued it, a blocked or needs-review journey (including one without current approved code), a skipped journey, a cancelled run, a run that stopped without a failed journey (for example a browser runtime error), no reviewed journeys, a twin that could not be rebuilt, an application URL that is not the rebuilt twin, or a gate interrupted by a controller restart. |
 | `released` | A person released a gate that needed release. |
 | `superseded` | A newer commit reached the stage first. |
 
@@ -71,8 +71,9 @@ Statuses are posted through the connected account's GitHub CLI session, with the
 | Failed | `failure` | Failed |
 | Needs release | `pending` | Needs release |
 | Released | `success` | Released by `<login>` |
+| Superseded after reporting `pending` | `error` | Superseded by `<sha7>` |
 
-Queued and superseded gates report nothing. Every gate whose status changed since it was last reported is reported, however long ago it ran. A source switch during an account lookup cannot redirect a report to another repository; it remains pending for its own source. A report that fails is kept on the gate, and the 50 most recently updated gates are retried with each poll; a failed report never holds back the gate or its promotion. Without a connected account the gate records `Connect GitHub to report commit status.`
+Queued gates report nothing, and neither does a superseded gate that never reported. A superseded gate whose commit was left `pending`, such as one waiting for Build when a newer commit arrived, reports `error` with `Superseded by <sha7>` under the context it reported, so no commit stays pending. A stopped repair's gate reports `Superseded` with no commit, and so, once after an upgrade, does a gate that an earlier version of Perpetual superseded without recording the newer commit. Every gate whose status changed since it was last reported is reported, however long ago it ran. A source switch during an account lookup cannot redirect a report to another repository; it remains pending for its own source. A report that fails is kept on the gate, and the 50 most recently updated gates are retried with each poll; a failed report never holds back the gate or its promotion. A refusal GitHub would repeat (HTTP 403, 404 or 422 that is not a rate limit, such as an account without write access or a commit GitHub does not have) is not retried while the same account and repository are connected: the gate's next status is tried once, and **Run now** or another connected account tries again. Without a connected account the gate records `Connect GitHub to report commit status.`
 
 ## Release and promotion
 
