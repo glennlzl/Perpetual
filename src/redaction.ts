@@ -11,20 +11,25 @@ export const REDACTED = '[REDACTED]';
 // publishable key, is ordinary text.
 const NAMES = 'token|secret|password|(?<!/)passwd|passphrase|(?<![a-z])(?:pass|pwd)(?![\\w-])|api[-_]?key|access[-_]?(?:key|token)|private[-_]?key|authorization';
 const SECRET_NAMES = `${NAMES}|(?:encryption|signing|master|license|service[-_]?role|hmac|jwt)[-_]?key`;
+// A name holding a credential name is the whole run of name characters it sits in, read once: a lookahead finds a
+// credential name in the run, then the run is taken whole, since what follows a name is never a name character. So the
+// time a run takes grows with its length alone, however many credential names it holds.
+const nameRun = (names: string) => `(?=[\\w-]*?(?:${names}))[\\w-]+`;
+const SECRET_NAME = nameRun(SECRET_NAMES);
 const PRIVATE_KEY = '[A-Z ]*PRIVATE KEY(?: BLOCK)?';
 // A process can stop before END; protect the remainder in that case, through the absolute end of the input.
 const PEM = new RegExp(`-----BEGIN (?:${PRIVATE_KEY}|CERTIFICATE)-----[\\s\\S]*?(?:-----END (?:${PRIVATE_KEY}|CERTIFICATE)-----|(?![\\s\\S]))`, 'g');
 // JSON members, also inside a string whose quotes are escaped, and whose value may hold escaped quotes.
-const QUOTED_KEY = new RegExp(`(\\\\?["'])([\\w-]*(?:${SECRET_NAMES})[\\w-]*)\\1(\\s*:\\s*)(\\\\?["'])((?:\\\\.|[^\\\\\\r\\n])*?)\\4`, 'gi');
+const QUOTED_KEY = new RegExp(`(\\\\?["'])(${SECRET_NAME})\\1(\\s*:\\s*)(\\\\?["'])((?:\\\\.|[^\\\\\\r\\n])*?)\\4`, 'gi');
 // A name starts where a run of name characters starts, so a long run is read once, not once per hyphen in it. A value
 // ends at whitespace, keeping trailing punctuation and quotes, and in code it runs on through the quoted literal a type
 // annotation is set to (`password: string = "…"`).
 const QUOTED_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'`, WORD = `["']*[^\\s,;"']+(?:[,;"']+[^\\s,;"']+)*`;
-const NAMED_VALUE = new RegExp(`((?<![\\w-])[\\w-]*(?:${SECRET_NAMES})[\\w-]*\\s*[=:]\\s*)(?:${QUOTED_VALUE}|${WORD}(?:[ \\t]*=[ \\t]*(?:${QUOTED_VALUE}))?)`, 'gi');
+const NAMED_VALUE = new RegExp(`((?<![\\w-])${SECRET_NAME}\\s*[=:]\\s*)(?:${QUOTED_VALUE}|${WORD}(?:[ \\t]*=[ \\t]*(?:${QUOTED_VALUE}))?)`, 'gi');
 // A YAML line: an unquoted value runs on over spaces, up to the next name set with = or :. A shell line's value ends at
 // its first space, where its command starts (`NPM_TOKEN=… npm publish`).
-const LINE_VALUE = new RegExp(`^([ \\t]*(?:-[ \\t]+)?[\\w-]*(?:${SECRET_NAMES})[\\w-]*[ \\t]*:[ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
-const FLAG_VALUE = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
+const LINE_VALUE = new RegExp(`^([ \\t]*(?:-[ \\t]+)?${SECRET_NAME}[ \\t]*:[ \\t]*)(?!["'])${WORD}(?:[ \\t]+(?![\\w-]+[ \\t]*[=:])${WORD})*`, 'gim');
+const FLAG_VALUE = new RegExp(`((?<![\\w-])--?${SECRET_NAME}(?:\\s*=\\s*|\\s+))(?:"[^"]*"|'[^']*'|\\S+)`, 'gi');
 const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
 // An Authorization value of any scheme. On a header line, at the start of a line or a quoted string, it runs through the
 // end of the line or the closing quote. Elsewhere, as in code or passed with its quoted name (`headers.set("Authorization",
@@ -32,7 +37,8 @@ const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
 // that ends the expression.
 const AUTHORIZATION_HEADER = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[^\s"'][^\r\n"']*/gim;
 const AUTHORIZATION = /((?:Authorization\s*[:=]|\(\s*["']Authorization["']\s*,|\[\s*["']Authorization["']\s*\]\s*=)\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
-const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
+// A JWT starts where a run of name characters starts, as a name does, so a long run is read once, not once per hyphen.
+const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|(?<!-)eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
 // User info, a user or a password alone too, ends at the last @ before the path. The user ends at ? or #, so an @ in a
@@ -48,7 +54,7 @@ function literalUrlPassword(text: string): boolean {
 // to a quoted value anywhere (after a type annotation, and as a || or ?? fallback, too), or to an unquoted one on an
 // env-file, YAML or shell line. A reference (`${{ secrets.X }}`, `$X`, a template, `process.env.X`), a URL or path
 // without a password, or a type is not one.
-const CREDENTIAL_NAME = `[\\w-]*(?:${NAMES})[\\w-]*`;
+const CREDENTIAL_NAME = nameRun(NAMES);
 const CREDENTIAL_MEMBER = new RegExp(`^${CREDENTIAL_NAME}$`, 'i');
 const PRIVATE_KEY_BLOCK = new RegExp(`-----BEGIN ${PRIVATE_KEY}-----`);
 // Decode URL escapes for inspection without changing ordinary source text. Malformed escapes remain data.
@@ -76,8 +82,8 @@ const namedValue = (match: string, prefix: string) => prefix + redactedLines(mat
 // password, or its user when it has none, is only references. A literal goes with its quotes, line by line, so text
 // redacted again, such as numbered lines, comes back the same.
 const LITERAL_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'|\`(?:\\\\.|[^\`\\\\])*\``;
-const NAMED_LITERAL = new RegExp(`((?<![\\w-])[\\w-]*(?:${SECRET_NAMES})[\\w-]*["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?::=|=>|[=:]|\\|\\|=?|\\?\\?=?)\\s*)(${LITERAL_VALUE})`, 'gi');
-const FLAG_LITERAL = new RegExp(`((?<![\\w-])--?[\\w-]*(?:${SECRET_NAMES})[\\w-]*(?:\\s*=\\s*|\\s+))(${LITERAL_VALUE})`, 'gi');
+const NAMED_LITERAL = new RegExp(`((?<![\\w-])${SECRET_NAME}["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?::=|=>|[=:]|\\|\\|=?|\\?\\?=?)\\s*)(${LITERAL_VALUE})`, 'gi');
+const FLAG_LITERAL = new RegExp(`((?<![\\w-])--?${SECRET_NAME}(?:\\s*=\\s*|\\s+))(${LITERAL_VALUE})`, 'gi');
 const AUTHORIZATION_LITERAL = new RegExp(`((?:\\(\\s*["']Authorization["']\\s*,|\\[\\s*["']Authorization["']\\s*\\]\\s*=)\\s*)(${LITERAL_VALUE})`, 'gi');
 const HEADER_LITERAL = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[A-Za-z][\w-]*[ \t]+[^\s"'`$]{8,}/gim;
 const BEARER_LITERAL = /\bBearer[ \t]+(?=[\w.~+/-]*\d)[\w.~+/-]{8,}=*/gi;

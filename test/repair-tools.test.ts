@@ -124,6 +124,14 @@ test('run returns the end of an output past its 1 MiB capture, without the line 
   assert.match(output, /^test \d{5} \.{12} ok\n/, 'The reply starts at a whole line.');
 });
 
+// Redaction runs on the controller's event loop: a megabyte that takes minutes would stall every other request.
+test('run redacts a megabyte of credential names at once', async t => {
+  const f = await tools(t), started = performance.now();
+  const result = await f.call('run', { command: 'node -e "process.stdout.write(\'token\'.repeat(209715))"' });
+  assert.ok(performance.now() - started < 10_000, `${Math.round(performance.now() - started)} ms`);
+  assert.deepEqual([result.ok, result.exitCode, result.truncated, String(result.output).length], [true, 0, true, 30_000]);
+});
+
 test('read redacts complete credentials before line numbering and clipping without changing the file', async t => {
   const f = await tools(t);
   const source = `const ready = true;\n-----BEGIN PRIVATE KEY-----\n${'QUJD'.repeat(600)}\n-----END PRIVATE KEY-----\n`;

@@ -52,6 +52,20 @@ test('a long run of name characters is read once, so a log of hyphenated or base
   }
 });
 
+// A megabyte is what the repair agent's run tool redacts at once, on the controller's event loop.
+test('a megabyte run of credential names, after any prefix, is read once in every mode', () => {
+  const names = 'token'.repeat(210_000), parts = 'eyJa-'.repeat(210_000);
+  for (const text of [...['', '--', '-', '"', "'", '\\"', '?', '&', '=', ' '].map(prefix => prefix + names), parts, `"${parts}`]) {
+    for (const [mode, read] of [['full', () => redact(text)], ['code', () => redact(text, { code: true })], ['change rules', () => hasCredential(text)], ['change rules in code', () => hasCredential(text, { code: true })]] as const) {
+      const started = performance.now();
+      read();
+      assert.ok(performance.now() - started < 2000, `${text.slice(0, 12)}… in ${mode} took ${Math.round(performance.now() - started)} ms`);
+    }
+  }
+  assert.equal(redact(`--${names}=fixture-literal`), `--${names}=${REDACTED}`, 'A value after the run is still found.');
+  assert.equal(redact(`${names} = "fixture-literal"`, { code: true }), `${names} = ${REDACTED}`);
+});
+
 test('code keeps what follows a credential name when it is an expression, a type or a reference, and hides literals', () => {
   for (const line of [
     '  const token = getToken(username);', 'export interface Session { token: string; secret: string }', 'async function login(username: string, password: string): Promise<Session> {',
