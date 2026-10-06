@@ -827,7 +827,8 @@ test('attempts a stopped repair reports while it unwinds are recorded with what 
   });
   const h = await harness(t, { steps: a.steps });
   await h.failHead([run('2', B, 'failure')]);
-  await until(() => h.repair(B)?.status === 'repairing');
+  // The repair reads repairing before the agent step starts, so the stop waits for the step's first report.
+  await until(() => h.repair(B)?.attempts?.length);
   await h.manager.stop({ id: h.repair(B)!.id });
   await h.manager.idle();
   assert.deepEqual([h.repair(B)?.status, h.repair(B)?.attempts], ['cancelled', [{ number: 1, model: 'openai/gpt-6-luna', cost: 0.4 }]]);

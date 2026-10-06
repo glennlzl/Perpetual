@@ -57,3 +57,12 @@ test('unavailable job evidence is explicit and read errors contain no stale succ
   assert.match(failed, /role="alert"[^>]*>Reconnect GitHub\./);
   assert.doesNotMatch(failed, /Passed|Workflow: CI|Loading actions/);
 });
+
+test('an unreadable Build offers Connect beside Retry, when the card has one to offer', () => {
+  const failed = renderToStaticMarkup(createElement(Card, { repoPath, scannedSha: A, runs: null, readError: 'Connect your GitHub account to read Build.', onConnect: () => {} }));
+  assert.match(failed, /role="alert"[^>]*>Connect your GitHub account to read Build\./);
+  assert.match(failed, />Retry<\/button>.*>Connect<\/button>/s);
+  const alone = renderToStaticMarkup(createElement(Card, { repoPath, scannedSha: A, runs: null, readError: 'Connect your GitHub account to read Build.' }));
+  assert.doesNotMatch(alone, />Connect<\/button>/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(Card, { repoPath, scannedSha: A, runs, onConnect: () => {} })), />(Retry|Connect)<\/button>/, 'A Build that was read offers neither.');
+});

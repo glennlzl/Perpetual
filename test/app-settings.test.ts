@@ -103,3 +103,39 @@ test('a key saved without OpenRouter\'s answer carries its warning until the nex
   settings.edit({ model: 'example/c' });
   assert.equal(settings.getSnapshot().saveWarning, '');
 });
+
+test('a model Select names a preselected model the controller does not use: a saved one the catalog lost, or none saved', async () => {
+  let saved = { model: 'example/retired', escalationModel: '' };
+  const settings = createAppSettings({ controller: async (path, input) => {
+    if (path.endsWith('/models')) return catalog;
+    if (input) saved = { model: String(input.model), escalationModel: String(input.escalationModel) };
+    return { capabilities: { ...reply(saved.model).capabilities, escalationModel: saved.escalationModel } };
+  } });
+  const states = () => { const { savedModel, modelState, savedEscalation, escalationState } = settings.getSnapshot(); return { savedModel, modelState, savedEscalation, escalationState }; };
+  assert.deepEqual(states(), { savedModel: '', modelState: null, savedEscalation: '', escalationState: null }, 'Nothing is named before the settings are read.');
+  await settings.load();
+  assert.deepEqual(states(), { savedModel: 'example/b', modelState: 'unavailable', savedEscalation: 'example/c', escalationState: 'unsaved' });
+  settings.edit({ model: 'example/a' });
+  assert.equal(settings.getSnapshot().modelState, 'unavailable', 'A choice not yet saved leaves the saved model unavailable.');
+  assert.equal(await settings.save(), true);
+  assert.deepEqual(states(), { savedModel: 'example/a', modelState: null, savedEscalation: 'example/c', escalationState: null });
+});
+
+test('without the catalog a saved model is not judged unavailable, and one never saved is still named', async () => {
+  const settings = createAppSettings({ controller: async path => {
+    if (path.endsWith('/models')) throw new Error('Catalog unavailable.');
+    return { capabilities: { ...reply('example/retired').capabilities, escalationModel: '' } };
+  } });
+  await settings.load();
+  assert.deepEqual([settings.getSnapshot().modelState, settings.getSnapshot().escalationState], [null, 'unsaved']);
+});
+
+test('the Model is not saved while the controller has no model configured, whatever default it reports', async () => {
+  // Before a key is saved the controller reports its built-in default, whether or not the catalog lists it.
+  for (const model of ['example/default', 'example/a']) {
+    const settings = createAppSettings({ controller: async path => path.endsWith('/models') ? catalog
+      : { capabilities: { ...reply(model).capabilities, escalationModel: '', keyConfigured: false, modelConfigured: false, modelError: 'Configure a model API key to use the browser agent.' } } });
+    await settings.load();
+    assert.deepEqual([settings.getSnapshot().modelState, settings.getSnapshot().escalationState], ['unsaved', 'unsaved'], model);
+  }
+});

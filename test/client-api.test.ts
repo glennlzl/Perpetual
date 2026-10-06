@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { api } from '../client/src/lib/api.ts';
+import { api, sourceBusy, type ApiError } from '../client/src/lib/api.ts';
 import { fetchJourneyFrame } from '../client/src/lib/frame-store.ts';
 
 // The page's own request helper, with fetch replaced as a stopped controller or an aborted request would answer.
@@ -28,4 +28,23 @@ test('a frame the stopped controller cannot send reads as unavailable, while an 
   await assert.rejects(fetchJourneyFrame(source, controller.signal), { name: 'AbortError' });
   globalThis.fetch = async () => new Response(null, { status: 204 });
   assert.equal(await fetchJourneyFrame(source, new AbortController().signal), null);
+});
+
+// The controller marks a refusal made only while it saves a source change; polls keep what they last read on it.
+test('a refusal while a source change saves carries its mark, and no other refusal does', async t => {
+  const fetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = fetch; });
+  globalThis.fetch = async () => Response.json({ error: 'A source change is still being saved. Please wait.', sourceBusy: true }, { status: 409 });
+  const busy = await api('/api/releases').catch((error: unknown) => error) as ApiError;
+  assert.deepEqual([busy.message, busy.statusCode, busy.sourceBusy, sourceBusy(busy)], ['A source change is still being saved. Please wait.', 409, true, true]);
+  globalThis.fetch = async () => Response.json({ error: 'The active repository changed. Reload its pipeline.' }, { status: 409 });
+  const changed = await api('/api/releases').catch((error: unknown) => error) as ApiError;
+  assert.deepEqual([changed.message, changed.statusCode, 'sourceBusy' in changed, sourceBusy(changed)], ['The active repository changed. Reload its pipeline.', 409, false, false]);
+  for (const value of [null, 'busy', { sourceBusy: 'true' }, new Error('A source change is still being saved. Please wait.')]) assert.equal(sourceBusy(value), false);
+  // Journey frames, fetched outside api(), carry it too; any other refused frame reads as unavailable.
+  const source = { repoPath: '/acme/app', stageId: 'beta', runId: '11111111-1111-4111-8111-111111111111', caseId: 'save' };
+  globalThis.fetch = async () => Response.json({ error: 'A source change is still being saved. Please wait.', sourceBusy: true }, { status: 409 });
+  assert.equal(sourceBusy(await fetchJourneyFrame(source, new AbortController().signal).catch((error: unknown) => error)), true);
+  globalThis.fetch = async () => Response.json({ error: 'The active repository changed. Reload its pipeline.' }, { status: 409 });
+  await assert.rejects(fetchJourneyFrame(source, new AbortController().signal), (error: unknown) => !sourceBusy(error) && (error as Error).message === 'Stream unavailable');
 });

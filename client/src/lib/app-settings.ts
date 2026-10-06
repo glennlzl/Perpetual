@@ -3,9 +3,16 @@ import type { Controller } from './api.ts';
 
 /** Unsaved App Settings edits, held only in this app session until saved or discarded. */
 export interface SettingsDraft { model: string; apiKey: string; escalationModel: string }
+/**
+ * Why a model Select preselects a model the controller does not use: its saved model left the catalog (`unavailable`),
+ * or none is saved (`unsaved`), as for the Model while the controller has none configured. null while it shows the saved
+ * model, or before the settings are read.
+ */
+export type SavedModelState = 'unavailable' | 'unsaved' | null;
 export interface SettingsSnapshot {
   capabilities: ModelSettingsView | null; models: OpenRouterModel[]; draft: SettingsDraft | null;
   savedModel: string; serverModel: string; savedEscalation: string; serverEscalation: string;
+  modelState: SavedModelState; escalationState: SavedModelState;
   loading: boolean; modelsLoading: boolean; saving: boolean; saved: boolean;
   readError: string; saveError: string; modelsError: string;
   /** The last save's warning, such as a key saved without OpenRouter's answer, until the next edit or save. */
@@ -15,7 +22,7 @@ const message = (failure: unknown) => failure instanceof Error ? failure.message
 
 /** One Settings session owns confirmed values, edits and requests even while its page is closed. */
 export function createAppSettings({ controller }: { controller: Controller }) {
-  let state: SettingsSnapshot = { capabilities: null, models: [], draft: null, savedModel: '', serverModel: '', savedEscalation: '', serverEscalation: '', loading: true, modelsLoading: false, saving: false, saved: false, readError: '', saveError: '', modelsError: '', saveWarning: '' };
+  let state: SettingsSnapshot = { capabilities: null, models: [], draft: null, savedModel: '', serverModel: '', savedEscalation: '', serverEscalation: '', modelState: null, escalationState: null, loading: true, modelsLoading: false, saving: false, saved: false, readError: '', saveError: '', modelsError: '', saveWarning: '' };
   let catalog: OpenRouterModelView | null = null, reading: Promise<void> | null = null, saving: Promise<boolean> | null = null, writeRevision = 0;
   const listeners = new Set<() => void>();
   const publish = (fields: Partial<SettingsSnapshot>) => { state = { ...state, ...fields }; listeners.forEach(listener => listener()); };
@@ -27,7 +34,11 @@ export function createAppSettings({ controller }: { controller: Controller }) {
     const listed = (id: string) => catalog?.models.some(model => model.id === id);
     const savedModel = catalog ? listed(serverModel) ? serverModel : catalog.defaultModel : serverModel;
     const savedEscalation = catalog ? listed(serverEscalation) ? serverEscalation : catalog.defaultEscalationModel || savedModel : serverEscalation;
-    return { models: catalog?.models ?? [], savedModel, serverModel, savedEscalation, serverEscalation };
+    // Without the catalog a saved model is not judged unavailable; a model never saved is named so either way. Until a
+    // model is configured, such as before a key is saved, the controller reports its built-in default, which no one saved.
+    const saved = (server: string): SavedModelState => !capabilities ? null : !server ? 'unsaved' : catalog && !listed(server) ? 'unavailable' : null;
+    const modelState: SavedModelState = capabilities && !capabilities.modelConfigured ? 'unsaved' : saved(serverModel);
+    return { models: catalog?.models ?? [], savedModel, serverModel, savedEscalation, serverEscalation, modelState, escalationState: saved(serverEscalation) };
   }
   function read(modelsOnly: boolean): Promise<void> {
     // Returning to the page observes its pending write; it must not start a competing read of the old values.

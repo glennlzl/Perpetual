@@ -4,7 +4,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api } from '@/lib/api';
+import { api, sourceBusy } from '@/lib/api';
 import { useTestStage } from '@/lib/use-test-workspace';
 import { environmentHasResources } from '@/lib/environment-view';
 import type { StageRemoval } from '@/lib/test-workspace';
@@ -72,7 +72,8 @@ export default function StageSettingsDialog({ dialog, stage, repoPath, onAction,
             if (result.removal?.status === 'completed') return;
           }
         } catch (failure) {
-          if (!stopped && workspaceStage.isCurrent() && epoch === requestEpoch.current) {
+          // A read refused while a source change saves keeps the removal as last read; the next read follows.
+          if (!stopped && workspaceStage.isCurrent() && epoch === requestEpoch.current && !sourceBusy(failure)) {
             setReadError((failure as Error).message);
             setChecking(false);
           }

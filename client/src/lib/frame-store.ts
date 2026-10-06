@@ -1,4 +1,4 @@
-import { controllerFetch } from './api.ts';
+import { controllerFetch, replyFailure, sourceBusy } from './api.ts';
 
 /** The journey a frame belongs to: one case of one run. */
 export interface FrameSource { repoPath: string; stageId: string; runId: string; caseId: string }
@@ -12,12 +12,16 @@ interface FrameEntry {
   revision: string | number | undefined; fetchedRevision: string | number | undefined; fetchedAt: number; request: AbortController | null; timer: ReturnType<typeof setTimeout> | undefined;
   /** Failed fetches of a finished journey's last frame so far. */
   retries: number;
+  /** Whether the last fetch was refused while a source change saved, which is no failure: the frame is fetched again. */
+  held: boolean;
 }
 export type FrameStore = ReturnType<typeof createFrameStore>;
 
 const EMPTY: FrameSnapshot = Object.freeze({ identity: '', url: '', error: '', receivedAt: 0, checkedAt: 0 });
 // A failed last frame is fetched again after 1, 2 and 4 seconds, then left until the page is shown again.
 const FINAL_RETRIES = 3;
+// One refused while a source change saves is fetched again every second, until the change is saved.
+const HELD_RETRY = 1000;
 const streaming = (status: string | undefined) => ['running', 'skipping', 'cancelling'].includes(status ?? '');
 const modeOf = (status: string | undefined): FrameMode => streaming(status) ? 'stream' : ['queued', 'pending'].includes(status ?? '') ? 'idle' : 'final';
 export const frameIdentity = ({ repoPath = '', stageId = '', runId = '', caseId = '' }: Partial<FrameSource>) => JSON.stringify([repoPath, stageId, runId, caseId]);
@@ -39,7 +43,7 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
     clearTimeout(entry.timer); entry.timer = undefined;
     if (!entry.subscribers.size || entry.request || hidden() || ['idle', 'done'].includes(entry.mode)) return;
     if (entry.mode === 'final') {
-      const retry = entry.retries ? entry.fetchedAt + 1000 * 2 ** (entry.retries - 1) - Date.now() : 0;
+      const retry = entry.held ? entry.fetchedAt + HELD_RETRY - Date.now() : entry.retries ? entry.fetchedAt + 1000 * 2 ** (entry.retries - 1) - Date.now() : 0;
       if (retry <= 0) return void capture(entry);
       entry.timer = setTimeout(() => schedule(entry), retry);
       return;
@@ -52,11 +56,14 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
   async function capture(entry: FrameEntry) {
     const request = new AbortController(), mode = entry.mode, revision = entry.revision;
     entry.request = request;
-    let url = '', error = '';
+    let url = '', error = '', held = false;
     try { const blob = await load(entry.source, request.signal); if (blob && !request.signal.aborted) url = createUrl(blob); }
-    catch (failure) { error = (failure as Error | null)?.message || 'Stream unavailable'; }
+    catch (failure) { if (sourceBusy(failure)) held = true; else error = (failure as Error | null)?.message || 'Stream unavailable'; }
     if (entry.request !== request) { if (url) revokeUrl(url); return; }
-    entry.request = null; entry.fetchedAt = Date.now(); entry.fetchedRevision = revision;
+    entry.request = null; entry.fetchedAt = Date.now(); entry.held = held;
+    // A frame refused while a source change saves leaves the last frame, its error and the retries as they were.
+    if (held) return schedule(entry);
+    entry.fetchedRevision = revision;
     if (mode === 'final' && entry.mode === 'final') { if (error && entry.retries < FINAL_RETRIES) entry.retries++; else entry.mode = 'done'; }
     const previous = entry.snapshot.url;
     entry.snapshot = { identity: entry.identity, url: url || previous, error, receivedAt: url ? entry.fetchedAt : entry.snapshot.receivedAt, checkedAt: entry.fetchedAt };
@@ -75,7 +82,7 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
     subscribe(source: FrameSource, listener: () => void, { interval = 350, status, revision }: FrameProgress & { interval?: number } = {}) {
       const identity = frameIdentity(source);
       let entry = entries.get(identity);
-      if (!entry) { entry = { identity, source: { ...source }, subscribers: new Map(), snapshot: { ...EMPTY, identity }, mode: 'idle', terminal: false, revision, fetchedRevision: undefined, fetchedAt: -Infinity, request: null, timer: undefined, retries: 0 }; entries.set(identity, entry); }
+      if (!entry) { entry = { identity, source: { ...source }, subscribers: new Map(), snapshot: { ...EMPTY, identity }, mode: 'idle', terminal: false, revision, fetchedRevision: undefined, fetchedAt: -Infinity, request: null, timer: undefined, retries: 0, held: false }; entries.set(identity, entry); }
       const token = {};
       entry.subscribers.set(token, { listener, interval });
       update(entry, { status, revision });
@@ -97,6 +104,8 @@ export function createFrameStore({ load, hidden = () => false, reducedMotion = (
 export async function fetchJourneyFrame({ repoPath, stageId, runId, caseId }: FrameSource, signal: AbortSignal) {
   const response = await controllerFetch(`/api/browser/runs/${encodeURIComponent(runId)}/frame?${new URLSearchParams({ repoPath, stageId, caseId })}`, { headers: { Accept: 'image/jpeg' }, cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }, signal);
   if (response.status === 204) return null;
+  // A frame refused while a source change saves throws that refusal, marked, which the store does not count as a failure.
+  if (response.status === 409) { const reply: unknown = await response.json().catch(() => null); if (sourceBusy(reply)) throw replyFailure(reply, response.status); }
   if (!response.ok || !response.headers.get('content-type')?.startsWith('image/jpeg')) throw new Error('Stream unavailable');
   return response.blob();
 }

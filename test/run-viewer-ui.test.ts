@@ -39,7 +39,8 @@ test('the run viewer closes without cancelling, reads a refused or unanswered ru
   const pageErrors: string[] = []; page.on('pageerror', error => pageErrors.push(error.message));
   const runId = '11111111-1111-4111-8111-111111111111', missing = '22222222-2222-4222-8222-222222222222', gone = '33333333-3333-4333-8333-333333333333';
   let status: 'running' | 'passed' = 'running', stopFails = true, refused = false, unreachable = false, goneMissing = false;
-  const reads: string[] = [], stops: unknown[] = [];
+  const reads: string[] = [], stops: unknown[] = [], frames: string[] = [];
+  const busy = { status: 409, json: { error: 'A source change is still being saved. Please wait.', sourceBusy: true } };
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === '/api/session') return route.fulfill({ json: { token: 'fixture-token' } });
@@ -49,10 +50,12 @@ test('the run viewer closes without cancelling, reads a refused or unanswered ru
     }
     // A stopped controller answers nothing at all.
     if (unreachable) return route.abort('connectionrefused');
+    // While a source change saves, the controller refuses the run and its frames as busy.
+    if (refused && path.endsWith('/frame')) { frames.push(path); return route.fulfill(busy); }
     if (path.endsWith('/frame')) return path.includes(gone) ? route.fulfill({ contentType: 'image/jpeg', body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) }) : route.fulfill({ status: 204, body: '' });
     const id = decodeURIComponent(path.split('/').at(-1)!);
     reads.push(id);
-    if (refused) return route.fulfill({ status: 409, json: { error: 'A source change is still being saved. Please wait.' } });
+    if (refused) return route.fulfill(busy);
     if (id === missing || id === gone && goneMissing) return route.fulfill({ status: 404, json: { error: 'Browser run not found in this stage.' } });
     const state = id === gone ? 'running' : status;
     const run = browserRunFixture({ id, status: state, caseIds: ['save'], caseSummaries: [journey], progress: { revision: 1, cases: [{ id: 'save', status: state }] }, ...(state === 'passed' ? { completedAt: '2026-01-01T00:05:00Z' } : {}) });
@@ -72,11 +75,16 @@ test('the run viewer closes without cancelling, reads a refused or unanswered ru
   await expect(viewer).toHaveCount(0);
   assert.deepEqual(stops, []);
   await page.getByRole('button', { name: 'Open viewer', exact: true }).click();
-  // A read refused while a source change saves, or one a stopped controller never answers, is read again until it succeeds.
+  // A read refused while a source change saves keeps the run as last read, without an error, and is read again.
   refused = true;
-  await expect(viewer.getByRole('alert')).toHaveText('A source change is still being saved. Please wait.');
-  await expect(viewer.getByText('Reconnecting', { exact: true })).toBeVisible();
   await readAgain('A refused read is read again.');
+  await readAgain('A refused read is read again until it succeeds.');
+  assert.ok(frames.length > 0, 'Its frames are refused too.');
+  await expect(viewer.getByRole('alert')).toHaveCount(0);
+  await expect(viewer.getByText('Browser stream unavailable.', { exact: true })).toHaveCount(0);
+  await expect(viewer.getByText('Reconnecting', { exact: true })).toHaveCount(0);
+  await expect(viewer.getByText('Running', { exact: true }).first()).toBeVisible();
+  // One a stopped controller never answers is read again until it succeeds, saying why meanwhile.
   refused = false; unreachable = true;
   await expect(viewer.getByRole('alert')).toHaveText('The local server is unavailable. Try reconnecting.');
   await expect(viewer.getByRole('status').filter({ hasText: 'The local server is unavailable. Try reconnecting.' })).toBeVisible();
