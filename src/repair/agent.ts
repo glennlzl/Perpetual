@@ -21,7 +21,7 @@ import { HELD, checkChanges, pathRules, type ChangeCheck } from './changes.ts';
 import type { RepairHost } from './clone.ts';
 import { INSTRUCTIONS, attemptPrompt, chooseImage, commitMessage, describeFailures, pullRequestBody, pullRequestTitle, repositoryDigest, type FailedWorkflow } from './context.ts';
 import { repairBranch, type GitHubFailure, type PullRequestRead, type RepairPullRequests } from './github.ts';
-import type { Repair, RepairAttempt, RepairContext, RepairOutcome, RepairPullRequest, RepairRun } from './manager.ts';
+import { DAILY_COST, type Repair, type RepairAttempt, type RepairContext, type RepairOutcome, type RepairPullRequest, type RepairRun } from './manager.ts';
 import { UNREADY, type CiVerdict, type RepairMerge } from './merge.ts';
 import { repairTools } from './tools.ts';
 import { failedRun, passedRun } from './triage.ts';
@@ -125,24 +125,26 @@ export const openrouterModels = ({ fetch }: { fetch?: typeof globalThis.fetch } 
  * after changing files without calling done still ends done when every failing step (`checks`, by default `failing` in
  * the workspace) then passes in the box: weaker models often finish with a message instead of the done call. Files a
  * command changed, such as a lockfile an install rewrote, count once the box's diff against `base` shows them.
+ * `onStep` receives the attempt's usage so far after each step, which outlives an attempt that rejects.
  */
-export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), base, steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost }: {
+export async function runAttempt({ model, box, instructions = INSTRUCTIONS, prompt, signal, failing = [], checks = failing.map(run => ({ run })), base, steps: limit = BUDGET.steps, timeoutMs = BUDGET.attemptMs, budget = BUDGET.cost, onStep }: {
   model: LanguageModel; box: RepairBox; instructions?: string; prompt: string; signal: AbortSignal; failing?: readonly string[]; checks?: readonly FailingCheck[]; base?: string; steps?: number; timeoutMs?: number; budget?: number;
+  onStep?: (usage: Pick<AttemptResult, 'inputTokens' | 'outputTokens' | 'cost'>) => void;
 }): Promise<AttemptResult> {
   const timeout = AbortSignal.timeout(timeoutMs), stop = AbortSignal.any([signal, timeout, ...(box.signal ? [box.signal] : [])]), seen: StepResult<ToolSet>[] = [];
   let changed = false, reproduced = false;
   const tools = repairTools(box, { signal: stop, events: { run(command, exitCode) { if (!changed && exitCode !== 0 && reproduces(command, failing)) reproduced = true; }, change() { changed = true; } } });
+  const usage = () => ({ inputTokens: seen.reduce((total, step) => total + (step.usage.inputTokens ?? 0), 0), outputTokens: seen.reduce((total, step) => total + (step.usage.outputTokens ?? 0), 0), cost: spentBy(seen) });
   const result = (end: AttemptResult['end'], extra: Partial<AttemptResult> = {}): AttemptResult => {
     const done = seen.flatMap(step => step.toolCalls).find(call => call.toolName === 'done');
     const summary = done && isRecord(done.input) && typeof done.input.summary === 'string' ? redact(done.input.summary).slice(0, 4000) : '';
-    return { end, summary, steps: seen.length, inputTokens: seen.reduce((total, step) => total + (step.usage.inputTokens ?? 0), 0),
-      outputTokens: seen.reduce((total, step) => total + (step.usage.outputTokens ?? 0), 0), cost: spentBy(seen), reproduced, ...extra };
+    return { end, summary, steps: seen.length, ...usage(), reproduced, ...extra };
   };
   try {
     await generateText({
       model, tools, instructions, prompt, abortSignal: stop, providerOptions: { openrouter: OPENROUTER_OPTIONS },
       stopWhen: [stepCountIs(limit), hasToolCall('done'), ({ steps }) => spentBy(steps) >= budget],
-      onStepEnd(step) { seen.push(step); },
+      onStepEnd(step) { seen.push(step); onStep?.(usage()); },
     });
   } catch (error) {
     if (signal.aborted) throw signal.reason ?? error;
@@ -174,11 +176,9 @@ export function createRepairAgent(options: RepairAgentOptions) {
   const budget = { ...BUDGET, ...options.budget }, ci = { ...CI, ...options.ci };
   const now = options.now ?? (() => new Date().toISOString()), clock = options.clock ?? Date.now, model = options.model ?? openrouterModels();
   const { boxes, host, github } = options, pulls = github.pullRequests;
-  const capped = `The repair reached its $${budget.cost.toFixed(2)} cost cap.`;
-  const ended: Record<Exclude<AttemptResult['end'], 'done'>, (result: AttemptResult) => string> = {
+  const ended: Record<Exclude<AttemptResult['end'], 'done' | 'cost'>, (result: AttemptResult) => string> = {
     steps: () => `The attempt reached its ${budget.steps}-step limit without calling done.`,
     time: () => `The attempt reached its ${Math.round(budget.attemptMs / 60_000)}-minute limit.`,
-    cost: () => capped,
     idle: () => 'The model stopped without calling done.',
     context: () => 'The attempt\'s conversation outgrew the model\'s context window. Read less at a time: narrower paths, grep, and shorter command output.',
     provider: result => `The model provider returned an error: ${result.error ?? 'unknown'}`,
@@ -231,6 +231,9 @@ export function createRepairAgent(options: RepairAgentOptions) {
     const { repair } = context, clone = join(context.directory, 'clone'), branch = repairBranch(repair.sha);
     const models = await options.models();
     if (!models) return { status: 'needs-person', reason: 'Add an OpenRouter API key in Settings.' };
+    // A repair Autopilot started by itself spends no more than what is left of its pipeline's daily cost cap.
+    const cap = Math.min(budget.cost, context.spendable ?? budget.cost);
+    const capped = cap < budget.cost ? `The repair reached this pipeline's $${DAILY_COST.toFixed(2)} daily cost cap.` : `The repair reached its $${budget.cost.toFixed(2)} cost cap.`;
     const attempts: RepairAttempt[] = [];
     let spent = 0, pushed: string | null = null, pullRequest: RepairPullRequest | null = null;
     let holds: string[] = [], ciRuns: string[] = [], feedback = '', summary = '', check: Pick<ChangeCheck, 'paths' | 'added' | 'removed'> | null = null;
@@ -270,19 +273,28 @@ export function createRepairAgent(options: RepairAgentOptions) {
       if (verdict.status === 'other') return { status: 'failed', reason: `The pull request's workflow runs ended as ${verdict.conclusion}.` };
       return { status: 'failed', reason: `The updated pull request failed CI: ${verdict.runs.map(run => run.name || run.path || run.id).slice(0, 5).join(', ')}.` };
     };
-    for (let number = 1; number <= budget.attempts && spent < budget.cost; number += 1) {
+    for (let number = 1; number <= budget.attempts && spent < cap; number += 1) {
       const id = number <= budget.escalateAfter ? models.model : models.escalationModel || models.model;
       const attempt: RepairAttempt = { number, model: id, startedAt: now() };
       attempts.push(attempt);
       await context.report({ status: 'repairing', attempts });
-      const result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
-        signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
-        checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), base: repair.sha, steps: budget.steps, timeoutMs: budget.attemptMs, budget: budget.cost - spent });
+      let result: AttemptResult;
+      try {
+        result = await runAttempt({ model: model(id, models.apiKey), box, prompt: attemptPrompt({ repair, workflows, digest, number, total: budget.attempts, feedback, changed: number > 1 }),
+          signal, failing: workflows.flatMap(workflow => workflow.step.run ? [workflow.step.run] : []),
+          checks: workflows.flatMap(workflow => workflow.step.run ? [{ run: workflow.step.run, directory: workflow.step.workingDirectory }] : []), base: repair.sha, steps: budget.steps, timeoutMs: budget.attemptMs, budget: cap - spent,
+          onStep: usage => Object.assign(attempt, usage) });
+      } catch (error) {
+        // An attempt a Stop, a newer head, shutdown or the box's removal cut short is still recorded with what its
+        // finished steps cost, which the pipeline's daily cost cap counts.
+        if (attempt.cost !== undefined) { attempt.completedAt = now(); await context.report({ attempts }).catch(() => {}); }
+        throw error;
+      }
       spent += result.cost;
       Object.assign(attempt, { completedAt: now(), reproduced: result.reproduced, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cost: result.cost });
       const fail = async (reason: string, next = reason) => { attempt.failure = reason; feedback = next; await context.report({ attempts }); };
       if (result.refusal) { await fail(result.refusal); return await finish({ status: 'needs-person', reason: result.refusal }); }
-      if (result.end !== 'done') { await fail(ended[result.end](result)); continue; }
+      if (result.end !== 'done') { await fail(result.end === 'cost' ? capped : ended[result.end](result)); continue; }
       summary = result.summary;
       let diff: Buffer;
       try { diff = await box.diff(repair.sha); }
@@ -360,7 +372,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
       await fail(failed, `${failed} The failed runs above are the pull request's; fix them on top of the pushed change.`);
     }
     if (pullRequest) await pulls.update({ repository: repair.repository, number: pullRequest.number, body: body() }).catch(() => {});
-    return await finish({ status: 'failed', reason: spent >= budget.cost ? capped : `The build was not fixed in ${budget.attempts} attempts.` });
+    return await finish({ status: 'failed', reason: spent >= cap ? capped : `The build was not fixed in ${budget.attempts} attempts.` });
   }
 
   async function cleanup({ repair, directory }: { repair: Repair; directory: string }) {

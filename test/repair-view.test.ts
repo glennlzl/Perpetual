@@ -86,6 +86,8 @@ test('only a managed source\'s Build carries Autopilot: its mode is the auto-mer
   for (const status of ['needs-person', 'failed', 'cancelled', 'flaky', 'superseded'] as const) {
     assert.deepEqual(autopilotStages({ repairs: [repair(status, { sha: HEAD })], autoMerge: true, head }, 'build').build.failed, { sha: HEAD, runs: [RUN] }, `A ${status} repair of the head may start again.`);
   }
+  assert.deepEqual(autopilotStages({ repairs: [repair('ready', { sha: HEAD, pullRequest: { ...PULL, draft: false } })], autoMerge: true, head }, 'build').build.failed, { sha: HEAD, runs: [] }, 'A fix waiting with its pull request is not started again.');
+  assert.deepEqual(autopilotStages({ repairs: [repair('ready', { sha: HEAD, pullRequest: { ...PULL, draft: false, closed: true } })], autoMerge: true, head }, 'build').build.failed, { sha: HEAD, runs: [RUN] }, 'A ready fix whose pull request a person closed may start again.');
   assert.deepEqual(autopilotStages({ repairs: [repair('ready')], autoMerge: true, head }, 'build').build.failed, { sha: HEAD, runs: [RUN] }, 'The scanned commit\'s fix never holds back the head\'s Repair.');
   const view: RepairView = { repairs: [repair('ready', { pullRequest: PULL }), repair('flaky', { sha: OLDER, category: 'availability' })], autoMerge: true, head, watchError: 'Could not read main from GitHub.' };
   const stages = [{ id: 'build', name: 'Build' }, { id: 'beta', name: 'Beta' }];
