@@ -164,8 +164,8 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       const item = Number(fixture[2]) === config.fixtures.length ? config.fixtures[Number(fixture[1]) - 1] : undefined;
       found = { stage: 'build', ...(item ? { subject: `Fixture ${fixture[1]} of ${fixture[2]} on ${code(item.service)}: ${item.sql ? `sql ${code(item.sql)}` : item.query ? `query ${code(item.query)}` : `command ${code(item.command ?? '')}`}` } : {}) };
     } else {
-      // A container that stopped failed its build or start; one still running but not healthy never became healthy. One
-      // that never started is only the cause when nothing else failed, and then every stopped container's logs are read.
+      // A container that stopped failed to start; one still running but not healthy never became healthy. One that never
+      // started is only the cause when nothing else failed, and then every stopped container's logs are read.
       const failed = FAILED_FIRST.map(test => containers.find(test)).find(item => item !== undefined);
       if (failed) {
         if (failed.state !== 'created') named = [failed.name];

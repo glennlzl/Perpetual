@@ -241,8 +241,10 @@ When time or steps run out, the controller checks the \`${CONFIG}\` you wrote la
 - An app runs on a Node.js image with corepack enabled, from a copy of the repository: \`node\` is its major version,
   the one the repository asks for (.nvmrc, .node-version or package.json's engines), else the current LTS. It must
   listen on \`port\`, also given as PORT, on all interfaces (0.0.0.0), not only localhost, and answer there below 500
-  within 5 minutes of starting. \`build\` is optional; it can reach the twin's services, but no other app, which has
-  not started yet.
+  within 5 minutes of starting. \`build\` is optional and runs in a container of its own: files it writes outside the
+  repository's copy, such as a global install or a browser a postinstall script downloads to the home directory, do
+  not reach the app. It can reach the twin's services, except one that runs the repository's code, such as a
+  Trigger.dev worker, which starts with the apps after the builds, and no other app, which has not started yet.
 - \`install\` is optional: one install that several apps share, such as a workspace's; it runs once before fixtures and
   apps start, and those apps' builds then leave it out.
 - Placeholders in service options and app env: \`{{<service id>.<VARIABLE>}}\` is a variable that service provides,

@@ -18,8 +18,9 @@ import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 
 // A twin is <dataDir>/environments/<id>/twin/{compose.yaml,.env,twin.json}: service setup in
-// placeholder order; once services are up, their test accounts, the shared install and fixtures;
-// then `docker compose up --wait`.
+// placeholder order; once services are up, their test accounts, the shared install, fixtures and
+// each app's build; then `docker compose up --wait` starts the apps and the services that run
+// repository code.
 
 export const PORT_BASE = 43100;
 export const PORT_BLOCK = 48;
