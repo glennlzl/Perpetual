@@ -226,24 +226,29 @@ test('journeys keep the recordings they report for the stage\'s latest runs only
   assert.equal((await restarted.video(f.context,latest,scenario.id,name)).size,4);
 });
 
-test('a stage keeps its latest gate run\'s recordings and its latest verification\'s apart from its five latest runs',async t=>{
+test('a stage keeps its latest gate run\'s and latest repair gate run\'s recordings and its latest verification\'s apart from its five latest runs',async t=>{
   const facts={caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]};
   const f=await fixture(t,input=>{
     const name=`page@${randomBytes(16).toString('hex')}.webm`;writeFileSync(join(input.videoDir!,name),'webm');
     return [{type:'video',caseId:scenario.id,files:[name]},...milestones,{type:'result',result:facts}];
   });
-  // A run nobody started by hand is the gate's: draft code needs review without a browser, and the mark stays private.
+  // A run nobody started by hand is a gate's: draft code needs review without a browser, and the mark stays private. A
+  // repair's gate, at its pull request head, names its repair, and its runs are marked apart.
   const unapproved=(await f.manager.run(f.context,{})).run;
   const report=await completed(f,unapproved.id);
   assert.equal(report.run.status,'needs_review');assert.equal(Object.hasOwn(report.run,'gate'),false);
-  const file=join(f.dataDir,'browser','state.json'),stored=()=>JSON.parse(readFileSync(file,'utf8')).runs as {id:string;gate?:boolean;verification?:{id:string}}[];
-  assert.equal(stored().find(run=>run.id===unapproved.id)!.gate,true);
-  // A recorded gate run runs approved code; this one is a person's run that the saved state then marks as the gate's.
+  const repairing=(await f.manager.run({...f.context,repair:'repair-1'},{})).run;await completed(f,repairing.id);
+  const file=join(f.dataDir,'browser','state.json'),stored=()=>JSON.parse(readFileSync(file,'utf8')).runs as {id:string;gate?:true|'repair';verification?:{id:string}}[];
+  assert.deepEqual([unapproved.id,repairing.id].map(id=>stored().find(run=>run.id===id)!.gate),[true,'repair']);
+  // Recorded gate runs run approved code; these are a person's runs that the saved state then marks as the gates'.
   const gate=(await f.manager.run(f.context,{},manual)).run;await completed(f,gate.id);
+  const repairGate=(await f.manager.run(f.context,{},manual)).run;await completed(f,repairGate.id);
   assert.equal(stored().find(run=>run.id===gate.id)!.gate,undefined,'A person\'s run is not the gate\'s.');
   await f.manager.close();
+  // The repair gate ran after the target branch's gate, whose run the stage's gate Badge and commit status refer to.
   const state=JSON.parse(await readFile(file,'utf8'));
-  state.runs.find((run:{id:string})=>run.id===gate.id).gate=true;state.runs=state.runs.filter((run:{id:string})=>run.id!==unapproved.id);
+  state.runs.find((run:{id:string})=>run.id===gate.id).gate=true;state.runs.find((run:{id:string})=>run.id===repairGate.id).gate='repair';
+  state.runs=state.runs.filter((run:{id:string})=>![unapproved.id,repairing.id].includes(run.id));
   await writeFile(file,JSON.stringify(state));
   const manager=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>manager.close());
   const idle=async()=>{for(const deadline=Date.now()+WAIT;manager.isActive(f.context);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The stage did not become idle.');};
@@ -254,31 +259,33 @@ test('a stage keeps its latest gate run\'s recordings and its latest verificatio
   const attempts=stored().filter(run=>run.verification),latest=attempts[0].verification!.id;
   assert.equal(attempts.length,8);
   const videos=join(f.dataDir,'browser','videos');
-  const kept=[...attempts.filter(run=>run.verification!.id===latest).map(run=>run.id),...runs.slice(2),gate.id];
-  for(const id of [gate.id,...runs,...attempts.map(run=>run.id)]){
+  const kept=[...attempts.filter(run=>run.verification!.id===latest).map(run=>run.id),...runs.slice(2),gate.id,repairGate.id];
+  for(const id of [gate.id,repairGate.id,...runs,...attempts.map(run=>run.id)]){
     const recorded=(await manager.runProgress(f.context,id)).progress.cases[0].videos;
     if(kept.includes(id)){assert.equal(recorded?.length,1,id);await access(join(videos,id,recorded![0]));}
     else{assert.equal(recorded,undefined,id);await removed(join(videos,id));}
   }
 });
 
-test('verification attempts keep a history of their own, and each stage keeps its latest gate run',async t=>{
+test('verification attempts keep a history of their own, and each stage keeps its latest gate run and latest repair gate run',async t=>{
   const f=await fixture(t,[...milestones,{type:'result',result:{caseId:scenario.id,stopCause:'none',assertions:[{...scenario.assertions[0],passed:true}]}}]);
   const first=(await f.manager.run(f.context,{},manual)).run;await completed(f,first.id);await f.manager.close();
   const file=join(f.dataDir,'browser','state.json'),state=JSON.parse(await readFile(file,'utf8')),[stored]=state.runs;
   const names=new Map<string,string>();
   const copy=(name:string,changes:Record<string,unknown>={})=>{const id=randomUUID();names.set(id,name);return {...structuredClone(stored),id,...changes};};
   const attempt=(index:number)=>copy(`attempt ${index}`,{verification:{id:`verification-${Math.floor(index/4)}`,hash:'a'.repeat(64),caseHash:'b'.repeat(64),attempt:index%4+1,control:index%4===3}});
-  // Newest first: 50 runs and 50 verification attempts interleaved, the stage's latest gate run, a run and an attempt
-  // past each history, an older gate run, and another stage's only gate run.
-  state.runs=[...Array.from({length:50},(_,index)=>[copy(`run ${index}`),attempt(index)]).flat(),copy('gate',{gate:true}),copy('run 50'),attempt(50),copy('older gate',{gate:true}),copy('other stage gate',{gate:true,scope:scopeId({key:'repo',stageId:'gamma'})})];
+  // Newest first: 50 runs and 50 verification attempts interleaved, the stage's latest repair gate run and latest gate run,
+  // a run and an attempt past each history, an older repair gate run and gate run, a run whose stored mark is no gate's,
+  // and another stage's only gate run.
+  state.runs=[...Array.from({length:50},(_,index)=>[copy(`run ${index}`),attempt(index)]).flat(),copy('repair gate',{gate:'repair'}),copy('gate',{gate:true}),copy('run 50'),attempt(50),
+    copy('older repair gate',{gate:'repair'}),copy('older gate',{gate:true}),copy('unknown mark',{gate:'nightly'}),copy('other stage gate',{gate:true,scope:scopeId({key:'repo',stageId:'gamma'})})];
   await writeFile(file,JSON.stringify(state));
   const restarted=await createBrowserManager({dataDir:f.dataDir,runtime:f.runtime,playwright:f.runtime});t.after(()=>restarted.close());
   const {run}=await restarted.run(f.context,{},manual);names.set(run.id,'new');
   for(const deadline=Date.now()+WAIT;['queued','running'].includes((await restarted.runProgress(f.context,run.id)).run.status);await new Promise(r=>setTimeout(r,5)))assert.ok(Date.now()<deadline,'The run did not finish.');
   const history=JSON.parse(await readFile(file,'utf8')).runs.map((item:{id:string})=>names.get(item.id));
   // The new run is the latest of the 50 runs, so the oldest of them leaves; no attempt takes a run's place.
-  const expected=['new',...Array.from({length:50},(_,index)=>[...index<49?[`run ${index}`]:[],`attempt ${index}`]).flat(),'gate','other stage gate'];
+  const expected=['new',...Array.from({length:50},(_,index)=>[...index<49?[`run ${index}`]:[],`attempt ${index}`]).flat(),'repair gate','gate','other stage gate'];
   assert.deepEqual(history,expected);
 });
 

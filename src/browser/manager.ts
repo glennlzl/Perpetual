@@ -43,8 +43,8 @@ import type {ScanRepo,ScanService} from '../scanner.ts';
 
 /** The active source scan, as far as browser tests read it (src/scanner.ts). */
 type StageScan={repo:Pick<ScanRepo,'path'>&Partial<Pick<ScanRepo,'sha'>>;services?:readonly (Pick<ScanService,'id'>&Partial<Pick<ScanService,'framework'|'path'>>)[]};
-/** The Sandbox stage a browser operation belongs to, with its active source. */
-export type BrowserStageContext={key:string;stageId:string;scan:StageScan;controllerOrigin?:string};
+/** The Sandbox stage a browser operation belongs to, with its active source; a repair gate's names its repair. */
+export type BrowserStageContext={key:string;stageId:string;scan:StageScan;controllerOrigin?:string;repair?:string};
 /** The environment behind a target URL, as the environments manager resolves it (src/environments/manager.ts). */
 export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;stageId?:string|null;pipelineKey?:string|null;repoPath?:string|null;apps?:readonly unknown[]|null;services?:readonly unknown[]|null;accounts?:readonly EnvironmentAccount[]|null};
 /** What the manager uses of environment leases. */
@@ -62,9 +62,12 @@ export type CaseProgress=Omit<PublicCaseProgress,'steps'>&{actionCount:number;st
 export type RunProgress=Omit<PublicRunProgress,'cases'>&{revision:number;cases:CaseProgress[]};
 type Discovery=BrowserDiscovery;
 type Analysis=BrowserAnalysis;
-/** A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes; gate marks a run the journey gate started. */
+/**
+ * A browser run (its journeys) or discovery, persisted with the approved case snapshots it executes. gate marks a run a
+ * journey gate started: true for the target branch's gate, repair for a repair's gate at its pull request head.
+ */
 export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engine'>&{
-  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;gate?:true;
+  scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;gate?:true|'repair';
 };
 type Preparation=BrowserPreparation;
 /**
@@ -123,6 +126,8 @@ const defaults:BrowserConfig={targetUrl:'',signInUrl:'',scope:'',requirements:''
 // The twin a verification started on is gone or no longer ready, so its attempts cannot go on there.
 const TWIN_CHANGED='The environment changed during its verification. Verify its code again.';
 const active=(run:StoredRun)=>['queued','running'].includes(run.status);
+// A stage's gate runs of one kind, the target branch's or a repair's, of which the latest is always kept.
+const gateKind=(run:StoredRun)=>run.gate?`${run.scope}\0${run.gate}`:'';
 // Playwright names each tab's recording; a stage keeps the recordings of its latest runs, and the history the latest runs.
 const VIDEO_RUNS_PER_STAGE=5,HISTORY=50,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const safeText=(value:unknown,limit:number)=>value?browserError(String(value),process.env,limit):'';
@@ -307,8 +312,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       }catch{throw new Error('Invalid stored read-only POST requests.');}
     }
   }
-  // Only true marks a gate run; any other stored value marks none.
-  for(const run of state.runs){const marker:unknown=run.gate;if(marker!==undefined&&marker!==true)delete run.gate;}
+  // Only true or repair marks a gate run; any other stored value marks none.
+  for(const run of state.runs){const marker:unknown=run.gate;if(marker!==undefined&&marker!==true&&marker!=='repair')delete run.gate;}
   for(const run of state.runs)if(run.codeFeedback!==undefined){
     const feedback:unknown=run.codeFeedback;
     if(!isRecord(feedback)||Object.keys(feedback).length>30||Object.entries(feedback).some(([id,error])=>!run.caseIds.includes(id)||typeof error!=='string'||!error||error.length>4000))throw new Error('Invalid stored code feedback.');
@@ -353,12 +358,13 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const verifications=new Map<string,VerificationEntry>(),verificationJobs=new Set<Promise<void>>();
   const verifying=(scope?:string,caseId?:string)=>[...verifications.values()].some(entry=>!entry.done&&(scope===undefined||entry.scope===scope)&&(caseId===undefined||entry.caseId===caseId));
   // The run history keeps the controller's latest 50 runs and, counted apart from them, its latest 50 verification
-  // attempts, so verifying code never pushes a gate or a person's run out of it. Each stage's latest gate run stays too,
-  // as does every active run and every attempt of a verification still running. runs is newest first.
+  // attempts, so verifying code never pushes a gate or a person's run out of it. Each stage's latest gate run and latest
+  // repair gate run stay too, as does every active run and every attempt of a verification still running. runs is newest
+  // first.
   function keptRuns(runs:BrowserRun[]){
     const counts={runs:0,attempts:0},gates=new Set<string>();
     return runs.filter(run=>{
-      const latestGate=Boolean(run.gate)&&!gates.has(run.scope);if(latestGate)gates.add(run.scope);
+      const kind=gateKind(run),latestGate=Boolean(kind)&&!gates.has(kind);if(latestGate)gates.add(kind);
       const recent=run.verification?counts.attempts++<HISTORY:counts.runs++<HISTORY;
       return recent||latestGate||active(run)||[...verifications.values()].some(entry=>!entry.done&&entry.id===run.verification?.id);
     });
@@ -379,8 +385,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     let promise:Promise<T>;try{promise=Promise.resolve(work());}catch(error){return Promise.reject(error);}admissions.add(promise);
     promise.finally(()=>admissions.delete(promise)).catch(()=>{});return promise;
   }
-  // Each stage keeps the recordings of its latest runs, apart from verification attempts, of its latest gate run, and of
-  // its latest verification's attempts; a run's recordings go with it. strict reports a folder it could not remove.
+  // Each stage keeps the recordings of its latest runs, apart from verification attempts, of its latest gate run and latest
+  // repair gate run, and of its latest verification's attempts; a run's recordings go with it. strict reports a folder it
+  // could not remove.
   async function pruneVideos({strict=false}={}){
     const kept=new Set<string>(),count=new Map<string,number>(),gates=new Set<string>(),verified=new Map<string,string>();
     for(const run of state.runs){
@@ -393,8 +400,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         keep=verified.get(run.scope)===run.verification.id;
       }else{
         const n=count.get(run.scope)||0;count.set(run.scope,n+1);
-        keep=n<VIDEO_RUNS_PER_STAGE||Boolean(run.gate)&&!gates.has(run.scope);
-        if(run.gate)gates.add(run.scope);
+        const kind=gateKind(run);
+        keep=n<VIDEO_RUNS_PER_STAGE||Boolean(kind)&&!gates.has(kind);
+        if(kind)gates.add(kind);
       }
       if(keep)kept.add(run.id);
       else for(const item of run.progress?.cases||[])delete item.videos;
@@ -861,8 +869,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
-      // Only a person's run is manual; any other run of journeys is the journey gate's.
-      else if(mode==='run'&&!options.manual)run.gate=true;
+      // Only a person's run is manual; any other run of journeys is a journey gate's, a repair's when it names one.
+      else if(mode==='run'&&!options.manual)run.gate=context.repair===undefined?true:'repair';
       const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
       if(preparation){Object.assign(preparation,{status:'discovering',targetUrl:config.targetUrl,runId:run.id});delete preparation.error;delete preparation.completedAt;}
       const admittedRuns=()=>keptRuns([run,...state.runs]);
