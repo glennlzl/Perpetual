@@ -5,9 +5,13 @@ export interface BrowserModelView {
 }
 /** App-wide settings include the saved escalation model, or an empty string until one is saved. */
 export interface ModelSettingsView extends BrowserModelView { escalationModel: string }
-/** GET and POST /api/settings/model. Runtime fields may be absent when the runtime cannot report them. */
+/**
+ * GET and POST /api/settings/model. Runtime fields may be absent when the runtime cannot report them. A POST that saved a
+ * new key OpenRouter could not be asked about carries a warning.
+ */
 export interface ModelSettingsReply {
   capabilities: ModelSettingsView & { runtimeInstalled?: boolean; browserInstalled?: boolean; runtimeProject?: string };
+  warning?: string;
 }
 /** An eligible model listed by OpenRouter's public catalog. */
 export interface OpenRouterModel { id: string; name: string; provider: string }

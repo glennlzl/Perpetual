@@ -49,7 +49,7 @@ async function fixture(t: TestContext) {
   return { dataDir, context, manager, observations, open,
     async removal() {
       removal = await createStageRemovalManager({ dataDir, usage, environments: manager,
-        browser: { isActive: () => false }, removeStage: async () => {} });
+        browser: { isActive: () => false, removeStage: async () => {} }, removeStage: async () => {} });
       return removal;
     },
   };

@@ -65,11 +65,15 @@ class SingleActionContract(unittest.IsolatedAsyncioTestCase):
                 result = await asyncio.wait_for(runner.discover(payload), 25)
             self.assertEqual(application.unexpected_visits, 0, "A rejected multi-action response executed its first navigation")
             self.assertEqual([case["name"] for case in result["cases"]], ["Observe workspace"])
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            # The counts are their own event, never part of the result.
+            self.assertNotIn("diagnostics", result)
+            [diagnostics] = [event["diagnostics"] for event in events if event.get("type") == "diagnostics"]
             # Model time and token totals vary; they are counted, never sent as prompts.
-            usage = {key: result["diagnostics"].pop(key) for key in ("modelMs", "inputTokens", "outputTokens")}
+            usage = {key: diagnostics.pop(key) for key in ("modelMs", "inputTokens", "outputTokens")}
             self.assertTrue(all(isinstance(value, int) and value >= 0 for value in usage.values()), usage)
-            self.assertEqual(result["diagnostics"], {"modelCalls": 2, "modelFailures": {"timeout": 0, "invalid_output": 1, "provider": 0, "other": 0}, "stepsWithoutActions": 1, "forcedFinalization": False, "actionCount": 1})
-            progress = [event for line in output.getvalue().splitlines() if (event := json.loads(line)).get("type") == "case"]
+            self.assertEqual(diagnostics, {"modelCalls": 2, "modelFailures": {"timeout": 0, "invalid_output": 1, "provider": 0, "other": 0}, "stepsWithoutActions": 1, "forcedFinalization": False, "actionCount": 1})
+            progress = [event for event in events if event.get("type") == "case"]
             self.assertEqual(progress[-1]["actions"], [{"type": "done", "status": "passed"}])
             for request in model.requests:
                 action_schema = request["tools"][0]["function"]["parameters"]["properties"]["action"]

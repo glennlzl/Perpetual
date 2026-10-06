@@ -35,6 +35,15 @@ export interface CallbackApplication { applicationId: string; origin: string }
 export interface CallbackReview { application: CallbackApplication | null; error?: string }
 export interface BrowserPreparation { environmentId: string; status: string; createdAt: string; targetUrl?: string; runId?: string; error?: string; completedAt?: string }
 export interface BrowserDiscovery { cases: BrowserCase[]; summary: string; authenticated: boolean }
+/**
+ * What a discovery's browser agent counted, kept on its run whether it completed, failed or was cancelled: model calls,
+ * failed calls by kind, steps without an action, actions, model time, tokens, and whether Browser Use forced its final
+ * report, as it does after two failures in a row, at the step limit or near the time limit. Evidence only: no verdict.
+ */
+export interface DiscoveryDiagnostics {
+  modelCalls: number; modelFailures: { timeout: number; invalid_output: number; provider: number; other: number };
+  stepsWithoutActions: number; actionCount: number; modelMs: number; inputTokens: number; outputTokens: number; forcedFinalization: boolean;
+}
 export interface BrowserAnalysis extends BrowserDiscovery { createdAt: string; sourceRevision: string | null; error?: string }
 export type BrowserCapabilities = ModelSettingsReply['capabilities'] & { playwright: { browserInstalled: boolean } };
 
@@ -67,10 +76,10 @@ export interface PublicRun {
   id: string; stageId: string; mode: 'run' | 'discover'; status: string; createdAt: string; startedAt?: string; completedAt?: string;
   targetUrl: string; sourceRevision: string | null; caseIds: string[]; caseSummaries: CaseSummary[]; progress?: RunProgress; results?: JourneyResult[]; error?: string; blockedRequests?: BlockedRequest[];
   engine?: 'playwright' | 'browser-use'; concurrency?: number; effectiveConcurrency?: number; concurrencyLimit?: ConcurrencyLimit; specHashes?: Record<string, string>;
-  environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; frameUpdatedAt?: string; frameCapturedAt?: string; callbackPolicy?: string; callbackOrigins?: string[];
+  environmentId?: string; verification?: Verification; discovery?: BrowserDiscovery; diagnostics?: DiscoveryDiagnostics; frameUpdatedAt?: string; frameCapturedAt?: string; callbackPolicy?: string; callbackOrigins?: string[];
 }
-/** Source polling omits code hashes and discovery, and includes progress only for active and latest runs. */
-export type RunSummary = Omit<PublicRun, 'progress' | 'specHashes' | 'discovery'> & { progress?: SummaryProgress };
+/** Source polling omits code hashes, discovery and its diagnostics, and includes progress only for active and latest runs. */
+export type RunSummary = Omit<PublicRun, 'progress' | 'specHashes' | 'discovery' | 'diagnostics'> & { progress?: SummaryProgress };
 export interface RunProgressReply { run: PublicRun; results: JourneyResult[]; progress: RunProgress; discovery?: BrowserDiscovery }
 
 export interface SpecVerification { status: 'passed' | 'failed' | 'cancelled' | 'running'; passes: number; control: 'missed' | 'caught' | null; error?: string }
@@ -83,7 +92,13 @@ export type JourneySpecs = Record<string, SpecSummary>;
 /** Code text is read separately for review, never in polling summaries. */
 export interface SpecCodeReply { authoring?: import('./authoring.ts').AuthoringRecord[]; approved?: { hash: string; code: string }; draft?: { hash: string; code: string } }
 export interface BrowserSummaryReply { cases: BrowserCase[]; specs: JourneySpecs; runs: RunSummary[]; preparation: BrowserPreparation | null }
+/** An unconfirmed browser cleanup holding the stage's application: the operation that left it and when it started. */
+export interface BrowserCleanupHold { operation: 'run' | 'discover' | 'generate'; startedAt: string }
+/** cleanup is present while an unconfirmed browser cleanup holds the stage's application. */
 export interface BrowserViewReply extends Omit<BrowserSummaryReply, 'runs'> {
   config: BrowserConfig; runs: PublicRun[]; analysis: BrowserAnalysis | null; accounts: EnvironmentAccount[]; capabilities: BrowserCapabilities;
   callbacks?: CallbackReview;
+  cleanup?: BrowserCleanupHold;
 }
+/** POST /api/browser/cleanup: a person confirmed the cleanup, so it holds the stage's application no longer. */
+export interface BrowserCleanupReply { cleanup: null }

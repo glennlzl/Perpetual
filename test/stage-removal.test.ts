@@ -8,7 +8,7 @@ import { createEnvironmentUsage, type EnvironmentUsage, type StageRef } from '..
 import type { PublicEnvironment } from '../src/environments/manager.ts';
 
 type RemovalManager = Awaited<ReturnType<typeof createStageRemovalManager>>;
-type FixtureOptions = { dataDir?: string; usage?: EnvironmentUsage; items?: PublicEnvironment[]; cleanup?: (id: string) => Promise<void>; browserActive?: () => boolean; remove?: (context: StageRef) => Promise<void> };
+type FixtureOptions = { dataDir?: string; usage?: EnvironmentUsage; items?: PublicEnvironment[]; cleanup?: (id: string) => Promise<void>; browserActive?: () => boolean; browserRemove?: (context: StageRef) => Promise<void>; remove?: (context: StageRef) => Promise<void> };
 
 const context = { key: 'source-a', stageId: 'beta', scan: { credentials: 'never-persist', repo: { path: '/repo/a' } } };
 // A ready Beta sandbox as environment summaries list it.
@@ -29,7 +29,8 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
   if (!options.dataDir) fixtures.get(t)!.directories.push(dataDir);
   const usage = options.usage || createEnvironmentUsage();
   const items = options.items || [ready('first'), ready('second')];
-  const calls: string[] = [], removed: StageRef[] = [], forgotten: StageRef[][] = [], jobs = new Map<string, Promise<void>>();
+  // order: each sandbox's deletion, the browser data's and the stage's, as they finish.
+  const calls: string[] = [], removed: StageRef[] = [], forgotten: StageRef[][] = [], browserRemoved: StageRef[] = [], order: string[] = [], jobs = new Map<string, Promise<void>>();
   const environments: Parameters<typeof createStageRemovalManager>[0]['environments'] = {
     summaries: key => key === context.key ? structuredClone(items) : [],
     async destroy(received, id, { removalToken } = {}) {
@@ -41,7 +42,7 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
       const job = Promise.resolve().then(async () => {
         try {
           await options.cleanup?.(id);
-          item.status = 'destroyed';
+          item.status = 'destroyed'; order.push(id);
         } catch (error) { item.status = 'cleanup_failed'; item.error = (error as Error).message; }
         finally { release(); jobs.delete(id); }
       });
@@ -53,11 +54,12 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
     async forget(stages) { forgotten.push(structuredClone(stages)); },
   };
   const manager = await createStageRemovalManager({ dataDir, usage, environments,
-    browser: { isActive: () => options.browserActive?.() || false },
-    removeStage: async received => { await options.remove?.(received); removed.push(received); },
+    browser: { isActive: () => options.browserActive?.() || false,
+      async removeStage(received) { await options.browserRemove?.(received); browserRemoved.push(received); order.push('browser'); } },
+    removeStage: async received => { await options.remove?.(received); removed.push(received); order.push('stage'); },
   });
   fixtures.get(t)!.managers.push(manager);
-  return { dataDir, usage, items, calls, removed, forgotten, manager };
+  return { dataDir, usage, items, calls, removed, forgotten, browserRemoved, order, manager };
 }
 
 test('accepted removal owns all cleanup and removes the pinned stage after every sandbox finishes', async t => {
@@ -191,4 +193,20 @@ test('already destroyed and clean failed environments need no cleanup, and other
   assert.deepEqual(f.calls, []);
   assert.equal(f.removed.length, 1);
   assert.equal(items[2].status, 'ready');
+});
+
+test('the stage\'s browser data is deleted after its sandboxes and before the stage, and a failure keeps the stage', async t => {
+  let fail = true;
+  const f = await fixture(t, { browserRemove: async () => { if (fail) throw new Error('Browser storage is unavailable.'); } });
+  await f.manager.start(context);
+  await f.manager.awaitIdle(context);
+  assert.equal(f.manager.view(context).removal?.status, 'failed');
+  assert.match(f.manager.view(context).removal!.error!, /Browser storage is unavailable/);
+  assert.deepEqual(f.order, ['first', 'second'], 'The stage stays while its tests and recordings remain.');
+  fail = false;
+  await f.manager.start(context);
+  await f.manager.awaitIdle(context);
+  assert.equal(f.manager.view(context).removal?.status, 'completed');
+  assert.deepEqual(f.order, ['first', 'second', 'browser', 'stage']);
+  assert.deepEqual(f.browserRemoved, [{ key: context.key, stageId: context.stageId }]);
 });

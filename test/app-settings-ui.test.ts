@@ -15,7 +15,8 @@ test('Settings save completion survives leaving and reopening the page', { timeo
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  for (const outcome of ['success', 'failure'] as const) await t.test(outcome, async t => {
+  const warning = 'OpenRouter could not check this key.';
+  for (const outcome of ['success', 'unchecked key', 'failure'] as const) await t.test(outcome, async t => {
     const saved = Promise.withResolvers<void>(), submitted: Record<string, unknown>[] = [];
     t.after(() => saved.resolve());
     let model = 'example/b';
@@ -31,7 +32,7 @@ test('Settings save completion survives leaving and reopening the page', { timeo
           const input: Record<string, unknown> = route.request().postDataJSON(); submitted.push(input);
           await saved.promise;
           if (outcome === 'failure') { status = 503; result = { error: 'Settings could not be saved. Try again.' }; }
-          else { model = String(input.model); result = { capabilities: capabilities(model) }; }
+          else { model = String(input.model); result = { capabilities: capabilities(model), ...(outcome === 'unchecked key' ? { warning } : {}) }; }
         } else result = { capabilities: capabilities(model) };
       } else { status = 404; result = { error: 'Unexpected fixture route.' }; }
       await route.fulfill({ status, json: result });
@@ -50,10 +51,12 @@ test('Settings save completion survives leaving and reopening the page', { timeo
     await expect(selection).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled();
     saved.resolve();
-    if (outcome === 'success') {
+    if (outcome !== 'failure') {
       await expect(page.getByRole('button', { name: 'Discard changes', exact: true })).toHaveCount(0);
       await expect(selection).toContainText('Model A');
       await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
+      // A key saved without OpenRouter's answer says so beside the saved settings.
+      await expect(page.getByRole('status').filter({ hasText: warning })).toHaveCount(outcome === 'unchecked key' ? 1 : 0);
       assert.equal(model, 'example/a');
     } else {
       await expect(page.getByRole('alert')).toContainText('Settings could not be saved. Try again.');

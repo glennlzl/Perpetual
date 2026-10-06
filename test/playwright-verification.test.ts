@@ -268,20 +268,22 @@ test('only a failed reviewed check catches the control run; any other end of it 
   }
 });
 
-test('a verification outlives the run history, which keeps only the controller\'s latest runs',async t=>{
+test('a verification outlives the run history, which keeps only the controller\'s latest runs and attempts',async t=>{
   const f=await setup(t);
   await f.manager.verifySpec(f.context,{caseId:journey.id,hash:f.hash});
   for(let attempt=1;attempt<=4;attempt++)(await f.worker(attempt)).finish(attempt===4?unkept:passing);
   assert.deepEqual(await f.settled(),{status:'passed',passes:3,control:'caught'});
   const attempts=(await stored(f)).runs.filter(run=>run.verification).map(run=>run.id).reverse();
-  // A person selects the case and runs the draft fifty times before approving it: the history no longer holds the attempts.
-  await f.manager.saveCases(f.context,[{...journey,selected:true}]);
+  // A person runs the draft fifty times before approving it. The history counts attempts apart from runs, so it still
+  // holds them, until fifty-two later attempts in another stage push them out.
   for(let count=5;count<55;count++){
     await f.manager.run(f.context,{caseIds:[journey.id]},{manual:true});
     (await f.worker(count)).finish(passing);
     for(let i=0;i<400&&f.manager.isActive(f.context);i++)await wait(5);
   }
-  assert.equal((await stored(f)).runs.some(run=>run.verification),false);
+  assert.deepEqual(await verificationRuns(f),attempts);
+  await verifyElsewhere(f,13);
+  assert.equal((await stored(f)).runs.some(run=>attempts.includes(run.id)),false);
   assert.deepEqual(await f.verification(),{status:'passed',passes:3,control:'caught'});
   await f.restart();
   assert.deepEqual(await f.verification(),{status:'passed',passes:3,control:'caught'},'A restart keeps it.');
@@ -379,6 +381,18 @@ test('a journey process learns the check version its code was verified under',()
 // Waits until a stage has no browser operation left, as after one run of it.
 async function idle(f:{manager:{isActive(context:{key:string;stageId:string}):boolean}},context:{key:string;stageId:string}){for(let i=0;i<400&&f.manager.isActive(context);i++)await wait(5);}
 const verificationRuns=async(f:{dataDir:string},id?:string)=>(await stored(f)).runs.filter(run=>run.verification&&(!id||run.verification.id===id)).map(run=>run.id).reverse();
+// Verifies the journey in another stage count times, four attempts each, so its attempts become the history's latest.
+async function verifyElsewhere(f:Awaited<ReturnType<typeof setup>>,count:number){
+  const gamma={...f.context,stageId:'gamma'};
+  await f.manager.saveConfig(gamma,{targetUrl:'http://localhost:3000'});await f.manager.saveCases(gamma,[journey]);
+  const hash=(await f.manager.saveSpec(gamma,{caseId:journey.id,code})).spec.draft!.hash;
+  let started=f.workers.length;
+  for(let i=0;i<count;i++){
+    await f.manager.verifySpec(gamma,{caseId:journey.id,hash});
+    for(let attempt=1;attempt<=4;attempt++)(await f.worker(++started)).finish(attempt===4?unkept:passing);
+    for(const deadline=Date.now()+10000;f.manager.isActive(gamma);await wait(5))assert.ok(Date.now()<deadline,'The verification did not end.');
+  }
+}
 
 test('approval records the attempts of the verification it judged, when the controller stopped before that verification was saved',async t=>{
   const f=await setup(t);
@@ -411,10 +425,10 @@ test('an interrupted verification keeps its own verdict after its attempts leave
   (await f.worker(5)).finish(passing);await f.worker(6);
   await f.restart();
   assert.deepEqual(await f.verification(),{status:'cancelled',passes:1,control:null});
-  // Fifty later runs push every attempt out of the history.
-  await f.manager.saveCases(f.context,[{...journey,selected:true}]);
-  for(let count=7;count<57;count++){await f.manager.run(f.context,{caseIds:[journey.id]},{manual:true});(await f.worker(count)).finish(passing);await idle(f,f.context);}
-  assert.deepEqual(await verificationRuns(f),[]);
+  // Fifty-two later attempts in another stage push every attempt out of the history.
+  const own=await verificationRuns(f);
+  await verifyElsewhere(f,13);
+  assert.equal((await stored(f)).runs.some(run=>own.includes(run.id)),false);
   assert.deepEqual(await f.verification(),{status:'cancelled',passes:1,control:null});
   await assert.rejects(f.manager.approveSpec(f.context,{caseId:journey.id,hash:f.hash}),{statusCode:409,message:'Verify this code first: it needs three passing runs and a caught control run.'});
 });

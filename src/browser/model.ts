@@ -22,7 +22,8 @@ export async function createBrowserModelSettings({dataDir,env=process.env}:{data
   const escalationModel=()=>modelId(saved?.escalationModel)?saved.escalationModel:null;
   const view=():ModelSettingsView=>({...browserModelView(configuration()),escalationModel:escalationModel()??''});
   const saves=createSaveQueue();
-  function save(input:unknown,{openRouterOnly=false}={}):Promise<ModelSettingsView>{
+  /** checkKey is given a newly entered key once everything else is valid, before anything is written; it throws to refuse it. */
+  function save(input:unknown,{openRouterOnly=false,checkKey}:{openRouterOnly?:boolean;checkKey?:(apiKey:string)=>Promise<void>}={}):Promise<ModelSettingsView>{
       return saves.run(async()=>{
         const fields=openRouterOnly?['apiKey','model','escalationModel']:['apiKey','model','baseUrl'];
         if(!isRecord(input)||Object.keys(input).some(key=>!fields.includes(key)))throw new Error(openRouterOnly?'Provide an OpenRouter model and API key.':'Provide model, API key or API URL.');
@@ -40,12 +41,13 @@ export async function createBrowserModelSettings({dataDir,env=process.env}:{data
         if(input.apiKey===undefined&&apiKey!==undefined&&new URL(normalizedUrl).origin!==originOf(current.baseUrl))throw new Error('Enter the API key for the new model API URL.');
         const escalation=input.escalationModel??escalationModel();
         const next={...settings,baseUrl:normalizedUrl,...(escalation?{escalationModel:escalation}:{})};
+        if(typeof input.apiKey==='string')await checkKey?.(input.apiKey);
         await writeStateFile(file,JSON.stringify(next),{prefix:'.browser-model-'});saved=next;return view();
       });
   }
   return {
     view,configuration,escalationModel,save,
-    saveOpenRouter:(input:unknown)=>save(input,{openRouterOnly:true}),
+    saveOpenRouter:(input:unknown,options:{checkKey?:(apiKey:string)=>Promise<void>}={})=>save(input,{...options,openRouterOnly:true}),
     environment:()=>browserModelEnvironment(configuration()),
   };
 }
