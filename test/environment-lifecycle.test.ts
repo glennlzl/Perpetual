@@ -225,6 +225,18 @@ test('a creation first deletes the stage’s earlier twin that still holds resou
   assert.deepEqual(manager.summaries(context.key).filter(holdsResources).map(item => item.id), [third.id]);
 });
 
+test('a creation from another checkout of the same source replaces the twin an earlier checkout built', async t => {
+  const destroyed: string[] = [];
+  const { manager } = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });
+  const earlier = await createReady(manager);
+  // The source saved again on dev is checked out afresh, under the same pipeline and stage.
+  const switched = { ...context, scan: { repo: { path: '/fixture/source-dev', sha: 'fixture-dev-revision', branch: 'dev' }, services: [] } };
+  const replaced = await manager.awaitIdle((await manager.create(switched)).environment.id);
+  assert.deepEqual([replaced.status, replaced.repoPath, replaced.sourceBranch], ['ready', '/fixture/source-dev', 'dev']);
+  assert.deepEqual(destroyed, [earlier.id]);
+  assert.deepEqual(manager.summaries(context.key).filter(holdsResources).map(item => item.id), [replaced.id]);
+});
+
 test('a creation after a controller crash deletes the twin the interrupted operation left', async t => {
   const destroyed: string[] = [];
   const f = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); } });

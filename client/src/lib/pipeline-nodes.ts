@@ -1,5 +1,5 @@
 import { stageActivity, type ActivitySnapshot } from './stage-activity.ts';
-import { environmentBehind, repairHead, shallowEqual } from './pipeline-flow.ts';
+import { behindCommits, environmentBehind, repairHead, shallowEqual } from './pipeline-flow.ts';
 import type { BuildReply, BuildStatus, BuildSummary } from './pipeline-github.ts';
 import type { AutopilotView } from './pipeline-autopilot.ts';
 import type { GateView } from './stage-gate.ts';
@@ -13,7 +13,7 @@ export type PipelineTransition = Pick<Transition, 'id' | 'source' | 'target'> & 
 /** A source's pipeline: its stages in order and the transitions between them. */
 export type PipelineView = Partial<Pick<Pipeline, 'repoPath'>> & { stages: PipelineStage[]; transitions: PipelineTransition[] };
 /** A scan as stage cards read it. R is a delivery row the scan projects for Source, Build or Production. */
-export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
+export interface NodeScan<R = unknown> { repo?: { path?: string; sha?: string | null; branch?: string | null } | null; scannedAt?: string; delivery?: { source?: readonly R[]; build?: readonly R[]; production?: readonly R[] } | null }
 
 // One shared empty list: a fresh [] per recompute would give every sandbox card, and a
 // Production card without deployment targets, new data on each unrelated poll.
@@ -72,7 +72,7 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
     ...outgoingTransition(stage, pipeline),
     busy, openDialog, toggleStage, addTest, selected: stage.id === selectedStageId, selection, environment, createSandbox,
     environmentBusy: busyStages.includes(stage.id), browserTests: snapshot.browserTests?.[stage.id],
-    activity: stageActivity(stage, snapshot), behind: environmentBehind(environment, sha) ? `${environment?.sourceRevision?.slice(0, 7)} → ${sha?.slice(0, 7)}` : '', repairHead: repairHead(environment),
+    activity: stageActivity(stage, snapshot), behind: environment && sha && environmentBehind(environment, sha) ? behindCommits(environment, sha, scan?.repo?.branch) : '', repairHead: repairHead(environment),
     arrival: arrivals[stage.id] || '', beat: stage.kind === 'sandbox' ? healthBeat(environment) : '',
     gate: stage.kind === 'sandbox' ? gates?.stages?.[stage.id] || null : stage.kind === 'production' ? gates?.production || null : null,
     ...(stage.kind === 'source' ? sourceProvenance(scan, source) : {}),

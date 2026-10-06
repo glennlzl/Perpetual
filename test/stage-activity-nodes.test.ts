@@ -99,4 +99,8 @@ test('a Sandbox card names the pull request head its repair twin runs instead of
   assert.deepEqual([data.behind, data.repairHead], ['', 'perpetual/repair/cb9292c · fffffff']);
   const older = stageNodeData(beta, context({ environments: [{ ...betaEnvironment, sourceRevision: 'a'.repeat(40) }] }));
   assert.deepEqual([older.behind, older.repairHead], ['aaaaaaa → cb9292c', '']);
+  // A twin an earlier checkout built on another branch names both.
+  const scan = { ...scanFixture(), repo: { ...scanFixture().repo, branch: 'dev' } };
+  const earlier = stageNodeData(beta, context({ scan, environments: [{ ...betaEnvironment, repoPath: '/data/sources/github-old/storefront', sourceBranch: 'main', sourceRevision: 'a'.repeat(40) }] }));
+  assert.deepEqual([earlier.environment?.id, earlier.behind], ['env-beta', 'main · aaaaaaa → dev · cb9292c']);
 });
