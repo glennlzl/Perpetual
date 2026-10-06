@@ -47,7 +47,8 @@ else if (command === 'exec' && rest.includes('sleep')) { const timer = setInterv
 `;
 async function fake(t: TestContext, state: Partial<{ size: number; availableKb: number; containers: string[]; networks: string[]; removeFailure: boolean; listFailure: boolean; missing: string[]; containerd: boolean }> = {}, disk: Partial<typeof DISK> = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-fake-docker-')), docker = join(dir, 'docker');
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  // A fake Docker call still finishing may add a file while the directory is removed.
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   await writeFile(docker, FAKE, { mode: 0o755 });
   const read = async () => JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
   const write = async (next: object) => writeFile(join(dir, 'state.json'), JSON.stringify({ size: 1000, availableKb: 50 * 1024 * 1024, containers: [], networks: [], ...await read().catch(() => ({})), ...next }));
@@ -169,7 +170,7 @@ test('an unavailable Docker resource list never confirms cleanup', async t => {
 
 test('rehydrated cleanup removes only the named repair and retries a failed Docker launch', async t => {
   const f = await fake(t);
-  await f.boxes.create({ id: 'owned', image: 'node:22-bookworm', source: f.dir });
+  const box = await f.boxes.create({ id: 'owned', image: 'node:22-bookworm', source: f.dir });
   const state = await f.read();
   const foreign = state.resources.map((resource: { id: string; name: string; labels: string[] }) => ({ ...resource, id: 'a'.repeat(64), name: 'foreign', labels: resource.labels.map(label => label === 'perpetual.repair=owned' ? 'perpetual.repair=other' : label) }));
   await f.write({ resources: [...state.resources, ...foreign] });
@@ -179,6 +180,8 @@ test('rehydrated cleanup removes only the named repair and retries a failed Dock
   await writeFile(join(f.dir, 'docker'), FAKE, { mode: 0o755 });
   await boxes.remove('owned');
   assert.deepEqual((await f.read()).resources, foreign);
+  // The first controller's box would end with its process; its disk watchdog would otherwise keep calling Docker.
+  await box.remove();
 });
 
 test('a watchdog whose removal fails reports pending cleanup, never confirmed removal', async t => {
