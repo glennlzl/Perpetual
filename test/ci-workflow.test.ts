@@ -81,6 +81,10 @@ test('the Docker tests step fails on a failed test, on one skipped for want of i
   const run = (...bodies: string[]) => step.outcome(Object.fromEntries(bodies.map((body, index) => [`test/stand-in-${index}-docker.test.ts`, body])));
   const passes = "test('passes', () => {});", desktopOnly = `test('reaches the host', t => t.skip(${JSON.stringify(TWINS_NEED_DESKTOP)}));`;
   assert.equal(await run(passes, desktopOnly), 0, 'On the runner\'s native Linux engine the parts that need Docker Desktop skip.');
+  // As in the Mailpit twin's test, which runs on every engine but for the part that reaches the host.
+  const part = (skip: string) => `test('starts a twin', async t => { await t.test('reaches the host', { skip: ${JSON.stringify(skip)} }, () => {}); });`;
+  assert.equal(await run(part(TWINS_NEED_DESKTOP)), 0, 'A test whose part that needs Docker Desktop skips still passes.');
+  assert.notEqual(await run(part('fixture')), 0, 'A part skipped for any other reason fails the step.');
   assert.notEqual(await run(passes, "test('fails', () => { throw new Error('fixture'); });"), 0, 'A failing test fails the step.');
   assert.notEqual(await run(passes, "test('opted out', { skip: 'Set PERPETUAL_DOCKER_TESTS=1 to run against the local Docker engine.' }, () => {});"), 0,
     'A test the job did not opt into fails the step.');

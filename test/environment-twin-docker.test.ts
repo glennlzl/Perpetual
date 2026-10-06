@@ -53,11 +53,11 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
   assert.deepEqual(steps, ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Setting up Mailpit', 'Loading source', 'Starting twin', 'Checking apps']);
   const url = new URL(ready.apps[0].url);
   assert.equal(url.hostname, '127.0.0.1');
-  // From here the app reaches Mailpit on the host's loopback through host.docker.internal, which only Docker Desktop routes.
-  if (desktopOnly) return t.skip(desktopOnly);
   const reply = await (await fetch(new URL('/journey', url))).json();
   assert.match(reply.smtp, /^host\.docker\.internal:\d+$/);
-  assert.equal(reply.mail, 200, 'The app reached Mailpit through its twin address.');
+  // Mailpit is published on the host's loopback, which the app reaches through host.docker.internal only where Docker
+  // Desktop routes it. Everything else here runs on every engine.
+  await t.test('the app reaches Mailpit through its twin address', { skip: desktopOnly }, () => assert.equal(reply.mail, 200));
   assert.deepEqual(await runtime.environmentHealth({ dataDir, environment }), { status: 'ready' });
   assert.match(await runtime.environmentLogs({ dataDir, environment }), /request \/journey/);
   // Built for no repository, the twin's package cache is its own, a volume of its project beside its workspace.
