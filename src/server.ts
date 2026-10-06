@@ -110,9 +110,6 @@ const staticFiles: Record<string, [string, string]>={'/':['build/index.html','te
 // A controller snapshot includes repository discovery and saved pipeline definitions.
 const CONTROLLER_STATE_LIMIT=32*1024*1024;
 const INVALID_STATE='Cannot load saved state; preserve it and use a different --data directory.';
-// Exact style-block hash from the embedded preview's reported CSP violation.
-// Its injection source is unverified; this grants no other inline CSS or script access.
-const reportedPreviewStyleHash="'sha256-UjmwW5hqkbmZat2z0a4MIudqMdHHunQ57o+t2nldQPQ='";
 
 // Read-only Git queries against a scanned or original checkout; never fetches or writes.
 const readGit=(path: string,args: string[])=>gitReadOnly(path,args,{timeout:2000,maxBuffer:4096});
@@ -503,7 +500,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'nonce-${styleNonce}' ${reportedPreviewStyleHash}; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+    // Local preview tools inject changing style blocks without the page's nonce. Permit those blocks;
+    // scripts, event handlers, style attributes and external stylesheets retain their own restrictions.
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
     const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
