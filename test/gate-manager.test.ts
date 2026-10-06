@@ -414,11 +414,17 @@ test('GitHub unreachable while the source moves leaves the gate queued, and it r
   assert.deepEqual(h.posts.filter(post => post.context === 'perpetual/Beta').map(post => post.description), ['Running', 'Passed']);
 });
 
-test('a managed source cannot admit a manual gate while GitHub is unreachable, and says so rather than asking to connect', async t => {
-  const h = await harness(t, { connection: () => { throw githubUnreachable(TIMED_OUT); }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+test('a managed source cannot admit a manual gate while GitHub is unreachable, says so rather than asking to connect, and keeps no watch error', async t => {
+  let outage = false;
+  const h = await harness(t, { connection: () => { if (outage) throw githubUnreachable(TIMED_OUT); return { login: 'developer', repository: 'owner/app' }; }, stages: STAGES.filter(stage => stage.id !== 'gamma') });
+  await h.manager.watch();
+  outage = true;
   await assert.rejects(h.manager.run({ stageId: 'beta' }), (error: HttpError) => error.statusCode === 502 && error.message === TIMED_OUT);
+  await h.manager.watch();
   await h.manager.idle();
-  assert.deepEqual([h.manager.view().stages, h.log, h.manager.view().watchError], [{}, [], TIMED_OUT]);
+  assert.deepEqual([h.manager.view().stages, h.log, h.manager.view().watchError], [{}, [], undefined]);
+  outage = false;
+  assert.deepEqual(h.manager.watchedHead({ key: KEY, repository: 'owner/app', branch: 'main', login: 'developer' }), { key: KEY, branch: 'main', sha: A }, 'Build reads the watched head as soon as GitHub answers.');
 });
 
 test('a gate interrupted by a restart needs release with the interruption, and queued gates resume', async t => {

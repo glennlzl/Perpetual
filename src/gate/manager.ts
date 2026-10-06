@@ -351,8 +351,11 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       const current = { ...selected, repository: selected.repository };
       const identity = sourceIdentity(current)!;
       scope = { identity, login: null };
-      const connection = await github.connection();
+      // GitHub not answering is no failed watch, any more than no connection is: neither is kept as the watch error, so
+      // Build and Run now read the watched head again as soon as GitHub answers.
+      const connection = await github.connection().catch((error: unknown) => { if (isUnreachable(error)) return text(error); throw error; });
       if (closed || sourceIdentity(active()) !== identity) return null;
+      if (typeof connection === 'string') return { identity, error: connection };
       if (!connection || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return { identity, error: 'Connect GitHub to read the branch head.' };
       const login = connection.login;
       scope = { identity, login: login.toLowerCase() };
