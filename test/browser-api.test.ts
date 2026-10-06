@@ -20,6 +20,8 @@ test('browser API uses controller session and source/stage scope, keeps provider
   assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:app.url}})).status,400);
   assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000',externalOrigins:['https://checkout.stripe.com/pay']}})).status,400);
   assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000',authEndpoints:['http://elsewhere.test/auth']}})).status,400);
+  assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000',callbackBindings:[{applicationId:'web',hostname:'*.localhost'}]}})).status,400);
+  assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000',callbackBindings:[{applicationId:'web',hostname:'localhost'}]}})).status,400);
   const journeyConfig=await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000',journeyTimeoutSeconds:600,externalOrigins:['https://checkout.stripe.com'],authEndpoints:['http://localhost:55888/auth/v1/token']}});
   assert.equal(journeyConfig.status,200);assert.deepEqual([journeyConfig.body.config.journeyTimeoutSeconds,journeyConfig.body.config.externalOrigins,journeyConfig.body.config.authEndpoints],[600,['https://checkout.stripe.com'],['http://localhost:55888/auth/v1/token']]);
   assert.equal((await request('/api/browser/config',{...context,config:{targetUrl:'http://localhost:3000'}})).status,200);

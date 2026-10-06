@@ -6,6 +6,8 @@ import {mkdir,lstat,readdir,rm} from 'node:fs/promises';
 import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {hide,redact} from '../redaction.ts';
+import {validateCallbackBindings,callbackPolicyHash,callbackApplication,resolveCallbackOrigins} from './callbacks.ts';
+import type {AutomaticCallbackTarget,CallbackResolutionInput} from './callbacks.ts';
 import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
 import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
@@ -77,7 +79,7 @@ type BrowserState={
  * keepLease takes the run's lease as the run ends, instead of it being released, for a caller that goes on using the twin.
  * target: the config and twin a verification started with, which each of its attempts runs with instead of the stage's current ones.
  */
-type StartOptions={manual?:boolean;verification?:Verification;preparation?:Preparation;isCurrent?:()=>boolean;keepLease?:(release:()=>void)=>void;target?:{config:BrowserConfig;environmentId:string|null}};
+type StartOptions={manual?:boolean;verification?:Verification;preparation?:Preparation;isCurrent?:()=>boolean;keepLease?:(release:()=>void)=>void;target?:{config:BrowserConfig;environmentId:string|null;automaticTarget?:AutomaticCallbackTarget;callbackOrigins:string[]}};
 /** A run request's fields; each is checked before use. */
 type StartInput={credentials?:unknown;accountId?:unknown;concurrency?:unknown;caseIds?:unknown;replaceCaseIds?:unknown;baseCases?:unknown};
 type InputOptions={signal?:AbortSignal;isCurrent?:()=>boolean};
@@ -104,7 +106,7 @@ const now=()=>new Date().toISOString();
 const runConcurrency=(value:unknown)=>{if(typeof value!=='number'||!Number.isInteger(value)||value<1||value>4)throw new Error('Choose 1–4 concurrent journeys.');return value;};
 const conflict=(message:string)=>Object.assign(new Error(message),{statusCode:409});
 const publicRun=({scope,approvedCases,environmentUseUncertain,codeFeedback,...run}:StoredRun):PublicRun=>structuredClone({...run,caseSummaries:(approvedCases||[]).map(({id,name,goal,preconditions,expectedOutcomes,assertions,steps,isolation})=>({id,name,goal,preconditions,expectedOutcomes,assertions,steps:steps||[],isolation:isolation||'shared'}))});
-const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit']);
+const summaryKeys=new Set<string>(['id','stageId','environmentId','mode','engine','verification','status','createdAt','startedAt','completedAt','targetUrl','sourceRevision','caseIds','caseSummaries','results','error','blockedRequests','frameUpdatedAt','frameCapturedAt','concurrency','effectiveConcurrency','concurrencyLimit','callbackPolicy','callbackOrigins']);
 type StoredRun=Omit<BrowserRun,'progress'>&{progress?:RunProgress};
 // Graph polling carries live state only; full action lists stay in runProgress.
 function summaryRun({progress,...run}:BrowserRun,withProgress:boolean):RunSummary{
@@ -192,9 +194,10 @@ function normalizedConfig(input:unknown,context:{controllerOrigin?:string}):Brow
   const maxSteps=input.maxSteps??defaults.maxSteps;if(typeof maxSteps!=='number'||!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>100)throw new Error('Choose 1–100 browser actions per case.');
   const journeyTimeoutSeconds=input.journeyTimeoutSeconds??defaults.journeyTimeoutSeconds;if(typeof journeyTimeoutSeconds!=='number'||!Number.isInteger(journeyTimeoutSeconds)||journeyTimeoutSeconds<60||journeyTimeoutSeconds>1800)throw new Error('Choose a journey time limit of 60–1800 seconds.');
   const targetUrl=input.targetUrl?validateBrowserTarget(String(input.targetUrl),context):'';
+  const fixed=externalOrigins(input.externalOrigins??[],context),bindings=validateCallbackBindings(input.callbackBindings,fixed.length);
   const reads=validateReadRequests(input.readOnlyRequests===undefined?[]:input.readOnlyRequests,targetUrl);
   // scope and requirements are strings or empty now.
-  return {targetUrl,signInUrl:signInPage(input.signInUrl,targetUrl),scope:(input.scope||'') as string,requirements:(input.requirements||'') as string,maxSteps,journeyTimeoutSeconds,externalOrigins:externalOrigins(input.externalOrigins??[],context),authEndpoints:authEndpoints(input.authEndpoints??[],targetUrl),...(reads.length?{readOnlyRequests:reads}:{})};
+  return {targetUrl,signInUrl:signInPage(input.signInUrl,targetUrl),scope:(input.scope||'') as string,requirements:(input.requirements||'') as string,maxSteps,journeyTimeoutSeconds,externalOrigins:fixed,...(bindings.length?{callbackBindings:bindings}:{}),authEndpoints:authEndpoints(input.authEndpoints??[],targetUrl),...(reads.length?{readOnlyRequests:reads}:{})};
 }
 
 // Mirrors the runner: evaluated checks accompany completed or failed milestones only,
@@ -266,6 +269,15 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
+  for(const config of Object.values(state.configs))validateCallbackBindings(config.callbackBindings,externalOrigins(config.externalOrigins??[],{}).length);
+  const storedPolicy=(value:unknown)=>value===undefined||value===''||typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+  for(const run of state.runs){
+    if(!storedPolicy(run.callbackPolicy)||run.verification&&!storedPolicy(run.verification.callbackPolicy))throw new Error('Invalid stored callback policy.');
+    if(run.callbackOrigins!==undefined){
+      const origins:unknown=run.callbackOrigins;
+      if(!Array.isArray(origins)||origins.length>2||new Set(origins).size!==origins.length||origins.some(value=>{try{if(typeof value!=='string')return true;const url=new URL(value);return url.origin!==value||url.protocol!=='http:'||!['localhost','127.0.0.1'].includes(url.hostname)||!url.port;}catch{return true;}}))throw new Error('Invalid stored callback origins.');
+    }
+  }
   for(const config of Object.values(state.configs))if(config.readOnlyRequests!==undefined){
     try{config.readOnlyRequests=validateReadRequests(config.readOnlyRequests,config.targetUrl);}catch{throw new Error('Invalid stored read-only POST requests.');}
   }
@@ -405,7 +417,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   await persist();
   const codeState=(scope:string):JourneyCodeState=>({specs:state.specs[scope]||{},generationFailures:state.generationFailures[scope]||{},authoring:retainAuthoring(state.authoring,state.cases)[scope]||{}});
   const codeSnapshot=(scope:string):JourneyCodeSnapshot=>({
-    readPolicy:readPolicyHash(state.configs[scope]?.readOnlyRequests,state.configTargets[scope]?.url===state.configs[scope]?.targetUrl?state.configTargets[scope]?.applicationId:undefined),code:codeState(scope),cases:state.cases[scope]||[],runs:state.runs.filter(run=>run.scope===scope),
+    callbackPolicy:callbackPolicyHash(scope,state.configs[scope]?.callbackBindings),readPolicy:readPolicyHash(state.configs[scope]?.readOnlyRequests,state.configTargets[scope]?.url===state.configs[scope]?.targetUrl?state.configTargets[scope]?.applicationId:undefined),code:codeState(scope),cases:state.cases[scope]||[],runs:state.runs.filter(run=>run.scope===scope),
     verifications:[...verifications.values()].filter(entry=>entry.scope===scope),
     generations:new Map((state.cases[scope]||[]).flatMap(item=>{const entry=generations.get(generationKey(scope,item.id));return entry?[[item.id,entry] as const]:[];})),
   });
@@ -458,7 +470,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const environment=resolveEnvironment(config.targetUrl);
     if(environment&&environment.status!=='ready')throw conflict('The selected application environment is not ready. Choose an available application URL.');
     if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
-    const target={config,environmentId:environment?.id||null};
+    const automaticTarget=structuredClone(state.configTargets[scope]);
+    const callbackOrigins=resolveCallbackOrigins(config.callbackBindings??[],callbackResolution(context,config,automaticTarget));
+    const target={config,environmentId:environment?.id||null,automaticTarget,callbackOrigins};
     // The verification holds that twin from its start to its end: it takes it here, and each attempt's lease passes to the
     // next, so nothing else, such as a health check, takes it while the verification records its start or an attempt, or
     // waits for the stage. A twin in use refuses the verification.
@@ -525,9 +539,10 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     assertExecutableJourneyChecks(snapshot);
     const feedback=journeyCode.generationFeedback(scope,item.id);
     const account=selectRunAccount(input);let credentials:RunCredentials|undefined;
+    const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
+    const callbackOrigins=resolveCallbackOrigins(config.callbackBindings??[],callbackResolution(context,config,state.configTargets[scope]));
     const configuration=modelSettings.configuration();
     if(!configuration.modelConfigured||!isOpenRouterEndpoint(configuration.baseUrl))throw new Error('Add your OpenRouter API key in Settings first.');
-    const config=normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
     const environment=resolveEnvironment(config.targetUrl);
     if(environment&&(environment.status!=='ready'||(environment.stageId&&environment.stageId!==context.stageId)))throw conflict('Set the application URL to this stage’s ready twin first.');
     if(environment&&state.runs.some(run=>run.environmentId===environment.id&&run.environmentUseUncertain))throw conflict('The selected application environment requires cleanup before it can be used again.');
@@ -546,7 +561,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       else generations.delete(key);
       release();throw error;
     }
-    const origins=[new URL(config.targetUrl).origin,...(environment?applications(environment):[]).map(app=>originOf(app.url)!),...config.externalOrigins];
+    const origins=[new URL(config.targetUrl).origin,...(environment?applications(environment):[]).map(app=>originOf(app.url)!),...config.externalOrigins,...callbackOrigins];
     const promise=(async()=>{
       let workspace:Awaited<ReturnType<typeof privateWorkspace>>|null=null;
       let external:Awaited<ReturnType<typeof beginExternal>>=null,uncertain=false;
@@ -704,6 +719,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         replaceIds=input.replaceCaseIds;
       }
       const config=options.target?.config??normalizedConfig(state.configs[scope]||defaults,context);if(!config.targetUrl)throw new Error('Set the application URL first.');
+      const callbackOrigins=resolveCallbackOrigins(config.callbackBindings??[],callbackResolution(context,config,options.target?options.target.automaticTarget:state.configTargets[scope]));
+      if(options.target&&!isDeepStrictEqual(callbackOrigins,options.target.callbackOrigins))throw conflict(TWIN_CHANGED);
       const environment=resolveEnvironment(config.targetUrl);
       if(options.target&&((environment?.id??null)!==options.target.environmentId||environment&&environment.status!=='ready'))throw conflict(TWIN_CHANGED);
       if(environment&&environment.status!=='ready')throw conflict('The selected application environment is not ready. Choose an available application URL.');
@@ -742,6 +759,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       external=await beginExternal(context,config.targetUrl,environment,mode);
       const progressCases:CaseProgress[]=mode==='discover'?[{id:'discovery',caseId:'discovery',name:'Explore application',status:'pending',actions:[],actionCount:0}]:cases.map(c=>({id:c.id,caseId:c.id,name:c.name,status:'queued',actions:[],actionCount:0,steps:c.steps.map(({id,title})=>({id,title,status:'pending'}))}));
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
+      if(callbackOrigins.length){run.callbackOrigins=[...callbackOrigins];run.callbackPolicy=callbackPolicyHash(scope,config.callbackBindings);}
       if(environment)run.environmentId=environment.id;
       if(options.verification)run.verification=structuredClone(options.verification);
       const preparation=mode==='discover'?(options.preparation||state.preparations[scope]):null,before=preparation&&{...preparation};
@@ -802,7 +820,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           // the target environment's apps and receives auth endpoints only with a supplied test account.
           // Validate worker input inside the terminal handler so refusal also settles the run and its lease.
           const origins=[new URL(config.targetUrl).origin,...applications(environment).map(app=>originOf(app.url)!)];
-          const workerInput={mode,...(config.readOnlyRequests?.length?{readOnlyRequests:config.readOnlyRequests}:{}),targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
+          const workerInput={mode,...(config.readOnlyRequests?.length?{readOnlyRequests:config.readOnlyRequests}:{}),targetUrl:config.targetUrl,allowedOrigins:[...new Set(mode==='run'?[...origins,...config.externalOrigins,...callbackOrigins]:origins)],timeoutSeconds:config.journeyTimeoutSeconds,...(credentials?{credentials}:{}),
             ...(mode==='discover'?{scope:config.scope,requirements:config.requirements,sourceContext,maxSteps:config.maxSteps,...(discoveryEndpoints?{authEndpoints:discoveryEndpoints}:{})}:{})};
           run.status='running';run.startedAt=now();await persist();
           if(closed||entry?.cancelled)throw new Error('Browser operation cancelled.');
@@ -971,6 +989,14 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   // The target twin's test accounts for the account choice, without passwords.
   function targetAccounts(url:string|undefined){const environment=url?resolveEnvironment(url):null;return environment?.status==='ready'?(environment.accounts||[]).map(({id,label,username})=>({id,label,username})):[];}
+  function callbackResolution(context:BrowserStageContext,config:BrowserConfig,target:AutomaticCallbackTarget|undefined):CallbackResolutionInput{
+    return {context,targetUrl:config.targetUrl,target,environment:config.targetUrl?resolveEnvironment(config.targetUrl):null};
+  }
+  function callbackReview(context:BrowserStageContext){
+    const config={...defaults,...state.configs[scopeId(context)]},input=callbackResolution(context,config,state.configTargets[scopeId(context)]);
+    const application=callbackApplication(input);
+    try{resolveCallbackOrigins(config.callbackBindings??[],input);return {application};}catch{return {application,error:'Choose a ready managed application for its callback bindings.'};}
+  }
   function publicConfig(scope:string):BrowserConfig{
     const config=structuredClone({...defaults,...state.configs[scope]});
     const environment=config.targetUrl?resolveEnvironment(config.targetUrl):null;
@@ -1066,17 +1092,30 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     interruptedEnvironmentIds:()=>[...new Set(state.runs.filter((run):run is BrowserRun&{environmentId:string}=>Boolean(run.environmentUseUncertain&&run.environmentId)).map(run=>run.environmentId))],
     draft:(...args:Parameters<typeof draft>)=>admit(()=>draft(...args)),transcribe:(...args:Parameters<typeof transcribe>)=>admit(()=>transcribe(...args)),
     hasPendingInput:()=>inputJobs.size>0,
-    async view(context:BrowserStageContext):Promise<BrowserViewReply>{const scope=scopeId(context);return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
+    async view(context:BrowserStageContext):Promise<BrowserViewReply>{const scope=scopeId(context);return {config:publicConfig(scope),callbacks:callbackReview(context),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
     saveModel(context:BrowserStageContext,input:unknown){return admit(()=>{requireIdle(context);return updateModel(()=>modelSettings.save(input));});},
     async saveConfig(context:BrowserStageContext,config:unknown){
-      requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context),target=state.configTargets[scope];
-      const sameTarget=target?.url===state.configs[scope]?.targetUrl&&publicConfig(scope).targetUrl===normalized.targetUrl;
-      state.configs[scope]=normalized;
-      if(target)delete target.suspendedReads;
-      if(target?.url!==normalized.targetUrl){if(target&&sameTarget)target.url=normalized.targetUrl;else delete state.configTargets[scope];}
-      // A saved target settles the setup an automatic preparation asked for; Generate stays the person's to start.
-      if(normalized.targetUrl&&state.preparations[scope]?.status==='needs_setup')delete state.preparations[scope];
-      await persist();return {config:normalized};
+      requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context);
+      let nextTarget:BrowserState['configTargets'][string]|undefined;
+      const candidate=()=>{
+        requireIdle(context);
+        const target=state.configTargets[scope],sameTarget=target?.url===state.configs[scope]?.targetUrl&&publicConfig(scope).targetUrl===normalized.targetUrl;
+        nextTarget=target&&(target.url===normalized.targetUrl||sameTarget)?{...structuredClone(target),url:normalized.targetUrl}:undefined;
+        if(nextTarget)delete nextTarget.suspendedReads;
+        const previous=state.configs[scope]?.callbackBindings??[];
+        const added=(normalized.callbackBindings??[]).filter(binding=>!previous.some(item=>item.applicationId===binding.applicationId&&item.hostname===binding.hostname));
+        if(added.length)resolveCallbackOrigins(added,callbackResolution(context,normalized,nextTarget));
+      };
+      candidate();let saving=false;
+      try{await persist(()=>{
+        candidate();busy.add(scope);saving=true;
+        const targets={...state.configTargets};if(nextTarget)targets[scope]=nextTarget;else delete targets[scope];
+        const preparations={...state.preparations};if(normalized.targetUrl&&preparations[scope]?.status==='needs_setup')delete preparations[scope];
+        return {...state,configs:{...state.configs,[scope]:normalized},configTargets:targets,preparations};
+      },()=>{
+        state.configs[scope]=normalized;if(nextTarget)state.configTargets[scope]=nextTarget;else delete state.configTargets[scope];
+        if(normalized.targetUrl&&state.preparations[scope]?.status==='needs_setup')delete state.preparations[scope];
+      });return {config:structuredClone(normalized)};}finally{if(saving)free(scope);}
     },
     saveCases(context:BrowserStageContext,cases:unknown,baseCases?:unknown){return admit(async()=>{
       requireIdle(context,{duringRun:true});
