@@ -20,8 +20,8 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 // installed host binary is used.
 //
 // DATABASE_URL preserves the local credentials reported by `supabase status`.
-// 2.118.0 includes supabase/cli#6505: prune overlapping Edge Runtime binds before its docker cp bootstrap.
-export const CLI_VERSION = '2.118.0';
+// 2.119.0 includes supabase/cli#6505, released in 2.118.0: prune overlapping Edge Runtime binds before its docker cp bootstrap.
+export const CLI_VERSION = '2.119.0';
 const CLI_MISSING = `Supabase CLI ${CLI_VERSION} is not installed: run npm run setup in Perpetual.`;
 /** The launcher would run whatever binary this names in place of the locked one, so it is always cleared. */
 const BINARY_OVERRIDE = 'SUPABASE_CLI_BINARY_OVERRIDE';
@@ -59,7 +59,7 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
     if (!object(section) || section.enabled !== undefined && typeof section.enabled !== 'boolean') throw new Error(invalid);
     return section.enabled !== false;
   };
-  // CLI 2.118.0 always starts Kong without --exclude; api.enabled only controls PostgREST.
+  // CLI 2.119.0 always starts Kong without --exclude; api.enabled only controls PostgREST.
   return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
     .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
 }
