@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { cp, lstat, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { basename, dirname, join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { relative } from '../paths.ts';
 import { bridgeSupabaseImportMaps } from '../supabase-import-maps.ts';
@@ -13,15 +14,20 @@ import type { ServiceContext, TwinService } from '../registry.ts';
 // The CLI cannot run inside a container without the host Docker socket: `supabase start` creates the
 // stack's containers itself, and its docs require the socket bind-mounted for that case. Perpetual never
 // mounts the socket into a container, so the minimal alternative is the pinned npm release run as a host
-// process through `ctx.exec` (`npx supabase@<pin>`), with the Docker access the controller already uses
-// for `docker compose`. No installed host binary is used.
+// process through `ctx.exec`, with the Docker access the controller already uses for `docker compose`.
+// The release is an exact dependency of Perpetual, so package-lock.json locks it, its platform binary and
+// its own dependencies with their integrity hashes; nothing is fetched when a twin starts, and no other
+// installed host binary is used.
 //
 // DATABASE_URL preserves the local credentials reported by `supabase status`.
 // 2.118.0 includes supabase/cli#6505: prune overlapping Edge Runtime binds before its docker cp bootstrap.
-export const CLI = 'supabase@2.118.0';
+export const CLI_VERSION = '2.118.0';
+const CLI_MISSING = `Supabase CLI ${CLI_VERSION} is not installed: run npm run setup in Perpetual.`;
+/** The launcher would run whatever binary this names in place of the locked one, so it is always cleared. */
+const BINARY_OVERRIDE = 'SUPABASE_CLI_BINARY_OVERRIDE';
 const MOUNT_CHECK_IMAGE = 'node:24-bookworm-slim';
-/** directory: the repository's supabase directory; functions and users are checked where they are used. */
-type Options = { directory?: Json; functions?: Json; users?: Json };
+/** directory: the repository's supabase directory; functions, users and auth are checked where they are used. */
+type Options = { directory?: Json; functions?: Json; users?: Json; auth?: Json };
 type Outputs = { url: string; anonKey: string; serviceRoleKey: string; jwtSecret: string; dbUrl: string };
 type Context = ServiceContext<Options, Outputs>;
 const STATE = new Set(['.branches', '.temp']); // CLI-local state, never source
@@ -57,7 +63,32 @@ async function healthContainers(ctx: Pick<Context, 'project' | 'dir'>) {
   return ['db', ...(enabled('auth') ? ['auth'] : []), 'kong']
     .map(name => ({ name: `supabase_${name}_${project}`, labels: { 'com.supabase.cli.project': project } }));
 }
-const cli = (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) => ctx.exec('npx', ['--yes', CLI, ...args], { cwd: ctx.dir, env });
+/** A package's manifest as `require` from `from` finds it, or undefined when it finds none it can read. */
+async function installed(from: string | URL, name: string) {
+  try {
+    const file = createRequire(from).resolve(`${name}/package.json`);
+    return { file, ...JSON.parse(await readFile(file, 'utf8')) as { version?: unknown; bin?: { supabase?: unknown }; optionalDependencies?: object } };
+  } catch { return undefined; }
+}
+/**
+ * The installed CLI's launcher, as `from` resolves it (Perpetual's own modules by default). The launcher runs the first
+ * binary package for this platform that it resolves from its own file, so that package is resolved the same way. Both
+ * must be the locked release; otherwise, as with a node_modules older than package.json or a binary package npm skipped
+ * when its optional install failed, the error names the command that installs them rather than leaving the launcher to fail.
+ */
+export async function cliEntry(from: string | URL = import.meta.url) {
+  const launcher = await installed(from, 'supabase');
+  if (launcher?.version !== CLI_VERSION || typeof launcher.bin?.supabase !== 'string') throw new Error(CLI_MISSING);
+  const entry = join(dirname(launcher.file), launcher.bin.supabase);
+  // The launcher's candidates, in its order: this platform's package, then on Linux its musl build.
+  const platform = `${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
+  const candidates = [`@supabase/cli-${platform}`, `@supabase/cli-${platform}-musl`].filter(name => Object.hasOwn(launcher.optionalDependencies ?? {}, name));
+  const binary = (await Promise.all(candidates.map(name => installed(entry, name)))).find(item => item !== undefined);
+  if (binary?.version !== CLI_VERSION) throw new Error(CLI_MISSING);
+  return entry;
+}
+const cli = async (ctx: Pick<Context, 'dir' | 'exec'>, args: string[], env: Record<string, string> = {}) =>
+  ctx.exec(process.execPath, [await cliEntry(), ...args], { cwd: ctx.dir, env: { [BINARY_OVERRIDE]: '', ...env } });
 const ENV_REFERENCE = /^env\((.*)\)$/; // a config.toml value the CLI fills from its own environment
 /** SUPABASE_ variables that set how the CLI itself runs, never what its stack holds: an image mirror, its home and telemetry. */
 const CLI_SETTINGS = new Set(['SUPABASE_INTERNAL_IMAGE_REGISTRY', 'SUPABASE_HOME', 'SUPABASE_TELEMETRY_DISABLED']);
@@ -81,28 +112,75 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseEnv = (text: string): Record<string, string> => Object.fromEntries(text.split('\n').map(line => line.trim().match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
   .filter(match => match !== null).map(([, key, value]) => [key, value.startsWith('"') ? String(JSON.parse(value)) : value]));
 
-// Sets `key = value` in `[section]` ('' is the top level), adding the key or the section when absent.
-export function setToml(text: string, section: string, key: string, value: string | number | boolean) {
-  const lines = text.split('\n'), line = `${key} = ${JSON.stringify(value)}`;
-  const start = section ? lines.findIndex(l => new RegExp(`^\\s*\\[\\s*${escape(section)}\\s*\\]\\s*(#.*)?$`).test(l)) : -1;
-  if (section && start < 0) return `${text.trimEnd()}\n\n[${section}]\n${line}\n`;
-  const end = lines.findIndex((l, i) => i > start && /^\s*\[/.test(l));
-  const at = lines.findIndex((l, i) => i > start && (end < 0 || i < end) && new RegExp(`^\\s*${escape(key)}\\s*=`).test(l));
-  if (at >= 0) { lines[at] = line; return lines.join('\n'); }
-  let last = end < 0 ? lines.length : end; // append after the section's last non-blank line
-  while (last > start + 1 && !lines[last - 1].trim()) last -= 1;
-  lines.splice(last, 0, line);
+/**
+ * How many of `lines`, a key's line and the rest of its section, the key's value spans: the fewest that parse, as an
+ * array or a multi-line string goes on. A value that does not parse within its section is taken as its one line, so a
+ * rewrite never reaches another section.
+ */
+function valueLines(lines: string[]) {
+  for (let end = 1; end <= lines.length; end += 1) {
+    try { parseToml(lines.slice(0, end).join('\n')); return end; } catch { /* the value goes on */ }
+  }
+  return 1;
+}
+
+// Sets `key = value` in `[section]` ('' is the top level), adding the key or the section when absent. A value the file
+// spreads over several lines is replaced whole. Lines are read without the '\r' of a CRLF ending, and those written end
+// as the file's lines do: a repository may commit config.toml with CRLF endings, which the snapshot keeps.
+export function setToml(text: string, section: string, key: string, value: string | number | boolean | string[]) {
+  const lines = text.split('\n'), bare = lines.map(l => l.endsWith('\r') ? l.slice(0, -1) : l);
+  const cr = text.includes('\r\n') ? '\r' : '', line = `${key} = ${JSON.stringify(value)}`;
+  const start = section ? bare.findIndex(l => new RegExp(`^\\s*\\[\\s*${escape(section)}\\s*\\]\\s*(#.*)?$`).test(l)) : -1;
+  if (section && start < 0) return `${text.trimEnd()}${cr}\n${cr}\n[${section}]${cr}\n${line}${cr}\n`;
+  const next = bare.findIndex((l, i) => i > start && /^\s*\[/.test(l)), end = next < 0 ? lines.length : next;
+  const at = bare.findIndex((l, i) => i > start && i < end && new RegExp(`^\\s*${escape(key)}\\s*=`).test(l));
+  if (at >= 0) {
+    const count = valueLines(bare.slice(at, end)), ending = lines[at + count - 1].endsWith('\r') ? '\r' : '';
+    lines.splice(at, count, line + ending);
+    return lines.join('\n');
+  }
+  let last = end; // append after the section's last non-blank line
+  while (last > start + 1 && !bare[last - 1].trim()) last -= 1;
+  // In a file with no final line break, a line added last ends the file, where TOML refuses a '\r'.
+  lines.splice(last, 0, last < lines.length ? line + cr : line);
   return lines.join('\n');
+}
+
+// Auth's Site URL and the other URLs it may redirect to: options.auth { siteUrl?, redirectUrls? }, placeholders allowed.
+const AUTH_FIELDS = ['siteUrl', 'redirectUrls'];
+const URL_TEXT = /^[^\s\x00-\x1f\x7f]+$/;
+function authOptions(input: unknown) {
+  const where = 'supabase.auth';
+  if (input == null) return {};
+  if (!object(input)) throw new Error(`${where} must be an object with ${AUTH_FIELDS.join(', ')}.`);
+  const extra = Object.keys(input).filter(key => !AUTH_FIELDS.includes(key));
+  if (extra.length) throw new Error(`${where} has unsupported field ${extra.join(', ')}; use ${AUTH_FIELDS.join(', ')}.`);
+  if (input.siteUrl != null && (typeof input.siteUrl !== 'string' || !URL_TEXT.test(input.siteUrl))) throw new Error(`${where}.siteUrl must be a URL, such as {{apps.web.publicUrl}}.`);
+  const urls = input.redirectUrls;
+  // Auth also takes patterns and an app's own scheme here, such as http://127.0.0.1:3000/** or acme://callback.
+  if (urls != null && (!Array.isArray(urls) || urls.some(url => typeof url !== 'string' || !URL_TEXT.test(url)))) throw new Error(`${where}.redirectUrls must list URLs, such as {{apps.web.publicUrl}}/auth/callback.`);
+  return { ...(typeof input.siteUrl === 'string' ? { siteUrl: input.siteUrl } : {}), ...(urls == null ? {} : { redirectUrls: urls as string[] }) };
+}
+/** The Site URL a browser follows when a link names no other address: the option, else the twin's app when it has one. */
+function siteUrl(ctx: Pick<Context, 'options' | 'apps' | 'app'>) {
+  const { siteUrl: site = ctx.apps.length === 1 ? ctx.app(ctx.apps[0]).publicUrl : undefined } = authOptions(ctx.options.auth);
+  if (site !== undefined && !/^https?:\/\/[^/?#\s]+/.test(site)) throw new Error('supabase.auth.siteUrl must be an http or https URL.');
+  return site;
 }
 
 // Gives the copied project this twin's id, allocated ports and a host.docker.internal token issuer, which the
 // apps verify tokens against. api.external_url keeps the CLI's default: the CLI health-checks the stack from the
-// host through it, and host.docker.internal does not resolve on the host.
-export function twinConfig(text: string, ctx: Pick<Context, 'port' | 'url' | 'project'>) {
+// host through it, and host.docker.internal does not resolve on the host. Auth sends a browser to its Site URL when a
+// link names no other address, as a confirmation email does, so the twin's app replaces the repository's development
+// address there; auth.redirectUrls replaces its other allowed addresses.
+export function twinConfig(text: string, ctx: Pick<Context, 'port' | 'url' | 'project' | 'options' | 'apps' | 'app'>) {
   const mail = /^\s*\[\s*inbucket\s*\]/m.test(text) ? 'inbucket' : 'local_smtp'; // [inbucket] is the older name
+  const site = siteUrl(ctx), { redirectUrls } = authOptions(ctx.options.auth);
+  let toml = setToml(setToml(text, '', 'project_id', projectId(ctx)), 'auth', 'jwt_issuer', ctx.url('api', '/auth/v1'));
+  if (site !== undefined) toml = setToml(toml, 'auth', 'site_url', site);
+  if (redirectUrls) toml = setToml(toml, 'auth', 'additional_redirect_urls', redirectUrls);
   return [...PORTS, ...MAIL_PORTS.map(([key, name]) => [mail, key, name])]
-    .reduce((toml, [section, key, name]) => setToml(toml, section, key, ctx.port(name)),
-      setToml(setToml(text, '', 'project_id', projectId(ctx)), 'auth', 'jwt_issuer', ctx.url('api', '/auth/v1')));
+    .reduce((current, [section, key, name]) => setToml(current, section, key, ctx.port(name)), toml);
 }
 
 // Edge functions: options.functions { directory?, env?, noVerifyJwt? }. `supabase start` serves the copied project's
@@ -251,6 +329,7 @@ export default {
       directory: `The repository's Supabase project directory, holding config.toml, migrations and seed.sql; default ${DIRECTORY}.`,
       functions: '{ directory?, env?, noVerifyJwt? }: serves the project\'s edge functions. directory: where they are when not in <project>/functions; env: their variables, placeholders allowed, no SUPABASE_ names; noVerifyJwt: functions that take requests without a JWT, such as a vendor\'s webhook.',
       users: '[{ id, email, emailConfirmed?, metadata? }]: test accounts, created through Auth with a generated password; emailConfirmed defaults to true, metadata is the user metadata.',
+      auth: '{ siteUrl?, redirectUrls? }: Auth\'s Site URL, where a browser goes when a sign-in or email link names no other address, default the {{apps.<id>.publicUrl}} of the twin\'s only app, else the project\'s config.toml value; redirectUrls: the other URLs Auth may redirect to, such as {{apps.web.publicUrl}}/auth/callback, in place of the project\'s additional_redirect_urls.',
     },
     provides: ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET', 'DATABASE_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY'],
     ports: [...PORTS.map(([, , name]) => name), ...MAIL_PORTS.map(([, name]) => name)],
@@ -260,6 +339,7 @@ export default {
     relative(options.directory ?? DIRECTORY, 'supabase directory');
     users(options);
     if (options.functions != null) functionOptions(options.functions);
+    authOptions(options.auth);
   },
   setup: async ctx => {
     const target = join(workdir(ctx), 'supabase'), config = join(target, 'config.toml');

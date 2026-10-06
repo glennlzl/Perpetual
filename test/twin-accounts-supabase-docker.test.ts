@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { allocatePorts } from '../src/twin/runtime.ts';
-import supabase, { CLI, setToml } from '../src/twin/services/supabase.ts';
+import supabase, { cliEntry, setToml } from '../src/twin/services/supabase.ts';
 import type { Json } from '../src/twin/config.ts';
 
 const exec = promisify(execFile);
@@ -21,7 +21,7 @@ const parseEnv = (text: string): Record<string, string> => Object.fromEntries(te
 test('the Supabase accounts hook creates users that sign in on the official local stack, and renews them idempotently', { skip, timeout: 600000 }, async t => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-smoke-')));
   const project = `perpetual-smoke-${randomBytes(4).toString('hex')}`;
-  const cli = (...args: string[]) => exec('npx', ['--yes', CLI, ...args], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
+  const cli = async (...args: string[]) => exec(process.execPath, [await cliEntry(), ...args], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
   t.after(async () => {
     try { await cli('stop', '--no-backup', '--project-id', project); }
     finally { await rm(dir, { recursive: true, force: true }); }

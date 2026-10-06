@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import { APPS, INSTALL, PORT_VARIABLE, SOURCE, VARIABLE, fail, placeholders, resolvePlaceholders } from './config.ts';
+import { APPS, INSTALL, PORT_VARIABLE, SOURCE, VARIABLE, buildStep, fail, placeholders, resolvePlaceholders } from './config.ts';
 import { relative } from './paths.ts';
 import { loopbackCommand } from './loopback.ts';
 import { containerLogging } from './logging.ts';
@@ -46,7 +46,12 @@ export { PORT_VARIABLE, SOURCE };
 /** The twin's own volume holding its source, dependencies and build output; removed with the twin. */
 export const WORKSPACE_VOLUME = 'workspace';
 const SERVICE_HEALTH = { interval: '2s', timeout: '5s', retries: 90 };
-const APP_HEALTH = { interval: '5s', timeout: '5s', retries: 3, start_period: '30m' };
+/**
+ * An app's container only starts it: its build is a step of its own, so an app that never answers below 500, as one
+ * listening on another port does, fails the twin once its start period ends rather than at the command's time limit.
+ */
+export const APP_START_PERIOD = '5m';
+const APP_HEALTH = { interval: '5s', timeout: '5s', retries: 3, start_period: APP_START_PERIOD };
 
 /** A service after setup: ready with its variables and containers, or blocked on the inputs it misses. */
 export type ResolvedService = { id: string; fidelity: Fidelity } & ({ status: 'ready'; env: Record<string, string>; containers: ServiceContainer[] } | { status: 'blocked'; missing: string[] });
@@ -113,6 +118,7 @@ function healthcheck(container: ServiceContainer, where: string): ComposeHealthc
  * `directory` runs it in that snapshot directory, like an app; `workspace` lists those containers, which need the install first.
  * ports: { '<service>.<port name>' | 'apps.<id>': hostPort }. source: absolute snapshot path.
  * cache: the repository's package cache (repositoryCache), which its twins share; without one, the twin's own.
+ * builds: each app's build step, in config order, which the runtime runs once before the apps start.
  */
 export function composeTwin({ project, owner, environment: id, source, config, services, ports, appImage: fallback = APP_IMAGE, cache }: {
   project: string; owner: string; environment: string; source: string; config: TwinConfig; services: ResolvedService[]; ports: HostPorts; appImage?: string; cache?: string;
@@ -151,7 +157,7 @@ export function composeTwin({ project, owner, environment: id, source, config, s
 
   const offered: Record<string, Map<string, string>> = {};
   for (const service of ready) for (const [variable, value] of Object.entries(provided[service.id])) (offered[variable] ??= new Map()).set(service.id, value);
-  const apps: { id: string; url: string; directory: string }[] = [];
+  const apps: { id: string; url: string; directory: string }[] = [], builds: { app: string; service: string; command: string }[] = [];
   for (const [appId, app] of Object.entries(config.apps)) {
     if (Object.hasOwn(compose.services, appId)) fail(`App "${appId}" has the same name as a service container; rename the app.`);
     const automatic: Record<string, string> = {};
@@ -171,11 +177,21 @@ export function composeTwin({ project, owner, environment: id, source, config, s
       for (const ref of refs) if (ref.public) publicPorts.add(hostPort(addressKey(ref)));
     }
     const port = hostPort(portKey(APPS, appId));
+    const variablesOf = { ...PACKAGE_CACHE_ENV, ...environment(appId, { ...automatic, [PORT_VARIABLE]: String(app.port), ...explicit }, dotenv) };
+    // The build is a one-shot service under a profile of its own name, like the install, with the app's variables and
+    // public addresses, writing its output to the workspace the app then starts from.
+    if (app.build !== undefined) {
+      const step = buildStep(appId);
+      if (Object.hasOwn(compose.services, step)) fail(`A service container is named ${step}, which the step that builds app ${appId} uses.`);
+      compose.services[step] = { image: appImage, ...workspace(app.directory), command: loopbackCommand(appCommand(app.build), publicPorts, app.port).map(literal),
+        environment: { ...variablesOf }, profiles: [step], ...common };
+      builds.push({ app: appId, service: step, command: app.build });
+    }
     compose.services[appId] = {
       image: appImage,
       ...workspace(app.directory),
-      command: loopbackCommand(appCommand(app.build, app.start), publicPorts, app.port).map(literal),
-      environment: { ...PACKAGE_CACHE_ENV, ...environment(appId, { ...automatic, [PORT_VARIABLE]: String(app.port), ...explicit }, dotenv) },
+      command: loopbackCommand(appCommand(app.start), publicPorts, app.port).map(literal),
+      environment: variablesOf,
       ports: [`${LOOPBACK}:${port}:${app.port}`],
       ...common,
       // A redirect is an answer, as the controller's check counts it, and is never followed: it may lead off the twin.
@@ -198,5 +214,5 @@ export function composeTwin({ project, owner, environment: id, source, config, s
     compose.volumes = { [WORKSPACE_VOLUME]: {}, [cacheVolume]: cache ? { external: true } : {} };
   }
   const summary = services.map((service): ServiceSummary => ({ id: service.id, fidelity: service.fidelity, status: service.status, ...(service.status === 'ready' ? {} : { missing: service.missing }) }));
-  return { compose, env: dotenv, services: summary, apps, workspace: inWorkspace };
+  return { compose, env: dotenv, services: summary, apps, workspace: inWorkspace, builds };
 }

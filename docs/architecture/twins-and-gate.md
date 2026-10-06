@@ -11,13 +11,14 @@ Status: implemented. Behaviour is documented in [Twins](../twins.md) and [Journe
 
 ## Twin
 
-A twin is a generated Docker Compose project plus a `.env` file. It runs the product's actual app code and the services that code depends on. The runtime writes `compose.yaml` and `.env` (mode 0600) under `<dataDir>/environments/<id>/twin/`, runs each service's setup, then runs `docker compose up --wait`. Teardown runs `docker compose down --volumes` plus each service's teardown, removes the containers interrupted one-shot commands left, running `down` again when it removed any, and confirms that none of the twin's volumes remain. Compose already handles ordering (`depends_on`) and health checks, so Perpetual does not reimplement either.
+A twin is a generated Docker Compose project plus a `.env` file. It runs the product's actual app code and the services that code depends on. The runtime writes `compose.yaml` and `.env` (mode 0600) under `<dataDir>/environments/<id>/twin/`, runs each service's setup, runs the install, fixtures and each app's build as one-shot steps, then runs `docker compose up --wait`. Teardown runs `docker compose down --volumes` plus each service's teardown, removes the containers interrupted one-shot commands left, running `down` again when it removed any, and confirms that none of the twin's volumes remain. Compose already handles ordering (`depends_on`) and health checks, so Perpetual does not reimplement either.
 
 - Apps run the repository's own code from the source snapshot on a Node image of the major the repository declares, else the current LTS. The user's checkout is never mounted.
   - A one-shot `source` service copies the snapshot into the twin's own `workspace` volume, and the install, apps, repository-code services and command fixtures run from that volume. Writing dependencies and build output through a host bind mount is several times slower on Docker Desktop.
   - Package managers keep downloads in a package cache that the twins of one repository share: an external volume, `perpetual-package-cache-<digest>`, named from a digest of the repository's identity (its pipeline key), which Perpetual owns and which deleting a twin keeps. Another repository's twins never mount it. pnpm's store is named there explicitly.
   - A repair gate's twin builds a pull request head no person has reviewed, so its cache is its own: an empty volume of its project, like `workspace`, removed with it, so nothing that code writes reaches a later twin. The `source` service mounts it too, so Compose creates it before a command fixture mounts it by name.
   - Each twin records how long every preparation step took, so a slow or failed twin shows where its time went.
+  - Each app's build is a one-shot Compose service under its own profile, like the install, run once before any app starts, with its own time limit and exit code. The app's container only starts the app, so its health check's start period is minutes: an app that never answers below 500 fails the twin then, not at the command's time limit.
 - Ports are allocated upward from a base in a block per twin and published on 127.0.0.1.
 - Internal `url` placeholders use `http://host.docker.internal:<port>`. Browser-consumed URLs explicitly use `publicUrl`, which selects `http://127.0.0.1:<port>` for either an app or a service's named port. App links use loopback too. Perpetual's Chromium keeps its Docker-host mapping for older plans, but ordinary host browsers need public addresses; saved plans and service outputs are never rewritten from variable-name prefixes.
 
@@ -45,7 +46,7 @@ export default {
 - `ctx` has four groups of values:
   - `options`: this service's section of the twin config;
   - `inputs` and `outputs`;
-  - addressing: `host`, `port(name)`, `url(name, path)`, `app(id).url`, and `sharedPort(name, current?)`, the port of a service's machine-wide instance, reserved once in `<dataDir>/twin-services/ports.json` outside every twin's port block;
+  - addressing: `host`, `port(name)`, `url(name, path)`, `apps` (the twin's app ids), `app(id).url` and `app(id).publicUrl`, and `sharedPort(name, current?)`, the port of a service's machine-wide instance, reserved once in `<dataDir>/twin-services/ports.json` outside every twin's port block;
   - `run(image, args)` for a pinned CLI image, and `exec(file, args, { cwd, env })` for a pinned CLI on the host that drives Docker itself, with `env` set over the controller's environment, which it otherwise inherits. The Docker socket is never mounted into a container.
 - Inputs are test credentials only. They are validated by pattern, stored locally (mode 0600), never sent to the client and reused across twins. A service with a missing input is **blocked**: its variables are left out, and nothing substitutes for it. A journey on the twin keeps its own verdict, since nothing tells whether the missing service caused it.
 - A service may declare `provision: { inputs: [{ name, label, default? }], run }` to create its inputs on the user's explicit action. `run(ctx)` gets `{ inputs, docker(args, { timeoutMs }), tempDir }`, where `tempDir` is a private, empty 0700 directory removed afterwards, and returns `{ values, details: { expiresAt, claimUrl?, account? } }`. `default: 'git-email'` pre-fills an input from `git config --global user.email`.
@@ -61,8 +62,8 @@ export default {
 | `postgres`, `redis`, `mongodb`, `mailpit` | Actual, from the official images. |
 | `llm` | Actual. The App Settings OpenRouter key and model by default, or the app's own development values with `source: app`. |
 | `secrets` | Actual. Internal secrets that several apps share, generated per twin. |
-| `supabase` | Official local mode through the Supabase CLI. The CLI fixes the local database password to `postgres` and binds its own ports; this is accepted because the CLI is the official local mode. |
-| `stripe` | Official sandbox: a test key, the user's own or from a sandbox Perpetual creates for them (below), `stripe listen` and `stripe fixtures`. |
+| `supabase` | Official local mode through the Supabase CLI, an exact dependency that `package-lock.json` locks with its whole tree. The CLI fixes the local database password to `postgres` and binds its own ports; this is accepted because the CLI is the official local mode. |
+| `stripe` | Official sandbox: test keys, the user's own or from a sandbox Perpetual creates for them (below), `stripe listen` and `stripe fixtures`, which run once per sandbox and fixtures document and whose exported ids later twins reuse. |
 | `trigger-dev` | Official local mode. One shared self-hosted instance per machine; each twin gets a project and a dev worker. `version` is an exact CLI version, built once into a local image; the worker signs in from a 0600 profile file, never from its environment. |
 | `emulate` | Only for services with no official simulation: Google and GitHub OAuth sign-in, AWS, Linear, the Vercel API and Apple. |
 
@@ -104,6 +105,8 @@ services:
   supabase: { functions: { env: { STRIPE_WEBHOOK_SECRET: "{{stripe.STRIPE_WEBHOOK_SECRET}}" }, noVerifyJwt: [stripe-webhook] } }
   stripe:   { webhook: "{{services.supabase.url.api}}/functions/v1/stripe-webhook" }
 ```
+
+- Supabase Auth: `auth: { siteUrl?, redirectUrls? }`. Auth's Site URL, where a browser goes when a sign-in or email link names no other address, is the `publicUrl` of the twin's only app unless `siteUrl` names another; with several apps and no `siteUrl` it stays the project's. `redirectUrls` replaces the project's `additional_redirect_urls`.
 
 - Fixtures run after services are ready and before apps start.
 - Test accounts come from a service's `accounts(ctx)` hook, which runs once services are ready and before the install and fixtures. Supabase creates its `users: [{ id, email, emailConfirmed?, metadata? }]` through its local Auth admin API.

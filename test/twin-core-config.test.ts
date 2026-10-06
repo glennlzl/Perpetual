@@ -42,6 +42,13 @@ test('An install step is normalized like an app directory and command', () => {
   for (const [input, error] of cases) assert.throws(() => validate(input), error);
 });
 
+test('No app takes the name of the step that builds another app', () => {
+  assert.throws(() => validate({ apps: { web: { build: 'npm run build', start: 'npm start', port: 3000 }, 'build-web': { start: 'x', port: 1 } } }),
+    { message: 'App "build-web" has the same name as the step that builds app "web"; rename the app.' });
+  // An app without a build has no such step.
+  assert.deepEqual(Object.keys(validate({ apps: { web: { start: 'npm start', port: 3000 }, 'build-web': { start: 'x', port: 1 } } }).apps), ['web', 'build-web']);
+});
+
 test('An app gets its port as PORT: an env PORT can only repeat it', () => {
   assert.deepEqual(validate({ apps: { web: { start: 'x', port: 3000, env: { PORT: 3000 } } } }).apps.web.env, { PORT: '3000' });
   // Its health check probes port, which an app listening elsewhere would never answer.

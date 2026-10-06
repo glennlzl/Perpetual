@@ -43,6 +43,7 @@ const compose = (call: Call | undefined) => call?.args[0] === 'compose' ? call.a
 const secretsIn = (text: string) => [KEY, WEBHOOK_SECRET, 'db-password-1'].filter(secret => text.includes(secret));
 const INSTALL_RUN = ['--progress', 'quiet', '--profile', 'install', 'run', '--rm', '--no-TTY', 'install'];
 const SOURCE_RUN = ['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'];
+const BUILD_RUN = ['--progress', 'quiet', '--profile', 'build-web', 'run', '--rm', '--no-TTY', 'build-web'];
 
 test('Prepare returns host-browser app URLs while container wiring keeps Docker host addresses', async t => {
   const { prepare, dir, dataDir } = await setup();
@@ -96,7 +97,7 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
   const { calls, steps, prepare, dir, source, dataDir } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const result = await prepare();
-  assert.deepEqual(steps, ['Setting up Database', 'Setting up Jobs', 'Setting up Payments', 'Setting up Mail', 'Loading source', 'Starting services', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Starting twin']);
+  assert.deepEqual(steps, ['Setting up Database', 'Setting up Jobs', 'Setting up Payments', 'Setting up Mail', 'Loading source', 'Starting services', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Building web', 'Starting twin']);
   assert.deepEqual(result, {
     status: 'ready',
     services: [
@@ -108,8 +109,10 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
 
   // Repository code runs from the twin's workspace volume, filled once from the snapshot. Without a repository, the
   // twin's package cache is its own, which Compose creates with that copy, so nothing is created before it.
-  const [listen, copy, up, sql, seed, all] = calls;
-  assert.equal(calls.length, 6);
+  const [listen, copy, up, sql, seed, build, all] = calls;
+  assert.equal(calls.length, 7);
+  assert.deepEqual(compose(build), BUILD_RUN);
+  assert.equal(build.env, undefined, 'The build gets its app\'s variables from the twin\'s files, never the command line.');
   assert.deepEqual(compose(copy), SOURCE_RUN);
   assert.ok(seed.args.some(arg => /^perpetual-.+_workspace:\/workspace$/.test(arg)), 'A command fixture runs in the workspace volume.');
   assert.deepEqual(listen.args.slice(0, 4), ['run', '--rm', '--add-host', 'host.docker.internal:host-gateway']);
@@ -142,9 +145,9 @@ test('A shared install runs once after services are ready, before fixtures and a
   const { calls, steps, prepare, dir, dataDir, runtime, source } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await prepare({ config: { ...config(), install: { directory: '.', command: 'npm ci' } } });
-  assert.deepEqual(steps.slice(-5), ['Starting services', 'Installing dependencies', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Starting twin']);
+  assert.deepEqual(steps.slice(-6), ['Starting services', 'Installing dependencies', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Building web', 'Starting twin']);
   assert.deepEqual(calls.slice(1).map(call => compose(call) ?? call.args.at(-1)), [
-    SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', ['up', '--wait']]);
+    SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', BUILD_RUN, ['up', '--wait']]);
   const install = calls.find(call => compose(call)?.includes('install'));
   assert.equal(install?.env, undefined, 'The install gets no twin variables.');
   assert.deepEqual(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services.install.profiles, ['install']);
@@ -260,6 +263,57 @@ test('An install that exits with an error or reaches its time limit says so befo
   await assert.rejects(runtime.prepare(twin), { message: 'Install "npm ci" in . failed: Twin command exceeded its 2-second limit.\nresolving packages' });
 });
 
+test('Each app\'s build runs once as a step of its own after the services start, before any app starts', async t => {
+  const { calls, steps, dataDir, source } = await setup();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const runtime = createTwinRuntime({ exec: async (file, args, options = {}) => { calls.push({ file, args, env: options.env }); return { stdout: '', stderr: '' }; }, services, isFree: async () => true });
+  const apps = { web: { directory: 'web', build: 'npm run build', start: 'npm start', port: 3000 }, admin: { directory: 'admin', build: 'npm run build:admin', start: 'npm start', port: 3001 }, api: { start: 'node api.js', port: 8080 } };
+  await runtime.prepare({ dataDir, id: 'built', source, config: { services: { mail: {} }, apps }, onStep: step => steps.push(step) });
+  // With no install, fixtures or accounts the services still start first, since a build may read them, as a page
+  // rendered from the database while it builds does.
+  assert.deepEqual(steps, ['Setting up Mail', 'Loading source', 'Starting services', 'Building web', 'Building admin', 'Starting twin']);
+  const run = (name: string) => ['--progress', 'quiet', '--profile', name, 'run', '--rm', '--no-TTY', name];
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, ['up', '--wait', 'mail'], run('build-web'), run('build-admin'), ['up', '--wait']]);
+  const file = YAML.parse(await readFile(join(dataDir, 'environments', 'built', 'twin', 'compose.yaml'), 'utf8'));
+  assert.deepEqual([file.services['build-web'].profiles, file.services['build-admin'].working_dir, file.services['build-api']], [['build-web'], '/workspace/admin', undefined]);
+  // Without services or fixtures to wait for, the builds follow the source copy.
+  calls.length = 0;
+  await runtime.prepare({ dataDir, id: 'bare', source, config: { apps: { web: apps.web } } });
+  assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, run('build-web'), ['up', '--wait']]);
+});
+
+test('A failed build stops prepare with its app, command, exit code and the end of its output, redacted, before any app starts', async t => {
+  const noise = Array.from({ length: 40 }, (_, index) => `compiling ${index}`).join('\n');
+  const { calls, prepare, dataDir } = await setup(args => {
+    if (args.includes('run') && args.includes('build-web')) throw Object.assign(new Error('Command failed: docker compose run'), { code: 2, stdout: `${noise}\n`, stderr: `Error: invalid key ${KEY}\n` });
+    return {};
+  });
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await assert.rejects(prepare(), (error: Error) => {
+    assert.match(error.message, /^Build "pnpm build" of app web failed with exit code 2: compiling 11\n/);
+    assert.match(error.message, /compiling 39\nError: invalid key \[redacted\]$/);
+    assert.deepEqual(secretsIn(error.message), []);
+    return true;
+  });
+  assert.deepEqual(compose(calls.at(-1)), BUILD_RUN, 'No app starts after a failed build.');
+});
+
+test('A build that reaches its own time limit says so before the end of its output', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  // The build is a real process here, so its exit code and time limit come from the command runner itself, as the install's do.
+  let build = 'echo compiling; exit 3', timeoutMs: number | undefined;
+  const exec: Exec = async (_file, args, options) => args.includes('build-web') && args.includes('run')
+    ? execCommand('sh', ['-c', build], { ...options, ...(timeoutMs ? { timeoutMs } : {}) }) : { stdout: '' };
+  const runtime = createTwinRuntime({ exec, services, owner: 'owner-1', isFree: async () => true });
+  const twin = { dataDir, id: 'beta', source, config: { apps: { web: { build: 'npm run build', start: 'node app.js', port: 3000 } } } };
+  await assert.rejects(runtime.prepare(twin), { message: 'Build "npm run build" of app web failed with exit code 3: compiling' });
+  build = 'echo compiling; exec sleep 60';
+  timeoutMs = 2000;
+  await assert.rejects(runtime.prepare(twin), { message: 'Build "npm run build" of app web failed: Twin command exceeded its 2-second limit.\ncompiling' });
+});
+
 test('Services with missing inputs are blocked, with the services that depend on them', async t => {
   const { calls, prepare, dir, dataDir } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -272,9 +326,9 @@ test('Services with missing inputs are blocked, with the services that depend on
     { id: 'payments', fidelity: 'official-sandbox', status: 'blocked', missing: ['PAYMENTS_KEY'] },
   ]);
   assert.equal(calls.some(call => call.args.includes('payments/cli:1.0') || call.args.includes(APP_IMAGE)), false);
-  assert.deepEqual(calls.map(compose).filter(Boolean), [SOURCE_RUN, ['up', '--wait', 'database', 'mail'], ['up', '--wait']]);
+  assert.deepEqual(calls.map(compose).filter(Boolean), [SOURCE_RUN, ['up', '--wait', 'database', 'mail'], BUILD_RUN, ['up', '--wait']]);
   const file = YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8'));
-  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'web', 'api', 'source']);
+  assert.deepEqual(Object.keys(file.services), ['database', 'mail', 'build-web', 'web', 'api', 'source']);
   assert.equal(Object.keys(file.services.web.environment).some(name => /PAYMENTS|JOBS/.test(name)), false);
 });
 
@@ -307,6 +361,22 @@ test('Twins prepared at the same time get separate host port blocks', async t =>
   const blocks = await Promise.all(['one', 'two', 'three'].map(async id => JSON.parse(await readFile(join(dataDir, 'environments', id, 'twin', 'twin.json'), 'utf8')).block));
   assert.equal(new Set(blocks.flat()).size, PORT_BLOCK * 3);
   assert.equal(new Set(results.map(result => result.apps[0].url)).size, 3);
+});
+
+test('A service context names the twin\'s apps in config order, with each app\'s container and browser address', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-twin-')), source = join(dataDir, 'source');
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  await mkdir(source);
+  const seen: unknown[] = [];
+  const probe = { id: 'probe', title: 'Probe', fidelity: 'actual', env: () => ({}),
+    setup: async ctx => { seen.push(ctx.apps, ctx.apps.map(id => ctx.app(id)), ctx.options); return {}; } } satisfies TwinService;
+  const runtime = createTwinRuntime({ exec: async () => ({ stdout: '' }), services: { probe }, owner: 'o', isFree: async () => true });
+  const apps = { web: { start: 'node web.js', port: 3000 }, api: { start: 'node api.js', port: 8080 } };
+  await runtime.prepare({ dataDir, id: 'beta', source, config: { services: { probe: { site: '{{apps.web.publicUrl}}/welcome' } }, apps } });
+  assert.deepEqual(seen, [['web', 'api'], [
+    { url: `http://host.docker.internal:${PORT_BASE}`, publicUrl: `http://127.0.0.1:${PORT_BASE}`, port: PORT_BASE },
+    { url: `http://host.docker.internal:${PORT_BASE + 1}`, publicUrl: `http://127.0.0.1:${PORT_BASE + 1}`, port: PORT_BASE + 1 },
+  ], { site: `http://127.0.0.1:${PORT_BASE}/welcome` }]);
 });
 
 test('A machine-wide instance keeps one host port that no twin block takes, even after its first twin is gone', async t => {

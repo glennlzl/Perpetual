@@ -18,6 +18,8 @@ const ENV = 'env';
 export const INSTALL = 'install';
 /** The one-shot service that copies the source snapshot into the twin's workspace volume; no app may take its name. */
 export const SOURCE = 'source';
+/** The one-shot service that runs an app's build, once, before the apps start; no other app may take its name. */
+export const buildStep = (app: string) => `build-${app}`;
 /** The variable every app gets its port in. */
 export const PORT_VARIABLE = 'PORT';
 /** SQL fixtures run psql against this variable of their service. */
@@ -220,6 +222,9 @@ export function validateTwinConfig(input: unknown, { services = registry }: { se
     if (Object.hasOwn(env, PORT_VARIABLE) && env[PORT_VARIABLE] !== String(app.port)) fail(`${where}.env.${PORT_VARIABLE} must be ${app.port}, the app's port; set port instead.`);
     config.apps[id] = { directory: relative(app.directory ?? '.', `${where}.directory`),
       ...(app.build == null ? {} : { build: command(app.build, `${where}.build`) }), start: command(app.start, `${where}.start`), port: app.port, env };
+  }
+  for (const [id, app] of Object.entries(config.apps)) {
+    if (app.build !== undefined && Object.hasOwn(config.apps, buildStep(id))) fail(`App "${buildStep(id)}" has the same name as the step that builds app "${id}"; rename the app.`);
   }
   if (!Array.isArray(fixtures)) fail('fixtures must be a list.');
   config.fixtures = fixtures.map((fixture: unknown, index: number): TwinFixture => {
