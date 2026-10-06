@@ -286,6 +286,10 @@ function withoutCredentials(name: string, buffer: Buffer) {
   const text = buffer.toString('utf8'), kept = withoutRegistryCredentials(text, name);
   return kept === text ? buffer : Buffer.from(kept);
 }
+/** Whether a repository path is a package manager's config, which the snapshot copies without its credentials. */
+export const isRegistryConfig = (path: string) => REGISTRY_CONFIG.test(posix.basename(path));
+/** A package manager's config at `path` as the snapshot copies it: without its credential lines, or null when it is left out. */
+export const copiedConfig = (path: string, buffer: Buffer) => buffer.length > REGISTRY_CONFIG_BYTES ? null : withoutCredentials(posix.basename(path), buffer);
 
 /**
  * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
