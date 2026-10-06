@@ -6,7 +6,7 @@
 import { posix } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
-import { REDACTED, hasCredential } from '../redaction.ts';
+import { REDACTED, SOURCE_CODE, hasCredential } from '../redaction.ts';
 
 /** credentials names where credential text was added, as path:line of the new file, never the text. */
 export interface ChangeCheck { paths: string[]; added: number; removed: number; rejected: string[]; holds: string[]; credentials: string[] }
@@ -50,7 +50,7 @@ const CHECK_CONFIG = /^(?:(?:jest|vitest|vite|playwright|cypress|karma|ava|wdio|
 const CHECK_PATH = /(?:^|\/)\.cargo\/config(?:\.toml)?$/;
 const isTest = (path: string) => {
   const parts = path.split('/'), name = parts.pop() ?? '';
-  return parts.some(part => TEST_FOLDER.test(part) || TEST_NAME.test(part)) || TEST_FILE.test(name) || CODE.test(name) && TEST_NAME.test(name.replace(/\.[^.]*$/, ''));
+  return parts.some(part => TEST_FOLDER.test(part) || TEST_NAME.test(part)) || TEST_FILE.test(name) || SOURCE_CODE.test(name) && TEST_NAME.test(name.replace(/\.[^.]*$/, ''));
 };
 const isCheckConfig = (path: string) => { const name = posix.basename(path); return CHECK_FILES.has(name) || CHECK_CONFIG.test(name) || CHECK_PATH.test(path); };
 // What a manifest says about how its package is checked, beside its dependencies: package.json's scripts, workspaces and
@@ -81,8 +81,6 @@ export function manifestChecksChanged(path: string, before: string | null, after
   const old = before === null ? { value: {} } : read(before), now = read(after);
   return !old || !now || manifest.checks.some(keys => !isDeepStrictEqual(valueAt(old.value, keys), valueAt(now.value, keys)));
 }
-// Source code, where an unquoted value is an expression rather than a literal.
-const CODE = /\.(?:[cm]?[jt]sx?|py|rb|go|java|kts?|scala|groovy|gradle|rs|php|cs|fs|swift|dart|exs?|erl|clj|lua|pl|r|jl|vue|svelte|c|h|cc|cpp|hpp|m|mm)$/i;
 
 /** A path git names in a diff header: C-quoted when it has special characters, and relative to the repository. */
 function unquote(value: string) {
@@ -141,7 +139,7 @@ export function checkChanges(diff: string, { deployFiles = [] }: { deployFiles?:
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) {
       const named = headerPaths(line.slice(11));
-      hunk = false; binary = false; file = named.at(-1) ?? ''; code = CODE.test(file);
+      hunk = false; binary = false; file = named.at(-1) ?? ''; code = SOURCE_CODE.test(file);
       named.forEach(path => paths.add(path));
       continue;
     }

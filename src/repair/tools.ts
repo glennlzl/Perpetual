@@ -5,7 +5,7 @@
 import { posix } from 'node:path';
 import { jsonSchema, tool, type JSONSchema7 } from 'ai';
 import type { BoxResult, RepairBox } from './box.ts';
-import { REDACTED, redact } from '../redaction.ts';
+import { REDACTED, SOURCE_CODE, redact } from '../redaction.ts';
 
 export const LIMITS = {
   path: 1024, entries: 500, lines: 2000, readBytes: 64 * 1024, lineChars: 2000, matches: 100, matchChars: 300, pattern: 500, include: 200,
@@ -19,13 +19,19 @@ export interface ToolEvents { run?(command: string, exitCode: number): void; cha
 
 const refused = (error: string): Refusal => ({ ok: false, error });
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
-// Replies read the workspace as source code: key blocks, token shapes and literals set to a name like token or password
-// are hidden, while the expressions and types around such names stay as written, so a line read can be edited.
+// Replies hide credentials with the shared catalogue, in the mode the text calls for. A file of source code or JSON reads
+// as code: key blocks, token shapes and literals set to a name like token or password are hidden, while the expressions,
+// types and versions around such names stay as written, so a line read can be edited. Any other file, such as .env,
+// YAML, INI, properties, .npmrc, a Dockerfile or a shell script, is configuration, where every value set to such a name
+// is hidden. Command output prints either, so it reads as code with the values of configuration lines and flags hidden
+// too; every other reply text, such as a path or an error, reads as code.
 const scrub = (value: unknown) => redact(value, { code: true });
-// The redaction marker stands in replies for text the tools hide, such as a literal set to a name like token or
-// password; copied into a file it would replace real code.
+const scrubFile = (path: string, text: string) => redact(text, { code: SOURCE_CODE.test(path) || /\.json[c5]?$/i.test(path) });
+const scrubOutput = (text: string) => redact(text, { output: true });
+// The redaction marker stands in replies for text the tools hide, such as a value set to a name like token or password;
+// copied into a file it would replace real code.
 const markers = (text: string) => text.split(REDACTED).length - 1;
-const MARKED = `${REDACTED} stands for text the tools hide, such as a literal set to a name like token or password, and is never code`;
+const MARKED = `${REDACTED} stands for text the tools hide, such as a value set to a name like token or password, and is never code`;
 const oneLine = (value: unknown, limit = 200) => clip(scrub(value).replace(/\s+/g, ' ').trim(), limit);
 const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
 /** The last limit characters of text from a line start, or the end of its last line when that alone is longer. */
@@ -89,7 +95,10 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const entries = scrub(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
     return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
   }
-  /** Redact the complete bounded file before selecting lines; a fragment may have lost its credential's context. */
+  /**
+   * Redact the complete bounded file, in its real name's mode, before selecting lines; a fragment may have lost its
+   * credential's context.
+   */
   async function observeFile(found: { full: string; name: string }): Promise<FileObservation> {
     const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; cat "$1"', 'sh', found.full], { limit: 4 * LIMITS.readBytes });
     if (result.truncated) return unavailable(result);
@@ -97,7 +106,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.exitCode !== 0 || result.timedOut) return refused(`${found.name} could not be read completely.`);
     if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
     const lines = (text: string) => { const values = text.split('\n'); if (values.at(-1) === '') values.pop(); return values; };
-    const raw = lines(result.stdout), redacted = lines(scrub(result.stdout));
+    const raw = lines(result.stdout), redacted = lines(scrubFile(found.full, result.stdout));
     if (raw.length !== redacted.length) return refused(`${found.name} cannot be shown with accurate line numbers after redaction.`);
     return { ok: true, raw, redacted };
   }
@@ -216,7 +225,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       if (!start || start === text.length) return unavailable(result);
       text = text.slice(start);
     }
-    const output = scrub(text), tail = lastLines(output, LIMITS.output);
+    const output = scrubOutput(text), tail = lastLines(output, LIMITS.output);
     return { ok: true, exitCode: result.exitCode, output: tail, timedOut: result.timedOut, truncated: result.truncated || tail.length < output.length };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.

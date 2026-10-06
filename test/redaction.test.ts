@@ -56,7 +56,8 @@ test('a long run of name characters is read once, so a log of hyphenated or base
 test('a megabyte run of credential names, after any prefix, is read once in every mode', () => {
   const names = 'token'.repeat(210_000), parts = 'eyJa-'.repeat(210_000);
   for (const text of [...['', '--', '-', '"', "'", '\\"', '?', '&', '=', ' '].map(prefix => prefix + names), parts, `"${parts}`]) {
-    for (const [mode, read] of [['full', () => redact(text)], ['code', () => redact(text, { code: true })], ['change rules', () => hasCredential(text)], ['change rules in code', () => hasCredential(text, { code: true })]] as const) {
+    for (const [mode, read] of [['full', () => redact(text)], ['code', () => redact(text, { code: true })], ['output', () => redact(text, { output: true })], ['change rules', () => hasCredential(text)],
+      ['change rules in code', () => hasCredential(text, { code: true })]] as const) {
       const started = performance.now();
       read();
       assert.ok(performance.now() - started < 2000, `${text.slice(0, 12)}… in ${mode} took ${Math.round(performance.now() - started)} ms`);
@@ -77,6 +78,9 @@ test('code keeps what follows a credential name when it is an expression, a type
     // A string that ends with a name and a separator is text: its closing quote opens no literal.
     'if (!token) throw new Error("Missing token: " + name);\nconst user = await getUser(name);\nreturn { user, message: "Signed in" };',
     "const LAUNCH = '#secret=', STORED = 'acme-browser-secret';", 'const args = "--token " + token + " --verbose";', 'log("Missing \'token\': " + name + " in the request");',
+    // A keyword argument, a reference in a string and a header set from a variable are code.
+    'client = Client(token=token, password=password)', '"deploy": "vercel --token=$VERCEL_TOKEN"', "const query = 'token=' + token;", 'const url = f"/login?password={password}"',
+    'headers: { Authorization: authHeader }',
   ]) assert.equal(redact(line, { code: true }), line, line);
   const cases: [string, string][] = [
     ['const apiKey = "fixture-literal-1";', `const apiKey = ${REDACTED};`],
@@ -90,6 +94,13 @@ test('code keeps what follows a credential name when it is an expression, a type
     ['GET /callback?access_token=fixture123&other=keep', `GET /callback?access_token=${REDACTED}&other=keep`],
     ['POST /oauth/token?grant_type=refresh&client_secret=0123456789abcdef&refresh_token=fixture-literal', `POST /oauth/token?grant_type=refresh&client_secret=${REDACTED}&refresh_token=${REDACTED}`],
     ['GET /session?id_token=fixture-literal&x-api-key=fixture-literal', `GET /session?id_token=${REDACTED}&x-api-key=${REDACTED}`],
+    // A credential name set with = in a string, as a connection string or a command writes it, or after a ;.
+    ['"Default": "Server=db;Database=app;User Id=sa;Password=fixture-literal;"', `"Default": "Server=db;Database=app;User Id=sa;Password=${REDACTED};"`],
+    ['"test": "API_KEY=fixture-literal jest"', `"test": "API_KEY=${REDACTED} jest"`],
+    ['conninfo = "host=db password=fixture-literal dbname=app"', `conninfo = "host=db password=${REDACTED} dbname=app"`],
+    ['Server=db;Password=fixture-literal;', `Server=db;Password=${REDACTED};`],
+    // An Authorization credential without a scheme, with a digit in it.
+    ['curl -H "Authorization: 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
     ['curl -H "Authorization: token 0123456789abcdef" https://api.example.test', `curl -H "Authorization: ${REDACTED}" https://api.example.test`],
     ['headers.set("Authorization", "Basic Zml4dHVyZTpsaXRlcmFs");', `headers.set("Authorization", ${REDACTED});`],
     ['request: Bearer abc123def456ghi', `request: Bearer ${REDACTED}`],
@@ -112,6 +123,30 @@ test('code keeps what follows a credential name when it is an expression, a type
     const numbered = output.split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n');
     assert.equal(redact(numbered, { code: true }), numbered, `${input} numbered`);
   }
+});
+
+// Command output prints code and configuration alike: `cat .env`, `git diff`, `grep -rn` and a test run.
+test('command output reads as code and also hides what env-style lines, YAML entries in capitals and flags set', () => {
+  const cases: [string, string][] = [
+    ['DB_PASSWORD=fixture-env\nexport JWT_SECRET=fixture-env\nenv API_KEY=fixture-env node app.js', `DB_PASSWORD=${REDACTED}\nexport JWT_SECRET=${REDACTED}\nenv API_KEY=${REDACTED} node app.js`],
+    ['+DB_PASSWORD=fixture-env\n-DB_PASSWORD=old\n DB_PASSWORD=context', `+DB_PASSWORD=${REDACTED}\n-DB_PASSWORD=${REDACTED}\n DB_PASSWORD=${REDACTED}`],
+    ['ENV DB_PASSWORD="example"\n      - POSTGRES_PASSWORD=example', `ENV DB_PASSWORD=${REDACTED}\n      - POSTGRES_PASSWORD=${REDACTED}`],
+    ['//registry.npmjs.org/:_authToken=00000000-0000-4000-8000-000000000000', `//registry.npmjs.org/:_authToken=${REDACTED}`],
+    ['db.password=example\n./.env:3:DB_PASSWORD=example', `db.password=${REDACTED}\n./.env:3:DB_PASSWORD=${REDACTED}`],
+    ['    environment:\n      POSTGRES_PASSWORD: example\n./compose.yml:8:      REDIS_PASSWORD: example', `    environment:\n      POSTGRES_PASSWORD: ${REDACTED}\n./compose.yml:8:      REDIS_PASSWORD: ${REDACTED}`],
+    ['mysql --password=example -u root\nmysql --password example -u root', `mysql --password=${REDACTED} -u root\nmysql --password ${REDACTED} -u root`],
+    ['Server=db;Password=fixture-literal;\n> Authorization: 0123456789abcdef', `Server=db;Password=${REDACTED};\n> Authorization: ${REDACTED}`],
+  ];
+  for (const [input, output] of cases) {
+    assert.equal(redact(input, { output: true }), output, input);
+    assert.equal(redact(output, { output: true }), output, `${input} again`);
+  }
+  for (const line of [
+    'const token = getToken(user);', '  password: string;', '  SECRET_KEY: string;', '  API_KEY: process.env.API_KEY,', '    token=token,', '+    password=password,', 'client = Client(token=token)',
+    "src/auth.ts(5,12): error TS2741: Property 'secret' is missing in type '{ token: string; }' but required in type 'Session'.", 'def login(password=None):',
+    'DB_PASSWORD=$DB_PASSWORD', '  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}', '//registry.npmjs.org/:_authToken=${NPM_TOKEN}', 'SECRET_FILE=/run/secrets/db', '  --token <token>  The API token',
+    'docker login --password-stdin -u acme', 'tests_passed=12 bypass=true',
+  ]) assert.equal(redact(line, { output: true }), line, line);
 });
 
 test('an Authorization value of any scheme and every part of a named value or URL user info are hidden', () => {

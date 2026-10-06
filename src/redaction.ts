@@ -74,24 +74,53 @@ const QUOTED_LITERAL = new RegExp(`(?<![\\w-])${CREDENTIAL_NAME}["']?\\s*(?::[ \
 const UNQUOTED_LITERAL = new RegExp(`^\\s*(?:export\\s+|-\\s+)?${CREDENTIAL_NAME}\\s*[=:]\\s*(?!["'])${NOT_LITERAL}[^\\s#]{8,}\\s*$`, 'im');
 const redactedLines = (text: string, marker = REDACTED) => text.split('\n').map(() => marker).join('\n');
 const namedValue = (match: string, prefix: string) => prefix + redactedLines(match.slice(prefix.length));
+/**
+ * Source code, by its file name, where an unquoted value after a credential name is an expression rather than a literal:
+ * the change rules read a change of such a file with hasCredential's `code` option, and the repair agent's tools read it
+ * with redact's.
+ */
+export const SOURCE_CODE = /\.(?:[cm]?[jt]sx?|py|rb|go|java|kts?|scala|groovy|gradle|rs|php|cs|fs|swift|dart|exs?|erl|clj|lua|pl|r|jl|vue|svelte|c|h|cc|cpp|hpp|m|mm)$/i;
 // In source code (`code`) what follows a credential name is an expression, a type or a reference, so only a literal is
 // hidden: a quoted string of eight or more characters, or one that spans lines, that names no reference, template, path
 // or address, set to the name with = := => : || or ?? (`password = "…"`, `"api_key": "…"`), passed to a flag
 // (`--token "…"`), or given to Authorization (`headers.set("Authorization", "…")`); an Authorization header's scheme and
-// credential; a Bearer credential with a digit in it; the value of a query parameter whose name holds a credential
-// name (`?access_token=…`, `&client_secret=…`). URL user info is hidden unless its password, or its user when it has
-// none, is only references. A literal goes with its quotes, line by line, so text redacted again, such as numbered
-// lines, comes back the same.
+// credential, or a credential of eight or more characters with a digit in it and no scheme; a Bearer credential with a
+// digit in it; the value of a query parameter whose name holds a credential name (`?access_token=…`,
+// `&client_secret=…`); and the value of such a name set with = in a string, or after a ;, as a connection string or a
+// command writes it (`"Server=db;Password=…"`, `"API_KEY=… npm test"`), up to a space, ; & = or a quote, so a chain of
+// such names is read once. URL user info is hidden unless its password, or its user when it has none, is only
+// references. A literal goes with its quotes, line by line, so text redacted again, such as numbered lines, comes back
+// the same.
 const LITERAL_VALUE = `"(?:\\\\.|[^"\\\\])*"|'[^']*'|\`(?:\\\\.|[^\`\\\\])*\``;
 const NAMED_LITERAL = new RegExp(`((?<![\\w-])${SECRET_NAME}["']?\\s*(?::[ \\t]*[\\w$.<>[\\]|?][\\w$.<>[\\]|? ]*?)?(?::=|=>|[=:]|\\|\\|=?|\\?\\?=?)\\s*)(${LITERAL_VALUE})`, 'gi');
 const FLAG_LITERAL = new RegExp(`((?<![\\w-])--?${SECRET_NAME}(?:\\s*=\\s*|\\s+))(${LITERAL_VALUE})`, 'gi');
 const AUTHORIZATION_LITERAL = new RegExp(`((?:\\(\\s*["']Authorization["']\\s*,|\\[\\s*["']Authorization["']\\s*\\]\\s*=)\\s*)(${LITERAL_VALUE})`, 'gi');
-const HEADER_LITERAL = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[A-Za-z][\w-]*[ \t]+[^\s"'`$]{8,}/gim;
+const HEADER_LITERAL = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)(?:[A-Za-z][\w-]*[ \t]+[^\s"'`$]{8,}|(?=[^\s"'`$,;)}]*\d)[^\s"'`$,;)}]{8,}(?![^\s"'`]))/gim;
 const BEARER_LITERAL = /\bBearer[ \t]+(?=[\w.~+/-]*\d)[\w.~+/-]{8,}=*/gi;
 const QUERY_LITERAL = new RegExp(`([?&]${SECRET_NAME}=)(?![$<{%#(])[^&\\s"'<>\`]{8,}`, 'gi');
+const PAIR_LITERAL = new RegExp(`(?<![\\w-])(${SECRET_NAME}=)([^\\s;&="'\`]+)`, 'gi');
 const REFERENCE = /\$\{[^}]*\}|\$[A-Za-z_]\w*|\{\{[^}]*\}\}|#\{[^}]*\}|\{\w*\}|%(?:\(\w+\))?s/g;
-const literal = (value: string) => (value.length >= 8 || value.includes('\n')) && !/^(?:[$<{%/]|\w+:\/\/)|\$\{|\{\{|#\{/.test(value);
+const reference = (value: string) => /^(?:[$<{%/]|\w+:\/\/)|\$\{|\{\{|#\{/.test(value);
+const literal = (value: string) => (value.length >= 8 || value.includes('\n')) && !reference(value);
 const literalValue = (match: string, prefix: string, quoted: string) => literal(quoted.slice(1, -1)) ? prefix + redactedLines(quoted) : match;
+// Command output (`output`) prints code and configuration alike, so it reads as code, and a value set to a credential
+// name on a configuration line is hidden as well, whatever its length: an env-style `NAME=value` line, at the start of a
+// line or after a diff marker, indentation, a YAML list dash, `export`, `env`, or a Dockerfile's `ENV` or `ARG`, and
+// after a key's path, such as an .npmrc registry's (`//registry.npmjs.org/:_authToken=…`), a properties key's
+// (`db.password=…`) or grep's `file:line:`, its name in capitals when it is indented, as code indents a keyword argument;
+// a YAML entry whose name is in capitals (`POSTGRES_PASSWORD: …`), as compose and CI files set the environment, unless
+// its value ends with , or ; as code's does; and a flag's unquoted value (`--password=…`, `--password …`). A reference,
+// such as $X, ${X}, <x>, {{x}} or a path, is no value.
+const ENV_LINE = new RegExp(`^([-+]?([ \\t]*)(?:-[ \\t]+)?(?:(export|env|arg)[ \\t]+)?(?:[^\\s=]*[/:.])?(${SECRET_NAME})=)("(?:\\\\.|[^"\\\\\\n])*"?|'[^'\\n]*'?|[^\\s"']\\S*)`, 'gim');
+const ENV_ENTRY = new RegExp(`^((?:[^\\s:]+:\\d+[:-])?[-+]?[ \\t]*(?:-[ \\t]+)?(${SECRET_NAME})[ \\t]*:[ \\t]+)("(?:\\\\.|[^"\\\\\\n])*"?|'[^'\\n]*'?|[^\\s"'#]\\S*(?:[ \\t]+[^\\s#]\\S*)*)`, 'gim');
+const FLAG_OUTPUT = new RegExp(`((?<![\\w-])--?${SECRET_NAME}(?:=|[ \\t]+(?!-)))([^\\s"'\`]+)`, 'gi');
+const capitals = (name: string) => /^[A-Z\d_-]+$/.test(name) && /[A-Z]/.test(name);
+const configValue = (value: string) => { const bare = value.replace(/^(["'])([\s\S]*?)\1?$/, '$2'); return bare !== '' && !reference(bare); };
+const configLines = (text: string) => text
+  .replace(ENV_LINE, (match: string, prefix: string, indent: string, keyword: string | undefined, name: string, value: string) =>
+    indent && !keyword && !capitals(name) || !configValue(value) ? match : prefix + REDACTED)
+  .replace(ENV_ENTRY, (match: string, prefix: string, name: string, value: string) => capitals(name) && configValue(value) && !/[,;]$/.test(value) ? prefix + REDACTED : match)
+  .replace(FLAG_OUTPUT, (match: string, prefix: string, value: string) => configValue(value) ? prefix + REDACTED : match);
 // The quote of the string each offset sits in on its line: a quote opens a string, the same quote closes it, and inside
 // one a backslash escapes the next character. Offsets are asked in order, so one pass over the text answers them all.
 function strings(text: string) {
@@ -138,7 +167,8 @@ function codeLiterals(text: string) {
     const [, prefix, quoted] = match;
     return inside(match.index) === quoted[0] || !literal(quoted.slice(1, -1)) ? undefined : prefix + redactedLines(quoted);
   });
-  return text.replace(QUERY_LITERAL, `$1${REDACTED}`);
+  text = text.replace(QUERY_LITERAL, `$1${REDACTED}`);
+  return literals(text, PAIR_LITERAL, (match, inside) => (inside(match.index) || match.input[match.index - 1] === ';') && literal(match[2]) ? match[1] + REDACTED : undefined);
 }
 const literalUserInfo = (match: string, scheme: string) => {
   const userinfo = match.slice(scheme.length, -1), colon = userinfo.indexOf(':');
@@ -155,10 +185,12 @@ const literalUserInfo = (match: string, scheme: string) => {
  * values after credential names and Authorization alone, for text formatted from values already redacted one
  * by one, whose `NAME: file:line` labels are not assignments; every other shape is still replaced. `code: true` reads
  * the text as source code, where a value after a credential name is an expression or a type: key blocks, token shapes
- * and literals stay hidden (a quoted literal set to a credential name, a Bearer or Authorization credential, a query
- * value, URL user info that is not a reference), while `const token = getToken(user)` or `password: string` stays.
+ * and literals stay hidden (a quoted literal set to a credential name, a Bearer or Authorization credential, a query or
+ * connection string value, URL user info that is not a reference), while `const token = getToken(user)` or
+ * `password: string` stays. `output: true` reads command output, which prints code and configuration alike: as code,
+ * and with the values env-style lines, YAML entries in capitals and flags set to a credential name hidden as well.
  */
-export function redact(input: unknown = '', { decodeUri = false, names = true, code = false, secrets = [] }: { decodeUri?: boolean; names?: boolean; code?: boolean; secrets?: Iterable<unknown> } = {}): string {
+export function redact(input: unknown = '', { decodeUri = false, names = true, code = false, output = false, secrets = [] }: { decodeUri?: boolean; names?: boolean; code?: boolean; output?: boolean; secrets?: Iterable<unknown> } = {}): string {
   // A shaped substring may be only part of a supplied credential. Hide that whole value first,
   // after optional URI decoding, so shape replacements cannot leave its prefix or suffix behind.
   const values = [...secrets], known = hide(decodeUri ? [...values, ...values.filter((value): value is string => typeof value === 'string').map(decodedUri)] : values);
@@ -166,10 +198,11 @@ export function redact(input: unknown = '', { decodeUri = false, names = true, c
   let text = (decodeUri ? known(decodedUri(supplied)) : supplied)
     .replace(/(?:\u001b|\^\[)\[[0-9;]*m/g, '')
     .replace(PEM, block => redactedLines(block));
-  if (code) {
+  if (code || output) {
     if (names) text = text.replace(HEADER_LITERAL, `$1${REDACTED}`).replace(AUTHORIZATION_LITERAL, literalValue);
     text = text.replace(BEARER_LITERAL, `Bearer ${REDACTED}`);
     if (names) text = codeLiterals(text);
+    if (names && output) text = configLines(text);
     return text.replace(TOKEN_SHAPE, REDACTED).replace(USER_INFO, literalUserInfo);
   }
   if (names) text = text.replace(AUTHORIZATION_HEADER, `$1${REDACTED}`).replace(AUTHORIZATION, `$1${REDACTED}`);

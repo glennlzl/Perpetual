@@ -261,6 +261,42 @@ test('tool replies still hide token shapes, key blocks, quoted literals and URL 
   for (const secret of ['fixture-literal', token, 'QUJDRA']) assert.ok(!JSON.stringify([read, run]).includes(secret), secret);
 });
 
+// Configuration a repository may commit with unquoted credentials: an env file, npm's registry settings and a compose
+// file. The tools read each as configuration, and command output that prints them hides the same values.
+const CONFIGURATION = {
+  '.env': 'DATABASE_HOST=db\nDB_PASSWORD=fixture-env-password\nJWT_SECRET=fixture-env-secret\n',
+  '.npmrc': 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=00000000-0000-4000-8000-fixture00001\n',
+  'compose.yml': 'services:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: fixture-compose-password\n',
+};
+
+test('read, grep and run hide every value an env file, .npmrc or compose file sets to a credential name', async t => {
+  const f = await tools(t);
+  for (const [path, text] of Object.entries(CONFIGURATION)) await writeFile(join(f.root, path), text);
+  const read = await Promise.all(Object.keys(CONFIGURATION).map(path => f.call('read', { path })));
+  assert.deepEqual(read.map(result => result.content), [
+    '1\tDATABASE_HOST=db\n2\tDB_PASSWORD=[REDACTED]\n3\tJWT_SECRET=[REDACTED]',
+    '1\tregistry=https://registry.npmjs.org/\n2\t//registry.npmjs.org/:_authToken=[REDACTED]',
+    '1\tservices:\n2\t  db:\n3\t    image: postgres:16\n4\t    environment:\n5\t      POSTGRES_USER: app\n6\t      POSTGRES_PASSWORD: [REDACTED]',
+  ]);
+  const grep = await f.call('grep', { pattern: 'PASSWORD|SECRET|_authToken' });
+  assert.deepEqual((grep.matches as string[]).toSorted(), ['.env:2:DB_PASSWORD=[REDACTED]', '.env:3:JWT_SECRET=[REDACTED]', '.npmrc:2://registry.npmjs.org/:_authToken=[REDACTED]',
+    'compose.yml:6:      POSTGRES_PASSWORD: [REDACTED]']);
+  const run = await f.call('run', { command: 'cat .env .npmrc compose.yml' });
+  assert.equal(run.output, `${read.map(result => String(result.content).replace(/^\d+\t/gm, '')).join('\n')}\n`, 'Command output hides what the files\' reads hide.');
+  const diff = await f.call('run', { command: 'git diff --no-index /dev/null .env; grep -rn PASSWORD .env compose.yml' });
+  for (const secret of ['fixture-env', 'fixture00001', 'fixture-compose']) assert.ok(!JSON.stringify([read, grep, run, diff]).includes(secret), secret);
+  assert.match(String(diff.output), /^\+DB_PASSWORD=\[REDACTED\]$/m);
+});
+
+test('JSON reads as code: versions and references stay, while a literal and a script\'s credential are hidden', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: 'app', scripts: { test: 'API_KEY=fixture-script-key jest', deploy: 'vercel --token=$VERCEL_TOKEN' },
+    dependencies: { jsonwebtoken: '^9.0.2', 'passport-jwt': '^4.0.1' }, config: { apiKey: 'fixture-json-literal' } }, null, 2) + '\n');
+  const read = await f.call('read', { path: 'package.json' });
+  assert.equal(read.content, ['1\t{', '2\t  "name": "app",', '3\t  "scripts": {', '4\t    "test": "API_KEY=[REDACTED] jest",', '5\t    "deploy": "vercel --token=$VERCEL_TOKEN"', '6\t  },',
+    '7\t  "dependencies": {', '8\t    "jsonwebtoken": "^9.0.2",', '9\t    "passport-jwt": "^4.0.1"', '10\t  },', '11\t  "config": {', '12\t    "apiKey": [REDACTED]', '13\t  }', '14\t}'].join('\n'));
+});
+
 test('a small selected line does not bypass the complete-file observation limit', async t => {
   const f = await tools(t);
   await writeFile(join(f.root, 'large.txt'), `needle\n${'x\n'.repeat(140_000)}`);
