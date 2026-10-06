@@ -8,7 +8,7 @@
 
 **Build** — The fixed stage holding the repository's workflow runner, GitHub Actions. A passing workflow is not a deployment.
 
-**Release** — An explicit request to deploy one tested commit through a configured GitHub deployment handler. It binds the confirmed commit and target to the ordinary Sandbox gates and follows the resulting deployment ID. Gate readiness permits a request; only the handler's reported success makes the release Deployed. An uncertain request is observed, never automatically repeated.
+**Release** — An explicit request to deploy one tested commit through a configured GitHub deployment handler. It binds the confirmed commit and target to the ordinary Sandbox gates and follows the resulting deployment ID. Gate readiness permits a request; only the handler's reported success makes the release Deployed. An uncertain request is observed, never automatically repeated, until it ends or a person abandons it, which ends only Perpetual's record of it.
 
 **Production** — The fixed last stage, holding the deployment targets the repository configures, such as a Railway service or a Vercel project; those are its production deployments. Beside them it lists the deployments GitHub records for the scanned commit, as the app that made them, such as a Vercel or Railway Git integration, reported them. Configuration alone never verifies a target or a release, and a record is the provider's report, not the journey gate's verdict.
 

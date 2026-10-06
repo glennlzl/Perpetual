@@ -42,7 +42,7 @@ import TwinServices from './TwinServices';
 import { environmentStatusLabel, latestEnvironment } from '@/lib/environment-view';
 import { GateActions, GateBadge, useStageGates } from './StageGate';
 import { ProductionRelease, useReleases } from './ProductionRelease';
-import { releaseBadge } from '@/lib/production-release';
+import { releaseBadge, shownRelease } from '@/lib/production-release';
 import { isStageGate, productionStatus } from '@/lib/stage-gate.ts';
 import type { BrowserView, Environment, PipelineAction, StageRemoval, WorkspaceSnapshot } from '@/lib/test-workspace';
 import type { SourceSelection } from './SourceSettings';
@@ -202,9 +202,10 @@ function DeploymentGroup({ service, repoPath, stageId, selection, openDialog }: 
 // describes the pipeline, so its arrow says so and the stage keeps its own status.
 function stageStatus(stage: PipelineStage, { environment, buildStatus, origin, revision, services, gate, gated, releases }: Pick<StageData, 'environment' | 'services'> & Partial<Pick<StageData, 'buildStatus' | 'origin' | 'revision' | 'gate' | 'gated' | 'releases'>>): StageStatusView | null {
   if (stage.kind === 'source') return revision ? { kind: 'ready', text: origin === 'github' ? 'GitHub' : 'Local', sha: revision } : { kind: 'unconfigured', text: 'No commit' };
-  // Ready is a gate verdict; a requested deployment reports its own state at its exact commit.
+  // Ready is a gate verdict; a requested deployment reports its own state at its exact commit, an earlier commit's
+  // while it is unresolved.
   if (stage.kind === 'production') {
-    const release = releaseBadge(releases?.current);
+    const release = releaseBadge(shownRelease(releases));
     if (release) return { kind: release.tone, text: release.label, sha: release.sha, hint: release.hint };
     const ready = productionStatus(gate && !isStageGate(gate) ? gate : null);
     if (ready) return { ...ready, hint: 'Every Sandbox gate passed or released this commit.' };

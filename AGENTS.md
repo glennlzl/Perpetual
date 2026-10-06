@@ -56,7 +56,7 @@ Read `docs/gate.md` before changing `src/gate`.
 
 - Business journeys are a CI/CD gate, not an optional schedule.
 - On every push to the target branch, and on a manual re-run, the Perpetual controller:
-  1. waits for GitHub Actions Build to pass at that exact commit, for a managed GitHub source; until then the gate is `waiting-build`, or `build-failed` when Build did not pass, and starts no twin or journey;
+  1. waits for GitHub Actions Build to pass at that exact commit, for a managed GitHub source; until then the gate is `waiting-build`, or `build-failed` when Build did not pass, or `needs-release` when no push or dispatch run arrives within 15 minutes of the push or re-run, and starts no twin or journey;
   2. rebuilds the Sandbox stage's twin at that commit, starting with the first Sandbox stage, such as Beta;
   3. runs the approved code of the stage's reviewed, selected journeys;
   4. reports a `perpetual/<Stage>` GitHub commit status that branch protection can require.

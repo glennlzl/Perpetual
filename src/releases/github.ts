@@ -45,7 +45,15 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
     try{const {stdout}=await runGitHub(['api','--hostname','github.com','--method',method,'--include','-H','Accept: application/vnd.github+json',...fields,endpoint],{run,maxBuffer:2*1024*1024});
       const reply=parseGitHubResponse(stdout);if(reply.status!==(method==='POST'?201:200))throw new Error('Unexpected response.');return reply.data;
     }catch(error){const status=githubHttpStatus(error),definitive=method==='POST'&&status!==null&&status>=400&&status<500&&status!==408;
-      throw Object.assign(new Error(method==='POST'?'Could not confirm the GitHub deployment request.':'Could not read the GitHub deployment configuration or status.'),{definitive});}
+      throw Object.assign(new Error(method==='POST'?'Could not confirm the GitHub deployment request.':'Could not read the GitHub deployment configuration or status.'),{definitive,status});}
+  }
+  // GitHub answers 404 for a deployment it no longer has, and for a repository the account cannot read: only a readable
+  // repository makes it the former, which is reported with why it ended (the manager ends only an unresolved release with
+  // it). Any other failure is thrown as it was.
+  async function gone(error:unknown,repository:string,deploymentId:string):Promise<ReleaseRemote>{
+    if((error as {status?:unknown}|null)?.status!==404)throw error;
+    await request('GET',`repos/${repository}`);
+    return {deploymentId,status:'failed',error:'The deployment no longer exists on GitHub.'};
   }
   async function verifyTarget(source:ReleaseSource,target:ReleaseTarget){
     safeSource(source);
@@ -65,6 +73,8 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
       const current=async()=>{const head=await readBranchHead({repository:source.repository,branch:source.branch,etag:null},{request:get});
         if(head.status!==200||head.sha!==source.sha)throw new Error('The branch head changed. Run its gates before deploying.');};
       await current();const build=await readBuild(source,{request:get,session});
+      // A gate released for a commit GitHub Actions never built does not stand in for Build.
+      if(build.status==='none')throw new Error('GitHub Actions has no push or dispatch run for this commit. Dispatch a workflow at it, then deploy.');
       if(build.status!=='passed')throw new Error(build.reason||'GitHub Actions Build has not passed for this commit.');
       await current();
     },
@@ -78,7 +88,8 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
     },
     async read(input){
       safeSource(input.source);let deployment:unknown;
-      if(input.deploymentId){if(!/^\d+$/.test(input.deploymentId))throw new Error('Invalid deployment identifier.');deployment=await request('GET',`repos/${input.source.repository}/deployments/${input.deploymentId}`);}
+      if(input.deploymentId){if(!/^\d+$/.test(input.deploymentId))throw new Error('Invalid deployment identifier.');
+        try{deployment=await request('GET',`repos/${input.source.repository}/deployments/${input.deploymentId}`);}catch(error){return gone(error,input.source.repository,input.deploymentId);}}
       else{
         const found:unknown[]=[];
         for(let page=1;page<=5;page++){
@@ -88,7 +99,8 @@ export function createReleaseGitHub({run,session=getGitHubSession}:{run?:GitHubR
         if(!found.length)return null;if(found.length!==1)throw new Error('Multiple deployments claim this release. Review them on GitHub.');deployment=found[0];
       }
       if(!matches(deployment,input)||input.deploymentId&&id(deployment.id)!==input.deploymentId)throw new Error('The deployment does not match this release.');
-      const statuses=await request('GET',`repos/${input.source.repository}/deployments/${id(deployment.id)!}/statuses?per_page=1`);
+      let statuses:unknown;
+      try{statuses=await request('GET',`repos/${input.source.repository}/deployments/${id(deployment.id)!}/statuses?per_page=1`);}catch(error){return gone(error,input.source.repository,id(deployment.id)!);}
       return remote(deployment,input,statuses);
     },
   };

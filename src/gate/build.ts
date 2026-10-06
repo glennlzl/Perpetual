@@ -13,7 +13,8 @@ const INCOMPLETE = 'GitHub did not return complete Build evidence. Waiting to ch
 /**
  * Fresh Actions evidence for one branch commit. Commit statuses (including perpetual/*) are never read here.
  * The latest run of each workflow is the build to judge; its older failures do not defeat a successful rerun.
- * A missing run, unreadable/incomplete evidence or an account change never admits a twin.
+ * A missing run, unreadable/incomplete evidence or an account change never admits a twin. Complete evidence with no
+ * push or dispatch run of the branch at the commit is `none`, so the gate can tell it from a build still running.
  */
 export async function readBuild(input: BuildInput, { request = githubRequest, session = getGitHubSession }: { request?: Request; session?: () => Promise<GitHubSession> } = {}): Promise<BuildVerdict> {
   const { repository, branch, sha, login } = input;
@@ -46,7 +47,7 @@ export async function readBuild(input: BuildInput, { request = githubRequest, se
   if (!(await connected())) return waiting('The GitHub account changed while verifying Build.');
   if (total === undefined || received < total) return waiting(INCOMPLETE);
   const runs = [...latest.values()], result = completedRuns(runs, branch);
-  if (!runs.length) return waiting('Waiting for GitHub Actions to build this branch commit.');
+  if (!runs.length) return { status: 'none', reason: 'Waiting for GitHub Actions to build this branch commit.' };
   if (!result) return waiting('Waiting for GitHub Actions to finish Build.');
   if (result.failed.length) return { status: 'blocked', reason: 'GitHub Actions Build failed. Repair it or rerun the failed workflow.' };
   if (!result.passed) return { status: 'blocked', reason: 'GitHub Actions Build did not pass. Complete a successful workflow run.' };

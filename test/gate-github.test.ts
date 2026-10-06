@@ -44,7 +44,19 @@ test('invalid statuses are refused before gh runs, and gh failures return fixed 
   assert.equal(ran, false);
   const denied = Object.assign(new Error('failed'), { stderr: 'HTTP 403: Resource not accessible by integration (token gho_secret)' });
   await assert.rejects(postCommitStatus({ repository: 'owner/app', sha: SHA, state: 'success', context: 'perpetual/Beta', description: 'Passed' }, { run: async () => { throw denied; } }),
-    (error: Error) => error.message === 'GitHub denied the commit status. Check write access to this repository.');
+    (error: Error) => error.message === 'GitHub denied the commit status. Check write access to this repository, then run the gate again.');
+});
+
+test('a refusal GitHub would repeat is marked refused; a rate limit, a timeout or a server error is not', async () => {
+  const post = (failure: object) => postCommitStatus({ repository: 'owner/app', sha: SHA, state: 'pending', context: 'perpetual/Beta', description: 'Running' }, { run: async () => { throw Object.assign(new Error('failed'), failure); } })
+    .then(() => assert.fail('The report must fail.'), (error: Error & { refused?: unknown }) => [error.message, error.refused === true]);
+  const denied = 'GitHub denied the commit status. Check write access to this repository, then run the gate again.';
+  assert.deepEqual(await post({ stderr: 'gh: Validation Failed (HTTP 422)' }), ['GitHub refused the commit status. Check that the commit is on GitHub, then run the gate again.', true]);
+  assert.deepEqual(await post({ stderr: 'gh: Resource not accessible by integration (HTTP 403)' }), [denied, true]);
+  assert.deepEqual(await post({ stderr: 'gh: Not Found (HTTP 404)' }), [denied, true]);
+  assert.deepEqual(await post({ stderr: 'gh: You have exceeded a secondary rate limit (HTTP 403)' }), ['GitHub has temporarily limited requests. Wait before trying again.', false]);
+  assert.deepEqual(await post({ killed: true }), ['Reporting the commit status timed out.', false]);
+  assert.deepEqual(await post({ stderr: 'gh: Server Error (HTTP 502)' }), ['Reporting the commit status failed.', false]);
 });
 
 test('only a managed clone can be moved to a commit; the user checkout never is', async t => {

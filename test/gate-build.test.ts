@@ -29,7 +29,9 @@ async function harness(t: TestContext, { managed = true, dataDir: existing, retr
     post: async (input: CommitStatusPost) => { if (state.failPost) throw new Error('Status write unavailable.'); posts.push(input); },
     build: async (input: typeof reads[number]) => { reads.push(input); return state.read ? state.read() : state.build; },
   };
-  const manager = await createGateManager({ dataDir, source: () => state.source, github, retryInterval,
+  // The controller's clock runs with real time, `ahead` of it.
+  const clock = { ahead: 0 };
+  const manager = await createGateManager({ dataDir, source: () => state.source, github, retryInterval, now: () => new Date(Date.now() + clock.ahead).toISOString(),
     steps: {
       prepare: async gate => { work.push(`prepare ${gate.sha}`); return gate; },
       journeys: () => state.journeys,
@@ -38,7 +40,7 @@ async function harness(t: TestContext, { managed = true, dataDir: existing, retr
     },
   });
   t.after(async () => { await manager.close(); if (!existing) await rm(dataDir, { recursive: true, force: true }); });
-  return { manager, state, work, reads, posts, dataDir, github };
+  return { manager, state, work, reads, posts, dataDir, github, clock };
 }
 
 // Without admission before prepare, the first assertion catches source movement and twin work while CI is pending.
@@ -71,6 +73,82 @@ test('a failed build cannot be manually released and a successful same-commit re
   assert.equal(h.work.filter((step: string) => step.startsWith('run')).length, 1);
 });
 
+const MINUTE = 60_000, UNBUILT = 'GitHub Actions has no push or dispatch run for this commit. Release it, or dispatch a workflow and run the gate again.';
+const NO_RUN: Build = { status: 'none', reason: 'Waiting for GitHub Actions to build this branch commit.' };
+
+test('a commit GitHub Actions never builds needs release after fifteen minutes, and only a person moves it on', async t => {
+  const h = await harness(t);
+  h.state.source.stages = [...h.state.source.stages, { id: 'gamma', name: 'Gamma', kind: 'sandbox' }];
+  h.state.build = NO_RUN;
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.deepEqual([h.manager.view().stages.beta.status, h.manager.view().stages.beta.reason], ['waiting-build', NO_RUN.reason]);
+  h.clock.ahead = 14 * MINUTE;
+  const checked = h.reads.length;
+  await until(() => h.reads.length >= checked + 2);
+  assert.equal(h.manager.view().stages.beta.status, 'waiting-build', 'A push or dispatch run may still appear.');
+  h.clock.ahead = 15 * MINUTE;
+  await until(() => h.manager.view().stages.beta.status === 'needs-release');
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.reason, UNBUILT);
+  assert.deepEqual(h.work, [], 'Nothing is rebuilt or run without Build.');
+  assert.deepEqual([h.manager.view().stages.gamma, h.manager.view().production], [undefined, null], 'Nothing moves on by itself.');
+  assert.deepEqual(h.posts.filter(post => post.sha === A).map(post => post.description), ['Waiting for Build', 'Needs release']);
+  // A release still rechecks Build: an unfinished or failed one is refused.
+  for (const build of [{ status: 'waiting', reason: 'Waiting for GitHub Actions to finish Build.' }, { status: 'blocked', reason: 'CI failed.' }] as const) {
+    h.state.build = build;
+    await assert.rejects(h.manager.release({ stageId: 'beta', sha: A, login: 'tester' }), new RegExp(build.reason));
+  }
+  // A person releases the commit while GitHub Actions still has no run for it; each stage needs its own release.
+  h.state.build = NO_RUN;
+  await h.manager.release({ stageId: 'beta', sha: A, login: 'tester' });
+  await until(() => h.manager.view().stages.gamma?.status === 'needs-release');
+  assert.equal(h.manager.view().stages.gamma.reason, UNBUILT);
+  assert.equal(h.manager.view().production, null);
+  await h.manager.release({ stageId: 'gamma', sha: A, login: 'tester' });
+  await h.manager.idle();
+  assert.deepEqual(h.manager.view().production, { sha: A, status: 'ready' });
+  assert.deepEqual(h.work, []);
+});
+
+test('Run now gives a commit without a Build run another wait, and a run that appears meanwhile admits it', async t => {
+  const h = await harness(t);
+  h.state.build = NO_RUN;
+  await h.manager.run({ stageId: 'beta' });
+  h.clock.ahead = 15 * MINUTE;
+  await until(() => h.manager.view().stages.beta.status === 'needs-release');
+  await h.manager.idle();
+  await h.manager.run({ stageId: 'beta' });
+  await h.manager.idle();
+  assert.deepEqual([h.manager.view().stages.beta.status, h.manager.view().stages.beta.reason], ['waiting-build', NO_RUN.reason]);
+  h.clock.ahead = 25 * MINUTE;
+  h.state.build = { status: 'passed' }; // a dispatched run at the commit passed
+  await until(() => h.manager.view().stages.beta.status === 'passed');
+  await h.manager.idle();
+  assert.deepEqual(h.work, [`prepare ${A}`, `rebuild ${A}`, `run ${A}`]);
+});
+
+test('Run now sends a report GitHub refused again, even for a gate whose Build failed and still waits', async t => {
+  const h = await harness(t);
+  h.state.build = { status: 'blocked', reason: 'CI failed.' };
+  let refusing = true, attempts = 0;
+  h.github.post = async input => {
+    attempts++;
+    if (refusing) throw Object.assign(new Error('GitHub denied the commit status. Check write access to this repository, then run the gate again.'), { refused: true });
+    h.posts.push(input);
+  };
+  await h.manager.run({ stageId: 'beta' });
+  await until(() => attempts === 1);
+  await h.manager.idle();
+  assert.equal(h.manager.view().stages.beta.status, 'build-failed');
+  assert.match(h.manager.view().stages.beta.statusError ?? '', /denied the commit status/);
+  refusing = false;
+  await h.manager.run({ stageId: 'beta' }); // the gate still waits for a successful rerun, and is not queued again
+  await until(() => h.posts.some(post => post.sha === A && post.description === 'Build did not pass'));
+  await h.manager.idle();
+  assert.deepEqual([attempts, h.manager.view().stages.beta.statusError], [2, undefined]);
+});
+
 test('a GitHub read error remains waiting and cannot become a releasable journey verdict', async t => {
   const h = await harness(t);
   h.state.read = async () => { throw new Error('GitHub is unavailable.'); };
@@ -97,6 +175,22 @@ test('a newer push supersedes a build wait even when the older build read return
   assert.deepEqual(h.work, [`prepare ${B}`, `rebuild ${B}`, `run ${B}`]);
   const saved = JSON.parse(await readFile(join(h.dataDir, 'gates/state.json'), 'utf8'));
   assert.equal(saved.gates.find((gate: { sha: string }) => gate.sha === A).status, 'superseded');
+});
+
+test('a commit superseded while it waits for Build is not left pending: its status ends in an error naming the newer commit', async t => {
+  const h = await harness(t);
+  await h.manager.watch(); // baseline A
+  h.state.head = B;
+  await h.manager.watch(); // push B while its Build runs
+  await until(() => h.posts.some(post => post.sha === B));
+  h.state.head = C;
+  await h.manager.watch(); // push C before B's Build ends
+  await until(() => h.posts.some(post => post.sha === B && post.state !== 'pending'));
+  await h.manager.idle();
+  assert.deepEqual(h.posts.filter(post => post.sha === B).map(post => [post.state, post.context, post.description]),
+    [['pending', 'perpetual/Beta', 'Waiting for Build'], ['error', 'perpetual/Beta', `Superseded by ${C.slice(0, 7)}`]]);
+  assert.deepEqual([h.manager.view().stages.beta.sha, h.manager.view().stages.beta.status], [C, 'waiting-build']);
+  assert.equal(h.posts.some(post => post.sha === A), false, 'The baseline was never gated, so nothing is reported on it.');
 });
 
 const saved = async (dataDir: string) => (JSON.parse(await readFile(join(dataDir, 'gates/state.json'), 'utf8')).gates as { sha: string; status: string }[]).map(gate => [gate.sha, gate.status]);

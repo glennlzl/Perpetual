@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReleaseGitHub } from '../src/releases/github.ts';
@@ -241,4 +241,103 @@ test('current deployment can be older than the recent history display limit',asy
   assert.equal(restored.recent.length,20);assert.equal(restored.recent.some(record=>record.id===first.id),false);
   assert.equal(restored.current?.id,first.id);assert.equal(restored.canDeploy,false);
   await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);
+});
+
+test('beyond a thousand records the oldest finished ones go, keeping unresolved ones and the latest of each target',async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),'perpetual-release-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const time='2026-01-01T00:00:00Z';
+  const stored=(index:number,{branch='main',environment='production',status='failed'}:{branch?:string;environment?:string;status?:string}={})=>{
+    const id=`release-${index}`,sha=index.toString(16).padStart(40,'0'),destination={...target,environment};
+    return {id,source:{...evidence().source!,branch,sha},target:destination,gates:[{...evidence().gates[0],sha}],workflow,record:{id,sha,...destination,status,createdAt:time,updatedAt:time}};
+  };
+  // The two oldest records: the only deployment to staging, and a deployment of another branch still unresolved.
+  const releases=[stored(1,{environment:'staging',status:'deployed'}),stored(2,{branch:'release',status:'queued'}),...Array.from({length:998},(_,index)=>stored(index+3))];
+  await mkdir(join(dataDir,'releases'),{mode:0o700});await writeFile(join(dataDir,'releases','state.json'),JSON.stringify({version:1,targets:{},releases}));
+  let current=evidence();
+  const manager=await createReleaseManager({dataDir,getEvidence:()=>structuredClone(current),github:{verifyTarget:async()=>workflow,verifyCommit:async()=>{},create:async()=>({deploymentId:'12',status:'queued'}),read:async()=>({deploymentId:'12',status:'deployed'})},pollInterval:0});
+  t.after(()=>manager.close());
+  const ids=async()=>(JSON.parse(await readFile(join(dataDir,'releases','state.json'),'utf8')).releases as {id:string}[]).map(entry=>entry.id);
+  await manager.configure(target);
+  const first=(await manager.deploy({sha:SHA,target})).current!;
+  let saved=await ids();
+  assert.deepEqual([saved.length,saved.slice(0,3),saved.at(-1)],[1000,['release-1','release-2','release-4'],first.id],'The oldest finished record of a target with newer records goes first.');
+  assert.equal((await manager.refresh()).current?.status,'deployed');
+  // The newest record of the main branch's production target is now the one just made, so the next oldest goes.
+  current=evidence();current.source!.sha=OTHER;current.gates[0].sha=OTHER;
+  const second=(await manager.deploy({sha:OTHER,target})).current!;
+  saved=await ids();
+  assert.deepEqual([saved.length,saved.slice(0,3),saved.slice(-2)],[1000,['release-1','release-2','release-5'],[first.id,second.id]]);
+});
+
+test('an earlier commit\'s unresolved release stays in the view, with its logs, until it ends',async t=>{
+  let status:'deploying'|'failed'='deploying';
+  const f=await fixture(t,{read:async()=>({deploymentId:'12',status,statusId:'41',logUrl:'https://ci.example.test/runs/7'})});
+  await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});
+  const deploying=await f.manager.refresh();
+  assert.deepEqual([deploying.current?.status,deploying.unresolved],['deploying',null],'This commit\'s release is current, never also unresolved.');
+  // A gate moved the source to a newer commit while the deployment runs.
+  const newer=evidence();newer.source!.sha=OTHER;newer.gates[0].sha=OTHER;f.setEvidence(newer);
+  const moved=await f.manager.view();
+  assert.deepEqual([moved.current,moved.unresolved?.sha,moved.unresolved?.status,moved.unresolved?.logUrl,moved.canDeploy],[null,SHA,'deploying','https://ci.example.test/runs/7',false]);
+  status='failed';
+  const ended=await f.manager.refresh();
+  assert.deepEqual([ended.unresolved,ended.canDeploy,ended.recent[0].status],[null,true,'failed']);
+});
+
+test('a person abandons an unresolved release: Perpetual stops reading it, and Deploy and Configure return',async t=>{
+  let reads=0;const f=await fixture(t,{read:async()=>{reads++;return {deploymentId:'12',status:'queued'};}});
+  await f.manager.configure(target);const queued=(await f.manager.deploy({sha:SHA,target})).current!;
+  const status=(code:number,pattern=/./)=>(error:Error&{statusCode?:number})=>error.statusCode===code&&pattern.test(error.message);
+  await assert.rejects(f.manager.abandon({id:'release-elsewhere'}),status(404));
+  const abandoned=await f.manager.abandon({id:queued.id});
+  assert.deepEqual([abandoned.current?.status,abandoned.current?.abandonedBy,abandoned.current?.error,abandoned.canDeploy,abandoned.blockedReason],['abandoned','owner',undefined,true,null]);
+  await assert.rejects(f.manager.abandon({id:queued.id}),status(409,/no longer unresolved/));
+  // GitHub still reports the deployment queued, but Check status never reads an abandoned release.
+  const before=reads,checked=await f.manager.refresh();
+  assert.deepEqual([reads-before,checked.current?.status],[0,'abandoned']);
+  await f.manager.close();const reopened=await createReleaseManager(f.options);t.after(()=>reopened.close());
+  assert.equal((await reopened.view()).current?.abandonedBy,'owner','The abandonment survives a restart.');
+  const staging={...target,environment:'staging'};await reopened.configure(staging);
+  assert.equal((await reopened.deploy({sha:SHA,target:staging})).current?.status,'queued');assert.equal(f.requests.length,2);
+});
+
+test('a request GitHub never received can be abandoned, so the commit can be requested again',async t=>{
+  let creates=0;const f=await fixture(t,{create:async()=>{if(++creates===1)throw new Error('connection lost');return {deploymentId:'21',status:'queued'};},read:async()=>null});
+  await f.manager.configure(target);const lost=(await f.manager.deploy({sha:SHA,target})).current!;
+  assert.equal((await f.manager.refresh()).current?.status,'unknown','GitHub has no matching record, so it stays uncertain.');
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/unresolved/);
+  await f.manager.abandon({id:lost.id});
+  const retried=await f.manager.deploy({sha:SHA,target});
+  assert.deepEqual([creates,retried.current?.deploymentId,retried.current?.status,retried.recent[1].status],[2,'21','queued','abandoned']);
+});
+
+test('a deployment deleted on GitHub ends its release as failed, so Deploy and Configure return',async t=>{
+  let deleted=false,release='';
+  const adapter=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    if(endpoint==='repos/acme/app')return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify({default_branch:'main'})}`};
+    if(deleted)throw Object.assign(new Error('failed'),{stderr:'gh: Not Found (HTTP 404)'});
+    const data=endpoint.includes('/statuses')?[]:{id:12,sha:SHA,environment:target.environment,production_environment:target.productionEnvironment,task:'deploy',payload:{perpetual:{releaseId:release,workflowPath:target.workflowPath,sha:SHA}}};
+    return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify(data)}`};}});
+  const f=await fixture(t,{read:adapter.read});await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});release=f.requests[0].id;
+  assert.equal((await f.manager.refresh()).current?.status,'queued','Its handler has reported nothing.');
+  deleted=true; // a person deleted the deployment on GitHub
+  const ended=await f.manager.refresh();
+  assert.deepEqual([ended.current?.status,ended.current?.error,ended.canDeploy],['failed','The deployment no longer exists on GitHub.',true]);
+  assert.deepEqual((await f.manager.configure({...target,environment:'staging'})).target?.environment,'staging');
+});
+
+test('a deployed release whose deployment GitHub later deleted stays deployed, so its commit is not offered again',async t=>{
+  let deleted=false,release='';
+  const adapter=createReleaseGitHub({run:async(_file,args)=>{const endpoint=args.at(-1)!;
+    if(endpoint==='repos/acme/app')return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify({default_branch:'main'})}`};
+    if(deleted)throw Object.assign(new Error('failed'),{stderr:'gh: Not Found (HTTP 404)'});
+    const data=endpoint.includes('/statuses')?[{id:51,state:'success'}]:{id:12,sha:SHA,environment:target.environment,production_environment:target.productionEnvironment,task:'deploy',payload:{perpetual:{releaseId:release,workflowPath:target.workflowPath,sha:SHA}}};
+    return {stdout:`HTTP/2.0 200 OK\n\n${JSON.stringify(data)}`};}});
+  const f=await fixture(t,{read:adapter.read});await f.manager.configure(target);await f.manager.deploy({sha:SHA,target});release=f.requests[0].id;
+  assert.equal((await f.manager.refresh()).current?.status,'deployed');
+  deleted=true; // a person deleted the deployment on GitHub after it succeeded
+  const checked=await f.manager.refresh();
+  assert.deepEqual([checked.current?.status,checked.current?.statusId,checked.current?.error,checked.canDeploy,checked.blockedReason],
+    ['deployed','51','The deployment no longer exists on GitHub.',false,'This commit is already deployed to this target.']);
+  await assert.rejects(f.manager.deploy({sha:SHA,target}),/already deployed/);assert.equal(f.requests.length,1);
 });
