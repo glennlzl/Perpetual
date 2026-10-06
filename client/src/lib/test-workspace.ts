@@ -23,7 +23,7 @@ export type BrowserConfig = Pick<PublicBrowserConfig, 'targetUrl' | 'scope' | 'r
 /** The workspace starts from source summaries before the inspector has loaded its full view. */
 export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
   runs: BrowserRun[]; capabilities: BrowserCapabilities | null; config: BrowserConfig;
-  specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[];
+  specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[]; callbacks?: BrowserViewReply['callbacks'];
 };
 /** A stage's sandboxes and its twin config, which this UI passes through to the controller unread. */
 export interface EnvironmentView { environments: Environment[]; plan: unknown }

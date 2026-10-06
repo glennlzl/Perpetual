@@ -28,6 +28,8 @@
 
 **Journey queue** — Bounded execution of the reviewed journeys in a run. Each journey has its own browser worker. Shared application data creates an exclusive barrier; independent test data permits parallel workers. Skipping stops the owned worker but does not roll back application side effects.
 
+**Application callback binding** — A person's reviewed association of one application id with an exact local hostname alias. For the stage's unambiguous selected application in a ready owned twin, it follows the current published port; a fixed external site never does. Its scope, application and hostname identify the permission for code verification and approval.
+
 **Reviewed case** — A business journey with a user-approved goal, preconditions, expected outcomes and independent checks. Generating a draft does not approve or execute it.
 
 **Journey code** — The Playwright actions of one reviewed case, with no checks of its own: the reviewed checks are evaluated from the case at run time. A case has at most one _approved_ code and one _draft_ beside it. Generated or saved code is always the draft and never replaces the approved code by itself; a person approves a draft after its verification passed, seeing the code or its diff. A gate runs approved code only; a person's run may try a current draft when no approved code is current. Editing the reviewed case makes both stale. Code references call it the journey spec.

@@ -1,3 +1,5 @@
+import ApplicationCallbacks from './ApplicationCallbacks';
+import type {ApplicationCallbackBinding,CallbackReview} from '../../contract/browser';
 import { Fragment, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type FormEvent, type ReactNode } from 'react';
 import { Check, ChevronDown, CircleCheck, CircleX, Code, Copy, ExternalLink, Eye, GitBranch, ListChecks, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, RotateCcw, Sparkles, Square, Trash2, Undo2 } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -161,10 +163,12 @@ function KnownUrl({ item, chosen, onChoose }: { item: TargetSuggestion; chosen: 
   return note ? <Tooltip><TooltipTrigger asChild>{chip}</TooltipTrigger><TooltipContent>{note}</TooltipContent></Tooltip> : chip;
 }
 
-function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFallback }: { config: BrowserConfig; suggestions?: TargetSuggestion[]; onSave: (config: BrowserConfig) => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
+function TestSettingsDialog({ config, callbacks, suggestions = [], onSave, onClose, focusFallback }: { config: BrowserConfig; callbacks?: CallbackReview; suggestions?: TargetSuggestion[]; onSave: (config: BrowserConfig) => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
   const returnFocus = useReturnFocus(focusFallback);
   const [targetUrl, setTargetUrl] = useState(config.targetUrl || '');
   const [signInUrl, setSignInUrl] = useState(config.signInUrl || '');
+  const [bindings,setBindings]=useState<ApplicationCallbackBinding[]>(()=>config.callbackBindings??[]);
+  const [callbacksValid,setCallbacksValid]=useState(true);
   const [origins, setOrigins] = useState(() => rowsOf(config.externalOrigins || []));
   const [endpoints, setEndpoints] = useState(() => rowsOf(config.authEndpoints || []));
   const [reads, setReads] = useState<ReadRequestRow[]>(() => (config.readOnlyRequests || []).map(rule => ({ ...rule, key: crypto.randomUUID(), reviewed: true })));
@@ -179,9 +183,10 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
     if (saving) return;
     setAttempted(true); setError('');
     if (!checked.valid) return;
+    if (!callbacksValid) { setError('Choose a callback host.'); return; }
     if (reads.some(row => !row.reviewed)) { setError('Review each POST request as read-only before saving.'); return; }
     setSaving(true);
-    try { await onSave({ ...config, ...checked.values, readOnlyRequests: reads.map(({ url, body }) => ({ url, body })) }); }
+    try { await onSave({ ...config, ...checked.values, callbackBindings:bindings, readOnlyRequests: reads.map(({ url, body }) => ({ url, body })) }); }
     catch (failure) { setError((failure as Error).message); setSaving(false); }
   }
   return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}><DialogContent className="max-h-[90vh] overflow-y-auto" aria-describedby={undefined} showCloseButton={!saving} onCloseAutoFocus={returnFocus}>
@@ -198,6 +203,7 @@ function TestSettingsDialog({ config, suggestions = [], onSave, onClose, focusFa
           <FieldError id="test-sign-in-url">{shown.signInUrl}</FieldError>
         </Field>
         <ListField id="external-origins" label="External sites allowed in runs" itemLabel="Site" addLabel="Add site" max={10} rows={origins} errors={checked.errors.externalOrigins} listError={shown.externalOriginsList} showErrors={attempted} onChange={setOrigins} />
+        <ApplicationCallbacks bindings={bindings} review={callbacks} fixedOriginsCount={checked.values.externalOrigins.length} bindingEditsDisabled={saving||targetUrl.trim()!==config.targetUrl} onChange={setBindings} onValidityChange={setCallbacksValid} />
         <ListField id="auth-endpoints" label="Sign-in API endpoints" itemLabel="Endpoint" addLabel="Add endpoint" max={3} rows={endpoints} errors={checked.errors.authEndpoints} listError={shown.authEndpointsList} showErrors={attempted} onChange={setEndpoints} />
         <Collapsible className="space-y-3">
           <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="h-auto w-full justify-between px-0 text-sm">Read-only POST requests<Badge variant="secondary">{reads.length}</Badge><ChevronDown className="size-4" /></Button></CollapsibleTrigger>
@@ -713,7 +719,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
     }} />}
     {creatingCase && <NewTestDialog draftKey={newTestDraftKey(repoPath, stageId)} focusFallback={sheet} onClose={() => setCreatingCase(false)} onCreate={createCase} onTranscribe={transcribeDescription} onAppSettings={onAppSettings} modelChecked={Boolean(capabilities)} modelConfigured={openRouterConfigured} voiceConfigured={openRouterConfigured} />}
     {watching && <BrowserAgentViewer key={watching.id || `pending-${watching.mode}`} repoPath={repoPath} stageId={stageId} runId={watching.id} mode={watching.mode} cases={cases} focusCaseId={watching.focusCaseId} startingError={watching.error} focusFallback={watching.focusCaseId ? focusCase(watching.focusCaseId) : sheet} onClose={() => setWatching(null)} onFinished={finished} onTestSettings={() => { setWatching(null); setConfigDialog('settings'); }} />}
-    {configDialog === 'settings' && <TestSettingsDialog config={config} suggestions={targetSuggestions} focusFallback={focusSettings} onClose={() => setConfigDialog(null)} onSave={async nextConfig => {
+    {configDialog === 'settings' && <TestSettingsDialog config={config} callbacks={data.callbacks} suggestions={targetSuggestions} focusFallback={focusSettings} onClose={() => setConfigDialog(null)} onSave={async nextConfig => {
       await stage.perform('browser', 'config', tx => persistConfig(tx, nextConfig));
       if (mounted.current && stage.isCurrent()) setConfigDialog(null);
     }} />}
