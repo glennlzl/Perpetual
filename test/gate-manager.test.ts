@@ -363,13 +363,14 @@ test('a failed status report is recorded and retried without blocking the gate o
 test('a status report GitHub refused for good is not retried until another account connects or the gate runs again', async t => {
   let failure: 'transient' | 'refused' | null = 'transient', login = 'developer', reads = 0;
   const attempts: string[] = [];
-  const h = await harness(t, { repository: null, stages: STAGES.filter(stage => stage.id !== 'gamma'), pollInterval: 10,
+  const options = { repository: null, stages: STAGES.filter(stage => stage.id !== 'gamma'), pollInterval: 10,
     connection: () => { reads++; return { login, repository: 'owner/app' }; },
-    post: async status => {
+    post: async (status: CommitStatusPost) => {
       attempts.push(`${login} ${status.state} ${status.description}`);
       if (failure === 'refused') throw Object.assign(new Error('GitHub refused the commit status. Check that the commit is on GitHub, then run the gate again.'), { refused: true });
       if (failure) throw new Error('Reporting the commit status failed.');
-    } });
+    } };
+  const h = await harness(t, options);
   const polls = async (count: number) => { const from = reads; await until(() => reads >= from + count, 'The polls must read the connection.'); };
   await h.manager.run({ stageId: 'beta' });
   await h.manager.idle();
@@ -382,19 +383,26 @@ test('a status report GitHub refused for good is not retried until another accou
   const refused = attempts.length;
   await polls(3);
   assert.equal(attempts.length, refused, 'A refused report is not sent again to the same account.');
-  const [saved] = await h.gates('beta');
-  assert.deepEqual(saved.refused, { state: 'success', context: 'perpetual/Beta', description: 'Passed', login: 'developer', repository: 'owner/app' }, 'The refusal survives a restart.');
+  // Nor by the controller started again on the same data, with the same account.
+  await h.manager.close();
+  const restarted = await harness(t, { ...options, dataDir: h.dataDir });
+  restarted.manager.start();
+  await polls(3);
+  assert.equal(attempts.length, refused, 'The refusal survives a restart.');
+  assert.match(restarted.manager.view().stages.beta.statusError ?? '', /^GitHub refused/);
   // Another account sends it, once.
   login = 'reviewer';
   await until(() => attempts.length > refused);
   await polls(3);
   assert.deepEqual(attempts.slice(refused), ['reviewer success Passed']);
-  // Running the gate again sends its reports again.
+  // Running the gate again sends its reports again, its verdict's last.
   failure = null;
-  await h.manager.run({ stageId: 'beta' });
-  await until(() => h.manager.view().stages.beta.status === 'passed' && h.manager.view().stages.beta.statusError === undefined, 'The gate run again must report.');
-  assert.equal(attempts.at(-1), 'reviewer success Passed');
-  assert.equal((await h.gates('beta'))[0].refused, undefined);
+  const rerun = attempts.length;
+  await restarted.manager.run({ stageId: 'beta' });
+  await until(async () => (await restarted.gates('beta'))[0].posted?.state === 'success', 'The gate run again must report its verdict.');
+  assert.equal(attempts.slice(rerun).at(-1), 'reviewer success Passed');
+  assert.equal(restarted.manager.view().stages.beta.statusError, undefined);
+  assert.equal((await restarted.gates('beta'))[0].refused, undefined);
 });
 
 test('a local checkout gate still runs without a GitHub connection and shows that no status was reported', async t => {
