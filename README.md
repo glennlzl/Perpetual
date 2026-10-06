@@ -99,13 +99,15 @@ npm run setup
 node src/cli.ts serve --repo /path/to/your/app
 ```
 
-Then open <http://127.0.0.1:4317>:
+Then open the link it prints, `http://127.0.0.1:4317/#secret=…`, which signs your browser in:
 
 1. **Settings**: add an [OpenRouter API key](https://openrouter.ai/keys).
 2. **Connect GitHub** and choose the repository and target branch. The gate watches repositories chosen this way.
 3. Add **Beta**, choose **Create Beta environment**, and connect any requested test services or accounts.
 4. Review the drafted journeys, then **Generate code**, **Verify code** and **Approve code**. Approval requires three passing runs and a control run whose blocked writes cause a reviewed check to fail.
 5. Push a new commit to the target branch while the controller is running. Use its `perpetual/Beta` status to gate release-branch promotion or deployment.
+
+To update Perpetual, run `git pull` and then `npm run setup` again in the clone before restarting it: `serve` serves the interface as setup last built it.
 
 <details>
 <summary>Let your coding agent guide setup</summary>

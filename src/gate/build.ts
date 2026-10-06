@@ -13,7 +13,7 @@ const INCOMPLETE = 'GitHub did not return complete Build evidence. Waiting to ch
 /**
  * Fresh Actions evidence for one branch commit. Commit statuses (including perpetual/*) are never read here.
  * The latest run of each workflow is the build to judge; its older failures do not defeat a successful rerun.
- * No run, unreadable/incomplete evidence, or an account change can admit a twin.
+ * A missing run, unreadable/incomplete evidence or an account change never admits a twin.
  */
 export async function readBuild(input: BuildInput, { request = githubRequest, session = getGitHubSession }: { request?: Request; session?: () => Promise<GitHubSession> } = {}): Promise<BuildVerdict> {
   const { repository, branch, sha, login } = input;

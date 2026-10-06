@@ -65,8 +65,8 @@ export interface RepairAgentOptions {
   host: RepairHost;
   github: RepairAgentGitHub;
   model?: ModelFactory;
-  /** Deploy configuration files the scan found for the repair's source, relative to the repository. */
-  deployFiles?(repair: Repair): readonly string[];
+  /** Deploy configuration files a scan of the repair's own checkout finds, relative to the repository. */
+  deployFiles?(repair: Repair, clone: string): Promise<readonly string[]>;
   budget?: Partial<typeof BUDGET>;
   ci?: Partial<typeof CI>;
   /** The merge step once CI passed; without it a repair whose pull request passed CI ends ready. */
@@ -231,7 +231,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
     const { repair } = context, clone = join(context.directory, 'clone'), branch = repairBranch(repair.sha);
     const models = await options.models();
     if (!models) return { status: 'needs-person', reason: 'Add an OpenRouter API key in Settings.' };
-    const deployFiles = options.deployFiles?.(repair) ?? [], attempts: RepairAttempt[] = [];
+    const attempts: RepairAttempt[] = [];
     let spent = 0, pushed: string | null = null, pullRequest: RepairPullRequest | null = null;
     let holds: string[] = [], ciRuns: string[] = [], feedback = '', summary = '', check: Pick<ChangeCheck, 'paths' | 'added' | 'removed'> | null = null;
     // The pull request is labelled once it opens, and again after each later push and at the end until GitHub takes the
@@ -253,6 +253,7 @@ export function createRepairAgent(options: RepairAgentOptions) {
     await rm(clone, { recursive: true, force: true });
     await host.clone({ repair, directory: clone });
     signal.throwIfAborted();
+    const deployFiles = await options.deployFiles?.(repair, clone) ?? [];
     const original = await describeFailures(clone, repair.runs, repair.failures ?? []);
     let workflows: FailedWorkflow[] = original;
     const image = await chooseImage(clone, original);

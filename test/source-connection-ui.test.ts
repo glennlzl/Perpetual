@@ -26,7 +26,7 @@ test('GitHub connection returns keyboard focus to its source controls', { timeou
     }
     await route.fulfill({ json: { authenticated: true, connected, account: { login: 'acme' }, source: null } });
   });
-  await page.goto(app.url);
+  await page.goto(app.launchUrl);
   await page.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
   await expect(dialog.getByRole('status')).toHaveText('Checking GitHub…');

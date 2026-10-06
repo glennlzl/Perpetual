@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import {createServer,type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {startServer,type Controller} from '../src/server.ts';
@@ -31,15 +31,18 @@ const model=createServer((req,res)=>{void(async()=>{
   // One read-only look first, then the proposals.
   const action=observations===1?{scroll:{down:true}}:{done:{data:{summary:'Fixture workspace observed',cases:Object.entries(plans).map(([name,plan])=>({name,goal:`${name} and verify the result`,steps:plan.steps.map(id=>({id,title:`${name}: ${id}`})),preconditions:[],expectedOutcomes:[`${plan.done} visible`],assertions:[{type:'text-visible',value:plan.done}],evidence:[]}))}}};
   const output={evaluation_previous_goal:'Observed fixture page',memory:'Choose from current page',next_goal:'Propose journeys',action:[action]};
-  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:'fixture',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:JSON.stringify(output)}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+  // The worker takes each decision as exactly one browser_decision tool call (integrations/browser-use/decision_model.py).
+  const call={id:`call-${observations}`,type:'function',function:{name:'browser_decision',arguments:JSON.stringify(output)}};
+  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:'fixture',choices:[{index:0,finish_reason:'tool_calls',message:{role:'assistant',content:null,tool_calls:[call]}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
 })().catch(error=>{res.statusCode=500;res.end(JSON.stringify({error:error.message}));});});
-let app: Controller|undefined,token='',stageId='',frames=0,frameBytes=0,activity=0;
+let app: Controller|undefined,secret='',stageId='',frames=0,frameBytes=0,activity=0;
 async function listen(server: Server){await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;}
-async function call<T=unknown>(path: string,body?: object): Promise<T>{const response=await fetch(app!.url+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Perpetual-Token':token}:{},body:body?JSON.stringify(body):undefined});const data=await response.json();assert.ok(response.ok,JSON.stringify(data));return data;}
+// A local tool's request, with the launch secret the controller keeps in its data directory.
+async function call<T=unknown>(path: string,body?: object): Promise<T>{const response=await fetch(app!.url+path,{method:body?'POST':'GET',headers:{'X-Perpetual-Secret':secret,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const data=await response.json();assert.ok(response.ok,JSON.stringify(data));return data;}
 const context=()=>({repoPath:repo,stageId});
 const query=(extra: Record<string,string>={})=>new URLSearchParams({...context(),...extra});
 async function frame(id: string){
-  const response=await fetch(`${app!.url}/api/browser/runs/${id}/frame?${query()}`);
+  const response=await fetch(`${app!.url}/api/browser/runs/${id}/frame?${query()}`,{headers:{'X-Perpetual-Secret':secret}});
   if(response.status!==200)return;
   assert.equal(response.headers.get('content-type'),'image/jpeg');const bytes=await response.arrayBuffer();frames++;frameBytes+=bytes.byteLength;
 }
@@ -57,7 +60,7 @@ async function finish(id: string){
 try{
   const targetUrl=await listen(fixture),baseUrl=await listen(model);
   app=await startServer({port:0,repo,dataDir:join(directory,'controller')});
-  token=(await call<{token:string}>('/api/session')).token;await call('/api/scan',{path:repo});
+  secret=await readFile(join(directory,'controller','launch-secret'),'utf8');await call('/api/scan',{path:repo});
   stageId=(await call<PipelineReply>('/api/pipeline/action',{repoPath:repo,action:'add-stage',name:'Beta'})).pipeline.stages.find(stage=>stage.name==='Beta')!.id;
   await call('/api/browser/model',{...context(),apiKey:'fixture-not-a-real-key',model:'fixture',baseUrl:baseUrl+'/v1'});
   await call('/api/browser/config',{...context(),config:{targetUrl,maxSteps:10,journeyTimeoutSeconds:300}});

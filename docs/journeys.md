@@ -271,7 +271,7 @@ The directory and files are private (0700 and 0600). CI enables this recorder fo
 
 ## API
 
-The main routes are below. Every request is scoped to `repoPath` and a Sandbox `stageId`. Mutations need the controller session token and a same-origin request.
+The main routes are below. Every request is scoped to `repoPath` and a Sandbox `stageId`, and needs the controller's [launch secret](cli.md), or the browser secret derived from it, and a same-origin request; changes from the interface also carry its session token.
 
 | Method and route | Input |
 | --- | --- |

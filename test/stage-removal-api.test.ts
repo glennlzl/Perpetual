@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,rm,writeFile,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {randomUUID} from 'node:crypto';
-import {startServer} from '../src/server.ts';
+import {fetch,startServer} from './fixtures/controller.ts';
 
 type Stage={id:string;name:string};
 type Removal={id:string;status:string;error?:string;completedAt?:string};

@@ -42,7 +42,7 @@ test('GitHub sign-in recovery keeps the next action reachable without stealing f
       if (path === '/api/github/auth/cancel') cancelled++;
       await route.fulfill({ json: path === '/api/github/repositories' ? { repositories: [{ fullName: 'acme/app' }] } : connection() });
     });
-    await page.goto(app.url);
+    await page.goto(app.launchUrl);
     await page.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
     const signIn = dialog.getByRole('button', { name: 'Sign in with GitHub', exact: true });
