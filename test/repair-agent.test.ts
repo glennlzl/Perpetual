@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -41,12 +41,18 @@ async function until(check: () => unknown, attempts = 2000) {
  * a failed run's log by its id. GitHub keeps the repair branch's head (`remote`, the last push), its open pull request
  * and that pull request's state; while `blips` is above zero the agent's connection reads fail, while `labelErrors` is,
  * labelling the pull request does, while `closeErrors` is, closing it does, as a network error, and while `readyErrors`
- * is, GitHub refuses to mark it ready.
+ * is, GitHub refuses to mark it ready. `spent` is what the pipeline's repairs already cost today.
  */
-async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outageMs, beforePush, logs = {}, merge }: { scripts: ScriptedStep[][]; ci: (push: number, sha: string) => WorkflowRun[]; budget?: { cost?: number }; noRunMs?: number; outageMs?: number; beforePush?: () => Promise<void>; logs?: Record<string, string>; merge?: Pick<RepairMerge, 'merge'> }) {
+async function harness(t: TestContext, { scripts, ci, budget, noRunMs = 80, outageMs, beforePush, logs = {}, merge, spent }: { scripts: ScriptedStep[][]; ci: (push: number, sha: string) => WorkflowRun[]; budget?: { cost?: number }; noRunMs?: number; outageMs?: number; beforePush?: () => Promise<void>; logs?: Record<string, string>; merge?: Pick<RepairMerge, 'merge'>; spent?: number }) {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-repair-agent-'));
   const { checkoutPath, sha: B } = await managedCopy(dataDir);
   const current: RepairSource = { key: 'github:owner/app:/', branch: 'main', repository: 'owner/app', checkoutPath, rootDirectory: '/' };
+  if (spent) {
+    const at = new Date().toISOString();
+    await mkdir(join(dataDir, 'repairs'), { recursive: true });
+    await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'earlier', key: current.key, repository: 'owner/app', branch: 'main', sha: 'd'.repeat(40), login: 'developer',
+      checkoutPath, rootDirectory: '/', trigger: 'push', status: 'merged', merged: 'e'.repeat(40), runs: [], attempts: [{ number: 1, model: MODELS.model, startedAt: at, completedAt: at, cost: spent }], createdAt: at, updatedAt: at }] }));
+  }
   const pull: PullRequestRef = { number: 7, url: 'https://github.com/owner/app/pull/7', draft: true };
   const github = { head: A, connection: { login: 'developer', repository: 'owner/app' } as { login: string; repository: string } | null, runs: {} as Record<string, WorkflowRun[]>,
     remote: null as string | null, openPull: null as PullRequestRef | null, pullState: 'open' as 'open' | 'closed' | 'merged', blips: 0, labelErrors: 0, closeErrors: 0, readyErrors: 0 };
@@ -301,6 +307,25 @@ test('the cost cap ends the repair as failed and keeps its pull request a draft'
   await until(() => h.repair()?.status === 'failed');
   await h.manager.idle();
   assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready, h.models.length], ['The repair reached its $0.04 cost cap.', true, [], 1]);
+});
+
+test('a repair Autopilot starts by itself spends no more than what is left of its pipeline\'s daily cost cap', async t => {
+  const h = await harness(t, { scripts: [FIX, FIX], spent: 9.98, ci: (_push, sha) => [run('101', sha, 'failure', { event: 'pull_request' })] });
+  await h.fail();
+  await until(() => h.repair()?.status === 'failed');
+  await h.manager.idle();
+  assert.deepEqual([h.repair()?.reason, h.models.length, h.pushes.length], ['The repair reached this pipeline\'s $10.00 daily cost cap.', 1, 0]);
+});
+
+test('an attempt a Stop cuts short is recorded with what its finished steps cost', async t => {
+  const h = await harness(t, { scripts: [[{ calls: [{ tool: 'list', input: {} }], cost: 0.3 }, { hang: true }]], ci: () => [] });
+  await h.fail();
+  await until(() => h.prompts[0]?.length === 2);
+  await h.manager.stop({ id: h.repair()!.id });
+  await h.manager.idle();
+  const attempt = (await h.saved()).attempts?.[0];
+  assert.deepEqual([h.repair()?.status, attempt?.cost, attempt?.inputTokens, Boolean(attempt?.completedAt), attempt?.failure], ['cancelled', 0.3, 100, true, undefined]);
+  assert.deepEqual(h.repair()?.attempts, [{ number: 1, model: MODELS.model, cost: 0.3 }], 'The change shows what the stopped attempt cost.');
 });
 
 test('without the connected account that saw the failure, nothing is pushed', async t => {

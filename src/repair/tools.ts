@@ -1,15 +1,15 @@
 // The repair agent's tools, its only permissions. Each runs inside the repair box: list, read and grep within the
 // workspace with capped output and a `truncated` flag; edit and write within the workspace, never .git; run a shell
-// command with a time limit, returning its exit code and bounded output; and done. A path is checked twice: as
+// command with a time limit, returning its exit code and the end of its output; and done. A path is checked twice: as
 // text on the host (relative, no `..`, no .git) and by its real path in the box, so a link cannot lead out.
 import { posix } from 'node:path';
 import { jsonSchema, tool, type JSONSchema7 } from 'ai';
 import type { BoxResult, RepairBox } from './box.ts';
-import { REDACTED, redact } from '../redaction.ts';
+import { REDACTED, SOURCE_CODE, redact } from '../redaction.ts';
 
 export const LIMITS = {
   path: 1024, entries: 500, lines: 2000, readBytes: 64 * 1024, lineChars: 2000, matches: 100, matchChars: 300, pattern: 500, include: 200,
-  editBytes: 1024 * 1024, command: 20_000, output: 30_000, searchSeconds: 30, runSeconds: 900, defaultRunSeconds: 300,
+  editBytes: 1024 * 1024, command: 20_000, output: 30_000, capture: 1024 * 1024, searchSeconds: 30, runSeconds: 900, defaultRunSeconds: 300,
 };
 type Refusal = { ok: false; error: string };
 type Result = { ok: true; [key: string]: unknown } | Refusal;
@@ -19,15 +19,30 @@ export interface ToolEvents { run?(command: string, exitCode: number): void; cha
 
 const refused = (error: string): Refusal => ({ ok: false, error });
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
-// The redaction marker stands in replies for text the tools hide, such as what follows a name like token or password;
+// Replies hide credentials with the shared catalogue, in the mode the text calls for. A file of source code or JSON reads
+// as code: key blocks, token shapes and literals set to a name like token or password are hidden, while the expressions,
+// types and versions around such names stay as written, so a line read can be edited. Any other file, such as .env,
+// YAML, INI, properties, .npmrc, a Dockerfile or a shell script, is configuration, where every value set to such a name
+// is hidden. Command output prints either, so it reads as code with the values of configuration lines and flags hidden
+// too; every other reply text, such as a path or an error, reads as code.
+const scrub = (value: unknown) => redact(value, { code: true });
+const scrubFile = (path: string, text: string) => redact(text, { code: SOURCE_CODE.test(path) || /\.json[c5]?$/i.test(path) });
+const scrubOutput = (text: string) => redact(text, { output: true });
+// The redaction marker stands in replies for text the tools hide, such as a value set to a name like token or password;
 // copied into a file it would replace real code.
 const markers = (text: string) => text.split(REDACTED).length - 1;
-const MARKED = `${REDACTED} stands for text the tools hide, such as what follows a name like token or password, and is never code`;
-const oneLine = (value: unknown, limit = 200) => clip(redact(value).replace(/\s+/g, ' ').trim(), limit);
+const MARKED = `${REDACTED} stands for text the tools hide, such as a value set to a name like token or password, and is never code`;
+const oneLine = (value: unknown, limit = 200) => clip(scrub(value).replace(/\s+/g, ' ').trim(), limit);
 const unavailable = (result: BoxResult) => ({ ...refused('The tool output exceeded its capture limit. Observation unavailable; narrow the command or use a smaller file.'), exitCode: result.exitCode, timedOut: result.timedOut, truncated: result.truncated });
+/** The last limit characters of text from a line start, or the end of its last line when that alone is longer. */
+function lastLines(text: string, limit: number) {
+  if (text.length <= limit) return text;
+  const tail = text.slice(-limit), start = text[text.length - limit - 1] === '\n' ? 0 : tail.indexOf('\n') + 1;
+  return start > 0 && start < tail.length ? tail.slice(start) : tail;
+}
 /** Model-facing text only; internal paths, file edits and change validation keep their original bytes. */
 function modelResult(result: Result): Result {
-  const strings = (value: unknown): unknown => typeof value === 'string' ? redact(value)
+  const strings = (value: unknown): unknown => typeof value === 'string' ? scrub(value)
     : Array.isArray(value) ? value.map(strings)
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, strings(item)])) : value;
   return strings(result) as Result;
@@ -77,10 +92,13 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.truncated) return unavailable(result);
     if (result.exitCode === 3) return refused(`${found.name} is not a folder; read it instead.`);
     if (result.exitCode !== 0) return refused(`${found.name} could not be listed.`);
-    const entries = redact(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
+    const entries = scrub(result.stdout).split('\n').filter(Boolean).map(entry => entry.replace(/[*=|>%]$/, '')).filter(entry => !GIT.test(entry.replace(/[/@]$/, '')));
     return { ok: true, path: found.name, entries: entries.slice(0, LIMITS.entries), truncated: entries.length > LIMITS.entries };
   }
-  /** Redact the complete bounded file before selecting lines; a fragment may have lost its credential's context. */
+  /**
+   * Redact the complete bounded file, in its real name's mode, before selecting lines; a fragment may have lost its
+   * credential's context.
+   */
   async function observeFile(found: { full: string; name: string }): Promise<FileObservation> {
     const result = await exec(['sh', '-c', '[ -f "$1" ] || exit 3; cat "$1"', 'sh', found.full], { limit: 4 * LIMITS.readBytes });
     if (result.truncated) return unavailable(result);
@@ -88,7 +106,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.exitCode !== 0 || result.timedOut) return refused(`${found.name} could not be read completely.`);
     if (result.stdout.includes('\0')) return refused(`${found.name} is a binary file.`);
     const lines = (text: string) => { const values = text.split('\n'); if (values.at(-1) === '') values.pop(); return values; };
-    const raw = lines(result.stdout), redacted = lines(redact(result.stdout));
+    const raw = lines(result.stdout), redacted = lines(scrubFile(found.full, result.stdout));
     if (raw.length !== redacted.length) return refused(`${found.name} cannot be shown with accurate line numbers after redaction.`);
     return { ok: true, raw, redacted };
   }
@@ -124,31 +142,36 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.timedOut) return refused(`The search took over ${LIMITS.searchSeconds} seconds; use a narrower path or an include glob.`);
     if (result.exitCode > 1) return refused(`The search failed: ${oneLine(result.stderr || 'grep error', 300)}`);
     // Keep grep's native ERE and match order. Its text is evidence for a complete-file read, never model output.
-    const selected: { file: string; line: number; text: string }[] = [];
-    let cursor = 0, count = 0;
+    const lines: { file: string; line: number; text: string }[] = [];
+    let cursor = 0;
     while (cursor < result.stdout.length) {
       const separator = result.stdout.indexOf('\0', cursor), end = result.stdout.indexOf('\n', separator + 1);
       const colon = result.stdout.indexOf(':', separator + 1), number = result.stdout.slice(separator + 1, colon);
       if (separator < cursor || end < 0 || colon < separator || colon > end || !/^[1-9]\d*$/.test(number) || !Number.isSafeInteger(Number(number))) return refused('The search returned an unreadable match.');
-      if (count < LIMITS.matches) selected.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
-      count += 1;
+      lines.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
       cursor = end + 1;
     }
-    const files = new Map<string, FileObservation>(), matches: string[] = [];
-    for (const match of selected) {
-      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
+    // Only a match shown counts toward the limit. A matched file the tools cannot show completely, such as a large or
+    // binary one, is named in skipped and its lines are left out, so the rest of the search still answers. At most as
+    // many files are read as matches may be shown, skipped ones included.
+    const files = new Map<string, FileObservation>(), matches: string[] = [], skipped: string[] = [];
+    let truncated = false;
+    for (const match of lines) {
       let file = files.get(match.file);
+      if (file && !file.ok) continue;
+      if (matches.length === LIMITS.matches || !file && files.size === LIMITS.matches) { truncated = true; break; }
+      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
       if (!file) {
         const located = await locate(shown(match.file));
         if (located.error !== undefined) return refused(located.error);
         file = await observeFile(located);
         files.set(match.file, file);
+        if (!file.ok) { skipped.push('truncated' in file && file.truncated ? `${located.name} is over ${4 * LIMITS.readBytes / 1024} KB.` : file.error); continue; }
       }
-      if (!file.ok) return file;
       if (file.raw[match.line - 1] !== match.text) return refused(`${shown(match.file)} changed after the search; search again.`);
       matches.push(`${shown(match.file)}:${clip(`${match.line}:${file.redacted[match.line - 1]}`.trim(), LIMITS.matchChars)}`);
     }
-    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches };
+    return { ok: true, path: found.name, matches, truncated, ...(skipped.length ? { skipped } : {}) };
   }
   async function write(found: { full: string; name: string }, text: string) {
     const result = await exec(['sh', '-c', '[ -d "$1" ] && exit 3; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', found.full], { stdin: text });
@@ -191,10 +214,19 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     const command = field(input, 'command'), seconds = field(input, 'timeoutSeconds') ?? LIMITS.defaultRunSeconds;
     if (typeof command !== 'string' || !command.trim() || command.length > LIMITS.command) return refused(`Pass a shell command of at most ${LIMITS.command} characters.`);
     if (!whole(seconds) || seconds > LIMITS.runSeconds) return refused(`timeoutSeconds is a whole number from 1 to ${LIMITS.runSeconds}.`);
-    const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.output, keep: 'tail' });
+    const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.capture, keep: 'tail' });
     events.run?.(command, result.exitCode);
-    if (result.truncated) return unavailable(result);
-    return { ok: true, exitCode: result.exitCode, output: redact(result.stdout + result.stderr), timedOut: result.timedOut, truncated: result.truncated };
+    // The capture is the output's last MiB, redacted whole before its end is returned, so a credential begun before that
+    // end is still hidden. Of a capture the box cut, the first line has lost its start, which may hold a credential's
+    // context: it is dropped, and a capture that is one cut line is withheld.
+    let text = result.stdout + result.stderr;
+    if (result.truncated) {
+      const start = text.indexOf('\n') + 1;
+      if (!start || start === text.length) return unavailable(result);
+      text = text.slice(start);
+    }
+    const output = scrubOutput(text), tail = lastLines(output, LIMITS.output);
+    return { ok: true, exitCode: result.exitCode, output: tail, timedOut: result.timedOut, truncated: result.truncated || tail.length < output.length };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.
   const guarded = (name: string, work: (input: unknown) => Promise<Result>) => async (input: unknown) => {
@@ -211,7 +243,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       execute: guarded('read', read),
     }),
     grep: tool({
-      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). Pass a narrow path and an include glob.`,
+      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). A matched file it cannot show, such as a larger or binary one, is named in skipped and its lines left out. Pass a narrow path and an include glob.`,
       inputSchema: schema({ pattern: { type: 'string', maxLength: LIMITS.pattern }, path: PATH, include: { type: 'string', description: 'A file name glob, such as *.ts.' } }, ['pattern']),
       execute: guarded('grep', grep),
     }),
@@ -222,7 +254,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     }),
     write: tool({ description: 'Writes a whole file of /workspace, creating its folders.', inputSchema: schema({ path: PATH, text: { type: 'string' } }, ['path', 'text']), execute: guarded('write', create) }),
     run: tool({
-      description: `Runs a bash command in /workspace and returns its exit code and up to ${LIMITS.output / 1000} KB of redacted output. Incomplete captures are withheld; narrow the command to observe less output. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
+      description: `Runs a bash command in /workspace and returns its exit code and the last ${LIMITS.output / 1000} KB of its redacted output, from a line start, with truncated set when it printed more. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
       inputSchema: schema({ command: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: LIMITS.runSeconds } }, ['command']),
       execute: guarded('run', run),
     }),
