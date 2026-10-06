@@ -1,5 +1,13 @@
 # Weekly update pull requests for the workflows' actions, pinned by commit with their release beside it, and for every
 # npm and uv lockfile. The bench corpus's repositories are fixtures, whose pins are the cases, and get none.
+#
+# Tests hold some pins in step with other files, so a pull request for one fails CI until a person updates those too:
+# - @playwright/test: playwright in integrations/browser-use/pyproject.toml and its uv.lock, and VERSIONS in
+#   integrations/browser-use/runner.py.
+# - browser-use: VERSIONS in integrations/browser-use/runner.py.
+# - cua-sandbox: after a review of the release as docs/desktop-sandbox.md records, CUA_VERSIONS in src/sandbox/cua.ts,
+#   SDK_VERSION in integrations/cua/bridge.py and that document's pins.
+# - mini-swe-agent: the version bench/repair/test/miniswe.test.ts expects, and the bench's notes that name it.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -21,8 +29,15 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: uv
+    directory: /integrations/browser-use
+    schedule:
+      interval: weekly
+    ignore:
+      # Playwright moves with the root's @playwright/test, in that pull request. Security updates still come.
+      - dependency-name: playwright
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+  - package-ecosystem: uv
     directories:
-      - /integrations/browser-use
       - /integrations/cua
       - /bench/repair/adapters/miniswe
     schedule:

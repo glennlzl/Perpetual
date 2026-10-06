@@ -126,10 +126,14 @@ test('Dependabot proposes weekly updates for the workflows\' actions and every n
   assert.deepEqual(covered('github-actions'), ['/']);
   assert.deepEqual(covered('npm'), (await holding('package-lock.json')).sort());
   assert.deepEqual(covered('uv'), (await holding('uv.lock')).sort());
-  // The root's Node types stay on the minor of the oldest Node the controller supports, which the Node types test above
-  // checks, so their minor and major updates could never pass.
-  const root = updates.find(update => update['package-ecosystem'] === 'npm' && update.directory === '/');
-  assert.deepEqual(root?.ignore, [{ 'dependency-name': '@types/node', 'update-types': ['version-update:semver-major', 'version-update:semver-minor'] }]);
+  // Version updates are left out only where another pin leads, as a test above checks: the oldest Node the controller
+  // supports leads its types' minor, and the root's @playwright/test leads the Python worker's Playwright, so one pull
+  // request moves both. update-types leaves out version updates only, so security updates still come.
+  const ignored = updates.flatMap(update => (update.ignore ?? []).map(rule => ({ directories: update.directories ?? [update.directory], ...rule })));
+  assert.deepEqual(ignored, [
+    { directories: ['/'], 'dependency-name': '@types/node', 'update-types': ['version-update:semver-major', 'version-update:semver-minor'] },
+    { directories: ['/integrations/browser-use'], 'dependency-name': 'playwright', 'update-types': ['version-update:semver-major', 'version-update:semver-minor', 'version-update:semver-patch'] },
+  ]);
 });
 
 test('every workflow pins its actions by commit with the release on the same line, where Dependabot updates both', async () => {
