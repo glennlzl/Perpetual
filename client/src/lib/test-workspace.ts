@@ -333,7 +333,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         return result;
       } catch (failure) {
         const error = failure as ApiError;
-        // A stale case list conflicts in a case save, and in the case write a replacing Generate makes.
+        // A stale case list conflicts in a case save and in the case write a replacing Generate makes, and a refused
+        // operation, such as a run an unconfirmed cleanup holds, means the stage changed too.
         if (resource === 'browser' && error.statusCode === 409) await refresh(entry, resource, true);
         if (error.name !== 'AbortError') update(entry, { error: error.message });
         throw failure;
