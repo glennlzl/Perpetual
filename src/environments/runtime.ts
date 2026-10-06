@@ -293,11 +293,6 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     // too short to be a credential in place, as its copy of the source does.
     const knownValues = () => [model.apiKey, ...knownSecrets], authorSecrets = () => hiddenFromAuthor(knownValues());
     try {
-      // Every attempt builds its config's twin, so an engine that cannot build one, such as Docker not running, ends the
-      // creation before the first paid attempt.
-      const unavailable = await twin.available?.();
-      if (unavailable) throw new Error(unavailable);
-      check();
       // Protect the first observation as well as build feedback. Reading stored inputs never provisions a service.
       values = await readInputs(environment.plan);
       check();
@@ -322,6 +317,9 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
         checkpoint: onDraft,
+        // Docker's engine is checked before each paid attempt and after a failed preparation: one that does not answer ends
+        // the creation.
+        available: async () => await twin.available?.() ?? null,
         teardown: async config => {
           // Generation retries also remove owned vendor containers. Save the bounded full evidence
           // through the manager before any teardown, even when feedback itself has fewer lines.

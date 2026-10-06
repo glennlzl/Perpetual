@@ -97,8 +97,7 @@ test('author retries keep retired input values private and rebuild evidence when
     twin: only({ async prepare({ source: path, inputs, onStep }) {
       assert.equal(await readFile(join(path, 'app.mjs'), 'utf8'), source);
       assert.equal(inputs?.payments.PAYMENTS_KEY, replacement);
-      // The service's own failure names it, so the next attempt is paid for.
-      if (++preparations === 1) { await onStep?.('Setting up Payments'); throw new Error(`Payments: declined ${retired} and ${replacement}`); }
+      if (++preparations === 1) { await onStep?.('Starting twin'); throw new Error(`Payments: declined ${retired} and ${replacement}`); }
       return { services: [{ id: 'payments', fidelity: 'official-sandbox', status: 'ready' }], apps: [{ id: 'web', url: 'http://127.0.0.1:43000/' }] };
     }, health: async () => ({ status: 'failed', containers: [] }), logs: async () => '', destroy: async () => ({ status: 'destroyed' }) }),
     answers: async () => 200,
