@@ -12,7 +12,7 @@ Throughout:
 
 ## The controller API
 
-The interface's own API, at the address of the link `serve` prints (`http://127.0.0.1:4317` by default). Every request carries the header `x-perpetual-secret` with the controller's launch secret, which you read from the clone's `.perpetual/launch-secret`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do.
+The interface's own API, at the address of the link `serve` prints (`http://127.0.0.1:4317` by default). Every request carries the header `x-perpetual-secret` with the controller's launch secret, which you read from the clone's `.perpetual/launch-secret`. Pipeline and environment calls carry `repoPath`, the `pipeline.repoPath` of `GET /api/pipeline`: the managed clone's path once a source is chosen. Bodies are JSON; a refusal is `{ "error": "…" }` with a 4xx status, and says what to do. A `409` that also carries `"sourceBusy": true` came while a source change was being saved: send the same request again shortly.
 
 ## 1. Start the controller
 

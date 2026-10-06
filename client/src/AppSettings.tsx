@@ -8,11 +8,13 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useActionFocus } from '@/lib/journey-focus';
-import type { AppSettingsSession, SettingsDraft } from '@/lib/app-settings';
+import type { AppSettingsSession, SavedModelState, SettingsDraft } from '@/lib/app-settings';
 import type { ModelSettingsView, OpenRouterModel } from '../../contract/settings.ts';
 
 type ModelGroup = { label: string; models: OpenRouterModel[] };
 const openRouter = (capabilities: ModelSettingsView | null) => capabilities?.provider === 'openrouter';
+// Why a model Select preselects a model the controller does not use.
+const SAVED_MODEL_STATES: Record<NonNullable<SavedModelState>, string> = { unavailable: 'Saved model unavailable', unsaved: 'Not saved' };
 const providerNames: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', 'meta-llama': 'Meta', 'x-ai': 'xAI', qwen: 'Qwen', mistralai: 'Mistral', nvidia: 'NVIDIA', openrouter: 'OpenRouter', rekaai: 'Reka' };
 const namePrefix = (name: string) => /^([^:]{1,48}):\s+\S/.exec(name)?.[1].trim();
 // Groups are named as the catalog names its models ("Meta: Llama 4"), so slugs that share
@@ -65,19 +67,19 @@ function PinnedGroup({ label, children }: { label: string; children: ReactNode }
 }
 
 // A catalog Select whose saved or preselected model stays pinned above the provider groups.
-function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange, triggerRef }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void; triggerRef?: Ref<HTMLButtonElement> }) {
+function ModelSelect({ id, value, models, pinned, pinnedLabel, disabled, loading, onChange, triggerRef, describedBy }: { id: string; value: string; models: OpenRouterModel[]; pinned?: OpenRouterModel; pinnedLabel: string; disabled: boolean; loading: boolean; onChange: (value: string) => void; triggerRef?: Ref<HTMLButtonElement>; describedBy?: string }) {
   const selected = models.find(item => item.id === value);
   const groups = useMemo(() => modelGroups(models, pinned?.id), [models, pinned]);
   // Radix can report an empty form value while asynchronously loaded options
   // register. Every selectable model has an id; that empty value is not an edit.
   return <Select value={selected ? value : ''} disabled={disabled} onValueChange={next => { if (next) onChange(next); }}>
-    <SelectTrigger ref={triggerRef} id={id} className="min-w-0 w-full data-[size=default]:h-10" title={selected?.name}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'}>{selected?.name}</SelectValue></span></SelectTrigger>
+    <SelectTrigger ref={triggerRef} id={id} aria-describedby={describedBy} className="min-w-0 w-full data-[size=default]:h-10" title={selected?.name}><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={loading ? 'Loading models…' : 'Select a model'}>{selected?.name}</SelectValue></span></SelectTrigger>
     <SelectContent position="popper" align="start" collisionPadding={16} className="max-h-[min(60dvh,var(--radix-select-content-available-height))] w-(--radix-select-trigger-width) max-w-[calc(100vw-2rem)]">{pinned && <PinnedGroup label={pinnedLabel}>{modelOption(pinned)}{groups.length > 0 && <SelectSeparator />}</PinnedGroup>}{groups.map(group => <SelectGroup key={group.label}><SelectLabel>{group.label}</SelectLabel>{group.models.map(item => modelOption(item, group.label))}</SelectGroup>)}</SelectContent>
   </Select>;
 }
 
 export default function AppSettings({ settings }: { settings: AppSettingsSession }) {
-  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, loading, modelsLoading, modelsError, saving, saved, readError, saveError, saveWarning } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
+  const { capabilities, models, draft, savedModel, serverModel, savedEscalation, serverEscalation, modelState, escalationState, loading, modelsLoading, modelsError, saving, saved, readError, saveError, saveWarning } = useSyncExternalStore(settings.subscribe, settings.getSnapshot);
   const model = draft?.model ?? savedModel;
   const escalationModel = draft?.escalationModel ?? savedEscalation;
   const apiKey = draft?.apiKey ?? '';
@@ -123,16 +125,23 @@ export default function AppSettings({ settings }: { settings: AppSettingsSession
           </div>
           <Separator />
           <div className="grid gap-3 py-7 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-8">
-            <Label htmlFor="openrouter-model" className="sm:self-start sm:pt-3">Model</Label>
+            {/* A preselected model the controller does not use is named beside the label, as the key's state is. */}
+            <div className="flex flex-wrap items-center gap-2 sm:flex-col sm:items-start sm:self-start sm:pt-3">
+              <Label htmlFor="openrouter-model">Model</Label>
+              {modelState && <Badge id="openrouter-model-state" variant="outline">{SAVED_MODEL_STATES[modelState]}</Badge>}
+            </div>
             <div className="min-w-0 space-y-3">
-              <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} triggerRef={modelTrigger} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
+              <ModelSelect id="openrouter-model" value={model} models={models} pinned={pinnedModel} pinnedLabel={savedModel === serverModel ? 'Current' : 'Default'} triggerRef={modelTrigger} describedBy={modelState ? 'openrouter-model-state' : undefined} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ model: value }); }} />
               {(modelsError || modelsLoading) && <div className="space-y-2">{modelsError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{modelsError}</p>}<Button type="button" variant="outline" size="sm" disabled={saving} aria-disabled={modelsLoading} aria-busy={modelsLoading} className="aria-disabled:opacity-50" onClick={() => { if (!modelsLoading) { rememberModelsFocus(); void settings.reloadModels(); } }}><RefreshCw className={modelsLoading ? 'motion-safe:animate-spin' : ''} />Reload models</Button></div>}
             </div>
           </div>
           <Separator />
           <div className="grid gap-3 py-7 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-8">
-            <Label htmlFor="openrouter-escalation-model" className="sm:self-start sm:pt-3">Escalation model</Label>
-            <div className="min-w-0"><ModelSelect id="openrouter-escalation-model" value={escalationModel} models={models} pinned={pinnedEscalation} pinnedLabel={savedEscalation === serverEscalation ? 'Current' : 'Default'} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ escalationModel: value }); }} /></div>
+            <div className="flex flex-wrap items-center gap-2 sm:flex-col sm:items-start sm:self-start sm:pt-3">
+              <Label htmlFor="openrouter-escalation-model">Escalation model</Label>
+              {escalationState && <Badge id="openrouter-escalation-model-state" variant="outline">{SAVED_MODEL_STATES[escalationState]}</Badge>}
+            </div>
+            <div className="min-w-0"><ModelSelect id="openrouter-escalation-model" value={escalationModel} models={models} pinned={pinnedEscalation} pinnedLabel={savedEscalation === serverEscalation ? 'Current' : 'Default'} describedBy={escalationState ? 'openrouter-escalation-model-state' : undefined} disabled={saving || modelsLoading || !models.length || !capabilities} loading={modelsLoading} onChange={value => { changed({ escalationModel: value }); }} /></div>
           </div>
         </fieldset>
         <Separator />

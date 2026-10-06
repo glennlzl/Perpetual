@@ -1,6 +1,6 @@
 import { pruneStageDrafts } from './case-drafts.ts';
 import { previewTargets, type PreviewNode, type PreviewTarget } from './journey-config.ts';
-import type { ApiError, ApiOptions, Controller } from './api.ts';
+import { sourceBusy, type ApiError, type ApiOptions, type Controller } from './api.ts';
 import type { BrowserCapabilities, BrowserCase, BrowserRun, JourneySpecs, RunProgress } from './browser-test-ui.ts';
 import type { TestAccount } from './test-accounts.ts';
 import type { PageVisibility } from './utils.ts';
@@ -232,7 +232,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         accept(entry, resource, value);
       }
     } catch (failure) {
-      if (current(entry) && !gone(entry) && revision === entry.revisions[resource]) update(entry, { pollErrors: { ...entry.view.pollErrors, [resource]: (failure as Error).message }, loading: { ...entry.view.loading, [resource]: false } });
+      // A read refused while a source change saves keeps the view as last read, and no error; the next poll reads it again.
+      if (current(entry) && !gone(entry) && revision === entry.revisions[resource] && !sourceBusy(failure)) update(entry, { pollErrors: { ...entry.view.pollErrors, [resource]: (failure as Error).message }, loading: { ...entry.view.loading, [resource]: false } });
     } finally { entry.reading[resource]--; }
   }
   // T is the full /api/state reply a caller reads beyond the fields the workspace reads.

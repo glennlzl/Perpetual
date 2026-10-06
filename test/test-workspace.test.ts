@@ -232,6 +232,27 @@ test('successful environment reads cannot clear a browser read failure', async t
   assert.equal(stage.getSnapshot().pollError, '');
 });
 
+test('a stage read refused while a source change saves keeps its view, and is no page error', async t => {
+  let busy = false;
+  const { workspace, stage } = fixture(t, async path => {
+    if (busy) throw Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true });
+    return path.startsWith('/api/browser') ? { cases: [scenario], runs: [] } : { environments: [{ id: 'env-1', stageId: 'beta', status: 'ready' }], plan: null };
+  });
+  await stage.refresh('browser'); await stage.refresh('environment');
+  const view = stage.getSnapshot();
+  busy = true;
+  await stage.refresh('browser'); await stage.refresh('environment');
+  assert.equal(stage.getSnapshot(), view, 'The stage keeps its view as last read.');
+  assert.equal(workspace.getSnapshot().error, '');
+  // A stage observed for the first time stays loading until a read is answered.
+  const gamma = workspace.stage('gamma'), stop = gamma.observe(['browser']);
+  t.after(stop);
+  await gamma.refresh('browser');
+  assert.deepEqual([gamma.getSnapshot().loading.browser, gamma.getSnapshot().pollError], [true, '']);
+  busy = false; await gamma.refresh('browser');
+  assert.deepEqual([gamma.getSnapshot().loading.browser, gamma.getSnapshot().browser.cases.map(item => item.id)], [false, ['journey']]);
+});
+
 test('graph creation provisions the stage\'s saved twin config without posting a plan', async t => {
   const posted: string[] = [];
   const { workspace, stage } = fixture(t, async (path, input) => {

@@ -1,6 +1,6 @@
 // GitHub Actions status for the watched Build commit, read through /api/github/build.
 // A run for another commit never verifies the current source.
-import type { Controller } from './api.ts';
+import { sourceBusy, type ApiError, type Controller } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
 import { createVisiblePoller } from './visible-poller.ts';
 
@@ -113,10 +113,13 @@ export function watchedBuildStatus(view: BuildReply | null | undefined, error?: 
 /** Names from the scanned workflow files. These are configuration, never execution evidence. */
 export type ConfiguredWorkflow = ActionWorkflow;
 export interface BuildWorkflowRow extends ConfiguredWorkflow { runs: GitHubRun[] }
-/** Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. */
-export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined): BuildWorkflowRow[] {
+/**
+ * Observed jobs retain their exact GitHub names/IDs; a matrix or reusable job is never matched by guessing. While Build
+ * is `unreadable` there is no Build commit to describe, so the scanned workflows stand, without runs.
+ */
+export function buildWorkflowRows(view: BuildReply | null | undefined, configured: ConfiguredWorkflow[], scannedSha: string | null | undefined, unreadable = false): BuildWorkflowRow[] {
   const rows = new Map<string, BuildWorkflowRow>();
-  if (view?.sha && view.sha === scannedSha) for (const workflow of configured) rows.set(workflow.file, { ...workflow, runs: [] });
+  if (view ? view.sha && view.sha === scannedSha : unreadable) for (const workflow of configured) rows.set(workflow.file, { ...workflow, runs: [] });
   for (const run of githubBranchBuild(view, view?.sha, view?.branch)?.runs ?? []) {
     const file = workflowPath(run.path), row = rows.get(file);
     if (row) { row.runs.push(run); if (run.name) row.name = run.name; }
@@ -125,7 +128,11 @@ export function buildWorkflowRows(view: BuildReply | null | undefined, configure
   return [...rows.values()];
 }
 
-export interface BuildRead { view: BuildReply | null; error: string | null }
+/**
+ * A Build read: the reply, or why it failed. unreachable marks a failure GitHub caused, which the controller answers with
+ * HTTP 502, as while GitHub is unreachable: the account stays connected, so connecting again would not help.
+ */
+export interface BuildRead { view: BuildReply | null; error: string | null; unreachable?: true }
 const buildListeners = new Set<() => void>();
 export const buildChanges = {
   subscribe(listener: () => void) { buildListeners.add(listener); return () => { buildListeners.delete(listener); }; },
@@ -135,7 +142,12 @@ export function createGitHubBuildPoller({ repoPath, branch, controller, ...optio
   return createGitHubPoller<BuildRead>({ ...options, path: `/api/github/build?${new URLSearchParams({ repoPath, ...(branch ? { branch } : {}) })}`,
     async controller(path) {
       try { return { view: await controller(path) as BuildReply, error: null }; }
-      catch (error) { return { view: null, error: error instanceof Error ? error.message : 'Could not read Build. Reconnect GitHub and try again.' }; }
+      catch (error) {
+        // Refused while a source change saves, which says nothing of Build: the poller keeps the Build it last read.
+        if (sourceBusy(error)) throw error;
+        const unreachable = (error as Partial<ApiError> | null)?.statusCode === 502;
+        return { view: null, error: error instanceof Error ? error.message : 'Could not read Build. Reconnect GitHub and try again.', ...(unreachable ? { unreachable: true as const } : {}) };
+      }
     },
     active: read => ['running', 'queued'].includes(watchedBuildSummary(read?.view)?.status ?? ''),
   });

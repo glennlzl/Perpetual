@@ -10,6 +10,7 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
   let environment: Environment = { id: 'environment-1', stageId: 'beta', status: 'preparing', step: 'Setting up Supabase', createdAt: '2026-01-01T00:00:00Z',
     timings: [{ step: 'Copying source', ms: 120 }], attempts: [{ attempt: 1, stage: 'build', summary: 'Install failed.' }] };
   const requests: { path: string; input: Record<string, unknown> }[] = [];
+  let saving = false;
   const browserView = { cases: [], runs: [], accounts: [], specs: {}, preparation: null, config: { targetUrl: '', scope: '', requirements: '', maxSteps: 60 },
     capabilities: { modelConfigured: false, runtimeInstalled: true, browserInstalled: true, playwright: { browserInstalled: true } } };
   const entry = `
@@ -34,6 +35,11 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
           let body = ''; for await (const chunk of req) body += chunk;
           const input = JSON.parse(body); requests.push({ path, input });
           if (path === '/api/environments/cancel') environment = { ...environment, step: 'Stopping', cancellationRequestedAt: '2026-01-01T00:01:00Z' };
+          // The controller refuses reads of the source while it saves a source change.
+          if (path.endsWith('/logs') && saving) {
+            res.statusCode = 409; res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'A source change is still being saved. Please wait.', sourceBusy: true })); return;
+          }
         }
         const reply = path === '/api/session' ? { token: 'fixture-token' } : path.endsWith('/logs') ? { logs: 'Downloading packages\nAPI_KEY=[REDACTED]' }
           : path.endsWith('/cancel') ? { environment } : path === '/api/environments' ? { environments: [environment], plan: {} } : browserView;
@@ -53,6 +59,13 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
   await expect(page.getByRole('tab')).toHaveCount(2);
   await page.getByRole('button', { name: 'Logs', exact: true }).click();
   await expect(page.getByText('Downloading packages', { exact: false })).toBeVisible();
+  // Logs read while a source change saves keep what they last showed, without an error.
+  saving = true;
+  const logReads = () => requests.filter(item => item.path.endsWith('/logs')).length, before = logReads();
+  await expect.poll(logReads, { timeout: 10_000 }).toBeGreaterThan(before + 1);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Downloading packages', { exact: false })).toBeVisible();
+  saving = false;
   await expect(page.getByText('Install failed.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.getByText('Stopping', { exact: true })).toBeVisible();
@@ -64,4 +77,16 @@ test('the environment inspector exposes actual preparation, logs and a scoped St
   await expect(page.getByText('Stopping', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Failed', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+  // A settled environment reads its logs once; a read refused while a source change saves is read again until they arrive.
+  saving = true;
+  const settled = logReads();
+  await page.getByRole('button', { name: 'Logs', exact: true }).click();
+  await expect.poll(logReads, { timeout: 10_000 }).toBeGreaterThan(settled + 1);
+  await expect(page.getByText('No logs yet.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  saving = false;
+  await expect(page.getByText('Downloading packages', { exact: false })).toBeVisible({ timeout: 10_000 });
+  const arrived = logReads();
+  await page.waitForTimeout(2500);
+  assert.equal(logReads(), arrived, 'Logs that arrived are not read again.');
 });

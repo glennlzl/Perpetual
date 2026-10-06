@@ -56,6 +56,8 @@ export interface StageNodeContext<D = unknown, R = unknown> {
   scan?: NodeScan<R> | null; source?: SavedSource | null; pipeline?: PipelineView | null; sha?: string | null;
   latest?: Record<string, Environment | undefined>; snapshot?: ActivitySnapshot & { browserTests?: Record<string, Partial<BrowserView> | undefined> }; arrivals?: Record<string, string>;
   healthBeat?: (environment: Environment | undefined) => string; build?: BuildSummary | null; buildStatus?: BuildStatus | null; github?: BuildReply | null; buildReadError?: string | null; gates?: GateView | null;
+  /** The Build read failed because GitHub did not answer (HTTP 502), as while it is unreachable, not for the connection. */
+  buildUnreachable?: boolean;
   /** Production's rows with the deployments GitHub records for the commit; absent, the scan's rows stand. */
   production?: readonly R[] | null;
   /** GitHub's page of the repository's deployments when it holds more records for the commit than were read. */
@@ -67,7 +69,7 @@ export interface StageNodeContext<D = unknown, R = unknown> {
   selection?: D | null; selectedStageId?: string | null; busyStages?: string[]; busy?: boolean;
   openDialog?: (dialog: D) => void; toggleStage?: (stageId: string) => void; addTest?: (stageId: string) => void; createSandbox?: (stageId: string) => void;
 }
-export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { scan, source = null, pipeline, sha = null, latest = {}, snapshot = {}, arrivals = {}, healthBeat = () => '', build = null, buildStatus = null, github = null, buildReadError = null, gates = null, production = null, moreDeployments = null, releases = null, releaseReadError = null, autopilot = null, selection = null, selectedStageId = null, busyStages = [], busy = false, openDialog, toggleStage, addTest, createSandbox }: StageNodeContext<D, R>) {
+export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { scan, source = null, pipeline, sha = null, latest = {}, snapshot = {}, arrivals = {}, healthBeat = () => '', build = null, buildStatus = null, github = null, buildReadError = null, buildUnreachable = false, gates = null, production = null, moreDeployments = null, releases = null, releaseReadError = null, autopilot = null, selection = null, selectedStageId = null, busyStages = [], busy = false, openDialog, toggleStage, addTest, createSandbox }: StageNodeContext<D, R>) {
   const environment = latest[stage.id], services = stage.kind === 'production' && production ? production : stageServices(scan, stage);
   return {
     stage, services, repoPath: scan?.repo?.path, scannedAt: scan?.scannedAt, sha,
@@ -78,11 +80,12 @@ export function stageNodeData<D = unknown, R = unknown>(stage: PipelineStage, { 
     arrival: arrivals[stage.id] || '', beat: stage.kind === 'sandbox' ? healthBeat(environment) : '',
     gate: stage.kind === 'sandbox' ? gates?.stages?.[stage.id] || null : stage.kind === 'production' ? gates?.production || null : null,
     ...(stage.kind === 'source' ? sourceProvenance(scan, source) : {}),
-    // Whether a Sandbox stage gates commits before Production; its badge says so when none does.
-    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), releases, releaseReadError, moreDeployments } : {}),
+    // Whether a Sandbox stage gates commits before Production, and whether the repository names a deployment target, which
+    // the recorded deployments joining its rows never do; its badge says so when either is missing.
+    ...(stage.kind === 'production' ? { gated: Boolean(pipeline?.stages?.some(item => item.kind === 'sandbox')), discovered: stageServices(scan, stage).length > 0, releases, releaseReadError, moreDeployments } : {}),
     // Source is the repository connection; the other stages carry their Autopilot.
     ...(stage.kind !== 'source' ? { autopilot: autopilot?.stages?.[stage.id] || null } : {}),
-    ...(stage.kind === 'build' ? { build, buildStatus, github, buildReadError } : {}),
+    ...(stage.kind === 'build' ? { build, buildStatus, github, buildReadError, buildUnreachable } : {}),
   };
 }
 

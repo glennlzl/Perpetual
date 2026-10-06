@@ -89,14 +89,15 @@ function ObservedRun({ run, openKey }: { run: GitHubRun; openKey: string }) {
   </StepList>;
 }
 
-export default function GitHubActionsCard({ repoPath, scannedAt, scannedSha, runs = null, readError, stageId, autopilot = null }: { repoPath?: string; scannedAt?: string; scannedSha?: string | null; runs?: BuildReply | null; readError?: string | null; stageId?: string; autopilot?: StageAutopilot | null }) {
+export default function GitHubActionsCard({ repoPath, scannedAt, scannedSha, runs = null, readError, stageId, autopilot = null, onConnect }: { repoPath?: string; scannedAt?: string; scannedSha?: string | null; runs?: BuildReply | null; readError?: string | null; stageId?: string; autopilot?: StageAutopilot | null; onConnect?: () => void }) {
   const configKey = JSON.stringify([repoPath, scannedAt, scannedSha]);
   const [config, setConfig] = useState<{ key: string; workflows: ConfiguredWorkflow[]; error: string } | null>(null);
   const [reload, setReload] = useState(0);
   const openKey = `github-actions:${repoPath}`;
   const [open, setOpen] = useRememberedOpen(openKey);
   const current = config?.key === configKey ? config : null;
-  const workflows = buildWorkflowRows(runs, current?.workflows ?? [], scannedSha);
+  // While Build cannot be read, the discovered workflows stay listed without run marks.
+  const workflows = buildWorkflowRows(runs, current?.workflows ?? [], scannedSha, Boolean(readError));
   const error = readError || current?.error;
 
   useEffect(() => {
@@ -117,7 +118,10 @@ export default function GitHubActionsCard({ repoPath, scannedAt, scannedSha, run
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent className="pb-1">
-          {error && <div className="space-y-2 p-2"><p role="alert" className="break-words text-xs text-destructive">{error}</p><Button type="button" variant="outline" size="sm" onClick={() => { if (readError) buildChanges.notify(); else setReload(value => value + 1); }}><RotateCw />Retry</Button></div>}
+          {error && <div className="space-y-2 p-2"><p role="alert" className="break-words text-xs text-destructive">{error}</p><div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => { if (readError) buildChanges.notify(); else setReload(value => value + 1); }}><RotateCw />Retry</Button>
+            {readError && onConnect && <Button type="button" variant="outline" size="sm" onClick={onConnect}>Connect</Button>}
+          </div></div>}
           {workflows.length ? <StepList label="GitHub workflows">
               {workflows.map(workflow => {
                 const mark = combinedMark(workflow.runs.map(githubMark)), file = workflow.file.split('/').at(-1), workflowName = actionText(workflow.name, file);

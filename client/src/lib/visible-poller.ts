@@ -1,3 +1,4 @@
+import { sourceBusy } from './api.ts';
 import type { PageVisibility, Timers } from './utils.ts';
 
 export type PollResult<T> = { ok: true; value: T } | { ok: false; error: unknown };
@@ -6,6 +7,8 @@ export type PollResult<T> = { ok: true; value: T } | { ok: false; error: unknown
  * One read at a time while the page is visible. A refresh requested during a read
  * runs once after it settles, and stopping prevents that read from publishing.
  * The caller owns the result, failures and cadence; this module owns their lifetime.
+ * A read the controller refused while it saved a source change publishes nothing:
+ * the caller keeps its last result, and the next read follows at its interval.
  */
 export function createVisiblePoller<T>({ read, onResult, interval, document = globalThis.document, timers = globalThis }: {
   read: () => Promise<T>; onResult: (result: PollResult<T>) => void; interval: () => number;
@@ -20,7 +23,7 @@ export function createVisiblePoller<T>({ read, onResult, interval, document = gl
     try { result = { ok: true, value: await read() }; }
     catch (error) { result = { ok: false, error }; }
     if (stopped) { loading = false; return; }
-    try { onResult(result); }
+    try { if (result.ok || !sourceBusy(result.error)) onResult(result); }
     finally { loading = false; }
     if (stopped) return;
     if (again) { again = false; return poll(); }

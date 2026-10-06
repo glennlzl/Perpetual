@@ -57,6 +57,12 @@ test('new and removed workflows at the watched commit do not inherit the old con
   assert.deepEqual(display.buildWorkflowRows(current, configured, A).map(row => [row.file, row.jobs[0]?.name, row.runs.length]), [[CI, 'Tests (${{ matrix.shard }}/2)', 0]], 'Same-commit configured jobs without a run remain visible and unverified.');
 });
 
+test('while Build cannot be read the discovered workflows stand without runs, and nothing stands before its first read', () => {
+  assert.deepEqual(display.buildWorkflowRows(null, configured, A, true).map(row => [row.file, row.name, row.jobs[0]?.name, row.runs.length]), [[CI, 'Old CI', 'Tests (${{ matrix.shard }}/2)', 0]]);
+  assert.deepEqual(display.buildWorkflowRows(null, configured, A), [], 'A Build still loading lists nothing yet.');
+  assert.deepEqual(display.buildWorkflowRows(reply(), configured, A, true).map(row => [row.file, row.jobs.length, row.runs.length]), [[CI, 0, 1]], 'A newer Build that was read never takes the older scan\'s tree.');
+});
+
 test('latest eligible workflow attempt owns the actual job tree, including unavailable jobs', () => {
   const rows = display.buildWorkflowRows(reply([run({ id: '1', conclusion: 'failure' }), run({ attempt: 2, jobs: null })]), configured, A);
   assert.deepEqual(rows[0].runs.map(item => [item.id, item.attempt, item.jobs]), [['2', 2, null]]);
@@ -77,6 +83,36 @@ test('Build polling clears a prior success on read failure and discards a comple
   const pending = display.createGitHubBuildPoller({ repoPath: '/acme/app', branch: 'main', controller: () => new Promise(resolve => { release = resolve; }), onChange: value => reads.push(value), timers, document: null });
   pending.stop(); release!(reply()); await new Promise(resolve => setImmediate(resolve));
   assert.equal(reads.length, 2);
+});
+
+test('a Build read GitHub did not answer (HTTP 502), as while it is unreachable, is marked so; one the connection refused is not', async t => {
+  const reads: (display.BuildRead | null)[] = [];
+  let status = 502;
+  const poller = display.createGitHubBuildPoller({ repoPath: '/acme/app', branch: 'main', document: null,
+    controller: async () => { throw Object.assign(new Error(status === 502 ? 'GitHub is unreachable. Check your network connection.' : 'Connect your GitHub account to read Build.'), { statusCode: status }); },
+    onChange: value => reads.push(value), timers: { setTimeout: () => 0, clearTimeout() {} },
+  });
+  t.after(() => poller.stop());
+  await new Promise(resolve => setImmediate(resolve));
+  status = 400; poller.refresh(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(reads, [
+    { view: null, error: 'GitHub is unreachable. Check your network connection.', unreachable: true },
+    { view: null, error: 'Connect your GitHub account to read Build.' },
+  ]);
+});
+
+test('a Build read refused while a source change saves keeps the Build last read, without a read error', async t => {
+  const delays: number[] = [], reads: unknown[] = [];
+  let busy = false;
+  const poller = display.createGitHubBuildPoller({ repoPath: '/acme/app', branch: 'main', document: null,
+    controller: async () => { if (busy) throw Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true }); return reply([run({ status: 'in_progress', conclusion: null })]); },
+    onChange: value => reads.push(value), timers: { setTimeout(_callback, delay) { delays.push(delay); return delays.length; }, clearTimeout() {} },
+  });
+  t.after(() => poller.stop());
+  await new Promise(resolve => setImmediate(resolve));
+  busy = true; poller.refresh(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 1, 'Build stays as last read rather than Unverified.');
+  assert.equal(delays.at(-1), 5000, 'The run in progress is read again soon.');
 });
 
 test('a refresh during an unfinished Build read rereads once before waiting for the idle interval', async t => {

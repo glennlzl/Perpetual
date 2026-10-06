@@ -64,6 +64,22 @@ function harness() {
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test('a read refused while a source change saves keeps the recorded deployments', async () => {
+  const h = harness(), changes: (GitHubDeployments | null)[] = [];
+  let busy = false;
+  const poller = createGitHubDeploymentsPoller({ controller: async () => {
+    if (busy) throw Object.assign(new Error('A source change is still being saved. Please wait.'), { statusCode: 409, sourceBusy: true });
+    return result([deployment('11', 'Vercel', 'Production – web', 'success')]);
+  }, repoPath: '/repo', onChange: value => changes.push(value), document: h.document, timers: h.timers });
+  await flush();
+  busy = true; await h.fire();
+  assert.equal(changes.length, 1, 'Production keeps its recorded rows.');
+  assert.ok(changes[0]?.deployments.length);
+  busy = false; await h.fire();
+  assert.equal(changes.length, 1, 'The same records read again change nothing.');
+  poller.stop();
+});
+
 test('the poller reads every 5 seconds while a deployment is in progress, otherwise every 60', async () => {
   const h = harness(), requests: string[] = [], changes: (GitHubDeployments | null)[] = [];
   let response = result([deployment('11', 'Vercel', 'Production – web', 'in_progress')]);
