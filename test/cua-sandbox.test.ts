@@ -1,17 +1,21 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSandbox, destroySandbox, inspectSandbox, listSandboxes, sandboxMcpCommand } from '../src/sandbox/cua.ts';
+import { promisify } from 'node:util';
+import { createSandbox, destroySandbox, inspectSandbox, listSandboxes, sandboxMcpCommand, startSandbox } from '../src/sandbox/cua.ts';
 
+const exec = promisify(execFile);
+const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const relay = fileURLToPath(new URL('../integrations/cua/relay.py', import.meta.url));
 const GUEST_PYTHON = '/opt/computer-server/venv/bin/python';
 
 // A docker CLI stand-in for one owned desktop on a local socket. It keeps its engine's state in state.json; no container
 // starts. An exec of computer-server's Python is the readiness check, answered as state.computerServer says; any other
-// exec is the Driver's, answered as state.exec says.
+// exec is the Driver's, answered as state.exec says. With state.exits, a started container stops again at once.
 const DOCKER = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -40,11 +44,14 @@ else if (command === 'container' && rest[0] === 'create') {
   // The image exposes these ports; they are bound only for a desktop that publishes them, as earlier versions did.
   const published = state.published ? [{ HostIp: '127.0.0.1', HostPort: '49152' }] : null, requested = state.published ? [{ HostIp: '127.0.0.1', HostPort: '' }] : null;
   process.stdout.write(JSON.stringify([{ Id: container.Id, Name: container.Name, Image: container.Image, Config: container.Config,
-    State: { Running: container.running, Paused: false, Restarting: false },
+    State: { Running: container.running, Paused: Boolean(container.paused), Restarting: false },
     NetworkSettings: { Ports: container.running ? { '8000/tcp': published, '6080/tcp': published } : {} },
     HostConfig: { NetworkMode: 'bridge', NanoCpus: container.cpus * 1e9, Memory: container.memoryMiB * 1024 * 1024, PidsLimit: container.pids,
       PortBindings: requested ? { '8000/tcp': requested, '6080/tcp': requested } : {} }, Mounts: [] }]));
-} else if (command === 'container' && rest[0] === 'start') { container.running = true; save(); }
+} else if (command === 'container' && rest[0] === 'start') {
+  if (container.paused) fail('Error response from daemon: cannot start a paused container, try unpause instead');
+  container.running = !state.exits; save();
+} else if (command === 'container' && rest[0] === 'unpause') { container.paused = false; save(); }
 else if (command === 'container' && rest[0] === 'rm') { if (state.rmError) fail(state.rmError); delete state.container; save(); }
 else if (command === 'exec') {
   const readiness = rest.includes(${JSON.stringify(GUEST_PYTHON)});
@@ -163,4 +170,62 @@ test('a desktop image that cannot run the guest relay fails creation at once', {
     { code: 'SANDBOX_INVALID_IMAGE', message: `The sandbox image cannot run ${GUEST_PYTHON}, which reaches its computer-server.` });
   const [failed] = await listSandboxes({ dataDir });
   assert.deepEqual([failed.status, failed.errorCode, Boolean(failed.cleanedAt), (await engine.read()).container], ['failed', 'SANDBOX_INVALID_IMAGE', true, undefined]);
+});
+
+test('a stopped desktop starts again in its own container, and a paused one resumes, once computer-server answers inside it', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const created = await createSandbox({ dataDir });
+  // Docker restarted: the desktop's container stopped, with its disk.
+  await engine.set({ container: { ...(await engine.read()).container, running: false }, readiness: null });
+  await assert.rejects(sandboxMcpCommand({ dataDir, id: created.id }), { code: 'SANDBOX_NOT_RUNNING', message: 'The sandbox is not running. Run sandbox start.' });
+  const started = await startSandbox({ dataDir, id: created.id });
+  const { container, readiness } = await engine.read();
+  assert.deepEqual([started.status, started.containerId, container.Id, container.running], ['running', created.containerId, created.containerId, true]);
+  assert.deepEqual(readiness, ['exec', '--user', '1000', created.containerId, GUEST_PYTHON, '-I', '-c', await readFile(relay, 'utf8'), '8000', 'GET', '/status', '3']);
+  // Docker refuses to start a paused container, so it is resumed.
+  await engine.set({ container: { ...container, paused: true } });
+  await assert.rejects(sandboxMcpCommand({ dataDir, id: created.id }), { code: 'SANDBOX_NOT_RUNNING' });
+  assert.equal((await startSandbox({ dataDir, id: created.id })).status, 'running');
+  assert.equal((await engine.read()).container.paused, false);
+  // A running desktop is only checked.
+  assert.equal((await startSandbox({ dataDir, id: created.id })).status, 'running');
+  assert.deepEqual((await sandboxMcpCommand({ dataDir, id: created.id })).args.slice(-3), [created.containerId, '/usr/local/bin/cua-driver', 'mcp']);
+});
+
+test('a desktop that exits as it starts, publishes ports or no longer exists is not started, and its record stays as it was', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const { id } = await createSandbox({ dataDir });
+  const file = join(dataDir, 'sandboxes', `${id}.json`), saved = await readFile(file, 'utf8');
+  await engine.set({ container: { ...(await engine.read()).container, running: false }, exits: true });
+  await assert.rejects(startSandbox({ dataDir, id }), { code: 'SANDBOX_START_FAILED' });
+  // A desktop that publishes ports, as earlier versions created, is refused before Docker runs it.
+  await engine.set({ exits: false, published: true });
+  await assert.rejects(startSandbox({ dataDir, id }), { code: 'SANDBOX_PORTS_INVALID' });
+  assert.equal((await engine.read()).container.running, false);
+  await engine.set({ published: false, container: null });
+  await assert.rejects(startSandbox({ dataDir, id }), { code: 'DOCKER_CONTAINER_MISSING', message: 'The sandbox container no longer exists. Create a new sandbox.' });
+  assert.equal(await readFile(file, 'utf8'), saved);
+});
+
+test('a desktop started after a failed destroy keeps no stale failure in its record', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const { id } = await createSandbox({ dataDir });
+  await engine.set({ down: true });
+  await assert.rejects(destroySandbox({ dataDir, id }), { code: 'DOCKER_UNAVAILABLE' });
+  assert.deepEqual((await listSandboxes({ dataDir })).map(record => [record.status, record.cleanupError]), [['cleanup_failed', 'The local Docker engine is unavailable.']]);
+  // Docker came back without the desktop running.
+  await engine.set({ down: false, container: { ...(await engine.read()).container, running: false } });
+  const started = await startSandbox({ dataDir, id });
+  assert.deepEqual([started.status, 'cleanupError' in started, (await listSandboxes({ dataDir }))[0].status], ['running', false, 'running']);
+});
+
+test('the CLI names sandbox start for a stopped desktop, and start prints the running desktop', async t => {
+  const engine = await localEngine(t), dataDir = engine.dataDir;
+  const { id } = await createSandbox({ dataDir });
+  await engine.set({ container: { ...(await engine.read()).container, running: false } });
+  // The CLI inherits this process's PATH and DOCKER_HOST, so it reaches the same stand-in engine.
+  const sandbox = (action: string) => exec(process.execPath, [CLI, 'sandbox', action, '--id', id, '--data', dataDir], { timeout: 60_000 });
+  await assert.rejects(sandbox('mcp'), { code: 1, stderr: 'The sandbox is not running. Run sandbox start.\n' });
+  const { stdout } = await sandbox('start');
+  assert.deepEqual([JSON.parse(stdout).id, JSON.parse(stdout).status, (await engine.read()).container.running], [id, 'running', true]);
 });

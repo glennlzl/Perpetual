@@ -50,6 +50,7 @@ async function main(){
     if(action==='create')return output(await cua.createSandbox({dataDir,image:option('image'),cpus:number('cpus'),memoryMiB:number('memory')}));
     if(action==='list')return output(await cua.listSandboxes({dataDir}));
     if(action==='inspect')return output(await cua.inspectSandbox(context));
+    if(action==='start')return output(await cua.startSandbox(context));
     if(action==='destroy')return output(await cua.destroySandbox(context));
     if(action==='exec') {
       const result=await cua.executeSandbox({...context,command:option('command',''),timeoutSeconds:number('timeout')});
@@ -62,7 +63,7 @@ async function main(){
     if(action==='mcp') {
       process.exitCode=await cua.runSandboxMcp({...context,driverPath:option('driver-path'),user:option('user')});return;
     }
-    throw new Error('Use sandbox create, list, inspect, destroy, exec, screenshot, upload, download, act, or mcp.');
+    throw new Error('Use sandbox create, list, inspect, start, destroy, exec, screenshot, upload, download, act, or mcp.');
   }
   if(command==='providers')return output(await getProviderStatus(await scanRepository(repo)));
   if(command==='failure')return output(await getGitHubFailure({repository:parseGitHubRemote((await scanRepository(repo)).repo.remote),runId:option('run','')}));
@@ -75,6 +76,6 @@ async function main(){
   console.error(`Unknown command: ${command}`);help();process.exitCode=1;
 }
 function help(){
-  console.log(`Perpetual 0.1 — local release control room\n\n  perpetual serve --repo /path/to/repo [--port 4317]\n  perpetual scan --repo /path/to/repo\n  perpetual twin --repo /path/to/repo\n  perpetual providers --repo /path/to/repo\n  perpetual failure --repo /path/to/repo --run RUN_ID\n  perpetual init-ci --repo /path/to/repo [--output file]\n  perpetual sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]\n  perpetual sandbox list\n  perpetual sandbox inspect --id ID\n  perpetual sandbox exec --id ID --command 'guest command'\n  perpetual sandbox screenshot --id ID --output screenshot.png\n  perpetual sandbox upload --id ID --input FILE --to /guest/path\n  perpetual sandbox download --id ID --from /guest/path --output FILE\n  perpetual sandbox act --id ID --action JSON\n  perpetual sandbox mcp --id ID [--driver-path /guest/path/cua-driver]\n  perpetual sandbox destroy --id ID\n\nUse --data PATH to choose where local reports and history are stored.\nQuickstart: ${resolve(dirname(fileURLToPath(import.meta.url)),'../README.md')}`);
+  console.log(`Perpetual 0.1 — local release control room\n\n  perpetual serve --repo /path/to/repo [--port 4317]\n  perpetual scan --repo /path/to/repo\n  perpetual twin --repo /path/to/repo\n  perpetual providers --repo /path/to/repo\n  perpetual failure --repo /path/to/repo --run RUN_ID\n  perpetual init-ci --repo /path/to/repo [--output file]\n  perpetual sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]\n  perpetual sandbox list\n  perpetual sandbox inspect --id ID\n  perpetual sandbox start --id ID\n  perpetual sandbox exec --id ID --command 'guest command'\n  perpetual sandbox screenshot --id ID --output screenshot.png\n  perpetual sandbox upload --id ID --input FILE --to /guest/path\n  perpetual sandbox download --id ID --from /guest/path --output FILE\n  perpetual sandbox act --id ID --action JSON\n  perpetual sandbox mcp --id ID [--driver-path /guest/path/cua-driver]\n  perpetual sandbox destroy --id ID\n\nUse --data PATH to choose where local reports and history are stored.\nQuickstart: ${resolve(dirname(fileURLToPath(import.meta.url)),'../README.md')}`);
 }
 main().catch((error: Error&{sandboxId?: string})=>{console.error(redact(error.message));if(error.sandboxId)console.error(`Sandbox: ${error.sandboxId}`);process.exitCode=1;});
