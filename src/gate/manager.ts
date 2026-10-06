@@ -36,7 +36,11 @@ export interface GateManagerOptions<Context, Twin> {
   /** Moves the managed source copy to its branch's head and rescans it (409: not now). */
   follow?: (head: SourceHead) => Promise<void>;
   now?: () => string; pollInterval?: number; retryInterval?: number;
-  /** How long after it was queued a gate waits for a commit GitHub Actions has no run for, before it needs release. */
+  /**
+   * How long a commit GitHub Actions has no run for waits for one, from when a push or Run now queued it, before its gate
+   * needs release. A promotion keeps that time, so a released commit that still has no run needs release at the next
+   * stage at once.
+   */
   buildWait?: number;
 }
 /** A gate as the pipeline shows it. */
