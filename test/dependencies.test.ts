@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import YAML from 'yaml';
+import { gitReadOnly } from '../src/process.ts';
 
 type Locked = { dev?: boolean; optional?: boolean; devOptional?: boolean; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }> };
 
@@ -84,18 +90,33 @@ test('a production install has every package production code loads: each product
 
 type Update = { 'package-ecosystem': string; directory?: string; directories?: string[]; schedule: { interval: string }; ignore?: { 'dependency-name': string; 'update-types'?: string[] }[] };
 // The bench corpus's repositories are fixtures: their pins are the cases a repair agent is scored on.
-const FIXTURES = 'bench/repair/corpus';
+const FIXTURES = 'bench/repair/corpus/';
 
-/** The directories that hold `file`, named as Dependabot names them (`/`, `/bench/repair`); installed packages, tool state and fixtures aside. */
-async function holding(file: string, directory = ''): Promise<string[]> {
-  const entries = await readdir(new URL(`../${directory ? `${directory}/` : ''}`, import.meta.url), { withFileTypes: true });
-  const found = entries.some(entry => entry.isFile() && entry.name === file) ? [`/${directory}`] : [];
-  for (const entry of entries) {
-    const path = directory ? `${directory}/${entry.name}` : entry.name;
-    if (entry.isDirectory() && entry.name !== 'node_modules' && !entry.name.startsWith('.') && path !== FIXTURES) found.push(...await holding(file, path));
-  }
-  return found;
+/**
+ * The directories where the repository at `root` tracks `file`, named as Dependabot names them (`/`, `/bench/repair`),
+ * the fixtures aside. Dependabot reads only what is committed, so no untracked file counts: neither installed packages
+ * nor the copies of the corpus that a bench run leaves in its ignored results.
+ */
+async function holding(file: string, root = fileURLToPath(new URL('..', import.meta.url))): Promise<string[]> {
+  const { stdout } = await gitReadOnly(root, ['ls-files', '-z', '--', `:(glob)**/${file}`]);
+  return stdout.split('\0').filter(path => path && !path.startsWith(FIXTURES)).map(path => posix.dirname(`/${path}`));
 }
+
+test('a lockfile counts only where git tracks it, so the corpus copies a bench run leaves in its results never do', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-lockfiles-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tracked = ['package-lock.json', 'apps/web/package-lock.json', `${FIXTURES}acme-case/repo/package-lock.json`];
+  // A bench run copies each case's repository, lockfile included, under bench/repair/results, which git ignores.
+  const untracked = ['bench/repair/results/2026-01-01T00-00-00Z/cases/acme-case/snapshot/package-lock.json', 'node_modules/acme/package-lock.json'];
+  for (const path of [...tracked, ...untracked]) {
+    await mkdir(join(root, dirname(path)), { recursive: true });
+    await writeFile(join(root, path), '{}\n');
+  }
+  const git = (...args: string[]) => promisify(execFile)('git', ['-C', root, '-c', 'init.defaultBranch=main', ...args]);
+  await git('init', '--quiet');
+  await git('add', '--force', '--', ...tracked);
+  assert.deepEqual((await holding('package-lock.json', root)).sort(), ['/', '/apps/web']);
+});
 
 test('Dependabot proposes weekly updates for the workflows\' actions and every npm and uv lockfile, the bench corpus\'s fixtures aside', async () => {
   const { version, updates } = YAML.parse(await readFile(new URL('../.github/dependabot.yml', import.meta.url), 'utf8')) as { version: number; updates: Update[] };
