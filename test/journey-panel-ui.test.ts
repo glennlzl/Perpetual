@@ -207,11 +207,15 @@ test('a journey cannot be edited while its code is generated, and can once gener
   assert.deepEqual(fixture.pageErrors, []);
 });
 
-test('an unconfirmed browser cleanup offers Cleanup done, which asks first and then releases the application', { timeout: 60000 }, async t => {
+test('an unconfirmed browser cleanup offers Cleanup done, which asks first, shows a refusal and then releases the application', { timeout: 60000 }, async t => {
   const fixture = await journeyPanel(t);
   fixture.controller.view = browserView({ cleanup: { operation: 'run', startedAt: '2026-10-01T00:00:00.000Z' } });
+  const refusal = 'Browser process group 4242 is still running. Stop it, then choose Cleanup done.';
+  let running = true;
   fixture.controller.reply = path => {
     if (path !== '/api/browser/cleanup') return undefined;
+    // The first confirmation comes while a worker group the operation saved still runs.
+    if (running) { running = false; return { status: 409, json: { error: refusal } }; }
     fixture.controller.view = browserView();
     return { json: { cleanup: null } };
   };
@@ -227,9 +231,12 @@ test('an unconfirmed browser cleanup offers Cleanup done, which asks first and t
   assert.deepEqual(fixture.controller.requests.filter(request => request.path === '/api/browser/cleanup'), []);
   await page.getByRole('button', { name: 'Cleanup done', exact: true }).click();
   await dialog.getByRole('button', { name: 'Cleanup done', exact: true }).click();
+  // A refusal names what still runs, and the dialog stays open for another confirmation.
+  await expect(dialog.getByText(refusal, { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cleanup done', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByText('Cleanup unconfirmed', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Cleanup done', exact: true })).toHaveCount(0);
-  assert.deepEqual(fixture.controller.requests.filter(request => request.path === '/api/browser/cleanup').map(request => [request.input.repoPath, request.input.stageId]), [['/acme/app', 'beta']]);
+  assert.deepEqual(fixture.controller.requests.filter(request => request.path === '/api/browser/cleanup').map(request => [request.input.repoPath, request.input.stageId]), [['/acme/app', 'beta'], ['/acme/app', 'beta']]);
   assert.deepEqual(fixture.pageErrors, []);
 });
