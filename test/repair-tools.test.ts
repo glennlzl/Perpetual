@@ -176,8 +176,8 @@ test('tool replies redact filenames and refused paths but internal file operatio
   assert.match(refused.error ?? '', /\[REDACTED\]/);
 });
 
-// A file over read's bound, a search output over grep's, and a run output that is one line longer than run's capture,
-// whose start the box cut.
+// A file over read's bound, a search output over grep's, and a run output whose last line alone is longer than run's
+// capture, whose start the box cut.
 test('tools withhold a capture already truncated by the box and preserve its execution evidence', async t => {
   const f = await tools(t);
   await writeFile(join(f.root, 'large.txt'), 'unredactable-fragment'.repeat(60_000));
