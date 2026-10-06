@@ -402,6 +402,37 @@ test('a stage keeps the records of its newest ten twins that are gone, and one a
   assert.deepEqual(beta(await saved()), [...ids.slice(3), failed.id].sort());
 });
 
+test('an application URL of a twin whose record was dropped resolves to the stage’s twin that is not ready, never to an external app', async t => {
+  let port = 50200;
+  const { manager, dataDir } = await fixture(t, { prepareEnvironment: async ({ environment, onUpdate }) => {
+    await onUpdate({ sandboxId: environment.id });
+    return { status: 'ready', services: [], apps: [{ id: 'app', url: `http://host.docker.internal:${port++}` }] };
+  } });
+  const ids: string[] = [];
+  for (let index = 0; index < 12; index += 1) ids.push((await createReady(manager)).id);
+  assert.ok(!manager.summaries(context.key).some(item => item.id === ids[0]), 'The oldest gone twin’s record is dropped.');
+  const dropped = manager.resolveTarget('http://localhost:50200/');
+  assert.deepEqual([dropped?.status, dropped?.stageId], ['destroyed', 'beta']);
+  assert.equal(manager.resolveTarget('http://localhost:50211/')?.id, ids[11]);
+  assert.equal(manager.resolveTarget('http://localhost:50212/'), null, 'An address no twin had is an external app.');
+  // A restart keeps them, and the newest gone twin keeps at most 50 such addresses, the newest.
+  await manager.close();
+  const file = join(dataDir, 'environments/state.json'), state = JSON.parse(await readFile(file, 'utf8'));
+  const oldest = state.environments.find((item: { id: string }) => item.id === ids[1]);
+  oldest.origins = Array.from({ length: 60 }, (_, index) => `http://127.0.0.1:${51000 + index}`);
+  await writeFile(file, JSON.stringify(state));
+  const restarted = await createEnvironmentManager({ dataDir, runtime: { prepareEnvironment: async ({ environment, onUpdate }) => { await onUpdate({ sandboxId: environment.id }); return structuredClone(ready); },
+    environmentLogs: async () => '', environmentHealth: async () => ({ status: 'ready' }), destroySandbox: async () => {} } });
+  try {
+    assert.equal(restarted.resolveTarget('http://localhost:50200/')?.status, 'destroyed');
+    // The next creation deletes the ready twin, and the record that held the 60 addresses is dropped.
+    await createReady(restarted);
+    assert.ok(!restarted.summaries(context.key).some(item => item.id === ids[1]));
+    assert.equal(restarted.resolveTarget('http://localhost:51048/')?.status, 'destroyed');
+    assert.equal(restarted.resolveTarget('http://localhost:51049/'), null);
+  } finally { await restarted.close(); }
+});
+
 test('a removed stage’s twin config, the scan it was detected from and its draft go, and other stages keep theirs', async t => {
   const { manager, dataDir } = await fixture(t);
   const gamma = { ...context, stageId: 'gamma' };

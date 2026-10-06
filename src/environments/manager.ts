@@ -102,6 +102,8 @@ const UUID = /^[a-f0-9-]{36}$/;
 const HEALTH_FAILURES = 3;
 /** The records a stage keeps of its twins that are gone, deleted or failed and cleaned up: its newest ones. */
 const GONE_KEPT = 10;
+/** The app origins of a stage's dropped records that its newest gone twin keeps, newest first. */
+const ORIGINS_KEPT = 50;
 const defaultRuntime: ManagedRuntime = { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox };
 const canRecoverHealth = (environment: EnvironmentRecord) => environment.status === 'failed' && environment.step === 'Unhealthy'
   && environment.sandboxId && environment.plan && !environment.cleanedAt;
@@ -219,9 +221,13 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
   // gone, and state and every view stay bounded. One still in use, such as one a stage removal names, stays for now.
   function prune(scope: string) {
     const gone = (item: EnvironmentRecord) => item.destroyedAt ?? item.updatedAt ?? item.createdAt;
-    const older = state.environments.filter(item => item.scope === scope && !holdsResources(item)).sort((one, other) => gone(other).localeCompare(gone(one))).slice(GONE_KEPT);
-    const dropped = new Set(older.filter(item => !jobs.has(item.id) && !usage.isBusy(item.id)));
+    const records = state.environments.filter(item => item.scope === scope && !holdsResources(item)).sort((one, other) => gone(other).localeCompare(gone(one)));
+    const dropped = new Set(records.slice(GONE_KEPT).filter(item => !jobs.has(item.id) && !usage.isBusy(item.id)));
     if (!dropped.size) return;
+    // An application URL may still point at a dropped twin: its origins stay with the stage's newest gone twin, so the URL
+    // resolves to a twin that is not ready, never to whatever listens there now as an external app.
+    const [newest] = records, origins = [...newest.origins ?? [], ...[...dropped].flatMap(item => item.origins ?? [])];
+    newest.origins = [...new Set(origins)].slice(0, ORIGINS_KEPT);
     state.environments = state.environments.filter(item => !dropped.has(item));
     for (const { id } of dropped) for (const beats of [healthChecks, healthFailures, healthResults, healthSkips]) beats.delete(id);
   }
