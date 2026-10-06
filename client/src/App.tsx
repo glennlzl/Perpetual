@@ -8,7 +8,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Separator } from '@/components/ui/separator';
-import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
+import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import Pipelines from './Pipelines';
 import { githubConnectionChanges } from '@/lib/github-connection-changes';
 import PipelineDialogs from './PipelineDialogs';
@@ -152,7 +152,6 @@ function AppSidebar({ theme, page, onNavigate }: { theme: Theme; page: Page; onN
             <SidebarMenuButton isActive={page !== 'settings'} tooltip="Project" aria-current={page !== 'settings' ? 'page' : undefined} onClick={() => navigate('pipelines')}>
               <Workflow /><span>Project</span>
             </SidebarMenuButton>
-            <SidebarMenuSub><SidebarMenuSubItem><SidebarMenuSubButton href="#pipelines" isActive={page !== 'settings'} onClick={event => { event.preventDefault(); navigate('pipelines'); }}><Workflow /><span>Pipelines</span></SidebarMenuSubButton></SidebarMenuSubItem></SidebarMenuSub>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>

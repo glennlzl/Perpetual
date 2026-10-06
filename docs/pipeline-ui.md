@@ -4,7 +4,7 @@ Start the controller as described in the [README](../README.md). It opens the li
 
 ## Canvas
 
-**Project** is the primary navigation entry, with **Pipelines** beneath it. It opens the current project's Pipelines table, with the left navigation collapsed; the header toggle expands it. Each project initially has one pipeline. Its row shows the repository, selected branch, stage count and connection state; selecting **Delivery** opens its canvas. The **Pipelines** breadcrumb returns to the table. Existing `#pipeline`, live-view and Git graph links still open the canvas. Without a repository, the page shows **Connect your GitHub** and one **Connect GitHub** button bearing the GitHub mark, which opens the Connect GitHub dialog directly.
+**Project** is the single primary navigation entry for delivery, with no sidebar submenu. It opens the current project's Pipelines table, with the left navigation collapsed; the header toggle expands it. Each project initially has one pipeline. Its row shows the repository, selected branch, stage count and connection state; selecting **Delivery** opens its canvas. The **Pipelines** breadcrumb returns to the table. Existing `#pipeline`, live-view and Git graph links still open the canvas. Without a repository, the page shows **Connect your GitHub** and one **Connect GitHub** button bearing the GitHub mark, which opens the Connect GitHub dialog directly.
 
 **Disconnect** closes Source and returns to the retained **Disconnected** row. **Reconnect GitHub** restores access to its saved graph. This detaches the account; it deletes no pipeline or tests, and independent URL browser tests are not cancelled by it.
 

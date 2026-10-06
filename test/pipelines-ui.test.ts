@@ -58,12 +58,13 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; deleti
   return { page, state, errors, posts };
 }
 
-test('Project opens a Pipelines table and the secondary navigation and row open the right views', { timeout: 60000 }, async t => {
+test('Project opens a Pipelines table without a sidebar submenu and the row opens the canvas', { timeout: 60000 }, async t => {
   const { page, errors } = await fixture(t);
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Toggle sidebar' }).click();
-  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Pipelines', exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Project', exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Pipelines', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Delivery', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Pipelines', exact: true }).click();
