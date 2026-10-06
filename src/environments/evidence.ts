@@ -19,7 +19,7 @@ import { parse as parseToml } from 'smol-toml';
 import { envNames, services as registry } from '../twin/index.ts';
 import { PORT_VARIABLE } from '../twin/compose.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
-import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MODULES, REQUIREMENTS, SCRIPT_MODULE, TOOLING, WALK, dependencyNames, isTest, keptFolders, packagePaths, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
+import { DOCS, ENV_EXAMPLE, FILE_BYTES, IMPORT_MAP, MANIFEST, MODULES, SCRIPT_MODULE, TOOLING, WALK, dependencyNames, isTest, keptFolders, packageFolders, packagePaths, readLocal, repositoryWalk, snapshotKeeps, specifierNames } from './plans.ts';
 import { SETUP_LIMITS, code as inlineCode, deployManifest, devcontainer, dockerfile, lineNumbers, oneLine, supabaseConfig, turbo, word as inlineWord, workflow, yamlValue } from './setup-configs.ts';
 import type { SetupEvidence } from './setup-configs.ts';
 import type { JsonObject } from '../twin/config.ts';
@@ -52,7 +52,7 @@ const URL_CONSTRUCTION = /\bnew\s+URL\s*\(/, REDIRECT = /\bredirect\s*\(/;
 const SCRIPT = /^(?:scripts?|migrations?|seeds?)\//i, SEED = /(?:^|\/)(?:seeds\/|seed\.[^/]+$)/i;
 /**
  * A file's role, by its path inside each of `packages` that holds it and inside the repository. A test's test folder may
- * be that of any folder in `tests`: the packages, and the folder of every manifest outside a test folder.
+ * be that of any folder in `tests`: the packages, and the folder of every manifest outside a test folder (packageFolders).
  */
 function roleOf(file: string, packages: Set<string>, tests: Set<string>): Role {
   if (isTest(file, tests)) return 'test';
@@ -60,7 +60,6 @@ function roleOf(file: string, packages: Set<string>, tests: Set<string>): Role {
   if (inner.some(path => TOOLING.test(path))) return 'tooling';
   return SEED.test(file) || inner.some(path => SCRIPT.test(path)) ? 'script' : 'runtime';
 }
-const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
 const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
 const SETUP_DOC = /setup|develop|local|getting[-_ ]?started|contributing|install|quick[-_ ]?start|self[-_ ]?host/i;
 const COMPOSE = /^(?:docker-)?compose(?:[.-][\w.-]*)?\.ya?ml$/i;
@@ -302,10 +301,8 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   };
   for (const item of packages) add(item.path, item.framework);
   try { for (const app of Object.values(fields(fields(JSON.parse(draft))?.apps) ?? {})) add(fields(app)?.directory ?? '.'); } catch { /* A draft that is not JSON names no folders. */ }
-  // A test folder is the first folder inside the repository or a package, and the packages around a manifest are
-  // shallower than it, so manifests are taken shallowest first: one in a test folder is a test's, and makes no package.
-  const tests = new Set(directories.keys()), depth = (file: string) => file.split('/').length;
-  for (const file of files.filter(path => MANIFEST(posix.basename(path)) && !DOCS.test(path)).sort((one, other) => depth(one) - depth(other))) if (!isTest(file, tests)) tests.add(posix.dirname(file));
+  // A test folder is the first folder inside the repository or a package: one with a manifest counts, as in detection.
+  const tests = packageFolders(files, directories.keys());
   const relevant = files.filter(file => !isTest(file, tests));
   const notes = [tracked ? `Files: the ${files.length.toLocaleString('en-US')} files git tracks that ${code(shown)} holds.` : `Files: a walk of ${code(shown)}, ${reason}.`];
   if (!complete) notes.push(tracked ? `Only the first ${TRACKED.files.toLocaleString('en-US')} of the ${tracked.length.toLocaleString('en-US')} files git tracks were listed.` : `The walk stopped at its limits (${WALK_LIMITS}); files beyond them are left out.`);
@@ -329,9 +326,10 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     if (posix.basename(directory) === 'supabase') projects.push(directory);
     else if ((ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))) && supabaseLike(await read(under(directory, 'config.toml'), SETUP_LIMITS.bytes))) projects.push(directory);
   }
-  // The function folder each file is in, if any, <project>/functions/<name>/, and each project's function folders.
+  // The function folder each file is in, if any, <project>/functions/<name>/, and each project's function folders. A test is
+  // no function's, so a folder of tests alone, such as functions/tests/, is no function.
   const projectSet = new Set(projects), functions = new Map<string, string>(), projectFunctions = new Map<string, Set<string>>();
-  for (const file of files) {
+  for (const file of relevant) {
     for (let folder = posix.dirname(file); folder !== '.'; folder = posix.dirname(folder)) {
       const parent = posix.dirname(folder), project = posix.dirname(parent);
       if (posix.basename(parent) !== 'functions' || !projectSet.has(project)) continue;

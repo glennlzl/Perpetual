@@ -108,6 +108,22 @@ test('a test folder is the first folder of a scanned package or the repository, 
   assert.deepEqual(Object.keys((await detect(repoPath)).services), ['stripe']);
 });
 
+test('a package’s test folder is no service evidence whatever the package’s language, and neither are Supabase’s and Cypress’s test layouts', async t => {
+  const { repoPath } = await fixture(t, {
+    'package.json': manifest('web', { next: '1.0.0' }, { dev: 'next dev' }),
+    // A Python package the scan does not list: its own tests folder is a test's, as the generated config's evidence has it.
+    'backend/pyproject.toml': '[project]\nname = "backend"\ndependencies = ["fastapi"]\n',
+    'backend/tests/requirements.txt': 'pytest\nredis\n',
+    // Supabase keeps its edge functions' tests beside them, and Cypress its own folder at the package's top.
+    'supabase/config.toml': 'project_id = "acme"\n',
+    'supabase/functions/tests/hello-world-test.ts': 'import Stripe from "npm:stripe@17";\n',
+    'supabase/functions/tests/helpers.ts': 'import { MongoClient } from "npm:mongodb@6";\n',
+    'cypress/e2e/login.cy.ts': 'import nodemailer from "npm:nodemailer@6";\n',
+    'cypress/package.json': manifest('cypress-support', { ioredis: '5.0.0' }),
+  });
+  assert.deepEqual((await detect(repoPath)).services, { supabase: { directory: 'supabase' } });
+});
+
 test('Deno modules and import maps name their packages in specifiers, which detection reads like dependencies', async t => {
   const { repoPath } = await fixture(t, {
     'supabase/config.toml': 'project_id = "fixture"\n',

@@ -29,13 +29,15 @@ export function snapshotKeeps(path: string) {
   return keptFolders(path) && !SKIP.has(name) && !PRIVATE.test(name) && !(PRIVATE_NAME.test(name) && !SOURCE_MODULE.test(name));
 }
 
-// Tests read variables of their own; docs' code is never run. A test file is one by its name, and Jest's __tests__ and
-// __mocks__ folders hold tests, wherever they are.
-export const TEST = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
+// Tests read variables of their own; docs' code is never run. A test file is one by its name, such as add.test.ts,
+// server_test.ts, hello-test.ts or test.ts as Deno and Supabase name them, login.cy.ts as Cypress does, or test_add.py;
+// Jest's __tests__ and __mocks__ folders and the tests folder of a functions folder, where Supabase keeps its edge
+// functions' tests, hold tests, wherever they are.
+export const TEST = /(?:^|\/)(?:__tests__|__mocks__|functions\/tests)\/|\.(?:test|spec)\.[^/]+$|[_-](?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test\.[cm]?[jt]sx?$|\.cy\.[cm]?[jt]sx?$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
 export const DOCS = /(?:^|\/)docs\//i;
-// Test and tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/
-// holds runtime code whatever its folders are called, a route named tests or e2e included.
-export const TEST_FOLDER = /^(?:tests?|e2e)\//i;
+// Test folders, Cypress's included, and tooling folders are the first folder inside a package or the repository, so an
+// app's own src/, app/ or lib/ holds runtime code whatever its folders are called, a route named tests or e2e included.
+export const TEST_FOLDER = /^(?:tests?|e2e|cypress)\//i;
 export const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
 /** A repository file's path inside each of `packages` that holds it, innermost first, then inside the repository. */
 export function packagePaths(file: string, packages: ReadonlySet<string>) {
@@ -43,12 +45,24 @@ export function packagePaths(file: string, packages: ReadonlySet<string>) {
   for (let directory = posix.dirname(file); directory !== '.'; directory = posix.dirname(directory)) if (packages.has(directory)) paths.push(file.slice(directory.length + 1));
   return [...paths, file];
 }
-/** Whether a repository file is a test's: by its name or a Jest folder, or in a test folder of a package or the repository. */
+/** Whether a repository file is a test's: by its name or a folder TEST names, or in a test folder of a package or the repository. */
 export const isTest = (file: string, packages: ReadonlySet<string>) => TEST.test(file) || packagePaths(file, packages).some(path => TEST_FOLDER.test(path));
 
 // Detection evidence: dependency manifests, and only the variable names of example env files.
 export const ENV_EXAMPLE = /^\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/i;
 export const REQUIREMENTS = /^requirements(?:[.-][\w.-]+)?\.txt$/i;
+/** Whether a file name is a package's manifest: package.json, pyproject.toml, a requirements file or deno.json. */
+export const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
+/**
+ * The packages whose first folders may be test or tooling folders: `packages`, and the folder of every manifest among
+ * `files` outside a test folder and docs, whatever its language. The packages around a manifest are shallower than it, so
+ * manifests are taken shallowest first: one in a test folder is a test's, and makes no package.
+ */
+export function packageFolders(files: readonly string[], packages: Iterable<string>) {
+  const folders = new Set(packages), depth = (file: string) => file.split('/').length;
+  for (const file of files.filter(path => MANIFEST(posix.basename(path)) && !DOCS.test(path)).sort((one, other) => depth(one) - depth(other))) if (!isTest(file, folders)) folders.add(posix.dirname(file));
+  return folders;
+}
 // Deno and browser modules name packages in their import specifiers instead of a manifest, e.g. npm:stripe@17 or
 // https://esm.sh/stripe@17; deno.json import maps name them the same way.
 export const SCRIPT_MODULE = /\.(?:[cm]?[jt]sx?)$/i, IMPORT_MAP = /^(?:deno\.jsonc?|import_map\.json)$/i;
@@ -202,9 +216,11 @@ async function repositoryApps(root: string, scan: DetectionScan): Promise<{ apps
  * evidence's roles class them (./evidence.ts), are not what the product runs, so their files are not evidence.
  */
 export async function repositoryDetection(scan: DetectionScan): Promise<{ evidence: DetectionEvidence; config: DetectedConfig }> {
-  const root = await realpath(scan.repo.path), scanned = new Set((scan.services ?? []).map(service => service.path));
-  const aside = (file: string) => isTest(file, scanned) || DOCS.test(file) || packagePaths(file, scanned).some(path => TOOLING.test(path));
-  const files = (await repositoryWalk(root)).files.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
+  const root = await realpath(scan.repo.path), walked = (await repositoryWalk(root)).files;
+  // Test and tooling folders are those of the scanned packages and of every other folder with a manifest, as the evidence's.
+  const folders = packageFolders(walked, (scan.services ?? []).map(service => service.path));
+  const aside = (file: string) => isTest(file, folders) || DOCS.test(file) || packagePaths(file, folders).some(path => TOOLING.test(path));
+  const files = walked.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
   let modules = 0;
   for (const file of files) {
     if (IMPORT_MAP.test(posix.basename(file)) || SCRIPT_MODULE.test(file) && ++modules <= MODULES.files) {
