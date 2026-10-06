@@ -114,6 +114,16 @@ test('run redacts its whole capture before it returns the end, so a credential b
   assert.ok(!output.includes('QUJD'), 'The key\'s body after the returned end\'s start is hidden.');
 });
 
+test('run returns the end of an output past its 1 MiB capture, without the line the capture cut, and its exit code', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'test.log'), Array.from({ length: 60_000 }, (_, index) => `test ${String(index + 1).padStart(5, '0')} ${'.'.repeat(12)} ok`).join('\n') + '\n2 failing\n');
+  const result = await f.call('run', { command: 'cat test.log; exit 5' });
+  const output = String(result.output);
+  assert.deepEqual([result.ok, result.exitCode, result.truncated], [true, 5, true]);
+  assert.ok(output.length <= 30_000 && output.endsWith('test 60000 ............ ok\n2 failing\n'));
+  assert.match(output, /^test \d{5} \.{12} ok\n/, 'The reply starts at a whole line.');
+});
+
 test('read redacts complete credentials before line numbering and clipping without changing the file', async t => {
   const f = await tools(t);
   const source = `const ready = true;\n-----BEGIN PRIVATE KEY-----\n${'QUJD'.repeat(600)}\n-----END PRIVATE KEY-----\n`;
@@ -158,6 +168,8 @@ test('tool replies redact filenames and refused paths but internal file operatio
   assert.match(refused.error ?? '', /\[REDACTED\]/);
 });
 
+// A file over read's bound, a search output over grep's, and a run output that is one line longer than run's capture,
+// whose start the box cut.
 test('tools withhold a capture already truncated by the box and preserve its execution evidence', async t => {
   const f = await tools(t);
   await writeFile(join(f.root, 'large.txt'), 'unredactable-fragment'.repeat(60_000));

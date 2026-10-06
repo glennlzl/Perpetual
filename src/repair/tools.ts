@@ -205,11 +205,17 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (!whole(seconds) || seconds > LIMITS.runSeconds) return refused(`timeoutSeconds is a whole number from 1 to ${LIMITS.runSeconds}.`);
     const result = await box.exec(['bash', '-c', 'exec 2>&1; eval "$1"', 'bash', command], { signal, timeoutMs: seconds * 1000, limit: LIMITS.capture, keep: 'tail' });
     events.run?.(command, result.exitCode);
-    // A capture the box cut short lost its start, which may hold a credential's context, so it is withheld. A complete
-    // one is redacted whole, then its end returned, so a credential begun before that end is still hidden.
-    if (result.truncated) return unavailable(result);
-    const output = scrub(result.stdout + result.stderr), tail = lastLines(output, LIMITS.output);
-    return { ok: true, exitCode: result.exitCode, output: tail, timedOut: result.timedOut, truncated: tail.length < output.length };
+    // The capture is the output's last MiB, redacted whole before its end is returned, so a credential begun before that
+    // end is still hidden. Of a capture the box cut, the first line has lost its start, which may hold a credential's
+    // context: it is dropped, and a capture that is one cut line is withheld.
+    let text = result.stdout + result.stderr;
+    if (result.truncated) {
+      const start = text.indexOf('\n') + 1;
+      if (!start || start === text.length) return unavailable(result);
+      text = text.slice(start);
+    }
+    const output = scrub(text), tail = lastLines(output, LIMITS.output);
+    return { ok: true, exitCode: result.exitCode, output: tail, timedOut: result.timedOut, truncated: result.truncated || tail.length < output.length };
   }
   // A tool that fails answers with its error so the model can adapt; a stopped repair stops the loop.
   const guarded = (name: string, work: (input: unknown) => Promise<Result>) => async (input: unknown) => {
@@ -237,7 +243,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     }),
     write: tool({ description: 'Writes a whole file of /workspace, creating its folders.', inputSchema: schema({ path: PATH, text: { type: 'string' } }, ['path', 'text']), execute: guarded('write', create) }),
     run: tool({
-      description: `Runs a bash command in /workspace and returns its exit code and the last ${LIMITS.output / 1000} KB of its redacted output, from a line start, with truncated set when it printed more. Output over ${LIMITS.capture / 1024 / 1024} MB is withheld; narrow the command. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
+      description: `Runs a bash command in /workspace and returns its exit code and the last ${LIMITS.output / 1000} KB of its redacted output, from a line start, with truncated set when it printed more. timeoutSeconds is at most ${LIMITS.runSeconds}, ${LIMITS.defaultRunSeconds} by default.`,
       inputSchema: schema({ command: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: LIMITS.runSeconds } }, ['command']),
       execute: guarded('run', run),
     }),
