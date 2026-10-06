@@ -1,0 +1,29 @@
+# Weekly update pull requests for the workflows' actions, pinned by commit with their release beside it, and for every
+# npm and uv lockfile. The bench corpus's repositories are fixtures, whose pins are the cases, and get none.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Node's types stay on the minor of the oldest Node that package.json's engines admits.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  - package-ecosystem: npm
+    directories:
+      - /bench/repair
+      - /bench/repair/adapters/pi
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directories:
+      - /integrations/browser-use
+      - /integrations/cua
+      - /bench/repair/adapters/miniswe
+    schedule:
+      interval: weekly

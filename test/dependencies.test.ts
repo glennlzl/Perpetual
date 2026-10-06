@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
+import YAML from 'yaml';
 
 type Locked = { dev?: boolean; optional?: boolean; devOptional?: boolean; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }> };
 
@@ -79,4 +80,43 @@ test('a production install has every package production code loads: each product
     }
   }
   assert.deepEqual(missing, []);
+});
+
+type Update = { 'package-ecosystem': string; directory?: string; directories?: string[]; schedule: { interval: string }; ignore?: { 'dependency-name': string; 'update-types'?: string[] }[] };
+// The bench corpus's repositories are fixtures: their pins are the cases a repair agent is scored on.
+const FIXTURES = 'bench/repair/corpus';
+
+/** The directories that hold `file`, named as Dependabot names them (`/`, `/bench/repair`); installed packages, tool state and fixtures aside. */
+async function holding(file: string, directory = ''): Promise<string[]> {
+  const entries = await readdir(new URL(`../${directory ? `${directory}/` : ''}`, import.meta.url), { withFileTypes: true });
+  const found = entries.some(entry => entry.isFile() && entry.name === file) ? [`/${directory}`] : [];
+  for (const entry of entries) {
+    const path = directory ? `${directory}/${entry.name}` : entry.name;
+    if (entry.isDirectory() && entry.name !== 'node_modules' && !entry.name.startsWith('.') && path !== FIXTURES) found.push(...await holding(file, path));
+  }
+  return found;
+}
+
+test('Dependabot proposes weekly updates for the workflows\' actions and every npm and uv lockfile, the bench corpus\'s fixtures aside', async () => {
+  const { version, updates } = YAML.parse(await readFile(new URL('../.github/dependabot.yml', import.meta.url), 'utf8')) as { version: number; updates: Update[] };
+  assert.equal(version, 2);
+  assert.deepEqual(updates.filter(update => update.schedule.interval !== 'weekly'), []);
+  const covered = (ecosystem: string) => updates.filter(update => update['package-ecosystem'] === ecosystem).flatMap(update => update.directories ?? [update.directory]).sort();
+  assert.deepEqual(covered('github-actions'), ['/']);
+  assert.deepEqual(covered('npm'), (await holding('package-lock.json')).sort());
+  assert.deepEqual(covered('uv'), (await holding('uv.lock')).sort());
+  // The root's Node types stay on the minor of the oldest Node the controller supports, which the Node types test above
+  // checks, so their minor and major updates could never pass.
+  const root = updates.find(update => update['package-ecosystem'] === 'npm' && update.directory === '/');
+  assert.deepEqual(root?.ignore, [{ 'dependency-name': '@types/node', 'update-types': ['version-update:semver-major', 'version-update:semver-minor'] }]);
+});
+
+test('every workflow pins its actions by commit with the release on the same line, where Dependabot updates both', async () => {
+  const directory = new URL('../.github/workflows/', import.meta.url), uses: string[] = [];
+  for (const file of (await readdir(directory)).filter(name => /\.ya?ml$/.test(name))) {
+    for (const [, reference] of (await readFile(new URL(file, directory), 'utf8')).matchAll(/^[ \t-]*uses:[ \t]*(.*)$/gm)) uses.push(`${file}: ${reference}`);
+  }
+  assert.ok(uses.length > 0);
+  // A release named on a line of its own would still name the old one once Dependabot moves the commit.
+  assert.deepEqual(uses.filter(use => !/: [\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/.test(use)), []);
 });
