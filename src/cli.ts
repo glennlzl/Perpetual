@@ -8,9 +8,10 @@ import { startServer } from './server.ts';
 import { getProviderStatus, parseGitHubRemote } from './providers.ts';
 import { redact } from './redaction.ts';
 import { getGitHubFailure } from './repair/github.ts';
+import { openBrowser } from './open-browser.ts';
 
-// Every option takes a value, as `--name value` or `--name=value`; an option no command knows, or one without its value,
-// is refused rather than ignored.
+// Value options accept `--name value` or `--name=value`; --no-open is a boolean switch. Unknown options
+// and missing values are refused rather than ignored.
 const OPTIONS=['repo','data','port','run','output','id','image','cpus','memory','command','timeout','input','to','from','action','driver-path','user'];
 let values: Record<string,string|boolean|undefined>={};
 function option(name: string): string|undefined;
@@ -20,7 +21,7 @@ function option(name: string,fallback?: string){const value=values[name];return 
 const number=(name: string)=>{const value=option(name);return value===undefined?undefined:Number(value);};
 const output=(data: unknown)=>console.log(JSON.stringify(data,null,2));
 async function main(){
-  const parsed=parseArgs({options:{help:{type:'boolean',short:'h'},...Object.fromEntries(OPTIONS.map(name=>[name,{type:'string' as const}]))},allowPositionals:true});
+  const parsed=parseArgs({options:{help:{type:'boolean',short:'h'},'no-open':{type:'boolean'},...Object.fromEntries(OPTIONS.map(name=>[name,{type:'string' as const}]))},allowPositionals:true});
   values=parsed.values;
   const [command='help',action]=parsed.positionals;
   const repo=resolve(option('repo',process.cwd())),dataDir=resolve(option('data','.perpetual'));
@@ -40,6 +41,7 @@ async function main(){
       stopping=true;console.log('Stopping…');
       app.close().then(()=>process.exit(0),(error: Error)=>{console.error(redact(error.message));process.exit(1);});
     });
+    if(!values['no-open'])openBrowser(app.launchUrl,()=>console.error('Could not open your browser. Open the launch link above.'));
     return;
   }
   if(command==='scan')return output(await scanRepository(repo));
@@ -75,6 +77,6 @@ async function main(){
   console.error(`Unknown command: ${command}`);help();process.exitCode=1;
 }
 function help(){
-  console.log(`Perpetual 0.1 — local release control room\n\n  perpetual serve --repo /path/to/repo [--port 4317]\n  perpetual scan --repo /path/to/repo\n  perpetual twin --repo /path/to/repo\n  perpetual providers --repo /path/to/repo\n  perpetual failure --repo /path/to/repo --run RUN_ID\n  perpetual init-ci --repo /path/to/repo [--output file]\n  perpetual sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]\n  perpetual sandbox list\n  perpetual sandbox inspect --id ID\n  perpetual sandbox exec --id ID --command 'guest command'\n  perpetual sandbox screenshot --id ID --output screenshot.png\n  perpetual sandbox upload --id ID --input FILE --to /guest/path\n  perpetual sandbox download --id ID --from /guest/path --output FILE\n  perpetual sandbox act --id ID --action JSON\n  perpetual sandbox mcp --id ID [--driver-path /guest/path/cua-driver]\n  perpetual sandbox destroy --id ID\n\nUse --data PATH to choose where local reports and history are stored.\nQuickstart: ${resolve(dirname(fileURLToPath(import.meta.url)),'../README.md')}`);
+  console.log(`Perpetual 0.1 — local release control room\n\n  perpetual serve --repo /path/to/repo [--port 4317] [--no-open]\n  perpetual scan --repo /path/to/repo\n  perpetual twin --repo /path/to/repo\n  perpetual providers --repo /path/to/repo\n  perpetual failure --repo /path/to/repo --run RUN_ID\n  perpetual init-ci --repo /path/to/repo [--output file]\n  perpetual sandbox create [--image IMAGE] [--cpus 2] [--memory 4096]\n  perpetual sandbox list\n  perpetual sandbox inspect --id ID\n  perpetual sandbox exec --id ID --command 'guest command'\n  perpetual sandbox screenshot --id ID --output screenshot.png\n  perpetual sandbox upload --id ID --input FILE --to /guest/path\n  perpetual sandbox download --id ID --from /guest/path --output FILE\n  perpetual sandbox act --id ID --action JSON\n  perpetual sandbox mcp --id ID [--driver-path /guest/path/cua-driver]\n  perpetual sandbox destroy --id ID\n\nUse --data PATH to choose where local reports and history are stored.\nQuickstart: ${resolve(dirname(fileURLToPath(import.meta.url)),'../README.md')}`);
 }
 main().catch((error: Error&{sandboxId?: string})=>{console.error(redact(error.message));if(error.sandboxId)console.error(`Sandbox: ${error.sandboxId}`);process.exitCode=1;});

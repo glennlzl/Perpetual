@@ -99,7 +99,7 @@ npm run setup
 node src/cli.ts serve --repo /path/to/your/app
 ```
 
-Then open the link it prints, `http://127.0.0.1:4317/#secret=…`, which signs your browser in:
+Serving opens the link it prints, `http://127.0.0.1:4317/#secret=…`, in your default browser and signs it in. If the browser cannot be opened, open that printed link yourself. Use `--no-open` for a headless session. In another browser, open the printed link or paste it into **Launch link** on the connection page and choose **Connect**:
 
 1. **Settings**: add an [OpenRouter API key](https://openrouter.ai/keys).
 2. **Connect GitHub** and choose the repository and target branch. The gate watches repositories chosen this way.
