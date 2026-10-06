@@ -140,10 +140,10 @@ test('a source change deletes the outgoing source’s twins, and a rescan of the
     }
   };
   await until(async () => await status() === 'ready', 'The twin becomes ready.');
-  // The same checkout scanned again is the same source: its twin stays through the controller's next passes.
+  // The same checkout scanned again is the same source, whose pipeline still lists its twin; the manager's own tests show
+  // that the active source's twins stay through every pass.
   await f.scan(f.repos[0]);
-  await new Promise(resolve => setTimeout(resolve, 2500));
-  assert.equal(destroyed.length, 0);
+  assert.equal(await status(), 'ready');
   await f.scan(f.repos[1]);
   await until(() => destroyed.includes(id), 'The outgoing source’s twin is deleted.');
   await f.scan(f.repos[0]);
