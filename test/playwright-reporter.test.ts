@@ -47,7 +47,7 @@ test('reporter lists every action the journey grammar allows and counts them all
     // Playwright 1.63's step titles for the grammar's actions.
     const titles:[string,string][]=[['Navigate to "/settings"','navigate'],['Go forward','navigate'],['Reload','reload_page'],['Go back','go_back'],['Click','click'],['Double click','click'],['Tap','click'],['Check','click'],['Uncheck','click'],['Drag and drop','click'],
       ['Mouse down','click'],['Mouse up','click'],['Fill "QA"','input'],['Type "QA"','input'],['Press sequentially "QA"','input'],['Clear','input'],['Insert "QA"','input'],['Press "Enter"','send_keys'],['Key down "Shift"','send_keys'],['Key up "Shift"','send_keys'],
-      ['Select option','select_option'],['Hover','hover'],['Mouse move','hover'],['Scroll into view','scroll'],['Mouse wheel','scroll'],['Focus','focus'],['Blur','blur'],['Wait for selector','wait'],['Wait for URL','wait'],['Wait for load state','wait'],['Wait for timeout','wait']];
+      ['Select option','select_option'],['Hover','hover'],['Mouse move','hover'],['Scroll into view','scroll'],['Mouse wheel','scroll'],['Focus','focus'],['Blur','blur'],['Wait for selector','wait'],['Wait for URL','wait'],['Wait for load state','wait'],['Wait for timeout','wait'],['Accept dialog','accept_dialog'],['Dismiss dialog','dismiss_dialog']];
     for(const [title] of titles)run(title);
     assert.deepEqual(emitted.at(-1)!.actions.map(action=>action.type),titles.map(([,type])=>type));
     // The case event carries the latest 150 actions and how many there were in all.

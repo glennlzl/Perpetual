@@ -46,6 +46,7 @@ MilestoneCheck =
 - The code drives milestones through the fixture: `journey.milestone(id, actions)` emits `running`, runs the actions in a `test.step`, evaluates the step's checks and emits `completed` or `failed` with evidence of the checks.
 - The fixture enforces the reviewed order. Code that skips a milestone, runs one out of order or does not run every milestone stops for review; nothing runs after a failed milestone.
 - `journey.signIn()` fills the run's account into the page's one visible sign-in form, opening the stage's sign-in page when the current page shows none. `journey.run` is the run's token. The fixture removes the account, the sign-in page, the token and the event channel from the process environment before any code runs.
+- `journey.dialog('accept' | 'dismiss', text?)`, armed in `Promise.all` before the one UI action that opens a native dialog, accepts the next dialog of any of the journey's pages, with a prompt's text, or dismisses it, as **Accept dialog** or **Dismiss dialog** in the live actions. An expected dialog that does not appear within 15 seconds stops the milestone with an action error. Every dialog nothing expects is dismissed, and a leave-page prompt accepted, as Playwright does.
 
 ## Progress events and transitions
 

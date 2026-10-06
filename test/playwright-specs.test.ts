@@ -110,6 +110,40 @@ test('a submission may arm one response wait before one UI action without exposi
   ])assert.throws(()=>validateJourneySpec(action(invalid),journey),/Line /,invalid);
 });
 
+test('a native dialog is expected only in Promise.all, before the one UI action that opens it',()=>{
+  const action=(value:string,item:Omit<BrowserCase,'evidence'>=journey)=>validateJourneySpec(spec(`await journey.milestone('open',async()=>{${value}});await journey.milestone('rename',async()=>{});`),item);
+  const click="page.getByRole('button',{name:'Delete'}).click()";
+  for(const accepted of [
+    `await Promise.all([journey.dialog('accept'),${click}]);`,
+    "await Promise.all([journey.dialog('dismiss'),page.keyboard.press('Delete')]);",
+    `await Promise.all([journey.dialog('accept','Archive reason'),${click}]);`,
+    `await Promise.all([page.waitForResponse('**/workflows/*'),journey.dialog('accept'),${click}]);`,
+  ])assert.ok(action(accepted),accepted);
+  // A prompt's text is typed text: it may type this run's data, which a later reviewed check reads.
+  const owned={...journey,steps:[{...journey.steps[0],checks:[{type:'text-visible' as const,value:'Reason {run}'}]},journey.steps[1]]};
+  assert.ok(action(`await Promise.all([journey.dialog('accept',\`Reason \${journey.run}\`),${click}]);`,owned));
+  assert.throws(()=>action(`await Promise.all([journey.dialog('accept','Reason journey.run'),${click}]);`,owned),/no preceding input uses the run token/);
+  const refused:[string,RegExp][]=[
+    ["await journey.dialog('accept');",/Expect a native dialog/],
+    [`await Promise.all([${click},journey.dialog('accept')]);`,/Only await Promise.all/],
+    [`await Promise.all([journey.dialog('accept'),page.waitForResponse('**/workflows/*'),${click}]);`,/Only await Promise.all/],
+    [`await Promise.all([journey.dialog('accept'),journey.dialog('accept'),${click}]);`,/Only await Promise.all/],
+    ["await Promise.all([journey.dialog('accept'),journey.signIn()]);",/Only await Promise.all/],
+    ["await Promise.all([journey.dialog('accept'),page.goto('/workflows')]);",/Only await Promise.all/],
+    [`await Promise.all([,${click}]);`,/Only await Promise.all/],
+    [`await Promise.all([journey.dialog('confirm'),${click}]);`,/Expect a native dialog/],
+    [`await Promise.all([journey.dialog('dismiss','Reason'),${click}]);`,/Expect a native dialog/],
+    [`await Promise.all([journey.dialog('accept','Reason','More'),${click}]);`,/Expect a native dialog/],
+    [`await Promise.all([journey.dialog('accept',process.env.SECRET),${click}]);`,/Expect a native dialog/],
+    [`await Promise.all([journey.dialog(),${click}]);`,/Expect a native dialog/],
+    ["page.once('dialog',dialog=>dialog.accept());",/Expect a native dialog/],
+    ["await page.waitForEvent('dialog');",/Expect a native dialog/],
+    [`await Promise.all([page.waitForEvent('dialog'),${click}]);`,/Only await Promise.all/],
+  ];
+  for(const [code,pattern] of refused)assert.throws(()=>action(code),pattern,code);
+  assert.throws(()=>validateJourneySpec(spec("  page.on('dialog', dialog => dialog.accept());\n"+body()),journey),/Expect a native dialog/);
+});
+
 test('a response wait may identify this run only after independent reviewed data exists',()=>{
   const created={...journey,steps:[{...journey.steps[0],checks:[{type:'text-visible' as const,value:'Item {run}'}]},journey.steps[1]]};
   const pair='await Promise.all([page.waitForResponse(`**/items/change?name=Item%20${journey.run}`,{timeout:10000}),page.getByRole("button",{name:"Update"}).click()]);';

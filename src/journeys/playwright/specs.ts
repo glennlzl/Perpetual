@@ -7,11 +7,11 @@ import { assertExecutableJourneyChecks, type BrowserCase } from '../../business/
 // A journey spec is stage data: the actions of one reviewed case, approved by a person. It runs in the same process
 // as the fixture that judges it, so it is an allowlisted grammar, not JavaScript with exceptions: one test of awaited
 // milestones, each a list of awaited Playwright actions on page, its locators, keyboard and mouse, whose arguments
-// are literals, options objects or locators. A response wait may be armed before one UI action in Promise.all; no
-// response value escapes that pair. The one value a spec reads is the run's token, journey.run, alone or in a
+// are literals, options objects or locators. A response wait, an expected native dialog or both may be armed before one
+// UI action in Promise.all; no response or dialog value escapes. The one value a spec reads is the run's token, journey.run, alone or in a
 // template literal, so a journey can type data no earlier run stored. It names an element or address only after a
 // milestone whose reviewed check shows or reads {run}, and so fails when the data is missing: before one, a control
-// run's blocked save would fail the action that looks for the data instead of a check. Outside the response pair, no other identifier, assignment, computed access
+// run's blocked save would fail the action that looks for the data instead of a check. Outside Promise.all, no other identifier, assignment, computed access
 // or function exists, so checks, page scripts, routing, globals and the runtime stay out of reach. Playwright's bundled Babel parses it,
 // the same parser that compiles it for the run.
 const MAX_BYTES = 200 * 1024;
@@ -48,6 +48,10 @@ const NAMED = 'journey.run names an element or address only after a milestone wh
 const TYPED = 'a typing action types text: a string, journey.run or a template literal.';
 const GOTO = 'page.goto takes a literal http(s) URL or path; journey.run never makes its address.';
 const PERFORMED = "an action performs itself and its page loads: trial and waitUntil: 'commit' are not allowed.";
+const PAIRED = "Only await Promise.all([page.waitForResponse('observed URL pattern'), journey.dialog('accept'), one UI action]) is allowed, with the response wait, the expected dialog or both, in that order, before one UI action.";
+const DIALOG = "Expect a native dialog before the one UI action that opens it: await Promise.all([journey.dialog('accept'), page.getByRole('button', { name: 'Delete' }).click()]), with journey.dialog('accept', 'text') for a prompt's text or journey.dialog('dismiss').";
+// What a spec might write to handle a dialog itself: Playwright's listeners, which the grammar has no place for.
+const LISTENERS = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener', 'waitForEvent']);
 // The text these actions type may hold journey.run in any milestone.
 const TYPING: Record<string, ReadonlySet<string>> = { locator: new Set(['fill', 'type', 'pressSequentially']), keyboard: new Set(['type', 'insertText']) };
 
@@ -62,6 +66,12 @@ const allowed = (owner: string | null, name: string) => owner && Object.hasOwn(A
 // journey.run, the run's token, is a string the fixture owns: reading it changes no check.
 const token = (node: Node | null | undefined, scope: ReadonlySet<string>) => node?.type === 'MemberExpression' && named(node.object, 'journey') && member(node) === 'run' && scope.has('journey');
 const runText = (node: Node, scope: ReadonlySet<string>) => token(node, scope) || node.type === 'TemplateLiteral' && node.expressions.every(item => token(item, scope));
+// Whether typed text holds the run's token, as data a later reviewed check reads must.
+const typesRun = (node: Node | undefined, scope: ReadonlySet<string>) => Boolean(node && (token(node, scope) || node.type === 'TemplateLiteral' && node.expressions.some(part => token(part, scope))));
+const listensForDialog = (node: Node | null | undefined): boolean => node?.type === 'AwaitExpression' ? listensForDialog(node.argument)
+  : node?.type === 'CallExpression' && LISTENERS.has(member(node.callee) ?? '') && text(node.arguments[0]) === 'dialog';
+const expectsDialog = (node: Node | null | undefined, scope: ReadonlySet<string>): node is CallExpression => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+  && named(node.callee.object, 'journey') && member(node.callee) === 'dialog' && scope.has('journey');
 
 // The Playwright object an expression yields, or null; the arguments of every call on the way are checked.
 // runs: whether journey.run may appear here, as typed text or once a reviewed check has read {run}.
@@ -91,9 +101,11 @@ function value(node: Node, scope: ReadonlySet<string>, runs: boolean) {
 // read: whether an earlier milestone's reviewed check read {run}, so journey.run may name an element or address.
 function actionCall(call: CallExpression, scope: ReadonlySet<string>, read: boolean) {
   const callee = call.callee, name = member(callee);
+  if (listensForDialog(call)) fail(call, DIALOG);
   if (callee.type !== 'MemberExpression' || !name) fail(call, ACTION);
   if (named(callee.object, 'journey') && scope.has('journey')) {
-    if (name !== 'signIn' || call.arguments.length) fail(call, 'journey.signIn() is the only journey call inside a milestone.');
+    if (name === 'dialog') fail(call, DIALOG);
+    if (name !== 'signIn' || call.arguments.length) fail(call, 'journey.signIn() is the only journey call inside a milestone, besides an expected dialog in Promise.all.');
     return false;
   }
   const owner = kind(callee.object, scope, read);
@@ -108,29 +120,42 @@ function actionCall(call: CallExpression, scope: ReadonlySet<string>, read: bool
     value(item, scope, read);
     fail(item, TYPED);
   });
-  const input = call.arguments[0];
-  return typing && Boolean(input && (token(input, scope) || input.type === 'TemplateLiteral' && input.expressions.some(part => token(part, scope))));
+  return typing && typesRun(call.arguments[0], scope);
+}
+
+// The expected dialog's choice, and a prompt's text, which is typed text: whether it types the run's token.
+function dialogCall(call: CallExpression, scope: ReadonlySet<string>) {
+  const [choice, input, ...rest] = call.arguments, how = text(choice);
+  if (rest.length || how !== 'accept' && how !== 'dismiss' || input !== undefined && how !== 'accept') fail(call, DIALOG);
+  if (input === undefined || text(input) !== null) return false;
+  if (!runText(input, scope)) fail(input, DIALOG);
+  return typesRun(input, scope);
 }
 
 function action(statement: Statement, scope: ReadonlySet<string>, read: boolean) {
   const call = awaited(statement);
-  if (!call) fail(statement, ACTION);
+  if (!call) fail(statement, statement.type === 'ExpressionStatement' && listensForDialog(statement.expression) ? DIALOG : ACTION);
   if (call.callee.type !== 'MemberExpression' || !named(call.callee.object, 'Promise')) return actionCall(call, scope, read);
-  // Arm an observed response before its UI action. No response value, predicate, callback or arbitrary parallel work
-  // is exposed. Both real writes and the control's blocked replies settle; reviewed checks still judge the fresh read.
-  const message = 'Only await Promise.all([page.waitForResponse("observed URL pattern"), one UI action]) is allowed.';
-  const pair = call.arguments[0];
-  if (member(call.callee) !== 'all' || call.arguments.length !== 1 || pair?.type !== 'ArrayExpression' || pair.elements.length !== 2) fail(call, message);
-  const [response, trigger] = pair.elements;
-  if (response?.type !== 'CallExpression' || response.callee.type !== 'MemberExpression' || !named(response.callee.object, 'page') || !scope.has('page') || member(response.callee) !== 'waitForResponse'
-    || response.arguments.length > 2) fail(call, message);
-  const pattern=response.arguments[0];
-  if(!text(pattern)&&!(pattern?.type==='TemplateLiteral'&&pattern.quasis.some(part=>Boolean(part.value.cooked))&&runText(pattern,scope)))fail(call,message);
-  // Like a locator or URL wait, a later response pattern may identify data already proved by a reviewed check.
-  // The token is never a bare address or an option value, and before that proof only literal patterns are allowed.
-  response.arguments.forEach((item,index) => value(item, scope, index===0&&read));
-  if (trigger?.type !== 'CallExpression' || trigger.callee.type !== 'MemberExpression' || !['locator', 'keyboard', 'mouse'].includes(kind(trigger.callee.object, scope, read) ?? '')) fail(call, message);
-  return actionCall(trigger, scope, read);
+  // Arm an observed response, an expected native dialog or both, in that order, before their one UI action. No response
+  // or dialog value, predicate, callback or arbitrary parallel work is exposed. Both real writes and the control's
+  // blocked replies settle a response wait; reviewed checks still judge the fresh read.
+  const group = call.arguments[0];
+  if (member(call.callee) !== 'all' || call.arguments.length !== 1 || group?.type !== 'ArrayExpression' || group.elements.length < 2 || group.elements.length > 3) fail(call, PAIRED);
+  const armed = group.elements.slice(0, -1), trigger = group.elements.at(-1), dialog = expectsDialog(armed.at(-1), scope) ? armed.pop() as CallExpression : undefined;
+  const [response, ...rest] = armed;
+  if (rest.length || response === null) fail(call, PAIRED);
+  if (response !== undefined) {
+    if (response.type !== 'CallExpression' || response.callee.type !== 'MemberExpression' || !named(response.callee.object, 'page') || !scope.has('page') || member(response.callee) !== 'waitForResponse'
+      || response.arguments.length > 2) fail(call, PAIRED);
+    const pattern=response.arguments[0];
+    if(!text(pattern)&&!(pattern?.type==='TemplateLiteral'&&pattern.quasis.some(part=>Boolean(part.value.cooked))&&runText(pattern,scope)))fail(call,PAIRED);
+    // Like a locator or URL wait, a later response pattern may identify data already proved by a reviewed check.
+    // The token is never a bare address or an option value, and before that proof only literal patterns are allowed.
+    response.arguments.forEach((item,index) => value(item, scope, index===0&&read));
+  }
+  const typed = dialog ? dialogCall(dialog, scope) : false;
+  if (trigger?.type !== 'CallExpression' || trigger.callee.type !== 'MemberExpression' || !['locator', 'keyboard', 'mouse'].includes(kind(trigger.callee.object, scope, read) ?? '')) fail(call, PAIRED);
+  return actionCall(trigger, scope, read) || typed;
 }
 
 export const specHash = (code: string | Buffer) => createHash('sha256').update(code).digest('hex');
@@ -161,7 +186,7 @@ export function validateJourneySpec(code: unknown, item: Partial<Pick<BrowserCas
   const requireRunInput = () => { if (!typedRun) throw new Error('A reviewed check reads this run’s data, but no preceding input uses the run token. Type journey.run or a template literal such as `Note ${journey.run}`, never the literal text “journey.run”.'); };
   for (const statement of statements(body.body)) {
     const milestone = awaited(statement), [id, actions] = milestone?.arguments || [];
-    if (!milestone || milestone.callee.type !== 'MemberExpression' || !named(milestone.callee.object, 'journey') || member(milestone.callee) !== 'milestone' || !scope.has('journey') || milestone.arguments.length !== 2) fail(statement, MILESTONES);
+    if (!milestone || milestone.callee.type !== 'MemberExpression' || !named(milestone.callee.object, 'journey') || member(milestone.callee) !== 'milestone' || !scope.has('journey') || milestone.arguments.length !== 2) fail(statement, statement.type === 'ExpressionStatement' && listensForDialog(statement.expression) ? DIALOG : MILESTONES);
     if (actions?.type !== 'ArrowFunctionExpression' || !actions.async || actions.params.length || actions.body.type !== 'BlockStatement' || actions.body.directives.length) fail(actions, 'milestone actions are async () => { … }.');
     // The order is judged before the actions, so a milestone's actions are read against its own reviewed step.
     if (ids.push(text(id)) > expected.length || ids.at(-1) !== expected[ids.length - 1]) throw order();

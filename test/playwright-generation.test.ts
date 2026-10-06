@@ -156,6 +156,20 @@ test('the generation rules keep navigation on the current run’s records',()=>{
   assert.ok(repairPrompt('Invalid code','tests/journey.spec.mjs',rules).includes(rule));
 });
 
+test('the generation rules expect a native dialog the generator handled in the reviewed grammar form',()=>{
+  const rules=generationRules(journey,{signIn:true}),rule=rules.find(item=>item.startsWith('Replay dismisses every native dialog'));
+  assert.ok(rule);
+  assert.ok(generationPlan(journey,{signIn:true}).includes(rule));
+  assert.ok(repairPrompt('Invalid code','tests/journey.spec.mjs',rules).includes(rule),'Grammar repair keeps the expected dialog form.');
+  // Each example the rule gives is code the grammar accepts.
+  const examples=[...rule.matchAll(/`(await Promise\.all\([^`]*\);)`/g)].map(match=>match[1].replace('one UI action',"page.getByRole('button', { name: 'Delete', exact: true }).click()"));
+  assert.equal(examples.length,2);
+  for(const example of examples){
+    const code=`import { test } from 'perpetual';\ntest('Rename the display name', async ({ page, journey }) => {\n  await journey.milestone('open-settings', async () => { await journey.signIn(); ${example} });\n  await journey.milestone('save-name', async () => {});\n});\n`;
+    assert.equal(validateJourneySpec(code,journey),code,example);
+  }
+});
+
 test('a reviewed journey’s code is generated in a private workspace and saved as a draft',async t=>{
   const f=await setup(t);
   const started=await f.manager.generateSpec(f.context,{caseId:journey.id});
@@ -178,6 +192,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
   assert.match(call.instructions,/The log's closing best practices are for ordinary Playwright tests and do not apply here: write no assertions and no variables\./,'The upstream log ends with advice the action-only grammar refuses.');
+  assert.match(call.instructions,/Write the UI action that opened a native dialog you handled as await Promise\.all\(\[journey\.dialog\('accept'\), that action\]\);/,'Replay dismisses a dialog the code does not expect.');
   assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
   // The test MCP server runs behind the filter that sets up only the workspace's seed.

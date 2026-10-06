@@ -29,7 +29,7 @@ const page=(title:string,body:string)=>`<!doctype html><title>${title}</title><b
 // does, and a message sent over it after that.
 const SOCKET="const SOCKET_URL=location.origin.replace('http','ws')+'/socket',socket=new WebSocket(SOCKET_URL),open=new Promise(resolve=>socket.addEventListener('open',()=>{socket.send(JSON.stringify({type:'hello'}));resolve();})),say=message=>open.then(()=>socket.send(JSON.stringify(message)));";
 function application({persist=true}:{persist?:boolean}={}){
-  const state={name:'Original Name',body:'Original body',credits:10,notes:0,items:[] as string[],failRename:false,failDelete:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
+  const state={name:'Original Name',body:'Original body',credits:10,notes:0,items:[] as string[],memos:[] as string[],failRename:false,failDelete:false},leaks:Record<string,string>[]=[],hosts=new Set<string|undefined>(),posts:string[]=[],seen:(string|null)[]=[],received:string[]=[];
   const server=http.createServer((req,res)=>{
     const url=new URL(req.url!,'http://app'),signedIn=/session=1/.test(req.headers.cookie||'');hosts.add(req.headers.host);
     if(req.method!=='GET')posts.push(`${req.method} ${url.pathname}`);
@@ -88,6 +88,14 @@ function application({persist=true}:{persist?:boolean}={}){
       // A search that filters the list as it is typed; the deleted workflow is no longer listed.
       if(url.pathname==='/workflows')return send(page('Workflows',`<h1>Workflows</h1><input type=search aria-label=Search id=q><ul id=list><li>Weekly report</li></ul><p id=empty hidden>No workflows found</p>
         <script>q.oninput=()=>{const hits=[...list.children].filter(item=>!(item.hidden=!item.textContent.toLowerCase().includes(q.value.toLowerCase())));empty.hidden=hits.length>0;};</script>`));
+      // Memos renamed through a native prompt and deleted only after a native confirmation; Cancel keeps the memo.
+      if(url.pathname==='/memos'&&req.method==='POST'){state.memos.push(body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/memos/rename'&&req.method==='POST'){const {from,to}=JSON.parse(body);state.memos=state.memos.map(memo=>memo===from?to:memo);res.writeHead(200);return res.end();}
+      if(url.pathname==='/memos/delete'&&req.method==='POST'){state.memos=state.memos.filter(memo=>memo!==body);res.writeHead(200);return res.end();}
+      if(url.pathname==='/memos')return send(page('Memos',`<h1>Memos</h1><label>Title <input id=title></label><button id=add>Add</button><ul>${state.memos.map(memo=>`<li><span>${memo}</span> <button class=rename>Rename</button> <button class=delete>Delete</button></li>`).join('')}</ul>
+        <script>add.onclick=()=>fetch('/memos',{method:'POST',body:title.value});document.querySelectorAll('li').forEach(item=>{const memo=item.querySelector('span').textContent;
+        item.querySelector('.rename').onclick=()=>{const to=prompt('New title',memo);if(to)fetch('/memos/rename',{method:'POST',body:JSON.stringify({from:memo,to})});};
+        item.querySelector('.delete').onclick=()=>{if(confirm('Delete this memo?'))fetch('/memos/delete',{method:'POST',body:memo});};});</script>`));
       if(url.pathname==='/')return redirect(signedIn?'/settings':'/login');
       if(url.pathname==='/login'&&req.method==='POST')return form.get('email')===account.username&&form.get('password')===account.password?redirect('/settings',{'set-cookie':'session=1; Path=/'}):redirect('/login');
       if(url.pathname==='/login')return send(page('Sign in','<form method=post action=/login><label>Email <input type=email name=email autocomplete=username></label><label>Password <input type=password name=password></label><button type=submit>Sign in</button></form>'));
@@ -208,6 +216,51 @@ async function verified({manager,context}:Progress,{id=journey.id,seconds=90}={}
   for(const end=Date.now()+seconds*1000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,100))){const verification=(await manager.view(context)).specs[id]?.draft?.verification;if(verification&&verification.status!=='running')return verification;}
   throw new Error('The verification did not finish.');
 }
+
+// A memo added, renamed through a native prompt, kept by cancelling a native confirmation, then deleted after one.
+const memo={...journey,id:'memo',name:'Rename and delete a memo',goal:'Add a memo, rename it, keep it once and then delete it.',steps:[
+  {id:'create',title:'Add a memo',checks:[{type:'text-visible' as const,value:'Memo {run}'}]},
+  {id:'rename',title:'Rename the memo',checks:[{type:'text-visible' as const,value:'Renamed {run}'}]},
+  {id:'keep',title:'Cancel the deletion',checks:[{type:'text-visible' as const,value:'Renamed {run}'}]},
+  {id:'delete',title:'Delete the memo',checks:[{type:'text-absent' as const,value:'Renamed {run}'}]},
+],assertions:[]};
+const row=(title:string,button:string)=>`page.getByRole('listitem').filter({ hasText: \`${title} \${journey.run}\` }).getByRole('button', { name: '${button}' })`;
+const memoCode=({add=`Promise.all([page.waitForResponse('**/memos'), page.getByRole('button', { name: 'Add' }).click()])`,remove=`Promise.all([page.waitForResponse('**/memos/delete'), journey.dialog('accept'), ${row('Renamed','Delete')}.click()])`}={})=>`import { test } from 'perpetual';
+test('Rename and delete a memo', async ({ page, journey }) => {
+  await journey.milestone('create', async () => { await page.goto('/memos'); await page.getByLabel('Title').fill(\`Memo \${journey.run}\`); await ${add}; await page.reload(); });
+  await journey.milestone('rename', async () => { await Promise.all([page.waitForResponse('**/memos/rename'), journey.dialog('accept', \`Renamed \${journey.run}\`), ${row('Memo','Rename')}.click()]); await page.reload(); });
+  await journey.milestone('keep', async () => { await Promise.all([journey.dialog('dismiss'), ${row('Renamed','Delete')}.click()]); await page.reload(); });
+  await journey.milestone('delete', async () => { await ${remove}; await page.reload(); });
+});
+`;
+
+test('reviewed code accepts or dismisses the native dialogs it expects, and every other dialog is dismissed',{timeout:180000},async t=>{
+  const f=await setup(t,{item:memo});
+  await f.draft(memoCode());
+  const passed=await finished(f,(await f.run()).run.id);
+  assert.equal(passed.results[0].status,'passed',JSON.stringify(passed.results));
+  assert.deepEqual(passed.progress.cases[0].actions.filter(action=>action.type.endsWith('_dialog')).map(action=>[action.type,action.status]),[['accept_dialog','passed'],['dismiss_dialog','passed'],['accept_dialog','passed']]);
+  // Unexpected, the confirmation is dismissed as before: nothing is deleted, and the reviewed check notices.
+  await f.draft(memoCode({remove:`${row('Renamed','Delete')}.click()`}));
+  const kept=await finished(f,(await f.run()).run.id);
+  assert.equal(kept.results[0].status,'failed');assert.equal(kept.results[0].error,'Milestone check failed: Delete the memo.');
+  // An expected dialog that never appears stops for review, never as a passed action.
+  await f.draft(memoCode({add:`Promise.all([journey.dialog('accept'), page.getByRole('button', { name: 'Add' }).click()])`}));
+  const missing=await finished(f,(await f.run()).run.id);
+  assert.equal(missing.results[0].status,'needs_review');
+  assert.equal(missing.results[0].error,'Action failed at “Add a memo”: The expected native dialog did not appear.');
+  assert.equal(f.app.state.memos.filter(item=>item.startsWith('Renamed ')).length,1,'Only the run that expected the confirmation deleted its memo.');
+});
+
+test('a journey through native dialogs passes three runs, its control catches the blocked save, and a person approves it',{timeout:180000},async t=>{
+  const f=await setup(t,{item:memo});
+  const {draft}=await f.draft(memoCode());
+  await f.manager.verifySpec(f.context,{caseId:memo.id,hash:draft!.hash,credentials:account});
+  assert.deepEqual(await verified(f,{id:memo.id}),{status:'passed',passes:3,control:'caught'});
+  await f.manager.approveSpec(f.context,{caseId:memo.id,hash:draft!.hash});
+  assert.equal((await f.manager.view(f.context)).specs[memo.id].approved?.stale,false);
+  assert.deepEqual(f.app.state.memos.filter(item=>item.startsWith('Renamed ')),[],'Each passing run deleted its memo after the confirmation.');
+});
 
 test('a later response wait follows run-owned request data through three saves and a caught control',{timeout:90000},async t=>{
   const item={...journey,id:'create-update',name:'Create and update a profile',steps:[
