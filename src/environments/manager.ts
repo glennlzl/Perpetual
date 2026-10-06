@@ -238,7 +238,8 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     const active = activeKey();
     if (!active) return;
     for (const environment of [...state.environments]) {
-      if (closed) return;
+      // A source change during the pass, such as back to the source of the twins it deletes, ends it: the next pass reads it.
+      if (closed || activeKey() !== active) return;
       if (environment.pipelineKey === active || !holdsResources(environment) || environment.status === 'cleanup_failed') continue;
       const stage = { key: environment.pipelineKey, stageId: environment.stageId };
       try {

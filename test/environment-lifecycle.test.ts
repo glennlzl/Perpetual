@@ -498,6 +498,22 @@ test('the twins of a pipeline the active source left are deleted once free, and 
   assert.equal(statuses()[zeta], 'ready');
 });
 
+test('a pass that deletes the twins of a source the pipeline left stops when that source is selected again', async t => {
+  let active: string | null = context.key;
+  const destroyed: string[] = [];
+  // The person selects this source again while the pass deletes its first twin.
+  const { manager } = await fixture(t, { destroySandbox: async ({ environment }) => { destroyed.push(environment.id); active = context.key; } }, { activeKey: () => active });
+  const gamma = { ...context, stageId: 'gamma' };
+  await manager.savePlan(gamma, plan);
+  const beta = (await createReady(manager)).id, { environment } = await manager.create(gamma), other = (await manager.awaitIdle(environment.id)).id;
+  active = 'github:acme/app:/';
+  await manager.tick();
+  assert.equal(destroyed.length, 1);
+  assert.equal((await manager.awaitIdle(destroyed[0] === beta ? other : beta)).status, 'ready', 'The other twin of the source stays.');
+  await manager.tick();
+  assert.equal(destroyed.length, 1);
+});
+
 test('owned-target resolution canonicalizes loopback aliases and retains stale ownership after deletion', async t => {
   const { manager } = await fixture(t);
   const environment = await createReady(manager);
