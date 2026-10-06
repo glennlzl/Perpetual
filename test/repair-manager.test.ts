@@ -696,28 +696,72 @@ test('a stopped rerun stays stopped when its attempt passes', async t => {
   assert.equal(h.repair(B)?.status, 'cancelled');
 });
 
-// An agent step whose one attempt fails, as the agent step records it, costing `cost` dollars; the repair ends failed.
+// An attempt that failed, as the agent step records it, costing `cost` dollars.
+const failedAttempt = (cost = 0.5) => ({ number: 1, model: 'openai/gpt-6-luna', startedAt: '2026-09-25T10:00:00.000Z', completedAt: '2026-09-25T10:00:00.000Z', failure: 'The model stopped without calling done.', cost });
+// An agent step whose one attempt fails; the repair ends failed.
 const fruitless = (cost = 0.5) => agent(async context => {
-  const at = '2026-09-25T10:00:00.000Z';
-  await context.report({ attempts: [{ number: 1, model: 'openai/gpt-6-luna', startedAt: at, completedAt: at, failure: 'The model stopped without calling done.', cost }] });
+  await context.report({ attempts: [failedAttempt(cost)] });
   return { status: 'failed', reason: 'The build was not fixed in 4 attempts.' };
 });
 // Failing heads one after another, each repair ending before the next head.
 async function failHeads(h: Awaited<ReturnType<typeof harness>>, heads: [string, WorkflowRun[]][]) {
   for (const [sha, runs] of heads) { await h.failHead(runs, sha); await h.manager.idle(); }
 }
+const HELD = 'The last 3 repairs of CI failed. Start Repair to try again.';
 
 test('after three repairs of the same failure failed in a row, the next waits for a person without the agent, who may still start Repair', async t => {
-  const a = fruitless();
+  const a = fruitless(), F = 'f'.repeat(40);
   const h = await harness(t, { steps: a.steps });
   await failHeads(h, [[B, [run('2', B, 'failure')]], [C, [run('3', C, 'failure')]], [D, [run('4', D, 'failure')]]]);
   assert.deepEqual([h.repair(D)?.status, a.contexts.length], ['failed', 3]);
   await failHeads(h, [[E, [run('5', E, 'failure')]]]);
-  assert.deepEqual([h.repair(E)?.status, h.repair(E)?.reason, a.contexts.length], ['needs-person', 'The last 3 repairs of CI failed. Start Repair to try again.', 3], 'The agent does not start.');
+  assert.deepEqual([h.repair(E)?.status, h.repair(E)?.reason, a.contexts.length], ['needs-person', HELD, 3], 'The agent does not start.');
   assert.deepEqual([h.calls.failures, h.manager.view().head?.failed], [['2', '3', '4', '5'], [shown('5')]], 'Triage still read the failure, and Build offers Repair.');
-  await h.manager.repair({ runId: '5' });
+  // The held repair, which the agent never tried, neither counts nor ends the run, so the next head waits as well.
+  await failHeads(h, [[F, [run('6', F, 'failure')]]]);
+  assert.deepEqual([h.repair(F)?.status, h.repair(F)?.reason, a.contexts.length], ['needs-person', HELD, 3]);
+  await h.manager.repair({ runId: '6' });
   await h.manager.idle();
-  assert.deepEqual([h.repair(E)?.trigger, h.repair(E)?.status, a.contexts.length], ['person', 'failed', 4], 'A person\'s Repair starts the agent.');
+  assert.deepEqual([h.repair(F)?.trigger, h.repair(F)?.status, a.contexts.length], ['person', 'failed', 4], 'A person\'s Repair starts the agent.');
+});
+
+test('a repair of the same failure that ended ready ends a run of failed repairs', async t => {
+  let started = 0;
+  const a = agent(async context => {
+    started += 1;
+    if (started === 2) return { status: 'ready' };
+    await context.report({ attempts: [failedAttempt()] });
+    return { status: 'failed', reason: 'The build was not fixed in 4 attempts.' };
+  });
+  const h = await harness(t, { steps: a.steps }), F = 'f'.repeat(40);
+  await failHeads(h, [[B, [run('2', B, 'failure')]], [C, [run('3', C, 'failure')]], [D, [run('4', D, 'failure')]], [E, [run('5', E, 'failure')]], [F, [run('6', F, 'failure')]]]);
+  assert.deepEqual([B, C, D, E, F].map(sha => h.repair(sha)?.status), ['failed', 'ready', 'failed', 'failed', 'failed']);
+  assert.equal(a.contexts.length, 5, 'Only D and E failed since the fix at C, so F\'s repair starts the agent.');
+});
+
+test('a repair a newer head superseded, or one the agent never tried, neither counts toward the breaker nor ends its run', async t => {
+  let started = 0, unavailable: string | null = null;
+  const a = agent(async (context, signal) => {
+    started += 1;
+    await context.report({ attempts: [failedAttempt()] });
+    if (started === 2) { await aborted(signal); return { status: 'failed' }; }
+    return { status: 'failed', reason: 'The build was not fixed in 4 attempts.' };
+  }, { unavailable: () => unavailable });
+  const h = await harness(t, { steps: a.steps }), [F, G] = ['f', '1'].map(digit => digit.repeat(40));
+  await failHeads(h, [[B, [run('2', B, 'failure')]]]);
+  // C's attempt failed, then D superseded it while it worked.
+  await h.failHead([run('3', C, 'failure')], C);
+  await until(() => h.repair(C)?.attempts?.length);
+  await failHeads(h, [[D, [run('4', D, 'failure')]]]);
+  // E needs a person before the agent starts.
+  unavailable = 'Add an OpenRouter API key in Settings.';
+  await failHeads(h, [[E, [run('5', E, 'failure')]]]);
+  unavailable = null;
+  await failHeads(h, [[F, [run('6', F, 'failure')]]]);
+  assert.deepEqual([B, C, D, E, F].map(sha => h.repair(sha)?.status), ['failed', 'superseded', 'failed', 'needs-person', 'failed']);
+  assert.equal(a.contexts.length, 4);
+  await failHeads(h, [[G, [run('7', G, 'failure')]]]);
+  assert.deepEqual([h.repair(G)?.status, h.repair(G)?.reason, a.contexts.length], ['needs-person', HELD, 4], 'B, D and F failed in a row.');
 });
 
 test('a run of failed repairs ends at a head that passed, remembered across a restart, and at a repair of another failure', async t => {
