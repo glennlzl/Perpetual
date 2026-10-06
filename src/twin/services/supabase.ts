@@ -99,26 +99,37 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseEnv = (text: string): Record<string, string> => Object.fromEntries(text.split('\n').map(line => line.trim().match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
   .filter(match => match !== null).map(([, key, value]) => [key, value.startsWith('"') ? String(JSON.parse(value)) : value]));
 
-/** How many lines the value of the key on line `at` spans: the fewest that parse, as an array or a multi-line string continues. */
-function valueLines(lines: string[], at: number) {
-  for (let end = at + 1; end <= lines.length; end += 1) {
-    try { parseToml(lines.slice(at, end).join('\n')); return end - at; } catch { /* the value goes on */ }
+/**
+ * How many of `lines`, a key's line and the rest of its section, the key's value spans: the fewest that parse, as an
+ * array or a multi-line string goes on. A value that does not parse within its section is taken as its one line, so a
+ * rewrite never reaches another section.
+ */
+function valueLines(lines: string[]) {
+  for (let end = 1; end <= lines.length; end += 1) {
+    try { parseToml(lines.slice(0, end).join('\n')); return end; } catch { /* the value goes on */ }
   }
   return 1;
 }
 
 // Sets `key = value` in `[section]` ('' is the top level), adding the key or the section when absent. A value the file
-// spreads over several lines is replaced whole.
+// spreads over several lines is replaced whole. Lines are read without the '\r' of a CRLF ending, and those written end
+// as the file's lines do: a repository may commit config.toml with CRLF endings, which the snapshot keeps.
 export function setToml(text: string, section: string, key: string, value: string | number | boolean | string[]) {
-  const lines = text.split('\n'), line = `${key} = ${JSON.stringify(value)}`;
-  const start = section ? lines.findIndex(l => new RegExp(`^\\s*\\[\\s*${escape(section)}\\s*\\]\\s*(#.*)?$`).test(l)) : -1;
-  if (section && start < 0) return `${text.trimEnd()}\n\n[${section}]\n${line}\n`;
-  const end = lines.findIndex((l, i) => i > start && /^\s*\[/.test(l));
-  const at = lines.findIndex((l, i) => i > start && (end < 0 || i < end) && new RegExp(`^\\s*${escape(key)}\\s*=`).test(l));
-  if (at >= 0) { lines.splice(at, valueLines(lines, at), line); return lines.join('\n'); }
-  let last = end < 0 ? lines.length : end; // append after the section's last non-blank line
-  while (last > start + 1 && !lines[last - 1].trim()) last -= 1;
-  lines.splice(last, 0, line);
+  const lines = text.split('\n'), bare = lines.map(l => l.endsWith('\r') ? l.slice(0, -1) : l);
+  const cr = text.includes('\r\n') ? '\r' : '', line = `${key} = ${JSON.stringify(value)}`;
+  const start = section ? bare.findIndex(l => new RegExp(`^\\s*\\[\\s*${escape(section)}\\s*\\]\\s*(#.*)?$`).test(l)) : -1;
+  if (section && start < 0) return `${text.trimEnd()}${cr}\n${cr}\n[${section}]${cr}\n${line}${cr}\n`;
+  const next = bare.findIndex((l, i) => i > start && /^\s*\[/.test(l)), end = next < 0 ? lines.length : next;
+  const at = bare.findIndex((l, i) => i > start && i < end && new RegExp(`^\\s*${escape(key)}\\s*=`).test(l));
+  if (at >= 0) {
+    const count = valueLines(bare.slice(at, end)), ending = lines[at + count - 1].endsWith('\r') ? '\r' : '';
+    lines.splice(at, count, line + ending);
+    return lines.join('\n');
+  }
+  let last = end; // append after the section's last non-blank line
+  while (last > start + 1 && !bare[last - 1].trim()) last -= 1;
+  // In a file with no final line break, a line added last ends the file, where TOML refuses a '\r'.
+  lines.splice(last, 0, last < lines.length ? line + cr : line);
   return lines.join('\n');
 }
 

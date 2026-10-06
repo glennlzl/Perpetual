@@ -216,6 +216,85 @@ test('Supabase auth options are checked before setup, with placeholders as text'
   assert.deepEqual(serviceOptionErrors({ services: { supabase: { auth: { siteUrl: '{{apps.web.publicUrl}}', redirectUrls: ['{{apps.web.publicUrl}}/auth/callback'] } } } }), []);
 });
 
+// A project's config.toml as `supabase init` lays it out, shortened: comments, nested tables and a list over several lines.
+const INIT_CONFIG = `# For detailed configuration reference documentation, visit:
+# https://supabase.com/docs/guides/local-development/cli/config
+project_id = "acme-app"
+
+[api]
+enabled = true
+# Port to use for the API URL.
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+port = 54329
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[realtime]
+enabled = true
+
+[studio]
+enabled = true
+port = 54323
+
+[local_smtp]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+]
+jwt_expiry = 3600
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+
+[edge_runtime]
+enabled = true
+policy = "per_worker"
+
+[experimental]
+orioledb_version = ""
+`;
+
+test('Supabase keeps every setting of a config.toml with CRLF line endings, as a repository may commit it', async () => {
+  const written = async (text: string) => {
+    const ctx = await context<SupabaseContext>({ apps: ['web'], respond: ({ args }) => args.includes('status') ? STATUS : '' });
+    await supabaseSource(ctx);
+    ctx.options = { ...ctx.options, auth: { redirectUrls: ['http://127.0.0.1:43180/**'] } };
+    await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), text);
+    await supabase.setup(ctx);
+    return readFile(join(ctx.dir, 'supabase/supabase/config.toml'), 'utf8');
+  };
+  const lf = await written(INIT_CONFIG), crlf = await written(INIT_CONFIG.replaceAll('\n', '\r\n'));
+  // The twin's id, addresses and ports, line for line as in the same file with LF endings, and every line ends in CRLF.
+  assert.equal(crlf, lf.replaceAll('\n', '\r\n'));
+  // Nothing of the project's is lost: each of its settings is still there.
+  const settings = (value: unknown, path = ''): string[] => value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? Object.entries(value).flatMap(([key, item]) => settings(item, `${path}.${key}`)) : [path];
+  const kept = new Set(settings(parseToml(crlf)));
+  assert.deepEqual(settings(parseToml(INIT_CONFIG)).filter(path => !kept.has(path)), []);
+  assert.deepEqual((parseToml(crlf).auth as Record<string, unknown>).additional_redirect_urls, ['http://127.0.0.1:43180/**']);
+});
+
 test('Supabase provides its standard variables from supabase status', async () => {
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
@@ -304,6 +383,18 @@ test('TOML rewrite adds missing keys and sections and uses [local_smtp] for curr
   // A value spread over several lines, an array or a multi-line string, is replaced whole.
   assert.equal(setToml('[auth]\nurls = [\n  "a", # first\n  "b",\n]\nport = 1\n', 'auth', 'urls', ['c']), '[auth]\nurls = ["c"]\nport = 1\n');
   assert.equal(setToml('[auth]\nsite = """\nhttp://a\n"""\nport = 1\n', 'auth', 'site', 'http://b'), '[auth]\nsite = "http://b"\nport = 1\n');
+  // One that does not parse within its section is replaced on its own line, and the next section stays.
+  assert.equal(setToml('[auth]\nurls = [\n  "a",\n[db]\nport = 2\n', 'auth', 'urls', ['c']), '[auth]\nurls = ["c"]\n  "a",\n[db]\nport = 2\n');
+  // CRLF line endings: only the key's own lines change, and the lines written end in CRLF too.
+  assert.equal(setToml('project_id = "acme"\r\n\r\n[auth]\r\nsite_url = "a"\r\njwt_expiry = 3600\r\n', '', 'project_id', 'perpetual-beta'),
+    'project_id = "perpetual-beta"\r\n\r\n[auth]\r\nsite_url = "a"\r\njwt_expiry = 3600\r\n');
+  assert.equal(setToml('[auth]\r\nurls = [\r\n  "a",\r\n]\r\nport = 1\r\n', 'auth', 'urls', ['c']), '[auth]\r\nurls = ["c"]\r\nport = 1\r\n');
+  assert.equal(setToml('[api] # gateway\r\nport = 1\r\n', 'api', 'port', 5), '[api] # gateway\r\nport = 5\r\n');
+  assert.equal(setToml('[auth]\r\nport = 1\r\n', 'auth', 'site_url', 'x'), '[auth]\r\nport = 1\r\nsite_url = "x"\r\n');
+  assert.equal(setToml('[api]\r\nport = 1\r\n', 'studio', 'port', 2), '[api]\r\nport = 1\r\n\r\n[studio]\r\nport = 2\r\n');
+  // Mixed endings: a CRLF line is replaced alone, and every other line keeps its own ending.
+  assert.equal(setToml('a = 1\r\nb = 2\nc = 3\n', '', 'a', 5), 'a = 5\r\nb = 2\nc = 3\n');
+  assert.equal(setToml('[auth]\nsite = "a"\r\nport = 1\n[db]\r\nport = 2\r\n', 'auth', 'site', 'b'), '[auth]\nsite = "b"\r\nport = 1\n[db]\r\nport = 2\r\n');
   const ctx = await context<SupabaseContext>({ respond: ({ args }) => args.includes('status') ? STATUS : '' });
   await supabaseSource(ctx);
   await writeFile(join(ctx.source, 'services/api/supabase/config.toml'), '[api]\nport = 54321\n');
