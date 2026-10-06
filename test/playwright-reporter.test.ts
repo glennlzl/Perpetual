@@ -24,6 +24,18 @@ test('reporter masks origin account errors before clipping while preserving revi
   }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
 });
 
+test('reporter keeps a username shorter than four characters readable and still hides the password',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const file=join(directory,'case.json');await writeFile(file,JSON.stringify({id:'case',name:'Save workspace',goal:'Save and reopen my workspace',steps:[],assertions:[]}));
+  const keys=['PERPETUAL_CASE','PERPETUAL_ACCOUNT_USERNAME','PERPETUAL_ACCOUNT_PASSWORD'],previous=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  try{
+    Object.assign(process.env,{PERPETUAL_CASE:file,PERPETUAL_ACCOUNT_USERNAME:'qa',PERPETUAL_ACCOUNT_PASSWORD:'private-pass-91'});
+    assert.equal(new JourneyReporter().safe("Missing the 'qa' queue link; typed private-pass-91"),"Missing the 'qa' queue link; typed [REDACTED]");
+    process.env.PERPETUAL_ACCOUNT_USERNAME='test';
+    assert.equal(new JourneyReporter().safe("Missing the 'test' queue link"),"Missing the '[REDACTED]' queue link");
+  }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
+});
+
 test('reporter lists every action the journey grammar allows and counts them all',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
   const file=join(directory,'case.json'),previous=process.env.PERPETUAL_CASE;
@@ -35,7 +47,7 @@ test('reporter lists every action the journey grammar allows and counts them all
     // Playwright 1.63's step titles for the grammar's actions.
     const titles:[string,string][]=[['Navigate to "/settings"','navigate'],['Go forward','navigate'],['Reload','reload_page'],['Go back','go_back'],['Click','click'],['Double click','click'],['Tap','click'],['Check','click'],['Uncheck','click'],['Drag and drop','click'],
       ['Mouse down','click'],['Mouse up','click'],['Fill "QA"','input'],['Type "QA"','input'],['Press sequentially "QA"','input'],['Clear','input'],['Insert "QA"','input'],['Press "Enter"','send_keys'],['Key down "Shift"','send_keys'],['Key up "Shift"','send_keys'],
-      ['Select option','select_option'],['Hover','hover'],['Mouse move','hover'],['Scroll into view','scroll'],['Mouse wheel','scroll'],['Focus','focus'],['Blur','blur'],['Wait for selector','wait'],['Wait for URL','wait'],['Wait for load state','wait'],['Wait for timeout','wait']];
+      ['Select option','select_option'],['Hover','hover'],['Mouse move','hover'],['Scroll into view','scroll'],['Mouse wheel','scroll'],['Focus','focus'],['Blur','blur'],['Wait for selector','wait'],['Wait for URL','wait'],['Wait for load state','wait'],['Wait for timeout','wait'],['Accept dialog','accept_dialog'],['Dismiss dialog','dismiss_dialog']];
     for(const [title] of titles)run(title);
     assert.deepEqual(emitted.at(-1)!.actions.map(action=>action.type),titles.map(([,type])=>type));
     // The case event carries the latest 150 actions and how many there were in all.
@@ -77,6 +89,26 @@ test('reporter hides encoded account paths before clipping and refuses malformed
       const invalid=new JourneyReporter();invalid.write=()=>{};
       invalid.onStdOut('channel:'+JSON.stringify({type:'control-read',caseId:'case',eligible:false,controlBlocks,...changes})+'\n');
       assert.notEqual(invalid.facts().controlRead,true);assert.equal((invalid.facts() as unknown as {controlBlocks?:unknown}).controlBlocks,undefined);
+    }
+  }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
+});
+
+test('reporter keeps a failed read only for a read rejected because a request failed, with the account hidden',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'perpetual-reporter-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const file=join(directory,'case.json');await writeFile(file,JSON.stringify({id:'case',name:'Save workspace',goal:'Save and reopen my workspace',steps:[],assertions:[]}));
+  const keys=['PERPETUAL_CASE','PERPETUAL_EVENT_CHANNEL','PERPETUAL_ACCOUNT_USERNAME','PERPETUAL_ACCOUNT_PASSWORD'],previous=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  const username='viewer@example.test';
+  try{
+    Object.assign(process.env,{PERPETUAL_CASE:file,PERPETUAL_EVENT_CHANNEL:'channel:',PERPETUAL_ACCOUNT_USERNAME:username,PERPETUAL_ACCOUNT_PASSWORD:'private-pass-91'});
+    const controlFailedRead={resourceType:'fetch',method:'GET',url:`https://app.test/users/${encodeURIComponent(username)}?token=private`,status:500};
+    const reporter=new JourneyReporter();reporter.write=()=>{};
+    reporter.onStdOut('channel:'+JSON.stringify({type:'control-read',caseId:'case',eligible:false,reason:'read-failed',controlFailedRead})+'\n');
+    assert.deepEqual(reporter.facts().controlFailedRead,{resourceType:'fetch',method:'GET',url:'https://app.test/users/[REDACTED]',status:500});
+    assert.equal(reporter.facts().controlReadReason,'read-failed');
+    for(const changes of [{eligible:true},{reason:'url-changed'},{reason:undefined},{controlFailedRead:{...controlFailedRead,body:'private'}}]){
+      const invalid=new JourneyReporter();invalid.write=()=>{};
+      invalid.onStdOut('channel:'+JSON.stringify({type:'control-read',caseId:'case',eligible:false,reason:'read-failed',controlFailedRead,...changes})+'\n');
+      assert.notEqual(invalid.facts().controlRead,true);assert.equal(invalid.facts().controlFailedRead,undefined);
     }
   }finally{for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];}
 });

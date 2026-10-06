@@ -16,13 +16,13 @@ import {createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-mo
 import {draftBrowserCase,transcribeBrowserAudio,validateTestDescription} from './openrouter-input.ts';
 import {journeyResult,runStatus} from './results.ts';
 import {controlBlockerText,controlReadReasonText} from '../journeys/playwright/control.ts';
-import {controlBlocks} from './control-evidence.ts';
+import {controlBlocks,controlFailedRead} from './control-evidence.ts';
 import {createJourneyScheduler,journeyConcurrency} from './journey-scheduler.ts';
 import {createJourneyCode,restoreJourneyCode,replaceJourneyCases} from './journey-code.ts';
 import type {GenerationFailure,JourneyCodeState,JourneyCodeSnapshot,Verification,VerificationIdentity,RunnableCode} from './journey-code.ts';
 export type {SpecSummary} from './journey-code.ts';
 import {applicationHost as canonicalHost,applicationOrigin,createEnvironmentUsage,scopeId,stageHeld} from '../environments/usage.ts';
-import {selectRunAccount} from './run-credentials.ts';
+import {accountSecrets,selectRunAccount} from './run-credentials.ts';
 import type {AccountSignIn,RunCredentials} from './run-credentials.ts';
 import {appId} from '../twin/detect.ts';
 import {createTwinRuntime} from '../twin/runtime.ts';
@@ -266,6 +266,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     const transports=controlBlocks(facts.controlBlocks);
     if(!transports||facts.controlBlocks!==undefined&&facts.controlRead!==false)throw new Error('Invalid stored control transport evidence.');
     if(facts.controlBlocks!==undefined)result.controlBlocks=transports;
+    const failedRead=controlFailedRead(facts.controlFailedRead);
+    if(failedRead===null||facts.controlFailedRead!==undefined&&(facts.controlRead!==false||facts.controlReadReason!=='read-failed'))throw new Error('Invalid stored failed control read.');
+    if(failedRead)result.controlFailedRead=failedRead;
   }
   // New policy and evidence fields are untrusted file data too: reject unsafe rules before any view or fingerprint,
   // and retain only the same bounded redacted diagnostic shape that live worker events can publish.
@@ -594,7 +597,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         // Project evidence before workspace removal; persist after owned cleanup releases the target.
         if(authoring){
           try{
-            const record=restoreAuthoringRecord({...authoring,cleanup:uncertain?'incomplete':authoring.cleanup},hide([configuration.apiKey,credentials?.password,credentials?.username]));
+            const record=restoreAuthoringRecord({...authoring,cleanup:uncertain?'incomplete':authoring.cleanup},hide([configuration.apiKey,...accountSecrets(credentials)]));
             let retained:AuthoringHistory;
             await persist(()=>{
               retained=retainAuthoring({...state.authoring,[scope]:{...state.authoring[scope],[item.id]:[record,...state.authoring[scope]?.[item.id]||[]]}},state.cases);
@@ -770,7 +773,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       catch(error){if(preparation){delete preparation.runId;delete preparation.targetUrl;Object.assign(preparation,before);}throw error;}
       if(closed){run.status='cancelled';run.completedAt=now();await persist();throw conflict('The controller is shutting down.');}
       const execution=async()=>{
-        const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,Object.values(credentials??{}));
+        const diagnostic=(error:unknown,limit=800)=>generationDiagnostic(error,limit,accountSecrets(credentials));
         // Set by the worker's discovery event.
         let discovery=null as Discovery|null,omittedCount=0,progressPersistence:Promise<unknown>=Promise.resolve(),progressError:unknown,progressQueued=false;
         // Registered before execution starts.
@@ -793,7 +796,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           }
           if(['skipping','cancelling','skipped','cancelled'].includes(progress.status))return;
           if(event.type==='blocked-request'){
-            const remove=hide(Object.values(credentials??{}));
+            const remove=hide(accountSecrets(credentials));
             const request=blockedRequest(event.method,event.url,value=>safeText(remove(redact(value,{decodeUri:true})),512));
             if(request&&!(run.blockedRequests??[]).some(item=>item.method===request.method&&item.url===request.url)){
               if((run.blockedRequests??[]).length<10)(run.blockedRequests??=[]).push(request);touch(run);
@@ -869,10 +872,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                   if(event.type==='result'){
                     if(facts)throw new Error('Browser runtime returned duplicate results.');
                     if(isRecord(event.result)&&event.result.caseId===item.id&&event.result.stopCause==='action'&&typeof event.result.actionFeedback==='string'&&event.result.actionFeedback.length<=2000)
-                      actionFeedback.set(item.id,generationDiagnostic(event.result.actionFeedback,2000,Object.values(credentials??{})));
+                      actionFeedback.set(item.id,generationDiagnostic(event.result.actionFeedback,2000,accountSecrets(credentials)));
                     // Scrub only diagnostics before journeyResult bounds them; check identities stay unchanged.
                     facts=isRecord(event.result)&&typeof event.result.error==='string'?{...event.result,error:diagnostic(event.result.error,4000)}:event.result;
-                    if(isRecord(facts)&&facts.controlBlocks!==undefined)facts={...facts,controlBlocks:controlBlocks(facts.controlBlocks,Object.values(credentials??{}))??facts.controlBlocks};
+                    if(isRecord(facts)&&facts.controlBlocks!==undefined)facts={...facts,controlBlocks:controlBlocks(facts.controlBlocks,accountSecrets(credentials))??facts.controlBlocks};
+                    if(isRecord(facts)&&facts.controlFailedRead!==undefined)facts={...facts,controlFailedRead:controlFailedRead(facts.controlFailedRead,accountSecrets(credentials))??facts.controlFailedRead};
                   }else if(event.type==='discovery')throw new Error('Browser runtime returned unexpected discovery.');
                   else progressEvent(event,item.id);
                 };
@@ -965,7 +969,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
           // stays as recorded; its raw errors never substitute for these private, bounded summaries.
           if(mode==='run')run.codeFeedback=Object.fromEntries(cases.flatMap(item=>{
             const result=run.results?.find(result=>result.caseId===item.id),error=result?.error||run.error;
-            return error&&result&&['failed','needs_review','blocked'].includes(result.status)?[[item.id,generationDiagnostic([generationDiagnostic(error,1800,Object.values(credentials??{})),actionFeedback.get(item.id)].filter(Boolean).join('\n'),4000,Object.values(credentials??{}))]]:[];
+            return error&&result&&['failed','needs_review','blocked'].includes(result.status)?[[item.id,generationDiagnostic([generationDiagnostic(error,1800,accountSecrets(credentials)),actionFeedback.get(item.id)].filter(Boolean).join('\n'),4000,accountSecrets(credentials))]]:[];
           }));
           if(preparation?.runId===run.id){
             const empty=run.status==='completed'&&!(state.cases[scope]||[]).length;

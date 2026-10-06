@@ -156,6 +156,20 @@ test('the generation rules keep navigation on the current run’s records',()=>{
   assert.ok(repairPrompt('Invalid code','tests/journey.spec.mjs',rules).includes(rule));
 });
 
+test('the generation rules expect a native dialog the generator handled in the reviewed grammar form',()=>{
+  const rules=generationRules(journey,{signIn:true}),rule=rules.find(item=>item.startsWith('Replay dismisses every native dialog'));
+  assert.ok(rule);
+  assert.ok(generationPlan(journey,{signIn:true}).includes(rule));
+  assert.ok(repairPrompt('Invalid code','tests/journey.spec.mjs',rules).includes(rule),'Grammar repair keeps the expected dialog form.');
+  // Each example the rule gives is code the grammar accepts.
+  const examples=[...rule.matchAll(/`(await Promise\.all\([^`]*\);)`/g)].map(match=>match[1].replace('one UI action',"page.getByRole('button', { name: 'Delete', exact: true }).click()"));
+  assert.equal(examples.length,2);
+  for(const example of examples){
+    const code=`import { test } from 'perpetual';\ntest('Rename the display name', async ({ page, journey }) => {\n  await journey.milestone('open-settings', async () => { await journey.signIn(); ${example} });\n  await journey.milestone('save-name', async () => {});\n});\n`;
+    assert.equal(validateJourneySpec(code,journey),code,example);
+  }
+});
+
 test('a reviewed journey’s code is generated in a private workspace and saved as a draft',async t=>{
   const f=await setup(t);
   const started=await f.manager.generateSpec(f.context,{caseId:journey.id});
@@ -178,6 +192,7 @@ test('a reviewed journey’s code is generated in a private workspace and saved 
   assert.equal(call.workspaceMode,0o700);assert.equal(dirname(workspace),join(await realpath(f.dataDir),'browser','generations'));assert.equal(call.cwd,join(workspace,'project'));
   assert.equal(call.git,true);assert.equal(call.prompts,true);
   assert.match(call.instructions,/The log's closing best practices are for ordinary Playwright tests and do not apply here: write no assertions and no variables\./,'The upstream log ends with advice the action-only grammar refuses.');
+  assert.match(call.instructions,/Write the UI action that opened a native dialog you handled as await Promise\.all\(\[journey\.dialog\('accept'\), that action\]\);/,'Replay dismisses a dialog the code does not expect.');
   assert.partialDeepStrictEqual(call.agent,{mode:'primary',model:'openrouter/openai/gpt-4.1-mini',allTools:false});
   assert.deepEqual(call.permission,{edit:'deny',bash:'deny',webfetch:'deny',external_directory:'deny'});
   // The test MCP server runs behind the filter that sets up only the workspace's seed.
@@ -845,6 +860,35 @@ test('successful authoring survives workspace removal and restart as private sco
   const source={...f.context,key:'other'};await restarted.saveCases(source,[journey]);
   assert.deepEqual(await restarted.specCode(source,{caseId:journey.id}),{});
   assert.equal((await lines(f.log)).length,1,'Reading diagnostics and restarting perform no paid work.');
+});
+
+test('an ordinary-word test account keeps authoring tool names and provenance while its values stay hidden',async t=>{
+  const f=await setup(t,{mode:'trace-valid'});
+  await f.manager.generateSpec(f.context,{caseId:journey.id,credentials:{username:'test',password}});
+  const spec=await settled(f),reply=await f.manager.specCode(f.context,{caseId:journey.id});
+  const provenance={harness:'opencode@1.18.32',generator:'playwright-test-generator@1.63.0',model:'openrouter/openai/gpt-4.1-mini'};
+  assert.deepEqual(spec?.draft?.provenance,provenance);
+  const [record]=reply.authoring!;
+  assert.deepEqual(record.provenance,provenance);
+  assert.deepEqual(record.attempts[0].events,[{tool:'generator_setup_page',outcome:'completed'},{tool:'browser_click',outcome:'completed'}]);
+  assert.ok(secretFree(reply));
+});
+
+test('generation feedback keeps a username shorter than four characters readable and still hides the password',async t=>{
+  const workspace=await mkdtemp(join(tmpdir(),'perpetual-generation-account-'));
+  t.after(()=>rm(workspace,{recursive:true,force:true}));
+  const log=join(workspace,'harness.jsonl');
+  const playwright:JourneyRuntime={capabilities:async()=>({browserInstalled:true}),start(input,onEvent){
+    return {promise:Promise.resolve().then(()=>{onEvent({type:'result',result:{caseId:input.case.id,stopCause:'none',assertions:[]}});}),cancel(){}};
+  }};
+  for(const [username,readable] of [['qa',true],['test',false]] as const){
+    const attempt=join(workspace,username);await mkdir(attempt);
+    await generateJourneySpec({workspace:attempt,item:journey,targetUrl:'http://localhost:3000/',timeoutSeconds:60,apiKey:key,model,credentials:{username,password},playwright,
+      feedback:{error:`Missing the ${username} queue link; typed ${password}`},harness:({model:requested,prompt})=>({command:process.execPath,args:[fake,'valid',log,prompt,requested]})}).promise;
+    const plan=(await lines(log)).at(-1)!.plan;
+    assert.equal(plan.includes(`Missing the ${username} queue link`),readable,username);
+    assert.ok(!plan.includes(password));
+  }
 });
 
 for(const mode of ['trace-blocked','trace-blocked-code'])test(`a generator-reported blocker rejects code without a paid retry and survives restart: ${mode}`,async t=>{

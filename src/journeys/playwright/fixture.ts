@@ -10,14 +10,17 @@ import { CHECK_VERSION, OPERATORS, RUN, RUN_TOKEN, STEPS, approvedCase, checkTem
 import type { ApprovedCase, Captures, Check, Evaluation, EvaluatedCheck, FixtureEvent, Reading, TextCheck } from './checks.ts';
 import { reviewedRead, validateReadRequests } from '../../browser/read-requests.ts';
 import { controlReads, controlBlockerText } from './control.ts';
-import type { ControlReadReason, ControlBlockedTransport } from '../../../contract/browser.ts';
+import type { ControlReadReason, ControlBlockedTransport, ControlFailedRead } from '../../../contract/browser.ts';
 import { fixtureLifecycle } from './diagnostics.ts';
 import { synchronizeReload } from './navigation.ts';
 import { installActionObservation, resetActionObservation, actionFeedback } from './action-observation.ts';
-import type { RunCredentials } from '../../browser/run-credentials.ts';
+import { accountSecrets, type RunCredentials } from '../../browser/run-credentials.ts';
 
-/** What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}. */
-export type JourneyFixture = { readonly run: string; milestone(id: string, actions: () => Promise<void>): Promise<void>; signIn(): Promise<void> };
+/**
+ * What a spec calls on its `journey` fixture; run is the run's token, for data a reviewed check names with {run}, and
+ * dialog expects the native dialog the one UI action beside it in Promise.all opens.
+ */
+export type JourneyFixture = { readonly run: string; milestone(id: string, actions: () => Promise<void>): Promise<void>; signIn(): Promise<void>; dialog(choice: 'accept' | 'dismiss', text?: string): Promise<void> };
 /** A check's result on the page; final means waiting longer cannot change it. */
 type Observation = Evaluation & { final?: true };
 /** Why no reviewed check can judge the page any more, once a navigation was refused. */
@@ -61,6 +64,8 @@ const UNGUARDED = controlBlockerText('unguarded-transport')!, REPORT = '__perpet
 const SHARED_WORKER = controlBlockerText('shared-worker')!;
 // Why journey.signIn() found no sign-in form to fill.
 const NO_FORM = 'The application URL shows no sign-in form. Set the sign-in page.', NO_SIGN_IN_FORM = 'The sign-in page shows no sign-in form. Check the sign-in page.';
+// An expected native dialog waits longer than an action's 10-second timeout, so an action that fails reports its own error.
+const DIALOG_MS = 15000, NO_DIALOG = 'The expected native dialog did not appear.';
 const OFF_ORIGIN = 'The sign-in form is not on the application origin.', UNENTERED = 'The test account could not be entered.';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // Only lines carrying the run's channel token are events; anything else a worker prints is ignored. Without a
@@ -358,9 +363,9 @@ export const test = base.extend<{ journey: JourneyFixture }>({
     let running = false, broken = false, signingIn = false, forwarded = 0, sent = 0, unguarded = false, sharedWorker = false;
     const controlRefusal = () => sharedWorker ? SHARED_WORKER : UNGUARDED;
     const controlFailures: (() => boolean)[] = [];
-    const controlReasons: { reason: () => ControlReadReason | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
+    const controlReasons: { reason: () => ControlReadReason | undefined; failedRead: () => ControlFailedRead | undefined; blocks: () => ControlBlockedTransport[] }[] = [];
     let controlCheckFailed = false;
-    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, Object.values(account ?? {})) : undefined;
+    const control = BLOCK_WRITES && CHECKS >= 3 ? controlReads(context, accountSecrets(account)) : undefined;
     const diagnostic = env.PERPETUAL_LIFECYCLE_DIAGNOSTICS === '1' && !BLOCK_WRITES && env.PERPETUAL_EVENT_CHANNEL ? fixtureLifecycle(context, lifecycle => {
       write.call(process.stdout, `${env.PERPETUAL_EVENT_CHANNEL}${JSON.stringify({ type: 'lifecycle', caseId: approved.id, lifecycle })}\n`);
     }) : undefined;
@@ -369,7 +374,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       return (check: EvaluatedCheck) => {
         control.captured(check);
         controlCheckFailed ||= !check.passed;
-        if (!check.passed) controlReasons.push({ reason: observed.reason(check), blocks: () => control.blocks(target) });
+        if (!check.passed) controlReasons.push({ reason: observed.reason(check), failedRead: observed.failedRead(check), blocks: () => control.blocks(target) });
         const witness = observed(check);
         if (witness && !unguarded) controlFailures.push(witness);
       };
@@ -458,7 +463,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         catch (error) {
           const target = current();
           if (target && !signingIn && env.PERPETUAL_EVENT_CHANNEL) {
-            const feedback = await actionFeedback(target, [account?.username, account?.password]);
+            const feedback = await actionFeedback(target, accountSecrets(account));
             if (feedback) emit({ type: 'action-feedback', feedback });
           }
           throw error;
@@ -478,6 +483,14 @@ export const test = base.extend<{ journey: JourneyFixture }>({
         emit({ type: 'journey-step', stepId: id, status: failed ? 'failed' : 'completed', evidence: evidence.slice(0, 2000), ...(checks.length ? { checks } : {}) });
         if (failed) { broken = true; throw new Error(`Reviewed check failed at milestone: ${step.title}.`); }
         running = false;
+      };
+      // The native dialog the reviewed code expects, armed before the one UI action that opens it: the next dialog of any
+      // of the journey's pages is accepted, with a prompt's text, or dismissed. Nothing else is listening, so Playwright
+      // still dismisses every other dialog and accepts a leave-page prompt.
+      const dialog = async (choice: unknown, text?: unknown) => {
+        if (!running || broken || choice !== 'accept' && choice !== 'dismiss' || text !== undefined && (choice !== 'accept' || typeof text !== 'string')) throw stop('The spec expected a dialog outside the reviewed grammar.');
+        const shown = await context.waitForEvent('dialog', { timeout: DIALOG_MS }).catch(() => { throw new Error(NO_DIALOG); });
+        if (choice === 'accept') await shown.accept(text as string | undefined); else await shown.dismiss();
       };
       const hold = (on: boolean, target = current()) => BLOCK_WRITES ? target?.evaluate(signingInPage, on).catch(() => {}) : undefined;
       const signIn = () => base.step(STEPS.signIn, async () => {
@@ -533,7 +546,7 @@ export const test = base.extend<{ journey: JourneyFixture }>({
           streak = gone && navigationAllowed(signing.url(), allowed) ? streak + 1 : 0;
         }
       };
-      await use(Object.freeze({ run: TOKEN, milestone, signIn }));
+      await use(Object.freeze({ run: TOKEN, milestone, signIn, dialog }));
       // An action, a check or the deadline ended the journey early; its milestones were already reported. A valid
       // spec runs a milestone per reviewed step, so only a generator's seed, which opens the application and at most
       // signs in, finishes without one: nothing was judged, and nothing is reported.
@@ -557,8 +570,8 @@ export const test = base.extend<{ journey: JourneyFixture }>({
       if (control && controlCheckFailed) {
         const eligible = !unguarded && controlFailures.some(valid => valid());
         const rejected = eligible || unguarded ? undefined : controlReasons.find(observed => observed.reason());
-        const reason = rejected?.reason(), controlBlocks = rejected?.blocks();
-        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}), ...(controlBlocks?.length ? { controlBlocks } : {}) });
+        const reason = rejected?.reason(), controlBlocks = rejected?.blocks(), controlFailedRead = reason === 'read-failed' ? rejected?.failedRead() : undefined;
+        emit({ type: 'control-read', eligible, ...(reason ? { reason } : {}), ...(controlBlocks?.length ? { controlBlocks } : {}), ...(controlFailedRead ? { controlFailedRead } : {}) });
       }
     }
   },

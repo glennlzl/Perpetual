@@ -1,8 +1,9 @@
 // OpenCode v1.18.32 cli/cmd/run.ts emits newline-delimited {type, timestamp, part} in --format json.
 // Project tool_use status, fixed error categories, step_finish metadata and a final structured blocker report.
 // Ordinary text, tool input/output, session ids and error prose are never diagnostics. See docs/journeys.md.
+// Every projected field is one of its fixed values, matched on what the harness wrote: hiding an account value first
+// could only turn a known tool, category or reason into unknown, since nothing else ever leaves this projection.
 import { createHash } from 'node:crypto';
-import { redact } from '../redaction.ts';
 import type { AuthoringBlocker, AuthoringBlockerKind, AuthoringFinishReason, AuthoringTool, AuthoringToolError, AuthoringUsage, HarnessEvidence } from '../../contract/authoring.ts';
 
 const TOOLS: readonly AuthoringTool[] = ['generator_setup_page','generator_read_log','generator_write_test','browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_snapshot','browser_take_screenshot','browser_wait_for','browser_tabs','browser_handle_dialog','browser_file_upload','browser_evaluate','browser_run_code','browser_console_messages','browser_network_requests','browser_close','browser_verify_element_visible','browser_verify_list_visible','browser_verify_text_visible','browser_verify_value','read','ls','glob','grep'];
@@ -17,11 +18,10 @@ export const finishReason = (value: unknown): AuthoringFinishReason => REASONS.i
 export const toolName = (value: unknown): AuthoringTool => TOOLS.includes(value as AuthoringTool) ? value as AuthoringTool : 'unknown';
 export const toolErrorKind = (value: unknown): AuthoringToolError => ERRORS.includes(value as AuthoringToolError) ? value as AuthoringToolError : 'unknown';
 /** A numbered milestone and fixed kind only. The generator also checks the ordinal against its actual case. */
-export function authoringBlocker(value: unknown, hide: (text: unknown) => string): AuthoringBlocker | undefined {
+export function authoringBlocker(value: unknown): AuthoringBlocker | undefined {
   const report = object(value);
-  if (!report || typeof report.milestone !== 'number' || !Number.isInteger(report.milestone) || report.milestone < 1 || report.milestone > 12 || typeof report.kind !== 'string') return;
-  const kind = redact(hide(report.kind));
-  return BLOCKERS.includes(kind as AuthoringBlockerKind) ? { milestone: report.milestone, kind: kind as AuthoringBlockerKind } : undefined;
+  if (!report || typeof report.milestone !== 'number' || !Number.isInteger(report.milestone) || report.milestone < 1 || report.milestone > 12) return;
+  return BLOCKERS.includes(report.kind as AuthoringBlockerKind) ? { milestone: report.milestone, kind: report.kind as AuthoringBlockerKind } : undefined;
 }
 /** Fixed upstream error categories only; neither an error's contents nor page data leaves this projection. */
 function classifyToolError(tool: AuthoringTool, text: string): AuthoringToolError {
@@ -37,8 +37,8 @@ export function authoringUsage(value: unknown): AuthoringUsage | null {
   return { input: usage.input as number, output: usage.output as number, reasoning: usage.reasoning as number, cacheRead: usage.cacheRead as number, cacheWrite: usage.cacheWrite as number, cost: usage.cost as number };
 }
 
-/** Bounded raw lines live only until projection; redact complete JSON string values before allowlisting them. */
-export function captureAuthoringEvidence(hide: (text: unknown) => string, onError: (message: string) => void = () => {}) {
+/** Bounded raw lines live only until projection. onError receives a provider error's message to classify, never to keep. */
+export function captureAuthoringEvidence(onError: (message: string) => void = () => {}) {
   const started = Date.now(), hashes = { stdout: createHash('sha256'), stderr: createHash('sha256') };
   let outputBytes = 0, scanned = 0, pending = '', discarding = false, eventsTruncated = false, limited = false;
   let reportedFinishReason: AuthoringFinishReason = 'unknown', usage: AuthoringUsage | null = null;
@@ -46,12 +46,12 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
   let reportedBlocker: AuthoringBlocker | undefined;
   let reportStopped = false, scanIncomplete = false;
   const events: HarnessEvidence['events'] = [];
-  const safe = (value: unknown) => typeof value === 'string' ? redact(hide(value)) : '';
+  const raw = (value: unknown) => typeof value === 'string' ? value : '';
   const clearReport = () => { reportedBlocker = undefined; reportStopped = false; };
   const loseScanIntegrity = () => { scanIncomplete = true; clearReport(); };
   const reportError = (envelope: Record<string, unknown> | null) => {
     const data = object(object(envelope?.error)?.data);
-    if (typeof data?.message === 'string') onError(safe(data.message));
+    if (typeof data?.message === 'string') onError(data.message);
   };
   // Past the stream bound, only error envelopes are read, for the provider refusal one may carry.
   function errorLine(text: string) {
@@ -68,9 +68,9 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
       clearReport();
       const end = object(part?.time)?.end;
       if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= 512 && number(end) && end > 0) {
-        let parsed: unknown; try { parsed = JSON.parse(safe(part.text)); } catch { return; }
+        let parsed: unknown; try { parsed = JSON.parse(part.text); } catch { return; }
         const wrapper = object(parsed), report = object(wrapper?.perpetual_blocker);
-        if (wrapper && Object.keys(wrapper).length === 1 && report && Object.keys(report).length === 2) reportedBlocker = authoringBlocker(report, hide);
+        if (wrapper && Object.keys(wrapper).length === 1 && report && Object.keys(report).length === 2) reportedBlocker = authoringBlocker(report);
       }
     }
     if (envelope?.type === 'error') reportError(envelope);
@@ -78,14 +78,14 @@ export function captureAuthoringEvidence(hide: (text: unknown) => string, onErro
       const state = object(part.state);
       if (state?.status !== 'completed' && state?.status !== 'error') return;
       // OpenCode preserves the configured MCP server's name when prefixing the tool.
-      const tool = safe(part.tool).replace(/^playwright[-_]test_/, '');
-      if (state.status === 'error') lastToolError = { tool: toolName(tool), kind: classifyToolError(toolName(tool), safe(state.error)) };
-      if (events.length < MAX_AUTHORING_EVENTS) events.push({ tool: toolName(tool), outcome: state.status });
+      const tool = toolName(raw(part.tool).replace(/^playwright[-_]test_/, ''));
+      if (state.status === 'error') lastToolError = { tool, kind: classifyToolError(tool, raw(state.error)) };
+      if (events.length < MAX_AUTHORING_EVENTS) events.push({ tool, outcome: state.status });
       else eventsTruncated = true;
     }
     if (envelope?.type === 'step_finish') {
       if (part?.type !== 'step-finish') { clearReport(); return; }
-      reportedFinishReason = finishReason(safe(part.reason));
+      reportedFinishReason = finishReason(part.reason);
       if (reportedFinishReason !== 'stop') clearReport();
       reportStopped = reportedBlocker !== undefined && reportedFinishReason === 'stop';
       const tokens = object(part.tokens), cache = object(tokens?.cache);
