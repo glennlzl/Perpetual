@@ -69,7 +69,7 @@ test('an account check GitHub does not answer is unreachable, never signed out',
   assert.deepEqual(await session({ login: 'octocat', name: 'Mona' }), { available: true, authenticated: true, account: { login: 'octocat', name: 'Mona' } });
 });
 
-test('a connection GitHub cannot verify for now is unreachable, not disconnected, and a Disconnect stays not connected', async t => {
+test('a connection GitHub cannot verify for now is unreachable, not disconnected, a Disconnect stays not connected, and Connect waits for GitHub', async t => {
   const answer = await accountCheck(t);
   await answer(OFFLINE);
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-github-connection-')), dataDir = join(dir, 'data');
@@ -86,7 +86,14 @@ test('a connection GitHub cannot verify for now is unreachable, not disconnected
   assert.deepEqual(await connection(), { connected: true, unreachable: undefined, message: undefined }, 'The same connection, verified once GitHub answers.');
   await answer(OFFLINE);
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
-  const disconnected = await (await fetch(`${app.url}/api/github/disconnect`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: '{}' })).json();
+  const post = async (action: string) => { const response = await fetch(`${app.url}/api/github/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: '{}' }); return { status: response.status, body: await response.json() }; };
+  const disconnected = (await post('disconnect')).body;
   assert.deepEqual([disconnected.connected, disconnected.unreachable], [false, undefined], 'A deliberate Disconnect is not connected, whatever GitHub answers.');
   assert.deepEqual(await connection(), { connected: false, unreachable: undefined, message: FAILED });
+  const refused = await post('connect');
+  assert.deepEqual([refused.status, refused.body.error], [502, FAILED], 'Connect refuses as unreachable while GitHub does not answer.');
+  assert.deepEqual(await connection(), { connected: false, unreachable: undefined, message: FAILED }, 'And connects nothing.');
+  await answer({ login: 'octocat', name: null });
+  const connected = await post('connect');
+  assert.deepEqual([connected.status, connected.body.connected, connected.body.account?.login], [200, true, 'octocat']);
 });

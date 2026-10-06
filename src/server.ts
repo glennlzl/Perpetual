@@ -709,6 +709,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/github/connect') {
         return await withSourceHeld(requireSourceIdle,async()=>{
           const session=await getGitHubSession();
+          // GitHub not answering verifies no account, and refuses as unreachable, as every request that needs one does.
+          if(session.unreachable)throw githubUnreachable(session.message);
           if(!session.authenticated)throw new Error(session.message || 'Sign in with GitHub CLI on this computer, then connect again.');
           const connectionRecord={login:session.account.login,connectedAt:new Date().toISOString()};
           await save(current=>({state:{...current,githubConnection:connectionRecord},commit(){state.githubConnection=connectionRecord;}}));
