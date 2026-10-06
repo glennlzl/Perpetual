@@ -147,6 +147,39 @@ test('a failed Load more branches keeps the branch chosen from a later page, and
   assert.deepEqual(pageErrors, []);
 });
 
+test('GitHub unreachable is neither connected nor disconnected: the branch list and Source say why and read it again', { timeout: 60000 }, async t => {
+  const source = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: repoPath };
+  const timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  let reachable = false;
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { source }) };
+    if (path === '/api/github/connection') return { json: reachable
+      ? { available: true, authenticated: true, connected: true, account: { login: 'acme', name: null }, source, localCheckout: null }
+      : { available: true, authenticated: false, account: null, connected: false, unreachable: true, message: timedOut, source, localCheckout: null } };
+    if (path === '/api/github/repositories') return { json: { repositories: [{ fullName: 'acme/app' }], nextPage: null } };
+    if (path === '/api/github/branches') return { json: { branches: [{ name: 'main' }, { name: 'feature/a' }], nextPage: null, defaultBranch: 'main' } };
+  });
+  await open();
+  // The branch list names why with Try again, and never offers to connect an account that is still connected.
+  const list = page.getByRole('listbox');
+  await page.getByRole('combobox', { name: 'Switch branch: main', exact: true }).click();
+  await expect(list.getByRole('group', { name: timedOut, exact: true }).getByRole('option', { name: 'Try again', exact: true })).toBeVisible();
+  await expect(list.getByRole('option', { name: 'Connect GitHub…', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  // Source opens without the Connect GitHub dialog, and reads the connection again on Try again.
+  await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+  const inspector = page.locator('.pipeline-inspector');
+  await expect(inspector.getByText('Unreachable', { exact: true })).toBeVisible();
+  await expect(inspector.getByRole('alert')).toHaveText(timedOut);
+  await expect(inspector.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toHaveCount(0);
+  reachable = true;
+  await inspector.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(inspector.getByText('acme · Connected', { exact: true })).toBeVisible();
+  await expect(inspector.getByRole('alert')).toHaveCount(0);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a changed gate verdict reads the release at once, so Deploy follows it between slow reads', { timeout: 60000 }, async t => {
   const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
   const target = { environment: 'production', productionEnvironment: true, workflowPath: '.github/workflows/deploy.yml' };
@@ -279,6 +312,28 @@ test('a refused Create environment is one canvas error that one Dismiss clears',
   assert.deepEqual(pageErrors, []);
 });
 
+test('a twin an earlier checkout built stays on its Sandbox card as behind, and Create replaces it', { timeout: 60000 }, async t => {
+  const pipeline = withBeta(), beta = pipeline.stages.find(stage => stage.kind === 'sandbox')!.id;
+  // Switching to dev saved the source again in a new checkout; Beta's twin was built from main's.
+  const earlier = { id: 'env-earlier', stageId: beta, status: 'ready', step: 'Ready', repoPath: '/data/sources/github-old/app', sourceBranch: 'main', sourceRevision: 'b'.repeat(40),
+    services: [], apps: [{ id: 'web', url: 'http://127.0.0.1:43100/' }], createdAt: '2026-10-01T00:00:00.000Z' };
+  const state = pipelineState(pipeline, { scan: { repo: { path: repoPath, name: 'app', branch: 'dev', sha }, delivery: { source: [], build: [], production: [] } }, environments: [earlier] });
+  const { page, posts, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: state };
+    if (path === '/api/environments/create') return { status: 202, json: { environment: { ...earlier, id: 'env-new', status: 'queued', step: 'Queued', repoPath, sourceBranch: 'dev', sourceRevision: sha } } };
+    if (path === '/api/environments') return { json: { environments: [earlier], plan: null } };
+  });
+  await open();
+  const card = page.getByRole('group', { name: 'Beta', exact: true });
+  const behind = card.getByRole('button', { name: 'Behind', exact: true });
+  await expect(behind).toBeVisible();
+  await behind.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('main · bbbbbbb → dev · aaaaaaa');
+  await card.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
+  await expect.poll(() => posts.filter(item => item.path === '/api/environments/create').map(item => item.body)).toEqual([{ repoPath, stageId: beta }]);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('a view that failed for one stage does not stand in for the next stage opened in the same sheet', { timeout: 60000 }, async t => {
   const beta = withBeta(), betaId = beta.stages.find(stage => stage.kind === 'sandbox')!.id;
   const pipeline = applyPipelineAction(beta, { action: 'add-stage', afterStageId: betaId, name: 'Gamma' });
@@ -403,6 +458,28 @@ test('connecting GitHub reads Build, the recorded deployments and the release ag
   await expect(buildCard.getByText('Passedaaaaaaa', { exact: true })).toBeVisible();
   await expect.poll(() => deploymentReads).toBe(2);
   await expect.poll(() => releaseReads).toBe(2);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('Production links to the commit\'s deployments on GitHub while it holds more records than were read', { timeout: 60000 }, async t => {
+  const record = { id: '11', environment: 'Production – app', provider: 'Vercel', creator: 'vercel[bot]', production: true, transient: false, ref: sha, task: 'deploy', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', state: 'success', stateAt: '2026-01-01T00:00:00Z', url: null, logUrl: null };
+  let more = true;
+  const { page, pageErrors, refresh, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, delivery: { source: [], build: [{ id: 'github-actions', kind: 'github-actions', provider: 'github-actions', label: 'GitHub Actions' }], production: [] } } } };
+    if (path === '/api/github/deployments') return { json: { repository: 'acme/app', sha, deployments: [record], ...(more ? { more: true } : {}) } };
+    if (path === '/api/github-actions') return { json: { workflows: [] } };
+  });
+  await open();
+  const production = page.getByRole('group', { name: 'Production', exact: true });
+  const link = production.getByRole('link', { name: 'More deployments on GitHub', exact: true });
+  await expect(link).toHaveAttribute('href', 'https://github.com/acme/app/deployments');
+  await expect(production.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
+  // Recorded deployments never change the stage Badge, whether or not every record was read.
+  await expect(production.getByRole('button', { name: 'Unverified', exact: true })).toBeVisible();
+  more = false;
+  await refresh('/api/github/deployments', '/build/src/lib/pipeline-deployments.ts', 'deploymentChanges');
+  await expect(link).toHaveCount(0);
+  await expect(production.getByRole('button', { name: 'Vercel projects', exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
 

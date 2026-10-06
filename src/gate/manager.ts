@@ -2,6 +2,7 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { failureText } from '../redaction.ts';
+import { isUnreachable } from '../github-cli.ts';
 import { isEnvironmentBusy } from '../environments/usage.ts';
 import type { GateView, ReleaseEvidence, StageGate } from '../../contract/gate.ts';
 import type { BranchHead, BranchHeadInput, CommitStatusPost } from './github.ts';
@@ -229,7 +230,8 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       if (await stopped()) return true;
       // A newer commit may have superseded it meanwhile.
       if (!PENDING.includes(gate.status)) return true;
-      if ((error as { statusCode?: unknown }).statusCode === 409) return false;
+      // A stage that cannot start now, or GitHub unreachable while the source moves, leaves the gate queued to retry.
+      if ((error as { statusCode?: unknown }).statusCode === 409 || isUnreachable(error)) return false;
       await settle(gate, 'needs-release', text(error));
       return true;
     }
@@ -333,8 +335,10 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
         // keeps its place. The most recently updated go first, and only the latest are retried after a failed report.
         const changed = state.gates.filter(gate => gate.key === current.key && commitStatus(gate) && !sameStatus(commitStatus(gate), gate.posted));
         if (!changed.length) continue;
-        let connection: GateConnection | null = null;
-        try { connection = await github.connection(); } catch { connection = null; }
+        // A connection that cannot be read, such as GitHub unreachable, is no disconnect: the report says why, and is
+        // tried again at the next poll.
+        let connection: GateConnection | null = null, unread = '';
+        try { connection = await github.connection(); } catch (error) { unread = text(error); }
         const due = changed.filter(gate => !refusedFor(gate, connection)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, REPORTED);
         if (!due.length) continue;
         for (const gate of due) {
@@ -345,7 +349,7 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
           const status = commitStatus(gate);
           // A gate queued again while the connection was read reports nothing.
           if (!status || refusedFor(gate, connection)) continue;
-          if (!connection) { gate.statusError = 'Connect GitHub to report commit status.'; continue; }
+          if (!connection) { gate.statusError = unread || 'Connect GitHub to report commit status.'; continue; }
           try { await github.post({ repository: connection.repository, sha: gate.sha, ...status }); gate.posted = status; delete gate.statusError; delete gate.refused; }
           catch (error) {
             gate.statusError = text(error);
@@ -373,8 +377,11 @@ export async function createGateManager<Context, Twin extends { id?: string | nu
       const current = { ...selected, repository: selected.repository };
       const identity = sourceIdentity(current)!;
       scope = { identity, login: null };
-      const connection = await github.connection();
+      // GitHub not answering is no failed watch, any more than no connection is: neither is kept as the watch error, so
+      // Build and Run now read the watched head again as soon as GitHub answers.
+      const connection = await github.connection().catch((error: unknown) => { if (isUnreachable(error)) return text(error); throw error; });
       if (closed || sourceIdentity(active()) !== identity) return null;
+      if (typeof connection === 'string') return { identity, error: connection };
       if (!connection || connection.repository.toLowerCase() !== current.repository.toLowerCase()) return { identity, error: 'Connect GitHub to read the branch head.' };
       const login = connection.login;
       scope = { identity, login: login.toLowerCase() };

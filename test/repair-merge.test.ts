@@ -8,6 +8,7 @@ import type { CheckRun, CommitChecks, PullRequestState, StatusCheck } from '../s
 import type { Repair, RepairProgress } from '../src/repair/manager.ts';
 import { AUTO_MERGE_OFF, HEAD_CHANGED, UNREADY, checksVerdict, createRepairMerge, type CiVerdict, type MERGE, type MergeGitHub } from '../src/repair/merge.ts';
 import { HELD } from '../src/repair/changes.ts';
+import { githubUnreachable } from '../src/github-cli.ts';
 
 // The merge step through its interface: a fake GitHub (pull request, checks, statuses, target head, comparison, branch
 // update and merge), fake repair gates and a host double that makes each checkout a folder. Nothing reaches GitHub,
@@ -52,7 +53,7 @@ async function harness(t: TestContext, { holds = [] as string[], behind = [] as 
       if (error) throw error;
       pull.draft = false;
     },
-    async checks({ sha }) { calls.checks.push(sha as string); reads += 1; return checks?.(sha as string, reads) ?? { runs: [passed()], statuses: calls.gates.filter(item => item.sha === sha).length ? [status('perpetual/Beta')] : [], complete: true }; },
+    async checks({ sha }) { calls.order.push('checks'); calls.checks.push(sha as string); reads += 1; return checks?.(sha as string, reads) ?? { runs: [passed()], statuses: calls.gates.filter(item => item.sha === sha).length ? [status('perpetual/Beta')] : [], complete: true }; },
     async compare({ base, head }) { calls.order.push('compare'); calls.compares.push({ base: base as string, head: head as string }); return { status: 'behind', behindBy: behind.shift() ?? 0, aheadBy: 1 }; },
     async updateBranch({ number, sha }) {
       calls.updates.push({ number: number as number, sha: sha as string });
@@ -195,6 +196,36 @@ test('auto-merge turned off while the connection is read before a write prevents
     assert.deepEqual(await h.run(), { status: 'ready', reason: AUTO_MERGE_OFF });
     assert.deepEqual([h.calls.merges, h.calls.updates], [[], []], behind.length ? 'No branch update.' : 'No merge.');
   }
+});
+
+test('GitHub unreachable just before the merge is waited out, and every check, the pull request and the target branch are read again before it merges', async t => {
+  const timedOut = 'Reading GitHub timed out. Check your connection and try again.';
+  let h: Awaited<ReturnType<typeof harness>> | undefined, outage = 2;
+  h = await harness(t, { connectionRead: () => { if (h?.calls.compares.length === 1 && outage > 0) { outage -= 1; throw githubUnreachable(timedOut); } } });
+  assert.deepEqual(await h.run(), { status: 'merged', merged: M });
+  assert.equal(outage, 0, 'The connection was read again until GitHub answered.');
+  assert.deepEqual(h.calls.order.slice(-9), ['checks', 'pull', 'head', 'compare', 'checks', 'pull', 'head', 'compare', 'merge'], 'Nothing read before the wait is trusted after it.');
+  // A check that failed while GitHub did not answer is read before anything is written.
+  let failing: Awaited<ReturnType<typeof harness>> | undefined, blip = 1;
+  failing = await harness(t, {
+    checks: (_sha, read) => ({ runs: [read === 1 ? passed() : { name: 'CI', status: 'completed', conclusion: 'failure' }], statuses: [status('perpetual/Beta')], complete: true }),
+    connectionRead: () => { if (failing?.calls.compares.length === 1 && blip > 0) { blip -= 1; throw githubUnreachable(timedOut); } },
+  });
+  assert.deepEqual(await failing.run(), { status: 'ready', reason: 'The check CI did not succeed.' });
+  assert.deepEqual([failing.calls.checks.length, failing.calls.merges, failing.calls.updates], [2, [], []], 'The fix stays ready, and nothing is written.');
+  let past: Awaited<ReturnType<typeof harness>> | undefined;
+  past = await harness(t, { timing: { outageMs: 5 }, connectionRead: () => { if (past?.calls.compares.length) throw githubUnreachable(timedOut); } });
+  assert.deepEqual(await past.run(), { status: 'ready', reason: timedOut }, 'Past the outage limit the fix waits for a person, with why.');
+  assert.deepEqual([past.calls.merges, past.calls.updates], [[], []]);
+  // GitHub that stops answering right before every write is waited out for the outage limit in all, not at each wait.
+  let flapping: Awaited<ReturnType<typeof harness>> | undefined, failedAt = 0;
+  flapping = await harness(t, { timing: { outageMs: 30 }, connectionRead: () => {
+    const compared = flapping?.calls.compares.length ?? 0;
+    if (compared > failedAt) { failedAt = compared; throw githubUnreachable(timedOut); }
+  } });
+  assert.deepEqual(await flapping.run(), { status: 'ready', reason: timedOut });
+  assert.ok(flapping.calls.compares.length > 1, 'Each wait read everything again.');
+  assert.deepEqual([flapping.calls.merges, flapping.calls.updates], [[], []]);
 });
 
 test('every check on the head must succeed: a failed or cancelled run, a failed or missing gate status and checks that stay pending never merge', async t => {

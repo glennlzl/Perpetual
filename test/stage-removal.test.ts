@@ -29,7 +29,7 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
   if (!options.dataDir) fixtures.get(t)!.directories.push(dataDir);
   const usage = options.usage || createEnvironmentUsage();
   const items = options.items || [ready('first'), ready('second')];
-  const calls: string[] = [], removed: StageRef[] = [], jobs = new Map<string, Promise<void>>();
+  const calls: string[] = [], removed: StageRef[] = [], forgotten: StageRef[][] = [], jobs = new Map<string, Promise<void>>();
   const environments: Parameters<typeof createStageRemovalManager>[0]['environments'] = {
     summaries: key => key === context.key ? structuredClone(items) : [],
     async destroy(received, id, { removalToken } = {}) {
@@ -50,13 +50,14 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
     },
     // A record removed from the list reads back as undefined, as a lost ownership record would.
     async awaitIdle(id) { await jobs.get(id); return structuredClone(items.find(item => item.id === id)!); },
+    async forget(stages) { forgotten.push(structuredClone(stages)); },
   };
   const manager = await createStageRemovalManager({ dataDir, usage, environments,
     browser: { isActive: () => options.browserActive?.() || false },
     removeStage: async received => { await options.remove?.(received); removed.push(received); },
   });
   fixtures.get(t)!.managers.push(manager);
-  return { dataDir, usage, items, calls, removed, manager };
+  return { dataDir, usage, items, calls, removed, forgotten, manager };
 }
 
 test('accepted removal owns all cleanup and removes the pinned stage after every sandbox finishes', async t => {
@@ -76,6 +77,11 @@ test('accepted removal owns all cleanup and removes the pinned stage after every
   assert.deepEqual(f.calls, ['first', 'second']);
   assert.deepEqual(f.removed, [{ key: 'source-a', stageId: 'beta' }]);
   assert.equal(f.manager.view(context).removal?.status, 'completed');
+  // The stage's twin config, detection and draft go with it, and a restart drops any that remain.
+  assert.deepEqual(f.forgotten, [[{ key: 'source-a', stageId: 'beta' }]]);
+  await f.manager.close();
+  const restarted = await fixture(t, { dataDir: f.dataDir, usage: createEnvironmentUsage(), items: [] });
+  assert.deepEqual(restarted.forgotten, [[{ key: 'source-a', stageId: 'beta' }]]);
   assert.equal(f.manager.summaries('other').length, 0);
   assert.equal(f.manager.summaries('source-a').length, 1);
 });

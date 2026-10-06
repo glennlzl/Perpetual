@@ -86,6 +86,8 @@ export interface EnvironmentTwin {
   health(options: TwinCall): Promise<{ status: string; containers: Container[] }>;
   logs(options: TwinCall & { service?: string; tail?: number }): Promise<string>;
   destroy(options: TwinCall & { inputs?: Record<string, InputValues> }): Promise<unknown>;
+  /** Why Docker cannot build a twin now, or null when it can; a twin without the check is taken as able. */
+  available?(): Promise<string | null>;
 }
 /** The OpenRouter model an agent writes a twin config with; the key stays in memory. */
 export interface AuthoringModel { apiKey: string; model: string; escalationModel?: string }
@@ -316,6 +318,9 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
         unwired: text => facts ? unwiredSummary(facts, text) : [],
         failed: async outcome => { attempts.push(outcome); await onUpdate({ attempts: [...attempts] }); },
         checkpoint: onDraft,
+        // Docker's engine is checked before each paid attempt and after a failed preparation: one that does not answer ends
+        // the creation.
+        available: async () => await twin.available?.() ?? null,
         teardown: async config => {
           // Generation retries also remove owned vendor containers. Save the bounded full evidence
           // through the manager before any teardown, even when feedback itself has fewer lines.

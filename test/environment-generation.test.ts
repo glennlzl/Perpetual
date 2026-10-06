@@ -83,10 +83,11 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
   const port = (server.address() as AddressInfo).port;
   // The steps the fake twin reports before it fails, the containers its health reads, and the logs of the whole twin or a
   // named container.
-  const twinState = { logs: '', serviceLogs: {} as Record<string, string>, fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'],
+  // engine: why the fake twin's Docker cannot build a twin, or null when it can.
+  const twinState = { logs: '', serviceLogs: {} as Record<string, string>, fail: (_prepared: number): string | null => null, steps: ['Setting up Database', 'Starting twin'], engine: null as string | null,
     containers: [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'exited', health: null, exitCode: 1 }] as { name: string; state: string; health: string | null; exitCode?: number }[] };
   // repositories: the repository each twin was prepared for, whose package cache it shares; none for a cache of its own.
-  const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, logs: [] as { service?: string; tail?: number }[] };
+  const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, engine: 0, logs: [] as { service?: string; tail?: number }[] };
   const twin: EnvironmentTwin = {
     async prepare({ config, repository, onStep = () => {} }) {
       const plan = validateTwinConfig(config, { services: { ...registry, ...services } });
@@ -103,6 +104,7 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     async health() { return { status: 'failed', containers: twinState.containers }; },
     async logs({ service, tail }) { calls.logs.push({ service, tail }); return service && Object.hasOwn(twinState.serviceLogs, service) ? twinState.serviceLogs[service] : twinState.logs; },
     async destroy() { calls.destroy += 1; return { status: 'destroyed' }; },
+    async available() { calls.engine += 1; return twinState.engine; },
   };
   // OpenCode is the fake in place of its command; the loop keeps its own, with the scripted model's fixture as its module.
   const runtime = createEnvironmentRuntime({ services, twin, inputs: async () => ({ payments: { PAYMENTS_KEY: secret } }),
@@ -349,7 +351,6 @@ test('a failed service exposes its terminal error in the environment and attempt
 
 test('staged feedback names the stage an attempt failed at and the app, service, install or fixture there, with its command', async t => {
   const install = { directory: '.', command: 'npm ci' };
-  const docker = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
   const cases: { name: string; write?: object; steps?: string[]; containers?: { name: string; state: string; health: string | null }[]; fail?: string; status?: number; logs?: string[]; expected: string }[] = [
     { name: 'an app that never became healthy', containers: [{ name: 'web', state: 'running', health: 'unhealthy' }], fail: 'container web is unhealthy',
       expected: staged(attempt(1), 'preparing the twin failed at "Starting twin"', 'healthy', 'container web is unhealthy', { subject: WEB }) },
@@ -364,9 +365,9 @@ test('staged feedback names the stage an attempt failed at and the app, service,
       expected: staged(attempt(1), 'preparing the twin failed at "Starting twin"', 'build', 'container payments-listener exited (1)', { subject: 'Service `payments`, container `payments-listener`' }) },
     { name: 'a service’s setup', steps: ['Setting up Database'], fail: 'Database: could not start',
       expected: staged(attempt(1), 'preparing the twin failed at "Setting up Database"', 'build', 'Database: could not start', { subject: 'Service `database`' }) },
-    // The twin names a service's own failure by its title; Docker's, in the same step, names none.
-    { name: 'Docker, during a service’s step', steps: ['Setting up Database'], containers: [], fail: docker,
-      expected: staged(attempt(1), 'preparing the twin failed at "Setting up Database"', 'build', docker) },
+    // A failure that names no part of the config, such as the configured Node image's pull, while Docker answers.
+    { name: 'the source copy’s image', steps: ['Loading source'], containers: [], fail: 'Error response from daemon: manifest for node:99-bookworm-slim not found',
+      expected: staged(attempt(1), 'preparing the twin failed at "Loading source"', 'build', 'Error response from daemon: manifest for node:99-bookworm-slim not found') },
     { name: 'the install', write: { ...good, install }, steps: ['Setting up Database', 'Installing dependencies'], fail: 'Install "npm ci" in . failed with exit code 1: npm ERR!',
       expected: staged(attempt(1), 'preparing the twin failed at "Installing dependencies"', 'build', 'Install "npm ci" in . failed with exit code 1: npm ERR!', { subject: 'Install in `.`: `npm ci`' }) },
     // A build is a step of its own: the app it builds, with its commands, whatever its containers show.
@@ -392,6 +393,60 @@ test('staged feedback names the stage an attempt failed at and the app, service,
     assert.equal(second.feedback?.split('\n## Logs\n')[0].replace(`:${f.port}/`, ':PORT/'), item.expected, item.name);
     if (item.logs) assert.deepEqual(f.calls.logs.map(call => call.service), [...item.logs, undefined], item.name);
   }
+});
+
+test('a preparation that fails while Docker does not answer ends generation without another paid attempt, whatever it names, and keeps no draft of it', async t => {
+  const docker = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?', engine = `Docker is not available. ${docker}`;
+  // Docker stops during a service's step: its error names no part of the config, or names the service whose setup called it.
+  for (const error of [docker, `Database: ${docker}`]) {
+    const f = await fixture(t, { script: [{ write: good }, { write: good }] });
+    f.twinState.steps = ['Setting up Database'];
+    f.twinState.containers = [];
+    f.twinState.fail = () => { f.twinState.engine = engine; return error; };
+    const failed = await f.create();
+    assert.deepEqual([failed.status, failed.error], ['failed', error]);
+    assert.equal((await lines(f.log)).length, 1, 'One paid attempt ran.');
+    assert.deepEqual([f.calls.prepare.length, f.calls.destroy, f.calls.engine, failed.attempts], [1, 1, 2, undefined], 'The failure cleanup removes the twin; no attempt failed.');
+    assert.deepEqual((await f.saved()).drafts, {});
+    assert.deepEqual((await f.manager.view(f.context)).plan, detected);
+  }
+  // An earlier attempt's own failure stays the stage's draft.
+  const g = await fixture(t, { script: [{ write: good }, { write: good }, { write: good }] });
+  g.twinState.steps = ['Setting up Database'];
+  g.twinState.containers = [];
+  g.twinState.fail = prepared => { if (prepared === 1) return 'Database: could not start'; g.twinState.engine = engine; return docker; };
+  const second = await g.create();
+  assert.deepEqual([second.status, second.error, second.attempts?.length], ['failed', docker, 1]);
+  assert.equal((await lines(g.log)).length, 2);
+  const [draft] = Object.values((await g.saved()).drafts) as { text: string; feedback: string }[];
+  assert.equal(draft.feedback, staged(attempt(1), 'preparing the twin failed at "Setting up Database"', 'build', 'Database: could not start', { subject: 'Service `database`' }));
+});
+
+test('generation checks Docker before each paid attempt, and an engine that cannot build a twin ends the creation', async t => {
+  const engine = 'Docker is not available. Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
+  const f = await fixture(t, { script: [{ write: good }] });
+  f.twinState.engine = engine;
+  const failed = await f.create();
+  assert.deepEqual([failed.status, failed.error, failed.failedStep], ['failed', engine, 'Checking application runtimes']);
+  assert.deepEqual([(await lines(f.log)).length, f.calls.prepare.length, f.calls.engine], [0, 0, 1], 'No author ran, and nothing was built.');
+  assert.deepEqual((await f.saved()).drafts, {});
+  // Once Docker runs, the person's next creation writes the config.
+  f.twinState.engine = null;
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  assert.equal(f.calls.engine, 2);
+  // A person's saved config is built without generating, so its own build reports Docker.
+  await f.manager.savePlan(f.context, { services: {}, apps: { web: app } });
+  assert.equal((await f.create()).status, 'ready');
+  assert.equal(f.calls.engine, 2);
+  // Docker stops once an attempt's twin is up, which does not count as ready: the next attempt is never paid for, and the
+  // config of the attempt that ran stays the stage's draft.
+  const g = await fixture(t, { script: [{ write: good }, { write: good }] });
+  g.answer.status = 500;
+  g.twinState.fail = () => { g.twinState.engine = engine; return null; };
+  const stopped = await g.create();
+  assert.deepEqual([stopped.status, stopped.error, stopped.attempts?.length, (await lines(g.log)).length, g.calls.engine], ['failed', engine, 1, 1, 2]);
+  assert.equal(Object.keys((await g.saved()).drafts).length, 1);
 });
 
 test('feedback keeps the logs of the app that did not answer, and an equal share of each failed container’s', async t => {

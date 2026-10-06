@@ -6,6 +6,7 @@ import { detectTwinConfig, envNames } from '../twin/index.ts';
 import { nodeMajor } from '../twin/detect.ts';
 import { relative as repositoryPath } from '../twin/paths.ts';
 import { gitReadOnly } from '../process.ts';
+import { withoutRegistryCredentials } from '../redaction.ts';
 import type { DetectedApp, DetectedConfig, DetectionEvidence } from '../twin/detect.ts';
 import type { PackageManifest, ScanRepo, ScanService } from '../scanner.ts';
 
@@ -14,8 +15,12 @@ export type DetectionScan = { repo: Pick<ScanRepo, 'path'>; services?: (Pick<Sca
 
 const SKIP = new Set(['.git', 'node_modules', '.next', '.nuxt', '.output', '.perpetual', '.venv', 'venv', '__pycache__', '.cache', '.turbo', '.vercel', '.railway', '.ssh', '.aws', '.config', '.azure', '.kube', '.gnupg', '.docker', '.codex', '.agents', '.claude']);
 const BUILD_OUTPUT = new Set(['dist', 'build', 'coverage']);
-const PRIVATE = /^(?:\.env(?:\..*)?|\.netrc|\.pypirc|\.npmrc|\.yarnrc(?:\.yml)?|id_(?:rsa|ed25519)(?:\..*)?|(?:AGENTS(?:\.override)?|CLAUDE(?:\.local)?)\.md)$|\.(?:pem|key|p12|pfx|sqlite|sqlite3|db)$/i;
+const PRIVATE = /^(?:\.env(?:\..*)?|\.netrc|\.pypirc|id_(?:rsa|ed25519)(?:\..*)?|(?:AGENTS(?:\.override)?|CLAUDE(?:\.local)?)\.md)$|\.(?:pem|key|p12|pfx|sqlite|sqlite3|db)$/i;
 const PRIVATE_NAME = /^(?:credentials|secrets?)(?:\..*)?$/i;
+// A package manager's config holds settings an install needs beside registry credentials, so it is copied without those;
+// one larger than this is left out.
+const REGISTRY_CONFIG = /^\.(?:npmrc|yarnrc(?:\.yml)?)$/i;
+export const REGISTRY_CONFIG_BYTES = 128 * 1024;
 const SOURCE_MODULE = /\.(?:[cm]?[jt]sx?|pyi?)$/i;
 /** Whether the snapshot keeps every folder on a repository path's way, by snapshotSource's rules. */
 export const keptFolders = (path: string) => path.split('/').slice(0, -1).every((name, index, folders) => !SKIP.has(name) && !PRIVATE.test(name) && !PRIVATE_NAME.test(name)
@@ -26,16 +31,40 @@ export function snapshotKeeps(path: string) {
   return keptFolders(path) && !SKIP.has(name) && !PRIVATE.test(name) && !(PRIVATE_NAME.test(name) && !SOURCE_MODULE.test(name));
 }
 
-// Tests read variables of their own; docs' code is never run.
-export const TEST = /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
+// Tests read variables of their own; docs' code is never run. A test file is one by its name, such as add.test.ts,
+// server_test.ts, hello-test.ts or test.ts as Deno and Supabase name them, login.cy.ts as Cypress does, or test_add.py;
+// Jest's __tests__ and __mocks__ folders and the tests folder of a functions folder, where Supabase keeps its edge
+// functions' tests, hold tests, wherever they are.
+export const TEST = /(?:^|\/)(?:__tests__|__mocks__|functions\/tests)\/|\.(?:test|spec)\.[^/]+$|[_-](?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test\.[cm]?[jt]sx?$|\.cy\.[cm]?[jt]sx?$|(?:^|\/)(?:test_[^/]*|[^/]*_test|conftest)\.py$|(?:^|\/)(?:playwright|vitest|jest|cypress|karma)\.config\.[^/]+$/i;
 export const DOCS = /(?:^|\/)docs\//i;
-// Tooling folders are the first folder inside a package or the repository, so an app's own src/, app/ or lib/ holds
-// runtime code whatever its folders are called.
+// Test folders, Cypress's included, and tooling folders are the first folder inside a package or the repository, so an
+// app's own src/, app/ or lib/ holds runtime code whatever its folders are called, a route named tests or e2e included.
+export const TEST_FOLDER = /^(?:tests?|e2e|cypress)\//i;
 export const TOOLING = /^(?:evals?|bench(?:marks?)?|fixtures?|examples?|samples?|playgrounds?|\.storybook|stories|tooling)\//i;
+/** A repository file's path inside each of `packages` that holds it, innermost first, then inside the repository. */
+export function packagePaths(file: string, packages: ReadonlySet<string>) {
+  const paths: string[] = [];
+  for (let directory = posix.dirname(file); directory !== '.'; directory = posix.dirname(directory)) if (packages.has(directory)) paths.push(file.slice(directory.length + 1));
+  return [...paths, file];
+}
+/** Whether a repository file is a test's: by its name or a folder TEST names, or in a test folder of a package or the repository. */
+export const isTest = (file: string, packages: ReadonlySet<string>) => TEST.test(file) || packagePaths(file, packages).some(path => TEST_FOLDER.test(path));
 
 // Detection evidence: dependency manifests, and only the variable names of example env files.
 export const ENV_EXAMPLE = /^\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/i;
 export const REQUIREMENTS = /^requirements(?:[.-][\w.-]+)?\.txt$/i;
+/** Whether a file name is a package's manifest: package.json, pyproject.toml, a requirements file or deno.json. */
+export const MANIFEST = (name: string) => name === 'package.json' || name === 'pyproject.toml' || REQUIREMENTS.test(name) || /^deno\.jsonc?$/i.test(name);
+/**
+ * The packages whose first folders may be test or tooling folders: `packages`, and the folder of every manifest among
+ * `files` outside a test folder and docs, whatever its language. The packages around a manifest are shallower than it, so
+ * manifests are taken shallowest first: one in a test folder is a test's, and makes no package.
+ */
+export function packageFolders(files: readonly string[], packages: Iterable<string>) {
+  const folders = new Set(packages), depth = (file: string) => file.split('/').length;
+  for (const file of files.filter(path => MANIFEST(posix.basename(path)) && !DOCS.test(path)).sort((one, other) => depth(one) - depth(other))) if (!isTest(file, folders)) folders.add(posix.dirname(file));
+  return folders;
+}
 // Deno and browser modules name packages in their import specifiers instead of a manifest, e.g. npm:stripe@17 or
 // https://esm.sh/stripe@17; deno.json import maps name them the same way.
 export const SCRIPT_MODULE = /\.(?:[cm]?[jt]sx?)$/i, IMPORT_MAP = /^(?:deno\.jsonc?|import_map\.json)$/i;
@@ -189,15 +218,11 @@ async function repositoryApps(root: string, scan: DetectionScan): Promise<{ apps
  * evidence's roles class them (./evidence.ts), are not what the product runs, so their files are not evidence.
  */
 export async function repositoryDetection(scan: DetectionScan): Promise<{ evidence: DetectionEvidence; config: DetectedConfig }> {
-  const root = await realpath(scan.repo.path), scanned = new Set((scan.services ?? []).map(service => service.path));
-  const aside = (file: string) => {
-    if (TEST.test(file) || DOCS.test(file)) return true;
-    for (let directory = posix.dirname(file); ; directory = posix.dirname(directory)) {
-      if ((directory === '.' || scanned.has(directory)) && TOOLING.test(directory === '.' ? file : file.slice(directory.length + 1))) return true;
-      if (directory === '.') return false;
-    }
-  };
-  const files = (await repositoryWalk(root)).files.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
+  const root = await realpath(scan.repo.path), walked = (await repositoryWalk(root)).files;
+  // Test and tooling folders are those of the scanned packages and of every other folder with a manifest, as the evidence's.
+  const folders = packageFolders(walked, (scan.services ?? []).map(service => service.path));
+  const aside = (file: string) => isTest(file, folders) || DOCS.test(file) || packagePaths(file, folders).some(path => TOOLING.test(path));
+  const files = walked.filter(file => !aside(file)), packages = new Set<string>(), env = new Set<string>();
   let modules = 0;
   for (const file of files) {
     if (IMPORT_MAP.test(posix.basename(file)) || SCRIPT_MODULE.test(file) && ++modules <= MODULES.files) {
@@ -256,10 +281,21 @@ async function ignoredPaths(root: string, folder = '') {
   }
 }
 
+/** A package manager's config without its credential lines, `name` being its file name: the same bytes, unless it held one. */
+function withoutCredentials(name: string, buffer: Buffer) {
+  const text = buffer.toString('utf8'), kept = withoutRegistryCredentials(text, name);
+  return kept === text ? buffer : Buffer.from(kept);
+}
+/** Whether a repository path is a package manager's config, which the snapshot copies without its credentials. */
+export const isRegistryConfig = (path: string) => REGISTRY_CONFIG.test(posix.basename(path));
+/** A package manager's config at `path` as the snapshot copies it: without its credential lines, or null when it is left out. */
+export const copiedConfig = (path: string, buffer: Buffer) => buffer.length > REGISTRY_CONFIG_BYTES ? null : withoutCredentials(posix.basename(path), buffer);
+
 /**
  * Copy a bounded working-tree snapshot without following links or importing local credentials. In a git checkout, files
  * git ignores stay out whatever their names, since local files such as credentials are never committed; so do those a
- * repository or submodule inside it ignores.
+ * repository or submodule inside it ignores. A package manager's config is copied without its credential lines, and left
+ * out unread when it is larger than REGISTRY_CONFIG_BYTES, which bounds the time its lines take to check.
  */
 export async function snapshotSource(repoPath: string, destination: string) {
   const root = await realpath(repoPath), target = resolve(destination);
@@ -300,8 +336,9 @@ export async function snapshotSource(repoPath: string, destination: string) {
       if (await realpath(original) !== original) throw new Error('Source links changed during snapshot creation.');
       const handle = await open(original, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        const stat = await handle.stat();
+        const stat = await handle.stat(), config = REGISTRY_CONFIG.test(entry.name);
         if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error(`Snapshot file is too large: ${name}`);
+        if (config && stat.size > REGISTRY_CONFIG_BYTES) continue;
         if (++count > 20000 || (bytes += stat.size) > 256 * 1024 * 1024) throw new Error('Source snapshot exceeds 20,000 files or 256 MiB.');
         const buffer = Buffer.alloc(stat.size);
         let offset = 0;
@@ -311,9 +348,11 @@ export async function snapshotSource(repoPath: string, destination: string) {
           offset += result.bytesRead;
         }
         if ((await handle.stat()).size !== stat.size || await realpath(original) !== original) throw new Error('Source changed during snapshot creation. Retry the operation.');
-        hash.update(relative(root, original)).update('\0').update(buffer).update('\0');
+        const content = config ? withoutCredentials(entry.name, buffer) : buffer;
+        bytes -= buffer.length - content.length;
+        hash.update(relative(root, original)).update('\0').update(content).update('\0');
         const out = await open(output, 'wx', stat.mode & 0o111 ? 0o700 : 0o600);
-        try { await out.writeFile(buffer); } finally { await out.close(); }
+        try { await out.writeFile(content); } finally { await out.close(); }
       } finally { await handle.close(); }
     }
   }

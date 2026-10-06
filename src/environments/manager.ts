@@ -100,6 +100,10 @@ const publicAccounts = (accounts: EnvironmentAccount[] | undefined) => (Array.is
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
 const UUID = /^[a-f0-9-]{36}$/;
 const HEALTH_FAILURES = 3;
+/** The records a stage keeps of its twins that are gone, deleted or failed and cleaned up: its newest ones. */
+const GONE_KEPT = 10;
+/** The app origins of a stage's dropped records that its newest gone twin keeps, newest first. */
+const ORIGINS_KEPT = 50;
 const defaultRuntime: ManagedRuntime = { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox };
 const canRecoverHealth = (environment: EnvironmentRecord) => environment.status === 'failed' && environment.step === 'Unhealthy'
   && environment.sandboxId && environment.plan && !environment.cleanedAt;
@@ -138,11 +142,12 @@ function loadedEnvironment({ twinsToken, activeOperation, desktopUrl, serviceOri
 /**
  * Context is the caller's stage context, which the manager hands back to onReady as it was given. authoringModel is
  * the model that writes a detected stage's twin config when a person creates its environment; null leaves the detected
- * plan as it is.
+ * plan as it is. activeKey is the pipeline of the active source, whose twins are the only ones kept: null while there is
+ * none, or while it changes.
  */
-export async function createEnvironmentManager<Context extends EnvironmentContext = EnvironmentContext>({ dataDir, onReady, usage = createEnvironmentUsage(), runtime = defaultRuntime, interruptedEnvironmentIds = [], authoringModel = () => appSettingsModel(dataDir) }: {
+export async function createEnvironmentManager<Context extends EnvironmentContext = EnvironmentContext>({ dataDir, onReady, usage = createEnvironmentUsage(), runtime = defaultRuntime, interruptedEnvironmentIds = [], authoringModel = () => appSettingsModel(dataDir), activeKey = () => null }: {
   dataDir: string; onReady?: (context: Context, environment: PublicEnvironment) => unknown; usage?: EnvironmentUsage;
-  runtime?: ManagedRuntime; interruptedEnvironmentIds?: string[]; authoringModel?: () => Promise<AuthoringModel | null>;
+  runtime?: ManagedRuntime; interruptedEnvironmentIds?: string[]; authoringModel?: () => Promise<AuthoringModel | null>; activeKey?: () => string | null;
 }) {
   // Resolved to its real path, so system aliases such as /tmp and /var never reach owned snapshot
   // destinations; snapshotSource still rejects an explicitly linked destination.
@@ -211,6 +216,37 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     await rm(join(directory, 'source'), { recursive: true, force: true });
     await rm(join(directory, AUTHORING), { recursive: true, force: true });
     await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code ?? '')) throw error; });
+  }
+  // Every rebuild leaves the record of the twin it replaced, so a stage keeps only its newest records of twins that are
+  // gone, and state and every view stay bounded. One still in use, such as one a stage removal names, stays for now.
+  function prune(scope: string) {
+    const gone = (item: EnvironmentRecord) => item.destroyedAt ?? item.updatedAt ?? item.createdAt;
+    const records = state.environments.filter(item => item.scope === scope && !holdsResources(item)).sort((one, other) => gone(other).localeCompare(gone(one)));
+    const dropped = new Set(records.slice(GONE_KEPT).filter(item => !jobs.has(item.id) && !usage.isBusy(item.id)));
+    if (!dropped.size) return;
+    // An application URL may still point at a dropped twin: its origins stay with the stage's newest gone twin, so the URL
+    // resolves to a twin that is not ready, never to whatever listens there now as an external app.
+    const [newest] = records, origins = [...newest.origins ?? [], ...[...dropped].flatMap(item => item.origins ?? [])];
+    newest.origins = [...new Set(origins)].slice(0, ORIGINS_KEPT);
+    state.environments = state.environments.filter(item => !dropped.has(item));
+    for (const { id } of dropped) for (const beats of [healthChecks, healthFailures, healthResults, healthSkips]) beats.delete(id);
+  }
+  // A source change leaves the outgoing source's twins, which nothing shows any more: each that holds resources is
+  // deleted once it is free, and one being created is stopped, its creation cleaning it up. One whose cleanup failed
+  // waits for a person, as it would on its own source, and one a stage removal holds for that removal.
+  async function retireOthers() {
+    const active = activeKey();
+    if (!active) return;
+    for (const environment of [...state.environments]) {
+      // A source change during the pass, such as back to the source of the twins it deletes, ends it: the next pass reads it.
+      if (closed || activeKey() !== active) return;
+      if (environment.pipelineKey === active || !holdsResources(environment) || environment.status === 'cleanup_failed') continue;
+      const stage = { key: environment.pipelineKey, stageId: environment.stageId };
+      try {
+        if (creations.has(environment.id)) await manager.cancel(stage, environment.id);
+        else if (!jobs.has(environment.id) && !usage.isBusy(environment.id)) await manager.destroy(stage, environment.id);
+      } catch { /* In use, or its stage is being removed: a later pass tries again. */ }
+    }
   }
   function setPlan(scope: string, value: EnvironmentPlan) {
     const previous = state.plans[scope];
@@ -311,6 +347,12 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     async view(context: Context) {
       const scope = scopeId(context), plan = await planFor(context);
       return { environments: state.environments.filter(item => item.scope === scope).map(withHealth), plan };
+    },
+    /** Drops removed stages' twin configs, the scans they were detected from and their drafts; their records stay. */
+    async forget(stages: StageRef[]) {
+      let changed = false;
+      for (const scope of stages.map(scopeId)) for (const records of [state.plans, state.detected, state.drafts]) if (Object.hasOwn(records, scope)) { delete records[scope]; changed = true; }
+      if (changed) await persist();
     },
     async savePlan(context: Context, plan: unknown) {
       // A config its services refuse is not saved: the twin would never build it.
@@ -443,6 +485,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           }
           if (environment.status === 'failed') delete environment.plan;
           delete environment.readsCheckout;
+          prune(scope);
           await persist();
           creations.delete(environment.id);
         }, { release, onSettled: async () => {
@@ -489,6 +532,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
           delete environment.logs; delete environment.logsAt; delete environment.authoringLogs;
           delete environment.plan;
         } catch (error) { Object.assign(environment, { status: 'cleanup_failed', step: 'Deletion failed', updatedAt: now(), error: failure(error) }); }
+        prune(environment.scope);
         await persist();
       }, { release });
       queued = true;
@@ -514,6 +558,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
       if (closed || ticking) return;
       ticking = true;
       try {
+      await retireOthers();
       for (const environment of state.environments) {
         if (closed) break;
         if ((environment.status !== 'ready' && !canRecoverHealth(environment)) || Date.now() - (healthChecks.get(environment.id) || 0) < 30000) continue;

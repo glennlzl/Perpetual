@@ -92,6 +92,16 @@ test('the account is re-verified on every read, so gh auth switch or logout stop
   assert.equal(f.calls.reads.length, 1);
 });
 
+test('GitHub unreachable refuses a read as unreachable, never as a disconnect, and the next read goes through', async t => {
+  const unreachable: GitHubSession = { available: true, authenticated: false, account: null, message: 'Reading GitHub timed out. Check your connection and try again.', unreachable: true };
+  for (const connection of [connected, undefined]) {
+    const f = await start(t, { connection, seams: github({ sessions: [unreachable, session('developer')] }) });
+    assert.deepEqual(await f.read(), { status: 502, body: { error: unreachable.message } }, connection ? 'A connected account.' : 'A reused local session.');
+    assert.equal((await f.read()).status, 200);
+    assert.equal(f.calls.reads.length, 1);
+  }
+});
+
 test('a pending GitHub sign-in answers 409 before any session or runs read', async t => {
   const f = await start(t, { connection: connected, seams: github({ pending: true }) });
   const result = await f.read();

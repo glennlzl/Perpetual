@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { transitionFlow, environmentBehind, readyArrivals, repairHead, shallowEqual, sourceEnvironments } from '../client/src/lib/pipeline-flow.ts';
+import { behindCommits, transitionFlow, environmentBehind, readyArrivals, repairHead, shallowEqual } from '../client/src/lib/pipeline-flow.ts';
 import type { BrowserRun } from '../client/src/lib/browser-test-ui.ts';
 import type { ActivitySnapshot } from '../client/src/lib/stage-activity.ts';
 import type { Environment } from '../client/src/lib/test-workspace.ts';
@@ -67,13 +67,22 @@ test('drift requires a ready environment and both known revisions', () => {
 // checkout Perpetual owns (repoPath), on the repair branch at the pull request head, and names the repair.
 test('a twin a repair\'s journey gate built is the stage\'s twin, at its pull request head rather than behind', () => {
   const PR = 'f'.repeat(40), repaired = environment('ready', { id: 'pr', repoPath: '/data/repairs/r1/gate-fffffff', sourceBranch: 'perpetual/repair/0a1b2c3', sourceRevision: PR, repair: 'r1' });
-  const other = environment('ready', { id: 'other', repoPath: '/data/sources/github-old/app', sourceRevision: OLD }), own = environment('destroyed', { id: 'own', repoPath: '/work/app' });
-  assert.deepEqual(sourceEnvironments([repaired, other, own, environment('ready', { id: 'unscoped' })], '/work/app').map(item => item.id), ['pr', 'own', 'unscoped'], 'Another checkout\'s twin is left out.');
   assert.equal(environmentBehind(repaired, SHA), false);
   assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [repaired], latest: { beta: repaired } })), null);
   assert.equal(repairHead(repaired), 'perpetual/repair/0a1b2c3 · fffffff');
   assert.equal(repairHead({ ...repaired, status: 'destroyed' }), '');
   assert.equal(repairHead(environment('ready', { sourceRevision: OLD })), '');
+});
+
+// A source saved again, as on a branch switch, is checked out afresh in another folder, under the same pipeline.
+test('a twin of an earlier checkout is behind when it runs another commit, and names both branches when they differ', () => {
+  const earlier = environment('ready', { id: 'earlier', repoPath: '/data/sources/github-old/app', sourceBranch: 'main', sourceRevision: OLD });
+  assert.equal(environmentBehind(earlier, SHA), true);
+  assert.equal(transitionFlow(edge('build', 'beta'), context({ environments: [earlier], latest: { beta: earlier } })), 'behind');
+  assert.equal(behindCommits(earlier, SHA, 'dev'), 'main · 0a1b2c3 → dev · cb9292c');
+  assert.equal(behindCommits(earlier, SHA, 'main'), '0a1b2c3 → cb9292c', 'The same branch moved on.');
+  assert.equal(behindCommits({ ...earlier, sourceBranch: null }, SHA, 'dev'), '0a1b2c3 → cb9292c');
+  assert.equal(environmentBehind({ ...earlier, sourceRevision: SHA }, SHA), false, 'Another checkout of the same commit runs the same code.');
 });
 
 test('arrival is reported once, only for an observed provisioning to ready transition', () => {

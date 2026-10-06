@@ -5,7 +5,8 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagnoseFailure } from '../src/providers.ts';
-import { createRepairManager, type Repair, type RepairContext, type RepairGitHub, type RepairOutcome, type RepairSource, type RepairSteps } from '../src/repair/manager.ts';
+import { githubUnreachable } from '../src/github-cli.ts';
+import { createRepairManager, type Repair, type RepairContext, type RepairGitHub, type RepairManagerOptions, type RepairOutcome, type RepairSource, type RepairSteps } from '../src/repair/manager.ts';
 import { autopilotStages } from '../src/repair/view.ts';
 import type { BranchHeadInput } from '../src/gate/github.ts';
 import type { WorkflowRun } from '../src/github-runs.ts';
@@ -20,6 +21,7 @@ const LOGS = {
   availability: 'Error: connect ECONNREFUSED 127.0.0.1:5432',
 };
 const PULL = { number: 7, url: 'https://github.com/owner/app/pull/7', branch: 'perpetual/repair/bbbbbbb' };
+const TIMED_OUT = 'Reading GitHub timed out. Check your connection and try again.';
 type HttpError = Error & { statusCode?: number };
 type Saved = { version: number; repairs: Repair[]; autoMerge?: Record<string, boolean>; passed?: Record<string, string> };
 const run = (id: string, sha: string, conclusion: string | null, { status = conclusion ? 'completed' : 'in_progress', attempt = 1, path = CI, branch = 'main', event = 'push' } = {}): WorkflowRun =>
@@ -56,18 +58,23 @@ function agent(behaviour: (context: RepairContext, signal: AbortSignal) => Promi
   return { steps, contexts };
 }
 
-// Injected source and GitHub record what the manager read; nothing reaches the network, a model or Docker.
+// Injected source and GitHub record what the manager read; nothing reaches the network, a model or Docker. While
+// `unreachable` is above zero, a connection read finds GitHub unreachable.
 // clock: the milliseconds after 10:00 its clock starts at, such as a later start of the same controller.
-async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' }, clock = 0 }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null; clock?: number } = {}) {
+async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' }, clock = 0, outage }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null; clock?: number; outage?: RepairManagerOptions['outage'] } = {}) {
   const dir = dataDir ?? await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   let tick = clock;
   const now = () => new Date(Date.UTC(2026, 8, 25, 10, 0, 0, tick++)).toISOString();
   const current: RepairSource = { key: KEY, branch: 'main', repository: 'owner/app', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/' };
   // hold, while set, keeps failure reads waiting; onRuns runs, and is awaited, within each runs read.
-  const github = { head: A, headError: null as Error | null, rerunError: null as Error | null, connection, runs: {} as Record<string, WorkflowRun[]>, logs: {} as Record<string, string>, hold: null as Promise<void> | null, onRuns: null as (() => unknown) | null };
+  const github = { head: A, headError: null as Error | null, rerunError: null as Error | null, connection, unreachable: 0, runs: {} as Record<string, WorkflowRun[]>, logs: {} as Record<string, string>, hold: null as Promise<void> | null, onRuns: null as (() => unknown) | null };
   const calls = { heads: [] as BranchHeadInput[], runs: [] as string[], failures: [] as string[], reruns: [] as string[], connections: 0 };
   const fake: RepairGitHub = {
-    async connection() { calls.connections++; return github.connection; },
+    async connection() {
+      calls.connections++;
+      if (github.unreachable > 0) { github.unreachable -= 1; throw githubUnreachable(TIMED_OUT); }
+      return github.connection;
+    },
     async head(input) {
       calls.heads.push(input);
       if (github.headError) throw github.headError;
@@ -83,7 +90,7 @@ async function harness(t: TestContext, { dataDir, steps, connection = { login: '
     },
     async rerun({ runId }) { calls.reruns.push(runId); if (github.rerunError) throw github.rerunError; },
   };
-  const manager = await createRepairManager({ dataDir: dir, source: () => current, github: fake, steps, now });
+  const manager = await createRepairManager({ dataDir: dir, source: () => current, github: fake, steps, now, outage });
   t.after(async () => { await manager.close(); await rm(dir, { recursive: true, force: true }); });
   const saved = async (): Promise<Saved> => JSON.parse(await readFile(join(dir, 'repairs', 'state.json'), 'utf8'));
   // One poll and the work it started.
@@ -1094,6 +1101,30 @@ test('the rerun is sent only while the account and repository that opened the re
       assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.calls.reruns], ['needs-person', reason, []]);
     });
   }
+});
+
+test('GitHub unreachable as a repair starts is waited out: triage and the agent go on once GitHub answers', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps, outage: { pollMs: 1, waitMs: 10_000 } });
+  await h.poll();
+  // GitHub stops answering once the head's runs are read, as the new repair checks its connection.
+  h.github.onRuns = () => { h.github.onRuns = null; h.github.unreachable = 3; };
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, h.github.unreachable], ['ready', undefined, 0]);
+  assert.deepEqual([h.calls.failures, a.contexts.length], [['2'], 1]);
+});
+
+test('GitHub unreachable for longer than the outage limit needs a person, with why, before any failure is read', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps, outage: { pollMs: 1, waitMs: 30 } });
+  await h.poll();
+  h.github.onRuns = () => { h.github.onRuns = null; h.github.unreachable = Number.POSITIVE_INFINITY; };
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => h.repair(B)?.status === 'needs-person');
+  h.github.unreachable = 0;
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.reason, h.calls.failures, a.contexts.length], [TIMED_OUT, [], 0]);
 });
 
 test('failed runs of a tag, a pull request or another branch at the head open nothing and are never rerun', async t => {

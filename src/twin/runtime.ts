@@ -44,7 +44,7 @@ const tail = (text: string) => text.trim().split('\n').slice(-ERROR_OUTPUT).join
 export type ExecOptions = { env?: Record<string, string>; cwd?: string; signal?: AbortSignal; timeoutMs?: number; outputLimitBytes?: number; onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void };
 export type Exec = (file: string, args: string[], options?: ExecOptions) => Promise<CommandOutput>;
 export type IsFree = (port: number) => Promise<boolean>;
-const COMMAND_TIMEOUT_MS = 15 * 60_000, CLEANUP_TIMEOUT_MS = 120_000, READ_TIMEOUT_MS = 20_000, LOG_LIMIT = 32_000;
+const COMMAND_TIMEOUT_MS = 15 * 60_000, CLEANUP_TIMEOUT_MS = 120_000, READ_TIMEOUT_MS = 20_000, ENGINE_TIMEOUT_MS = 15_000, LOG_LIMIT = 32_000;
 /**
  * Completion joins the CLI's owned process group. Docker resources still belong to the twin's teardown, so a CLI killed
  * after ignoring its stop signal, as `docker run` does while its guest ignores it, leaves no cleanup once its group is gone.
@@ -649,7 +649,21 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
 
   const destroy = (options: Parameters<typeof destroyTwin>[0]) => operations.run({ timeoutMs: CLEANUP_TIMEOUT_MS }, () => destroyTwin(options));
 
-  return { prepare, health, logs, destroy, account };
+  /**
+   * Why Docker cannot build a twin now, such as an engine that is not running, or null when its engine answers: one
+   * bounded `docker version`, run as every twin command is, so it reaches the same engine.
+   */
+  async function available(): Promise<string | null> {
+    try {
+      const { stdout } = await operations.run({ timeoutMs: ENGINE_TIMEOUT_MS, outputLimitBytes: 1024 * 1024 }, () => docker(['version', '--format', '{{.Server.Version}}']));
+      return stdout.trim() ? null : 'Docker is not available. Its engine reported no version.';
+    } catch (error) {
+      const failed = error as Error & { timedOut?: true };
+      return `Docker is not available. ${failed.timedOut ? `It did not answer within ${ENGINE_TIMEOUT_MS / 1000} seconds.` : failed.message.trim().split('\n')[0]}`;
+    }
+  }
+
+  return { prepare, health, logs, destroy, account, available };
 }
 export type TwinRuntime = ReturnType<typeof createTwinRuntime>;
 /** What prepare returns: the twin's status, service summaries, app URLs and test accounts without passwords. */

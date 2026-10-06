@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGitHubDeploymentsPoller, deploymentMark, deploymentsActive, isRecordedDeployment, productionRows } from '../client/src/lib/pipeline-deployments.ts';
+import { createGitHubDeploymentsPoller, deploymentMark, deploymentsActive, isRecordedDeployment, moreDeployments, productionRows } from '../client/src/lib/pipeline-deployments.ts';
 import type { DeploymentGroupRow, GitHubDeployment, GitHubDeployments } from '../client/src/lib/pipeline-deployments.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281';
@@ -38,6 +38,13 @@ test('recorded deployments join the provider group discovery supplied, or form o
   assert.ok(isRecordedDeployment(vercelRows.deployments[0]));
   assert.equal(isRecordedDeployment(railwayRows.deployments[0]), false);
   assert.deepEqual(railway.deployments.length, 1, 'The supplied group is not mutated.');
+});
+
+test('a reply that says older records exist links to the repository\'s deployments on GitHub; a complete one links nowhere', () => {
+  const records = [deployment('11', 'Vercel', 'Production – web', 'success')];
+  assert.equal(moreDeployments({ ...result(records), more: true }), 'https://github.com/acme/storefront/deployments');
+  assert.equal(moreDeployments(result(records)), null);
+  assert.equal(moreDeployments(null), null);
 });
 
 test('records for another commit, or none, leave the supplied rows as they are', () => {

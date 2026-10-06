@@ -21,17 +21,19 @@ export function transitionFlow(edge: { source: string; target: string; blocked?:
   return environmentBehind(latest[target.id], sha) ? 'behind' : null;
 }
 
-// A twin a repair's journey gate built runs its pull request head, which is never behind the scanned commit.
+// A twin a repair's journey gate built runs its pull request head, which is never behind the scanned commit. A twin of an
+// earlier checkout of the source, such as one built before a branch switch, is the stage's twin until Create replaces it,
+// behind when it runs another commit.
 export const environmentBehind = (environment: FlowEnvironment | null | undefined, sha: string | null | undefined) => Boolean(environment?.status === 'ready' && !environment.repair && environment.sourceRevision && sha && environment.sourceRevision !== sha);
+/** A behind twin's short commit and the scanned one, each with its branch when the twin was built from another branch. */
+export function behindCommits(environment: FlowEnvironment, sha: string, branch: string | null | undefined) {
+  const named = Boolean(environment.sourceBranch && branch && environment.sourceBranch !== branch);
+  const at = (name: string | null | undefined, commit: string | null | undefined) => [named ? name : '', commit?.slice(0, 7)].filter(Boolean).join(' · ');
+  return `${at(environment.sourceBranch, environment.sourceRevision)} → ${at(branch, sha)}`;
+}
 /** The branch and short commit of the pull request head a ready repair twin runs; empty for any other environment. */
 export const repairHead = (environment: FlowEnvironment | null | undefined) => environment?.status === 'ready' && environment.repair
   ? [environment.sourceBranch, environment.sourceRevision?.slice(0, 7)].filter(Boolean).join(' · ') : '';
-/**
- * A source's environments: those created from its scanned checkout, and the twins its repairs' journey gates built from
- * their pull request checkouts, which replace the stage's twin until its next gate.
- */
-export const sourceEnvironments = <E extends Pick<Environment, 'repoPath' | 'repair'>>(environments: readonly E[], repoPath: string | null | undefined) =>
-  environments.filter(item => !item.repoPath || item.repoPath === repoPath || Boolean(item.repair));
 
 // Keyed by environment id + updatedAt, so a transition flashes once per observation.
 export function readyArrivals(seen: Map<string, string> | null | undefined, environments: Pick<Environment, 'id' | 'stageId' | 'status' | 'updatedAt'>[] = []) {

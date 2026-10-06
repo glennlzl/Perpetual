@@ -74,13 +74,15 @@ export function createGitHubDeploymentsReader({ request = (endpoint, etag) => gi
     return page;
   }
   async function load(login: string, repository: string, sha: string): Promise<CommitDeployments> {
-    // GitHub lists a commit's records newest first, 50 a page; up to 1,000 are read, as workflow runs are.
+    // GitHub lists a commit's records newest first, 50 a page; up to 1,000 are read, as workflow runs are, and a reply
+    // that stops there says that older ones exist rather than leaving them out without notice.
     const listed: unknown[] = [];
+    let more = false;
     for (let page = 1; ; page++) {
       const { data, next } = await conditional(login, `repos/${repository}/deployments?sha=${sha}&per_page=50${page === 1 ? '' : `&page=${page}`}`);
       if (Array.isArray(data)) listed.push(...data);
       if (!next) break;
-      if (page === 20) throw failure('GitHub deployment records exceed the 1,000-record reading limit.');
+      if (page === 20) { more = true; break; }
     }
     const deployments = normalizeDeployments(listed, sha);
     // A pending deployment's status is re-read; a settled one is read once per update.
@@ -94,7 +96,7 @@ export function createGitHubDeploymentsReader({ request = (endpoint, etag) => gi
       // As many final statuses are kept as records are read, so a long list never evicts its own.
       if (status.state && FINAL.has(status.state)) remember(settled, key, status, 1000);
     });
-    return { repository, sha, deployments };
+    return { repository, sha, deployments, ...(more ? { more: true as const } : {}) };
   }
   return {
     session() { return session(); },

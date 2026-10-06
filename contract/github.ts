@@ -1,15 +1,21 @@
 // Public GitHub source, connection and evidence replies. Private CLI output and credentials never join these types.
 
 export interface GitHubAccount { login: string; name: string | null }
-/** A verified CLI account is present exactly when the session is authenticated. */
-export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined }
-  | { available: boolean; authenticated: false; account: null; message?: string };
+/**
+ * A verified CLI account is present exactly when the session is authenticated. An unreachable session is one GitHub did
+ * not answer for now, which says nothing about the account; its message names why.
+ */
+export type GitHubSession = { available: boolean; authenticated: true; account: GitHubAccount; message?: undefined; unreachable?: undefined }
+  | { available: boolean; authenticated: false; account: null; message?: string; unreachable?: true };
 /** A saved source or a local checkout's detected remote; older/local projections omit managed-copy fields. */
 export interface GitHubSource {
   repository: string; branch?: string | null; rootDirectory?: string | null; scanPath?: string | null;
   checkoutPath?: string; sha?: string | null; connectedAccount?: string; savedAt?: string;
 }
-/** GET /api/github/connection and POST connect/disconnect. Only GET includes the original local checkout. */
+/**
+ * GET /api/github/connection and POST connect/disconnect. Only GET includes the original local checkout. unreachable
+ * marks a connection this instance holds that GitHub could not verify for now: not connected, and not disconnected.
+ */
 export type GitHubConnection = (
   | (Extract<GitHubSession, { authenticated: true }> & { connected: true })
   | (GitHubSession & { connected: false })
@@ -55,5 +61,8 @@ export interface DeploymentRecord extends DeploymentStatus {
   id: string; environment: string; provider: string; creator: string | null; production: boolean | null; transient: boolean | null;
   ref: string | null; task: string | null; createdAt: string | null; updatedAt: string | null;
 }
-/** GET /api/github/deployments: the deployments GitHub records for the scanned commit. */
-export interface CommitDeployments { repository: string; sha: string | null; deployments: DeploymentRecord[] }
+/**
+ * GET /api/github/deployments: the deployments GitHub records for the scanned commit, newest first. more: GitHub holds
+ * older records for the commit than the newest 1,000 read.
+ */
+export interface CommitDeployments { repository: string; sha: string | null; deployments: DeploymentRecord[]; more?: true }
