@@ -5,9 +5,10 @@ import { chromium, expect } from '@playwright/test';
 import { createUiServer } from './fixtures/ui-server.ts';
 import type { BrowserCase, JourneyResult } from '../contract/browser.ts';
 
-test('the existing Evidence disclosure shows rejected transports in Chromium', { timeout: 30000 }, async t => {
+test('the existing Evidence disclosure shows rejected transports and a failed read in Chromium', { timeout: 30000 }, async t => {
   const item: BrowserCase = { id:'rename',name:'Rename workspace',goal:'Keep the renamed workspace',steps:[],preconditions:[],expectedOutcomes:[],assertions:[],selected:true,needsReview:false,isolation:'shared',evidence:[] };
-  const result: JourneyResult = { caseId:item.id,status:'failed',controlRead:false,controlReadReason:'blocked-after-read',assertions:[],controlBlocks:[{kind:'http',method:'POST',url:'https://app.test/read',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}] };
+  const result: JourneyResult = { caseId:item.id,status:'failed',controlRead:false,controlReadReason:'read-failed',assertions:[],controlBlocks:[{kind:'http',method:'POST',url:'https://app.test/read',afterRead:true},{kind:'socket',transport:'websocket',afterRead:true}],
+    controlFailedRead:{resourceType:'fetch',method:'GET',url:'https://app.test/api/name',status:500} };
   const entry=`import React from 'react';import {createRoot} from 'react-dom/client';import JourneyEvidence from '/src/JourneyEvidence.tsx';import {Collapsible,CollapsibleTrigger,CollapsibleContent} from '/src/components/ui/collapsible.tsx';import {Button} from '/src/components/ui/button.tsx';import '/src/index.css';createRoot(document.getElementById('root')).render(React.createElement(Collapsible,{},React.createElement(CollapsibleTrigger,{asChild:true},React.createElement(Button,{},'Evidence')),React.createElement(CollapsibleContent,{},React.createElement(JourneyEvidence,{item:${JSON.stringify(item)},result:${JSON.stringify(result)},progress:null}))));`;
   const server=await createUiServer(t,{configFile:fileURLToPath(new URL('../vite.config.ts',import.meta.url)),logLevel:'error',server:{host:'127.0.0.1',port:0},plugins:[{
     name:'control-evidence-ui',resolveId(id){if(id.endsWith('/__evidence.tsx'))return '\0evidence.tsx';},load(id){if(id==='\0evidence.tsx')return entry;},
@@ -22,4 +23,7 @@ test('the existing Evidence disclosure shows rejected transports in Chromium', {
   await expect(page.getByText('https://app.test/read',{exact:true})).toBeVisible();
   await expect(page.getByText('POST',{exact:true})).toBeVisible();await expect(page.getByText('WebSocket',{exact:true})).toBeVisible();
   await expect(page.getByText('After read',{exact:true})).toHaveCount(2);
+  await expect(page.getByRole('heading',{name:'Failed read'})).toBeVisible();
+  await expect(page.getByText('https://app.test/api/name',{exact:true})).toBeVisible();
+  await expect(page.getByText('GET',{exact:true})).toBeVisible();await expect(page.getByText('HTTP 500',{exact:true})).toBeVisible();
 });

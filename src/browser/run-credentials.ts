@@ -8,6 +8,17 @@ type AccountTarget = { accounts?: readonly { id: string }[] | null };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
+// A username shorter than this is an ordinary word in most text, such as a tool name, an error or a page path: hiding
+// it would garble that text without protecting the account.
+const HIDDEN_USERNAME = 4;
+/** The account values hidden from run and authoring text: the password always, the username from four characters. */
+export function accountSecrets(account: { username?: unknown; password?: unknown } | null | undefined): string[] {
+  const values: string[] = [];
+  if (typeof account?.password === 'string' && account.password) values.push(account.password);
+  if (typeof account?.username === 'string' && account.username.length >= HIDDEN_USERNAME) values.push(account.username);
+  return values;
+}
+
 // Credentials belong to one admitted execution, never a saved case or config.
 export function validateRunCredentials(value: unknown): RunCredentials | undefined {
   if (value === undefined) return undefined;

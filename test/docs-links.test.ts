@@ -38,6 +38,17 @@ test('the gate documents name every gate Badge the pipeline shows, Build admissi
   }
 });
 
+test('AGENTS.md lists the gate document\'s steps, beginning with the wait for Build and naming its two states', async () => {
+  // The numbered steps after the line that ends "the controller:" or "the Perpetual controller:".
+  const steps = async (file: string) => (/controller:\n+((?:[ \t]*\d+\. .+\n)+)/.exec(await readFile(join(root, file), 'utf8'))?.[1] ?? '')
+    .trim().split('\n').map(line => line.trim().replace(/^\d+\. /, ''));
+  const [agents, gate] = await Promise.all([steps('AGENTS.md'), steps('docs/gate.md')]);
+  assert.equal(agents.length, gate.length, agents.join('\n'));
+  for (const list of [agents, gate]) assert.match(list[0], /^waits for GitHub Actions Build to pass at that exact (?:branch )?commit/);
+  // An agent then reads a gate waiting for Build, or stopped by it, as the gate's own state rather than a defect.
+  for (const status of ['waiting-build', 'build-failed']) assert.ok(agents[0].includes(`\`${status}\``), status);
+});
+
 test('no current document says Perpetual renews a provisioned sandbox: only a person provisions one again', async () => {
   // In each paragraph or top-level list item about a provision or a Stripe sandbox, every clause that renews or
   // recreates one says it never does. Elsewhere the words are free.

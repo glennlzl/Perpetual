@@ -7,19 +7,22 @@ import type { EvaluatedCheck } from '../src/journeys/playwright/checks.ts';
 
 // Network ordering around a judged document, independent of browser timing. Real browser/controller
 // persistence and POST interference cases live in playwright-control-read.test.ts.
-function setup(initial = 'http://app.test/') {
+function setup(initial = 'http://app.test/', secrets: string[] = []) {
   const page = () => { let url = initial; const events = new EventEmitter(), frame = { parentFrame: () => null, url: () => url }; return Object.assign(events, { mainFrame: () => frame, url: frame.url, isClosed: () => false, setUrl(value: string) { url = value; } }) as unknown as Page & EventEmitter & { setUrl(value: string): void }; };
   const first = page(), second = page(), context = Object.assign(new EventEmitter(), { pages: () => [first, second] });
-  const reads = controlReads(context as unknown as BrowserContext);
+  const reads = controlReads(context as unknown as BrowserContext, secrets);
   // A request keeps the address it was sent to. Chromium reports a document's request without the fragment its page URL keeps.
-  function request(target = first, method = 'GET') { const url = target.url().split('#')[0]; return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => url } as unknown as Request; }
+  function request(target = first, method = 'GET') { const url = target.url().split('#')[0]; return { frame: () => ({ page: () => target, parentFrame: () => null }), isNavigationRequest: () => true, method: () => method, url: () => url, resourceType: () => 'document' } as unknown as Request; }
+  // A request the page or one of its embedded frames makes for what it shows.
+  function resource(target: Page, type: string, url: string, embedded = false) { return { frame: () => ({ page: () => target, parentFrame: () => embedded ? target.mainFrame() : null }), isNavigationRequest: () => type === 'document', method: () => 'GET', url: () => url, resourceType: () => type } as unknown as Request; }
+  const fail = (request: Request, status?: number) => status ? context.emit('response', { request: () => request, ok: () => false, status: () => status }) : context.emit('requestfailed', request);
   function fresh(target = first, status = 200) {
     const req = request(target); context.emit('request', req);
     context.emit('response', { request: () => req, ok: () => status === 200, status: () => status });
     target.emit('framenavigated', target.mainFrame()); context.emit('requestfinished', req); return req;
   }
   const failed: EvaluatedCheck = { type: 'text-visible', value: 'Name {run}', passed: false };
-  return { reads, first, second, context, request, fresh, failed };
+  return { reads, first, second, context, request, resource, fail, fresh, failed };
 }
 
 test('only the failing page fresh after its blocked change can certify a control failure', () => {
@@ -49,7 +52,7 @@ test('failed reads, uncommitted documents and later blocked reads cannot certify
   const req = f.request(); f.context.emit('request', req); f.context.emit('response', {request:()=>req,ok:()=>true,status:()=>200}); f.context.emit('requestfinished',req);
   assert.equal(f.reads.eligible(f.first,f.failed),false);
   f.first.emit('framenavigated',f.first.mainFrame()); assert.equal(f.reads.eligible(f.first,f.failed),true);
-  f.context.emit('requestfailed',f.request()); assert.equal(f.reads.eligible(f.first,f.failed),false);
+  f.fail(f.resource(f.first,'fetch','http://app.test/api/name')); assert.equal(f.reads.eligible(f.first,f.failed),false);
   f.fresh(); f.reads.blockedRequest(f.request(f.first,'POST')); assert.equal(f.reads.eligible(f.first,f.failed),false);
 });
 
@@ -97,13 +100,51 @@ test('a delayed blocked response does not invalidate the fresh document after th
   // A paired response wait can start the reload before Playwright delivers its response event.
   f.context.emit('response', { request: () => write, ok: () => false, status: () => 503 });
   assert.equal(witness(), true, 'This is the already blocked change, not a failed read of the new document.');
-  const read = f.request();
-  f.context.emit('response', { request: () => read, ok: () => false, status: () => 503 });
+  f.fail(f.resource(f.first, 'fetch', 'http://app.test/api/name'), 503);
   assert.equal(witness(), false, 'An actual failed read still makes the new document unreadable.');
   f.fresh();
   f.context.emit('requestfailed', write);
   assert.equal(f.reads.eligible(f.first, f.failed), false, 'A failed transport remains inconclusive, even for a blocked request.');
   assert.equal(f.reads.observation(f.first).reason(f.failed)(), 'blocked-request-failed', 'An aborted blocked write is distinguished from an application read failure.');
+  assert.equal(f.reads.observation(f.first).failedRead(f.failed)(), undefined, 'A blocked write is no failed read.');
+});
+
+test('a failed asset, third-party script or embedded frame leaves a fresh read able to certify its control failure', () => {
+  const f = setup(); f.reads.blocked(f.first); f.fresh();
+  const witness = f.reads.observation(f.first)(f.failed);
+  assert.ok(witness);
+  // None of these can keep a stored value from the judged page; a frame the run refuses fails like any other.
+  for (const [type, url, embedded] of [['image', 'http://app.test/avatar.png'], ['font', 'https://fonts.example/sans.woff2'], ['stylesheet', 'http://app.test/missing.css'], ['media', 'http://app.test/intro.mp4'],
+    ['manifest', 'http://app.test/site.webmanifest'], ['script', 'https://analytics.example/tag.js'], ['document', 'https://refused.example/', true], ['fetch', 'http://app.test/api/widget', true], ['document', 'http://app.test/earlier']] as const) {
+    for (const status of [404, undefined]) f.fail(f.resource(f.first, type, url, embedded), status);
+  }
+  assert.equal(witness(), true);
+  assert.equal(f.reads.eligible(f.first, f.failed), true);
+});
+
+test('a failed request carrying the judged page or its data rejects the read and is named for diagnosis', () => {
+  for (const [type, url, status] of [['fetch', 'http://app.test/api/name', 500], ['xhr', 'https://api.example/name', 404], ['eventsource', 'http://app.test/updates', undefined], ['script', 'http://app.test/assets/app.js', undefined]] as const) {
+    const f = setup(); f.reads.blocked(f.first); f.fresh();
+    const observed = f.reads.observation(f.first), witness = observed(f.failed);
+    const request = f.resource(f.first, type, url);
+    f.fail(request, status);
+    // Chromium also reports an error response whose empty body the page never read as failed.
+    if (status) f.fail(request);
+    assert.equal(witness!(), false, type);
+    assert.equal(observed.reason(f.failed)(), 'read-failed', type);
+    assert.deepEqual(observed.failedRead(f.failed)(), { resourceType: type, method: 'GET', url, ...(status ? { status } : {}) }, type);
+    f.fresh(); assert.equal(f.reads.eligible(f.first, f.failed), true, 'A new document is read again from the start.');
+  }
+  const f = setup(); f.reads.blocked(f.first); f.fresh(f.first, 503);
+  assert.deepEqual(f.reads.observation(f.first).failedRead(f.failed)(), { resourceType: 'document', method: 'GET', url: 'http://app.test/', status: 503 });
+  assert.equal(f.reads.observation(f.first).failedRead({ ...f.failed, passed: true })(), undefined, 'A passed check needs no diagnosis.');
+});
+
+test('a failed read keeps only its origin and path, with the account hidden', () => {
+  const f = setup('http://app.test/', ['private-user']); f.reads.blocked(f.first); f.fresh();
+  const observed = f.reads.observation(f.first); observed(f.failed);
+  f.fail(f.resource(f.first, 'fetch', 'http://app.test/users/private-user?token=private#private'));
+  assert.deepEqual(observed.failedRead(f.failed)(), { resourceType: 'fetch', method: 'GET', url: 'http://app.test/users/[REDACTED]' });
 });
 
 test('a later blocked request invalidates the fresh document even when its response is ignored', () => {

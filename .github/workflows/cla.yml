@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: CLA Assistant
-        # contributor-assistant/github-action v2.6.1, pinned by commit. pull_request_target never checks out PR code here.
-        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        # Pinned by commit. pull_request_target never checks out PR code here.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

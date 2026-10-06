@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import YAML from 'yaml';
+import { gitReadOnly } from '../src/process.ts';
 
 type Locked = { dev?: boolean; optional?: boolean; devOptional?: boolean; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }> };
 
@@ -79,4 +86,62 @@ test('a production install has every package production code loads: each product
     }
   }
   assert.deepEqual(missing, []);
+});
+
+type Update = { 'package-ecosystem': string; directory?: string; directories?: string[]; schedule: { interval: string }; ignore?: { 'dependency-name': string; 'update-types'?: string[] }[] };
+// The bench corpus's repositories are fixtures: their pins are the cases a repair agent is scored on.
+const FIXTURES = 'bench/repair/corpus/';
+
+/**
+ * The directories where the repository at `root` tracks `file`, named as Dependabot names them (`/`, `/bench/repair`),
+ * the fixtures aside. Dependabot reads only what is committed, so no untracked file counts: neither installed packages
+ * nor the copies of the corpus that a bench run leaves in its ignored results.
+ */
+async function holding(file: string, root = fileURLToPath(new URL('..', import.meta.url))): Promise<string[]> {
+  const { stdout } = await gitReadOnly(root, ['ls-files', '-z', '--', `:(glob)**/${file}`]);
+  return stdout.split('\0').filter(path => path && !path.startsWith(FIXTURES)).map(path => posix.dirname(`/${path}`));
+}
+
+test('a lockfile counts only where git tracks it, so the corpus copies a bench run leaves in its results never do', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perpetual-lockfiles-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tracked = ['package-lock.json', 'apps/web/package-lock.json', `${FIXTURES}acme-case/repo/package-lock.json`];
+  // A bench run copies each case's repository, lockfile included, under bench/repair/results, which git ignores.
+  const untracked = ['bench/repair/results/2026-01-01T00-00-00Z/cases/acme-case/snapshot/package-lock.json', 'node_modules/acme/package-lock.json'];
+  for (const path of [...tracked, ...untracked]) {
+    await mkdir(join(root, dirname(path)), { recursive: true });
+    await writeFile(join(root, path), '{}\n');
+  }
+  const git = (...args: string[]) => promisify(execFile)('git', ['-C', root, '-c', 'init.defaultBranch=main', ...args]);
+  await git('init', '--quiet');
+  await git('add', '--force', '--', ...tracked);
+  assert.deepEqual((await holding('package-lock.json', root)).sort(), ['/', '/apps/web']);
+});
+
+test('Dependabot proposes weekly updates for the workflows\' actions and every npm and uv lockfile, the bench corpus\'s fixtures aside', async () => {
+  const { version, updates } = YAML.parse(await readFile(new URL('../.github/dependabot.yml', import.meta.url), 'utf8')) as { version: number; updates: Update[] };
+  assert.equal(version, 2);
+  assert.deepEqual(updates.filter(update => update.schedule.interval !== 'weekly'), []);
+  const covered = (ecosystem: string) => updates.filter(update => update['package-ecosystem'] === ecosystem).flatMap(update => update.directories ?? [update.directory]).sort();
+  assert.deepEqual(covered('github-actions'), ['/']);
+  assert.deepEqual(covered('npm'), (await holding('package-lock.json')).sort());
+  assert.deepEqual(covered('uv'), (await holding('uv.lock')).sort());
+  // Version updates are left out only where another pin leads, as a test above checks: the oldest Node the controller
+  // supports leads its types' minor, and the root's @playwright/test leads the Python worker's Playwright, so one pull
+  // request moves both. update-types leaves out version updates only, so security updates still come.
+  const ignored = updates.flatMap(update => (update.ignore ?? []).map(rule => ({ directories: update.directories ?? [update.directory], ...rule })));
+  assert.deepEqual(ignored, [
+    { directories: ['/'], 'dependency-name': '@types/node', 'update-types': ['version-update:semver-major', 'version-update:semver-minor'] },
+    { directories: ['/integrations/browser-use'], 'dependency-name': 'playwright', 'update-types': ['version-update:semver-major', 'version-update:semver-minor', 'version-update:semver-patch'] },
+  ]);
+});
+
+test('every workflow pins its actions by commit with the release on the same line, where Dependabot updates both', async () => {
+  const directory = new URL('../.github/workflows/', import.meta.url), uses: string[] = [];
+  for (const file of (await readdir(directory)).filter(name => /\.ya?ml$/.test(name))) {
+    for (const [, reference] of (await readFile(new URL(file, directory), 'utf8')).matchAll(/^[ \t-]*uses:[ \t]*(.*)$/gm)) uses.push(`${file}: ${reference}`);
+  }
+  assert.ok(uses.length > 0);
+  // A release named on a line of its own would still name the old one once Dependabot moves the commit.
+  assert.deepEqual(uses.filter(use => !/: [\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/.test(use)), []);
 });

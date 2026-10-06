@@ -24,6 +24,8 @@ export interface ReadOnlyRequest { url: string; body: string | null }
 export interface BlockedRequest { method: string; url: string }
 /** Diagnostic identity only: never a request body, query, header or socket payload. */
 export type ControlBlockedTransport = ({ kind: 'http'; method: string; url: string } | { kind: 'socket'; transport: 'websocket' }) & { afterRead: boolean };
+/** The request carrying the judged page or its data whose failure left a control read unreadable; status when it answered. */
+export interface ControlFailedRead { resourceType: 'document' | 'script' | 'xhr' | 'fetch' | 'eventsource'; method: string; url: string; status?: number }
 export interface BrowserConfig {
   targetUrl: string; signInUrl: string; scope: string; requirements: string; maxSteps: number;
   journeyTimeoutSeconds: number; externalOrigins: string[]; authEndpoints: string[]; readOnlyRequests?: ReadOnlyRequest[]; callbackBindings?: ApplicationCallbackBinding[];
@@ -42,7 +44,7 @@ export type AssertionResult = FinalAssertion & { passed: boolean; resolved?: str
 export type JourneyVerdict = 'passed' | 'failed' | 'blocked' | 'needs_review';
 export type ControlBlocker = 'shared-worker' | 'unguarded-transport';
 export type ControlReadReason = 'page-unavailable' | 'no-blocked-change' | 'no-fresh-document' | 'blocked-after-read' | 'blocked-request-failed' | 'read-failed' | 'read-incomplete' | 'document-not-committed' | 'document-replaced' | 'url-changed' | 'check-unreadable' | 'baseline-not-before-change' | 'check-not-run-owned';
-export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[]; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
+export interface JourneyResult { caseId: string; status: JourneyVerdict | 'skipped' | 'cancelled'; engine?: 'playwright'; controlRead?: boolean; controlBlocker?: ControlBlocker; controlReadReason?: ControlReadReason; controlBlocks?: ControlBlockedTransport[]; controlFailedRead?: ControlFailedRead; assertions: AssertionResult[]; blockers?: Blocker[]; error?: string }
 export type RunStatus = JourneyVerdict | 'cancelled' | 'completed';
 export type ConcurrencyLimit = 'account' | 'shared-data' | null;
 export type MilestoneCheckResult = MilestoneCheck & { passed: boolean; observed?: number; resolved?: string; error?: string; provenance?: 'independent' };
