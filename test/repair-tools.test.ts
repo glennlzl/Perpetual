@@ -279,6 +279,30 @@ test('grep names a matched file it cannot show completely and still answers from
   assert.deepEqual([result.ok, result.matches, result.skipped], [true, ['package.json:1:{ "devDependencies": { "typescript": "5.6.3" } }'], ['package-lock.json is over 256 KB.']]);
 });
 
+test('grep counts only the matches it shows, so a skipped file\'s many matching lines leave room for the others', async t => {
+  const f = await tools(t);
+  await writeFile(join(f.root, 'package-lock.json'), `{\n${'  "typescript": "5.6.3",\n'.repeat(150)}${'  "padding": "x",\n'.repeat(20_000)}}\n`);
+  await writeFile(join(f.root, 'package.json'), '{ "devDependencies": { "typescript": "5.6.3" } }\n');
+  const result = await f.call('grep', { pattern: 'typescript' });
+  assert.deepEqual([result.ok, result.matches, result.truncated, result.skipped], [true, ['package.json:1:{ "devDependencies": { "typescript": "5.6.3" } }'], false, ['package-lock.json is over 256 KB.']]);
+});
+
+test('grep reads at most as many files as it may show matches, skipped ones included', async t => {
+  const f = await tools(t);
+  await mkdir(join(f.root, 'logs'));
+  for (let index = 0; index <= 100; index += 1) await writeFile(join(f.root, 'logs', `${String(index).padStart(3, '0')}.log`), 'needle\n');
+  // Every matched file reads as one too large to show.
+  const exec = f.box.exec;
+  let reads = 0;
+  f.box.exec = async (argv, options) => {
+    const result = await exec(argv, options);
+    if (argv[0] === 'sh' && argv[2].includes('cat "$1"') && argv[4].includes('/logs/')) { reads += 1; return { ...result, truncated: true }; }
+    return result;
+  };
+  const result = await f.call('grep', { pattern: 'needle', path: 'logs' });
+  assert.deepEqual([result.ok, result.matches, result.truncated, (result.skipped as string[]).length, reads], [true, [], true, 100, 100]);
+});
+
 test('grep refuses a file changed after its native match was observed', async t => {
   const f = await tools(t), file = join(f.root, 'race.txt');
   await writeFile(file, 'original match\n');

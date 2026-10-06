@@ -133,34 +133,36 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
     if (result.timedOut) return refused(`The search took over ${LIMITS.searchSeconds} seconds; use a narrower path or an include glob.`);
     if (result.exitCode > 1) return refused(`The search failed: ${oneLine(result.stderr || 'grep error', 300)}`);
     // Keep grep's native ERE and match order. Its text is evidence for a complete-file read, never model output.
-    const selected: { file: string; line: number; text: string }[] = [];
-    let cursor = 0, count = 0;
+    const lines: { file: string; line: number; text: string }[] = [];
+    let cursor = 0;
     while (cursor < result.stdout.length) {
       const separator = result.stdout.indexOf('\0', cursor), end = result.stdout.indexOf('\n', separator + 1);
       const colon = result.stdout.indexOf(':', separator + 1), number = result.stdout.slice(separator + 1, colon);
       if (separator < cursor || end < 0 || colon < separator || colon > end || !/^[1-9]\d*$/.test(number) || !Number.isSafeInteger(Number(number))) return refused('The search returned an unreadable match.');
-      if (count < LIMITS.matches) selected.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
-      count += 1;
+      lines.push({ file: result.stdout.slice(cursor, separator), line: Number(number), text: result.stdout.slice(colon + 1, end) });
       cursor = end + 1;
     }
+    // Only a match shown counts toward the limit. A matched file the tools cannot show completely, such as a large or
+    // binary one, is named in skipped and its lines are left out, so the rest of the search still answers. At most as
+    // many files are read as matches may be shown, skipped ones included.
     const files = new Map<string, FileObservation>(), matches: string[] = [], skipped: string[] = [];
-    for (const match of selected) {
-      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
+    let truncated = false;
+    for (const match of lines) {
       let file = files.get(match.file);
+      if (file && !file.ok) continue;
+      if (matches.length === LIMITS.matches || !file && files.size === LIMITS.matches) { truncated = true; break; }
+      if (!match.file.startsWith(`${root}/`)) return refused('A search result leads outside /workspace.');
       if (!file) {
         const located = await locate(shown(match.file));
         if (located.error !== undefined) return refused(located.error);
         file = await observeFile(located);
         files.set(match.file, file);
-        // A matched file the tools cannot show completely, such as a large or binary one, is named and its matches left
-        // out; the rest of the search still answers.
-        if (!file.ok) skipped.push('truncated' in file && file.truncated ? `${located.name} is over ${4 * LIMITS.readBytes / 1024} KB.` : file.error);
+        if (!file.ok) { skipped.push('truncated' in file && file.truncated ? `${located.name} is over ${4 * LIMITS.readBytes / 1024} KB.` : file.error); continue; }
       }
-      if (!file.ok) continue;
       if (file.raw[match.line - 1] !== match.text) return refused(`${shown(match.file)} changed after the search; search again.`);
       matches.push(`${shown(match.file)}:${clip(`${match.line}:${file.redacted[match.line - 1]}`.trim(), LIMITS.matchChars)}`);
     }
-    return { ok: true, path: found.name, matches, truncated: count > LIMITS.matches, ...(skipped.length ? { skipped } : {}) };
+    return { ok: true, path: found.name, matches, truncated, ...(skipped.length ? { skipped } : {}) };
   }
   async function write(found: { full: string; name: string }, text: string) {
     const result = await exec(['sh', '-c', '[ -d "$1" ] && exit 3; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', found.full], { stdin: text });
@@ -232,7 +234,7 @@ export function repairTools(box: RepairBox, { events = {}, signal }: { events?: 
       execute: guarded('read', read),
     }),
     grep: tool({
-      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). A matched file it cannot show, such as a larger or binary one, is named in skipped. Pass a narrow path and an include glob.`,
+      description: `Searches files under a path for an extended regular expression: at most ${LIMITS.matches} matching lines as path:line:text, after redacting each complete matched file (at most ${4 * LIMITS.readBytes / 1024} KB). A matched file it cannot show, such as a larger or binary one, is named in skipped and its lines left out. Pass a narrow path and an include glob.`,
       inputSchema: schema({ pattern: { type: 'string', maxLength: LIMITS.pattern }, path: PATH, include: { type: 'string', description: 'A file name glob, such as *.ts.' } }, ['pattern']),
       execute: guarded('grep', grep),
     }),
