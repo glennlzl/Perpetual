@@ -70,9 +70,11 @@ type Preparation=BrowserPreparation;
 /**
  * Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. groups are the
  * process groups its workers lead and pending counts the worker starts saved before their groups were, so a restart can
- * prove the operation's workers gone; an older record without groups never proves it.
+ * prove the operation's workers gone; an older record without groups never proves it. workerCleanupIncomplete says a
+ * worker, or the supervisor that stopped it, reported its cleanup incomplete: the browser a worker starts leads a process
+ * group of its own and outlives a killed worker, so no restart proves it gone and only a person's confirmation does.
  */
-type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string;groups?:number[];pending?:number};
+type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workerCleanupIncomplete?:true;workspace?:string;groups?:number[];pending?:number};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
   preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;applicationId?:string;signInPath?:string;suspendedReads?:{applicationId?:string;requests:ReadOnlyRequest[]}}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
@@ -129,8 +131,13 @@ const MAX_WORKERS=64;
 const processGroup=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>1&&value<2**31;
 // A process group no longer exists once signalling it fails with ESRCH; any other answer, a permission error included, keeps it.
 const groupGone=(group:number)=>{try{process.kill(-group,0);return false;}catch(error){return (error as NodeJS.ErrnoException).code==='ESRCH';}};
-/** Whether every worker an external operation started is proven gone. Windows workers lead no process group, so they never are. */
-const workersGone=(operation:ExternalOperation)=>process.platform!=='win32'&&Array.isArray(operation.groups)&&!operation.pending&&operation.groups.every(groupGone);
+// A process group this controller can still signal, as the group of a worker it started that still runs is.
+const groupRuns=(group:number)=>{try{process.kill(-group,0);return true;}catch{return false;}};
+/**
+ * Whether every worker an external operation started is proven gone. Windows workers lead no process group, so they never
+ * are; nor are those of an operation whose worker reported its cleanup incomplete, since its browser may outlive them.
+ */
+const workersGone=(operation:ExternalOperation)=>process.platform!=='win32'&&!operation.workerCleanupIncomplete&&Array.isArray(operation.groups)&&!operation.pending&&operation.groups.every(groupGone);
 const touch=(run:BrowserRun)=>{run.progress.revision=(run.progress.revision||0)+1;};
 const settleSteps=(progress:{steps?:StepProgress[]},status:string)=>{for(const step of progress.steps||[])if(step.status==='running')step.status=['skipped','cancelled'].includes(status)?status:'unconfirmed';};
 const actionErrorCodes:ReadonlySet<string>=new Set(['action_not_allowed','navigation_not_allowed','attachments_not_allowed','credential_literal_rejected','credential_reference_invalid','credential_origin_mismatch','credential_field_unavailable','credential_target_mismatch','credential_frame_mismatch','credential_field_type_mismatch','credential_verification_failed','browser_action_failed','action_result_missing','journey_progress_invalid']);
@@ -320,6 +327,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   const external:unknown=state.externalOperations??{};
   if(!isRecord(external)||Object.entries(external).some(([origin,item])=>{
     if(!isRecord(item)||typeof item.id!=='string'||typeof item.scope!=='string'||typeof item.startedAt!=='string'||typeof item.operation!=='string'||!['run','discover','generate'].includes(item.operation)||item.cleanupIncomplete!==undefined&&item.cleanupIncomplete!==true)return true;
+    if(item.workerCleanupIncomplete!==undefined&&item.workerCleanupIncomplete!==true)return true;
     try{if(externalOrigin(origin)!==origin)return true;}catch{return true;}
     if(item.groups!==undefined&&(!Array.isArray(item.groups)||item.groups.length>MAX_WORKERS||!item.groups.every(processGroup)))return true;
     if(item.pending!==undefined&&(typeof item.pending!=='number'||!Number.isSafeInteger(item.pending)||item.pending<0||item.pending>MAX_WORKERS))return true;
@@ -420,7 +428,9 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   /**
    * Records an external operation's workers as they start: each start is saved as pending before the worker starts, then
    * the process group it leads, so a restart can tell whether the operation's workers are gone. A start that never reports
-   * a group stays pending, as does one whose group could not be saved, and either keeps the hold.
+   * a group stays pending, as does one whose group could not be saved, and either keeps the hold. A worker's group that is
+   * gone as the worker ends is dropped, so neither a restart nor a person waits for its number, which another process may
+   * take; a worker that reports its cleanup incomplete is saved as such and keeps the hold until a person confirms cleanup.
    */
   function workerOwner(owned:Awaited<ReturnType<typeof beginExternal>>):WorkerOwner|undefined{
     if(!owned)return undefined;
@@ -428,13 +438,18 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     return {async claim(){
       entry.pending=(entry.pending??0)+1;
       try{await persist();}catch(error){entry.pending-=1;throw error;}
-      let settled=false;
+      let settled=false,own:number|undefined;
       const settle=(group?:number)=>{
-        if(settled)return;settled=true;
+        if(settled)return;settled=true;own=group;
         entry.pending=Math.max(0,(entry.pending??1)-1);if(group!==undefined)entry.groups=[...entry.groups??[],group];
         persist().catch(()=>{});
       };
-      return {started:group=>settle(group),release:()=>settle()};
+      return {started:group=>settle(group),release:()=>settle(),ended(incomplete){
+        const gone=own!==undefined&&groupGone(own);
+        if(gone)entry.groups=(entry.groups??[]).filter(group=>group!==own);
+        if(incomplete)entry.workerCleanupIncomplete=true;
+        if(gone||incomplete)persist().catch(()=>{});
+      }};
     }};
   }
   // The stage's application as external operations hold it, or null without a valid application URL.
@@ -444,14 +459,16 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   function cleanupHold(scope:string){const origin=applicationOf(scope),held=origin?state.externalOperations[origin]:undefined;return origin&&held&&!externalLeases.has(origin)?{origin,held}:null;}
   /**
    * A person confirms that the browser processes an operation left on the stage's application are stopped: its hold goes,
-   * and a generation's retained workspace with it. An operation still in progress keeps its application.
+   * and a generation's retained workspace with it. An operation still in progress keeps its application, and so does a
+   * worker process group the operation saved while it still runs, as an earlier controller's worker may still act there.
    */
   function confirmCleanup(context:BrowserStageContext){return admit(async():Promise<BrowserCleanupReply>=>{
     const scope=scopeId(context),application=applicationOf(scope);
     if(application&&externalLeases.has(application))throw conflict('This application has a browser operation in progress.');
     const hold=cleanupHold(scope);
     if(!hold)throw Object.assign(new Error('No browser cleanup is waiting for confirmation.'),{statusCode:404});
-    const {origin,held}=hold;
+    const {origin,held}=hold,running=(held.groups??[]).filter(groupRuns);
+    if(running.length)throw conflict(running.length===1?`Browser process group ${running[0]} is still running. Stop it, then choose Cleanup done.`:`Browser process groups ${running.join(', ')} are still running. Stop them, then choose Cleanup done.`);
     await persist(()=>({...state,externalOperations:Object.fromEntries(Object.entries(state.externalOperations).filter(([key])=>key!==origin))}),()=>{delete state.externalOperations[origin];});
     // A workspace that cannot be removed now goes at the next start, as nothing retains it any more.
     if(held.workspace)await rm(join(generationRoot,held.workspace),{recursive:true,force:true}).catch(()=>{});
@@ -483,6 +500,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   // A restart keeps an external operation's hold and workspace unless every worker it started is proven gone: each start
   // was saved before the worker started, then with the process group it leads, and none of those groups exists any more.
+  // That proves only the workers' own groups gone, so a hold whose worker reported its cleanup incomplete stays until a
+  // person confirms cleanup.
   for(const [origin,operation] of Object.entries(state.externalOperations)){if(workersGone(operation))delete state.externalOperations[origin];else operation.cleanupIncomplete=true;}
   const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
   await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));

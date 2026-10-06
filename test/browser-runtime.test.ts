@@ -245,19 +245,24 @@ test('a worker reports the process group it leads as it starts, which is gone on
   assert.throws(()=>process.kill(-pid,0),{code:'ESRCH'});
 });
 
-test('an owned worker starts only once its start is recorded and reports its group, and a claim is released only when nothing started',async()=>{
+test('an owned worker starts only once its start is recorded, reports its group and how it ended, and a claim is released only when nothing started',async()=>{
   const log:string[]=[];let recorded!:()=>void;const saved=new Promise<void>(resolve=>{recorded=resolve;});
-  const owner={async claim(){log.push('claim');await saved;log.push('recorded');return {started:(group:number)=>{log.push(`group ${group}`);},release:()=>{log.push('release');}};}};
+  const owner={async claim(){log.push('claim');await saved;log.push('recorded');return {started:(group:number)=>{log.push(`group ${group}`);},release:()=>{log.push('release');},ended:(incomplete:boolean)=>{log.push(incomplete?'ended incomplete':'ended');}};}};
   const job=ownedStart(owner,({onGroup})=>{log.push('start');onGroup?.(4242);return {promise:Promise.resolve('done'),cancel(){}};});
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(log,['claim'],'Nothing starts before its start is recorded.');
   recorded();
   assert.equal(await job.promise,'done');
-  assert.deepEqual(log,['claim','recorded','start','group 4242']);
+  assert.deepEqual(log,['claim','recorded','start','group 4242','ended']);
   // A worker that ends without reporting its group leaves its claim open: it may have started one.
   log.length=0;
   await assert.rejects(ownedStart(owner,()=>({promise:Promise.reject(new Error('The browser stopped.')),cancel(){}})).promise,{message:'The browser stopped.'});
-  assert.deepEqual(log,['claim','recorded']);
+  assert.deepEqual(log,['claim','recorded','ended']);
+  // A worker whose cleanup is incomplete, as after its supervisor killed it, says so as it fails.
+  log.length=0;
+  const forced=Object.assign(new Error('Cleanup incomplete after forced termination.'),{cleanupIncomplete:true as const});
+  await assert.rejects(ownedStart(owner,({onGroup})=>{onGroup?.(4343);return {promise:Promise.reject(forced),cancel(){}};}).promise,forced);
+  assert.deepEqual(log,['claim','recorded','group 4343','ended incomplete']);
   // Cancelled while its start is recorded, or refused at once, it starts nothing and releases its claim.
   log.length=0;
   const cancelled=ownedStart(owner,()=>{log.push('start');return {promise:Promise.resolve('done'),cancel(){}};});

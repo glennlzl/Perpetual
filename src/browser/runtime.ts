@@ -29,9 +29,11 @@ export type BrowserCapabilities={runtimeInstalled:boolean;browserInstalled:boole
 export type WorkerStartOptions={timeoutMs?:number;cleanupGraceMs?:number;onGroup?:(group:number)=>void};
 /**
  * A worker an operation is about to start: started records the process group it leads, and release says that no worker
- * started after all. A claim neither started nor released stays open, since a worker may have started.
+ * started after all. A claim neither started nor released stays open, since a worker may have started. ended says the
+ * started worker's job settled, and whether the worker, or the supervisor that stopped it, reported its cleanup
+ * incomplete: processes outside its group, such as the browser it started, may then remain.
  */
-export type WorkerClaim={started(group:number):void;release():void};
+export type WorkerClaim={started(group:number):void;release():void;ended(incomplete:boolean):void};
 /** Records each worker an operation starts before it starts: claim() resolves once the start is recorded. */
 export type WorkerOwner={claim():Promise<WorkerClaim>};
 export type BrowserRuntime={capabilities():Promise<BrowserCapabilities>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void,options?:WorkerStartOptions):WorkerJob};
@@ -88,7 +90,8 @@ export function workerTimeoutMs({mode,timeoutSeconds}:{mode?:string;timeoutSecon
 
 /**
  * Starts a worker once its owner has recorded the start, and tells the owner the process group the worker leads, so the
- * owner can tell later whether it is gone; without an owner it starts at once. Cancelled before then, it starts nothing.
+ * owner can tell later whether it is gone, and how the worker ended; without an owner it starts at once. Cancelled before
+ * then, it starts nothing.
  */
 export function ownedStart<T>(owner:WorkerOwner|undefined,start:(options:Pick<WorkerStartOptions,'onGroup'>)=>WorkerJob<T>):WorkerJob<T>{
   if(!owner)return start({});
@@ -97,7 +100,7 @@ export function ownedStart<T>(owner:WorkerOwner|undefined,start:(options:Pick<Wo
     if(cancelled){claim.release();throw new Error('Browser operation cancelled.');}
     // A start that throws at once started no worker, unless it already reported one.
     try{job=start({onGroup:claim.started});}catch(error){claim.release();throw error;}
-    return job.promise;
+    return job.promise.then(value=>{claim.ended(false);return value;},(error:unknown)=>{claim.ended((error as WorkerError|null)?.cleanupIncomplete===true);throw error;});
   });
   return {promise,cancel(){cancelled=true;job?.cancel();}};
 }

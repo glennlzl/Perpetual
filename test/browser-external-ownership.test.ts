@@ -164,18 +164,30 @@ function leftBehind(t: TestContext) {
   return child.pid!;
 }
 const groupExists = (group: number) => { try { process.kill(-group, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; } };
+// A process group that has exited, as a worker's has once its supervisor killed it.
+async function exited() {
+  const child = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+  await new Promise(resolve => child.once('exit', resolve));
+  for (const deadline = Date.now() + 10000; groupExists(child.pid!); await wait(10)) assert.ok(Date.now() < deadline, 'The group did not exit.');
+  return child.pid!;
+}
+type Hold = { groups?: number[]; pending?: number; workerCleanupIncomplete?: true; workspace?: string };
+const holds = async (file: string) => Object.values(JSON.parse(await readFile(file, 'utf8')).externalOperations) as Hold[];
+// The controller saves the worker's start before it starts, then the group it leads.
+async function groupSaved(file: string, group: number) {
+  for (const deadline = Date.now() + 10000; ; await wait(10)) {
+    const [held] = await holds(file);
+    if (held?.groups?.includes(group) && !held.pending) return;
+    assert.ok(Date.now() < deadline, 'The worker\'s group was not saved.');
+  }
+}
 
 test('a restart releases an external hold once every worker group the operation saved is gone, and keeps it before', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t), group = leftBehind(t);
   f.reportGroup(group);
   await f.manager.run(f.context('beta'), {}, { manual: true }); await f.started(1);
   const file = join(f.dataDir, 'browser/state.json');
-  // The controller saves the worker's start before it starts, then the group it leads.
-  for (const deadline = Date.now() + 10000; ; await wait(10)) {
-    const [held] = Object.values(JSON.parse(await readFile(file, 'utf8')).externalOperations) as { groups?: number[]; pending?: number }[];
-    if (held?.groups?.includes(group) && !held.pending) break;
-    assert.ok(Date.now() < deadline, 'The worker\'s group was not saved.');
-  }
+  await groupSaved(file, group);
   // The state a controller stopped at that moment leaves.
   const stopped = await readFile(file, 'utf8');
   await f.manager.close(); await writeFile(file, stopped); await f.restart();
@@ -222,4 +234,48 @@ test('Cleanup done releases a hold from any stage on its application, and its ge
   await f.manager.run(f.context('gamma'), {}, { manual: true }); await f.started(2);
   await f.restart();
   assert.equal((await f.manager.view(f.context('gamma'))).cleanup, undefined, 'A confirmation survives a restart.');
+});
+
+for (const operation of ['run', 'generate'] as const) test(`a ${operation === 'run' ? 'run' : 'generation'} whose worker reported its cleanup incomplete keeps its hold${operation === 'generate' ? ' and workspace' : ''} across restarts, though the worker's group is gone`, { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), group = await exited();
+  f.reportGroup(group);
+  if (operation === 'run') await f.manager.run(f.context('beta'), {}, { manual: true });
+  else await f.manager.generateSpec(f.context('beta'), { caseId: journey.id, ...account });
+  await f.started(1);
+  const file = join(f.dataDir, 'browser/state.json'), [{ workspace }] = await holds(file);
+  const generation = workspace ? join(f.dataDir, 'browser/generations', workspace) : null;
+  // The supervisor killed the worker's group once its grace period ended: the browser the worker started may remain.
+  f.workers[0].fail(Object.assign(new Error('Cleanup incomplete after forced termination.'), { cleanupIncomplete: true })); await f.settled('beta');
+  // Its group is gone, which proves nothing of its browser: the report is what the hold keeps.
+  const [held] = await holds(file);
+  assert.deepEqual([held.groups, held.pending, held.workerCleanupIncomplete], [[], 0, true]);
+  await assert.rejects(f.manager.run(f.context('gamma'), {}, { manual: true }), /choose Cleanup done/);
+  for (const restart of [1, 2]) {
+    await f.restart();
+    await assert.rejects(f.manager.run(f.context('gamma'), {}, { manual: true }), /choose Cleanup done/, `Restart ${restart} keeps the hold.`);
+    assert.equal((await f.manager.view(f.context('gamma'))).cleanup?.operation, operation);
+    if (generation) await access(generation);
+  }
+  // Only a person's confirmation releases it.
+  assert.deepEqual(await f.manager.confirmCleanup(f.context('gamma')), { cleanup: null });
+  if (generation) await assert.rejects(access(generation));
+  await f.manager.run(f.context('gamma'), {}, { manual: true }); await f.started(2);
+});
+
+test('Cleanup done is refused while a worker group the operation saved still runs, and names the group', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), group = leftBehind(t);
+  f.reportGroup(group);
+  await f.manager.run(f.context('beta'), {}, { manual: true }); await f.started(1);
+  const file = join(f.dataDir, 'browser/state.json');
+  await groupSaved(file, group);
+  // The controller stopped while its worker went on running.
+  const stopped = await readFile(file, 'utf8');
+  await f.manager.close(); await writeFile(file, stopped); await f.restart();
+  await assert.rejects(f.manager.confirmCleanup(f.context('gamma')), { statusCode: 409, message: `Browser process group ${group} is still running. Stop it, then choose Cleanup done.` });
+  assert.equal((await f.manager.view(f.context('gamma'))).cleanup?.operation, 'run', 'The refusal keeps the hold.');
+  process.kill(-group, 'SIGKILL');
+  for (const deadline = Date.now() + 10000; groupExists(group); await wait(10)) assert.ok(Date.now() < deadline, 'The group did not exit.');
+  assert.deepEqual(await f.manager.confirmCleanup(f.context('gamma')), { cleanup: null });
+  f.reportGroup(undefined);
+  await f.manager.run(f.context('gamma'), {}, { manual: true }); await f.started(2);
 });
