@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
 import type { ModelSettingsView, OpenRouterModelView } from '../contract/settings.ts';
+
+// CI runs test files concurrently, so every wait allows ten seconds.
+const expect = playwrightExpect.configure({ timeout: 10_000 });
 
 const catalog: OpenRouterModelView = { models: ['a', 'b', 'c'].map(id => ({ id: `example/${id}`, name: `Example: Model ${id.toUpperCase()}`, provider: 'example' })), defaultModel: 'example/b', defaultEscalationModel: 'example/c' };
 const capabilities = (model: string): ModelSettingsView => ({ provider: 'openrouter', model, escalationModel: 'example/c', baseUrl: 'https://openrouter.ai/api/v1', keyConfigured: true, modelConfigured: true });
