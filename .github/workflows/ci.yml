@@ -1,7 +1,8 @@
 # Builds the interface and runs the Node and Python browser runtime tests, drives the Python worker through the real
 # controller, and type-checks and tests the repair-agent bench, which imports the product's repair modules. Tests that
 # need Docker skip unless PERPETUAL_DOCKER_TESTS=1 (twins), PERPETUAL_REPAIR_DOCKER_TESTS=1 (the repair box) or
-# BENCH_DOCKER=1 (the bench's boxes) is set, so no job starts containers.
+# BENCH_DOCKER=1 (the bench's boxes) is set, so no job here starts containers. docker.yml runs the twin and repair box
+# tests every night.
 name: CI
 
 on:
