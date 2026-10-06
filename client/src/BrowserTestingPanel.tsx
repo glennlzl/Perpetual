@@ -459,6 +459,24 @@ function ConfirmCaseDialog({ item, title = 'Delete test?', action = 'Delete test
   </AlertDialog>;
 }
 
+// Confirming cleanup releases an application whose leftover browser processes a person stopped, so it is asked first.
+function ConfirmCleanupDialog({ application, pending, onConfirm, onClose, focusFallback }: { application: string; pending: string; onConfirm: () => Promise<void>; onClose: () => void; focusFallback: FocusFallback }) {
+  const returnFocus = useReturnFocus(focusFallback);
+  const [error, setError] = useState('');
+  return <AlertDialog open onOpenChange={open => { if (!open && !pending) onClose(); }}>
+    <AlertDialogContent onCloseAutoFocus={returnFocus}>
+      <AlertDialogHeader><AlertDialogTitle>Confirm browser cleanup?</AlertDialogTitle><AlertDialogDescription className="break-words">{application}</AlertDialogDescription></AlertDialogHeader>
+      <ErrorText>{error}</ErrorText>
+      <AlertDialogFooter><AlertDialogCancel disabled={Boolean(pending)}>Cancel</AlertDialogCancel><AlertDialogAction disabled={Boolean(pending)} onClick={async event => {
+        event.preventDefault();
+        setError('');
+        try { await onConfirm(); }
+        catch (failure) { setError((failure as Error).message); }
+      }}>{pending === 'cleanup' ? 'Confirming…' : 'Cleanup done'}</AlertDialogAction></AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>;
+}
+
 type BrowserTestingPanelProps = {
   repoPath: string; stageId: string; busy?: boolean; initialRunId?: string; initialWatch?: boolean; initialCaseId?: string; caseRequestKey?: number | string;
   view?: 'tests' | 'runs'; visible?: boolean; environmentStatus?: string; targetSuggestions?: TargetSuggestion[]; environmentError?: string;
@@ -477,6 +495,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   const [deletingCase, setDeletingCase] = useState<BrowserCase | null>(null);
   const [discarding, setDiscarding] = useState<{ item: BrowserCase; hash: string } | null>(null);
   const [approvingCase, setApprovingCase] = useState<BrowserCase | null>(null);
+  const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [authoringCase, setAuthoringCase] = useState<BrowserCase | null>(null);
   const [creatingCase, setCreatingCase] = useState(false);
   const [configDialog, setConfigDialog] = useState<'settings' | 'generate' | null>(null);
@@ -516,6 +535,8 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
   // A verification's attempts are the stage's active runs, so only its Stop verifying stays open while they run.
   const locked = loading || busy || Boolean(pending), disabled = locked || Boolean(activeRun);
   const validTarget = validUrl(config.targetUrl);
+  // The saved application an unconfirmed browser cleanup holds.
+  const heldApplication = data.cleanup && validUrl(data.config.targetUrl) ? new URL(data.config.targetUrl).origin : '';
   const readiness = browserReadiness(capabilities, validTarget);
   const showReadiness = !loading && readiness.some(item => !item.ready);
   const wait = activeRun ? activeRun.mode === 'discover' ? 'Generating tests' : 'Run in progress' : loading ? 'Loading' : disabled ? 'Wait for the current action to finish' : '';
@@ -628,6 +649,7 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {(preparation?.status === 'preparing' || ['queued', 'creating', 'preparing'].includes(environmentStatus ?? '')) && <Badge variant="secondary">Creating environment</Badge>}
       {preparation?.status === 'discovering' && !activeRun && <Badge variant="secondary">Generating tests</Badge>}
       {['needs_setup', 'failed'].includes(preparation?.status ?? '') && <div className="flex flex-wrap items-center gap-2"><Badge variant={preparation!.status === 'failed' ? 'destructive' : 'outline'}>{preparation!.status === 'failed' ? 'Preparation failed' : 'Setup required'}</Badge><ErrorText>{preparation!.error}</ErrorText></div>}
+      {heldApplication && <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">Cleanup unconfirmed</Badge><Button size="sm" variant="outline" disabled={locked} onClick={() => setConfirmingCleanup(true)}>Cleanup done</Button></div>}
       {showReadiness && <Readiness items={readiness} primary={toolbar.primary} targetBlocker={toolbar.blockers.target} onTarget={() => setConfigDialog('settings')} onAppSettings={onAppSettings} />}
       {validTarget && <div className="test-target flex min-w-0 items-center gap-2">
         <Button asChild variant="link" className="h-auto min-w-0 max-w-full shrink justify-start px-0 py-1"><a href={config.targetUrl} target="_blank" rel="noopener noreferrer"><span className="truncate">{config.targetUrl}</span><ExternalLink /></a></Button>
@@ -673,6 +695,10 @@ export default function BrowserTestingPanel({ repoPath, stageId, busy = false, i
       {loading && !data.runs.length && <TestListSkeleton label="Loading test runs" />}
       <ItemGroup className="test-run-list" aria-label="Test runs">{[...data.runs].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(run => <Item role="listitem" size="sm" variant="default" className="test-run-row" key={run.id}><ItemContent className="min-w-0"><Button variant="ghost" className="h-auto w-full items-start justify-between gap-3 whitespace-normal px-0 py-1" onClick={() => setWatching(watchedRun(run))}><span className="min-w-0 flex-1 space-y-1 text-left"><span className="flex flex-wrap items-center gap-1.5 break-words font-medium">{browserRunTitle(run)}{run.verification?.control && <Badge variant="outline">Control</Badge>}</span><span className="block text-xs font-normal tabular-nums text-muted-foreground">{dateLabel(run.createdAt)}</span></span><Badge className="shrink-0" variant={run.status === 'failed' ? 'destructive' : 'secondary'}>{browserRunLabel(run)}</Badge><Eye className="mt-0.5 shrink-0" /></Button></ItemContent></Item>)}</ItemGroup>
     </>}
+    {confirmingCleanup && heldApplication && <ConfirmCleanupDialog application={heldApplication} pending={pending} focusFallback={sheet} onClose={() => setConfirmingCleanup(false)} onConfirm={async () => {
+      await stage.perform('browser', 'cleanup', tx => tx.post('cleanup'));
+      if (mounted.current && stage.isCurrent()) setConfirmingCleanup(false);
+    }} />}
     {deletingCase && <ConfirmCaseDialog key={deletingCase.id} item={deletingCase} pending={pending} disabled={disabled} focusFallback={sheet} onClose={() => setDeletingCase(null)} onConfirm={async () => {
       await stage.perform('browser', 'cases', tx => tx.post('cases', { cases: cases.filter(item => item.id !== deletingCase.id), baseCases: cases }));
       if (mounted.current && stage.isCurrent()) setDeletingCase(null);

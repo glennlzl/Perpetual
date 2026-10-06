@@ -21,7 +21,7 @@ export type PipelineAction =
 /** Unsaved/loading settings may not have received all normalized controller defaults yet. */
 export type BrowserConfig = Pick<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'> & Partial<Omit<PublicBrowserConfig, 'targetUrl' | 'scope' | 'requirements' | 'maxSteps'>>;
 /** The workspace starts from source summaries before the inspector has loaded its full view. */
-export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation'> & {
+export type BrowserView = Pick<BrowserViewReply, 'cases' | 'preparation' | 'cleanup'> & {
   runs: BrowserRun[]; capabilities: BrowserCapabilities | null; config: BrowserConfig;
   specs?: JourneySpecs; analysis?: BrowserAnalysis | null; accounts?: TestAccount[];
 };

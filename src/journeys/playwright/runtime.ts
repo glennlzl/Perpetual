@@ -115,7 +115,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
       }
       return preflight;
     },
-    start(input: JourneyRunInput, onEvent: (event: WorkerEvent) => void, { timeoutMs = workerTimeoutMs(input), cleanupGraceMs = 40000 }: WorkerStartOptions = {}): WorkerJob {
+    start(input: JourneyRunInput, onEvent: (event: WorkerEvent) => void, { timeoutMs = workerTimeoutMs(input), cleanupGraceMs = 40000, onGroup }: WorkerStartOptions = {}): WorkerJob {
       const credentials = validateRunCredentials(input.credentials);
       if (input.mode !== 'run' || !input.case?.id || typeof input.spec?.code !== 'string' || !/^[a-f0-9]{64}$/.test(input.spec.hash || '')) throw new Error('A Playwright journey needs its approved case and spec.');
       const checkVersion = input.checkVersion ?? CHECK_VERSION;
@@ -143,7 +143,7 @@ export function createPlaywrightRuntime({ env = process.env, checkTimeoutMs = 10
               if (facts.stopCause === 'action' || facts.stopCause === 'deadline' || Array.isArray(facts.assertions) && facts.assertions.some(value => value && typeof value === 'object' && value.passed === false)) failed = true;
             }
             onEvent(event);
-          }, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], errorSecrets: [credentials?.username], unavailable: 'Playwright is unavailable. Run npm install.',
+          }, onGroup, timeoutMs, cleanupGraceMs, stopSignal: 'SIGINT', secrets: [credentials?.password], errorSecrets: [credentials?.username], unavailable: 'Playwright is unavailable. Run npm install.',
             ...(diagnostic.enabled ? {
               onLifecycle: event => diagnostic.record({ ...event, source: 'supervisor' }),
               onDiagnostic: value => {

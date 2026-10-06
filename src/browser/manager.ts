@@ -7,7 +7,7 @@ import {basename,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {hide,redact} from '../redaction.ts';
 import {validateReadRequests,readPolicyHash,blockedRequest} from './read-requests.ts';
-import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys} from './runtime.ts';
+import {createBrowserRuntime,validateBrowserTarget,browserError,modelKeys,ownedStart} from './runtime.ts';
 import {validateBrowserCases,browserDiscoveryContext,discoveredBrowserCases,assertReviewedJourneys,assertExecutableJourneyChecks,hasJourneyChecks} from '../business/browser-cases.ts';
 import {createBrowserModelSettings} from './model.ts';
 import {checkOpenRouterKey,createOpenRouterModelCatalog,isOpenRouterEndpoint} from './openrouter-models.ts';
@@ -32,9 +32,9 @@ import {privateWorkspace} from '../agents/opencode.ts';
 import type {BrowserCase,MilestoneCheck} from '../business/browser-cases.ts';
 import type {BrowserModelConfiguration} from './model-policy.ts';
 import type {ModelSettingsReply} from '../../contract/settings.ts';
-import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,DiscoveryDiagnostics,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
+import type {BlockedRequest,ReadOnlyRequest,BrowserConfig,BrowserPreparation,BrowserDiscovery,BrowserAnalysis,BrowserCleanupHold,BrowserCleanupReply,DiscoveryDiagnostics,MilestoneCheckResult,StepProgress as PublicStepProgress,BrowserAction,CaseProgress as PublicCaseProgress,RunProgress as PublicRunProgress,PublicRun,RunSummary,RunProgressReply,BrowserViewReply,BrowserSummaryReply,BrowserCapabilities as PublicCapabilities} from '../../contract/browser.ts';
 export type {BrowserConfig,PublicRun,RunSummary} from '../../contract/browser.ts';
-import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob} from './runtime.ts';
+import type {BrowserCapabilities,BrowserWorkerInput,WorkerError,WorkerEvent,WorkerJob,WorkerOwner,WorkerStartOptions} from './runtime.ts';
 import type {JourneyResult,RunStatus} from './results.ts';
 import type {JourneyRunInput} from '../journeys/playwright/runtime.ts';
 import type {EnvironmentAccount} from '../environments/manager.ts';
@@ -50,9 +50,9 @@ export type TargetEnvironment={id:string;status:string;sandboxId?:string|null;st
 /** What the manager uses of environment leases. */
 type Leases=Pick<EnvironmentUsage,'assertAvailable'|'acquire'>;
 /** Runs one journey's approved Playwright code (src/journeys/playwright/runtime.ts). */
-type JourneyRuntime={capabilities():Promise<{browserInstalled?:boolean}>;start(input:JourneyRunInput,onEvent:(event:WorkerEvent)=>void):WorkerJob<unknown>};
+type JourneyRuntime={capabilities():Promise<{browserInstalled?:boolean}>;start(input:JourneyRunInput,onEvent:(event:WorkerEvent)=>void,options?:Pick<WorkerStartOptions,'onGroup'>):WorkerJob<unknown>};
 /** The browser agent, which discovers journeys; an absent capability is unknown. */
-type AgentRuntime={capabilities():Promise<Partial<BrowserCapabilities>>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void):WorkerJob<unknown>};
+type AgentRuntime={capabilities():Promise<Partial<BrowserCapabilities>>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void,options?:Pick<WorkerStartOptions,'onGroup'>):WorkerJob<unknown>};
 
 type CheckResult=MilestoneCheckResult&{provenance:'independent'};
 type StepProgress=Omit<PublicStepProgress,'checks'>&{title:string;checks?:CheckResult[]};
@@ -67,8 +67,12 @@ export type BrowserRun=Omit<PublicRun,'caseSummaries'|'progress'|'status'|'engin
   scope:string;status:'queued'|'running'|RunStatus;engine?:'playwright';approvedCases:BrowserCase[];progress:RunProgress;environmentUseUncertain?:boolean;codeFeedback?:Record<string,string>;gate?:true;
 };
 type Preparation=BrowserPreparation;
-/** Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. */
-type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string};
+/**
+ * Browser ownership on a target Perpetual does not host; retained when process cleanup is unconfirmed. groups are the
+ * process groups its workers lead and pending counts the worker starts saved before their groups were, so a restart can
+ * prove the operation's workers gone; an older record without groups never proves it.
+ */
+type ExternalOperation={id:string;scope:string;operation:'run'|'discover'|'generate';startedAt:string;cleanupIncomplete?:true;workspace?:string;groups?:number[];pending?:number};
 type BrowserState={
   version:1;configs:Record<string,BrowserConfig>;cases:Record<string,BrowserCase[]>;analyses:Record<string,Analysis>;runs:BrowserRun[];
   preparations:Record<string,Preparation>;preparationAttempts:Record<string,true>;configTargets:Record<string,{environmentId:string;url:string;applicationId?:string;signInPath?:string;suspendedReads?:{applicationId?:string;requests:ReadOnlyRequest[]}}>;specs:Record<string,JourneyCodeState['specs']>;externalOperations:Record<string,ExternalOperation>;generationFailures:Record<string,JourneyCodeState['generationFailures']>;authoring:AuthoringHistory;
@@ -120,6 +124,13 @@ const active=(run:StoredRun)=>['queued','running'].includes(run.status);
 // Playwright names each tab's recording; a stage keeps the recordings of its latest runs, and the history the latest runs.
 const VIDEO_RUNS_PER_STAGE=5,HISTORY=50,videoName=/^page@[a-f0-9]{32}\.webm$/,runFolder=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const safeText=(value:unknown,limit:number)=>value?browserError(String(value),process.env,limit):'';
+// An external operation's workers: up to a run's 30 journeys, or a generation's seed and two harness runs.
+const MAX_WORKERS=64;
+const processGroup=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>1&&value<2**31;
+// A process group no longer exists once signalling it fails with ESRCH; any other answer, a permission error included, keeps it.
+const groupGone=(group:number)=>{try{process.kill(-group,0);return false;}catch(error){return (error as NodeJS.ErrnoException).code==='ESRCH';}};
+/** Whether every worker an external operation started is proven gone. Windows workers lead no process group, so they never are. */
+const workersGone=(operation:ExternalOperation)=>process.platform!=='win32'&&Array.isArray(operation.groups)&&!operation.pending&&operation.groups.every(groupGone);
 const touch=(run:BrowserRun)=>{run.progress.revision=(run.progress.revision||0)+1;};
 const settleSteps=(progress:{steps?:StepProgress[]},status:string)=>{for(const step of progress.steps||[])if(step.status==='running')step.status=['skipped','cancelled'].includes(status)?status:'unconfirmed';};
 const actionErrorCodes:ReadonlySet<string>=new Set(['action_not_allowed','navigation_not_allowed','attachments_not_allowed','credential_literal_rejected','credential_reference_invalid','credential_origin_mismatch','credential_field_unavailable','credential_target_mismatch','credential_frame_mismatch','credential_field_type_mismatch','credential_verification_failed','browser_action_failed','action_result_missing','journey_progress_invalid']);
@@ -310,13 +321,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   if(!isRecord(external)||Object.entries(external).some(([origin,item])=>{
     if(!isRecord(item)||typeof item.id!=='string'||typeof item.scope!=='string'||typeof item.startedAt!=='string'||typeof item.operation!=='string'||!['run','discover','generate'].includes(item.operation)||item.cleanupIncomplete!==undefined&&item.cleanupIncomplete!==true)return true;
     try{if(externalOrigin(origin)!==origin)return true;}catch{return true;}
+    if(item.groups!==undefined&&(!Array.isArray(item.groups)||item.groups.length>MAX_WORKERS||!item.groups.every(processGroup)))return true;
+    if(item.pending!==undefined&&(typeof item.pending!=='number'||!Number.isSafeInteger(item.pending)||item.pending<0||item.pending>MAX_WORKERS))return true;
     return item.workspace!==undefined&&(typeof item.workspace!=='string'||!runFolder.test(item.workspace));
   }))throw new Error('Unsupported external browser ownership state.');
   state.externalOperations=external as Record<string,ExternalOperation>;
-  // A restart cannot prove that the previous controller's processes exited. Preserve their hold and workspace.
-  for(const operation of Object.values(state.externalOperations))operation.cleanupIncomplete=true;
-  const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
-  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   // Add current draft defaults without rewriting immutable historical approvals.
   for(const [scope,cases] of Object.entries(state.cases))state.cases[scope]=validateBrowserCases(cases,{draft:true});
   const failures:unknown=state.generationFailures??{};
@@ -389,7 +398,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   function persist(project:()=>BrowserState=()=>state,commit=()=>{}):Promise<void>{return saves.run(async()=>{const projected=project(),authoring=retainAuthoring(projected.authoring??{},projected.cases);const content=JSON.stringify({...projected,authoring});if(Buffer.byteLength(content)>16*1024*1024)throw new Error('Browser metadata storage is full.');await writeStateFile(file,content);commit();state.authoring=authoring;});}
   const externalLeases=new Set<string>();
-  const externalCleanup='Browser cleanup for this application is unconfirmed. Stop the remaining browser processes and confirm cleanup before using this URL again.';
+  const externalCleanup='Browser cleanup for this application is unconfirmed. Stop its remaining browser processes, then choose Cleanup done.';
   function takeTarget(context:BrowserStageContext,url:string,environmentId:string|null|undefined,operation:string){
     const origin=externalOrigin(url);
     // An earlier external operation may still be acting on an origin that a newly owned twin now uses.
@@ -404,10 +413,50 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
   }
   async function beginExternal(context:BrowserStageContext,url:string,environment:TargetEnvironment|null|undefined,operation:ExternalOperation['operation'],workspace?:string){
     if(environment)return null;
-    const origin=externalOrigin(url),entry:ExternalOperation={id:randomUUID(),scope:scopeId(context),operation,startedAt:now(),...(workspace?{workspace:basename(workspace)}:{})};
+    const origin=externalOrigin(url),entry:ExternalOperation={id:randomUUID(),scope:scopeId(context),operation,startedAt:now(),groups:[],...(workspace?{workspace:basename(workspace)}:{})};
     await persist(()=>({...state,externalOperations:{...state.externalOperations,[origin]:entry}}),()=>{state.externalOperations[origin]=entry;});
     return {origin,entry};
   }
+  /**
+   * Records an external operation's workers as they start: each start is saved as pending before the worker starts, then
+   * the process group it leads, so a restart can tell whether the operation's workers are gone. A start that never reports
+   * a group stays pending, as does one whose group could not be saved, and either keeps the hold.
+   */
+  function workerOwner(owned:Awaited<ReturnType<typeof beginExternal>>):WorkerOwner|undefined{
+    if(!owned)return undefined;
+    const {entry}=owned;
+    return {async claim(){
+      entry.pending=(entry.pending??0)+1;
+      try{await persist();}catch(error){entry.pending-=1;throw error;}
+      let settled=false;
+      const settle=(group?:number)=>{
+        if(settled)return;settled=true;
+        entry.pending=Math.max(0,(entry.pending??1)-1);if(group!==undefined)entry.groups=[...entry.groups??[],group];
+        persist().catch(()=>{});
+      };
+      return {started:group=>settle(group),release:()=>settle()};
+    }};
+  }
+  // The stage's application as external operations hold it, or null without a valid application URL.
+  const applicationOf=(scope:string)=>{try{const target=state.configs[scope]?.targetUrl;return target?externalOrigin(target):null;}catch{return null;}};
+  // What holds the stage's application while no operation of this controller does: an unconfirmed cleanup, or a hold an
+  // earlier controller left.
+  function cleanupHold(scope:string){const origin=applicationOf(scope),held=origin?state.externalOperations[origin]:undefined;return origin&&held&&!externalLeases.has(origin)?{origin,held}:null;}
+  /**
+   * A person confirms that the browser processes an operation left on the stage's application are stopped: its hold goes,
+   * and a generation's retained workspace with it. An operation still in progress keeps its application.
+   */
+  function confirmCleanup(context:BrowserStageContext){return admit(async():Promise<BrowserCleanupReply>=>{
+    const scope=scopeId(context),application=applicationOf(scope);
+    if(application&&externalLeases.has(application))throw conflict('This application has a browser operation in progress.');
+    const hold=cleanupHold(scope);
+    if(!hold)throw Object.assign(new Error('No browser cleanup is waiting for confirmation.'),{statusCode:404});
+    const {origin,held}=hold;
+    await persist(()=>({...state,externalOperations:Object.fromEntries(Object.entries(state.externalOperations).filter(([key])=>key!==origin))}),()=>{delete state.externalOperations[origin];});
+    // A workspace that cannot be removed now goes at the next start, as nothing retains it any more.
+    if(held.workspace)await rm(join(generationRoot,held.workspace),{recursive:true,force:true}).catch(()=>{});
+    return {cleanup:null};
+  });}
   async function finishExternal(owned:Awaited<ReturnType<typeof beginExternal>>,uncertain=false){
     if(!owned||state.externalOperations[owned.origin]?.id!==owned.entry.id)return;
     if(uncertain){owned.entry.cleanupIncomplete=true;await persist();return;}
@@ -432,6 +481,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     }
     if(run.progress)touch(run);
   }
+  // A restart keeps an external operation's hold and workspace unless every worker it started is proven gone: each start
+  // was saved before the worker started, then with the process group it leads, and none of those groups exists any more.
+  for(const [origin,operation] of Object.entries(state.externalOperations)){if(workersGone(operation))delete state.externalOperations[origin];else operation.cleanupIncomplete=true;}
+  const retainedWorkspaces=new Set(Object.values(state.externalOperations).map(operation=>operation.workspace));
+  await Promise.all((await readdir(generationRoot)).filter(name=>runFolder.test(name)&&!retainedWorkspaces.has(name)).map(name=>rm(join(generationRoot,name),{recursive:true,force:true})));
   for(const preparation of Object.values(state.preparations))if(['preparing','discovering'].includes(preparation.status))Object.assign(preparation,{status:'failed',error:'The controller stopped while preparing integration tests. Discover cases to try again.',completedAt:now()});
   // Also removes folders left by a crash or by runs past the history limit.
   await pruneVideos();
@@ -590,7 +644,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
         external=await beginExternal(context,config.targetUrl,environment,'generate',workspace.path);
         const reasoning=await modelCatalog.generationReasoning(configuration.model);
         // The seed signs in first with the runtime that runs journeys, on the stage's sign-in page when one is set.
-        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,apiKey:configuration.apiKey,model:configuration.model,reasoning,feedback,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
+        const job=generateJourneySpec({...generation,workspace:workspace.path,item:snapshot,targetUrl:config.targetUrl,allowedOrigins:[...new Set(origins)],timeoutSeconds:config.journeyTimeoutSeconds,credentials,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),playwright,owner:workerOwner(external),apiKey:configuration.apiKey,model:configuration.model,reasoning,feedback,onStep:(step:string)=>{if(!entry.cancelled)entry.step=step;}});
         entry.cancel=()=>{entry.cancelled=true;entry.step='cancelling';job.cancel();};
         if(entry.cancelled)job.cancel();
         const generated=await job.promise;
@@ -783,6 +837,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
       if(closed)throw conflict('The controller is shutting down.');
       if(options.isCurrent&&!options.isCurrent())throw conflict('The active source changed. Open this source and discover cases to continue.');
       external=await beginExternal(context,config.targetUrl,environment,mode);
+      const owner=workerOwner(external);
       const progressCases:CaseProgress[]=mode==='discover'?[{id:'discovery',caseId:'discovery',name:'Explore application',status:'pending',actions:[],actionCount:0}]:cases.map(c=>({id:c.id,caseId:c.id,name:c.name,status:'queued',actions:[],actionCount:0,steps:c.steps.map(({id,title})=>({id,title,status:'pending'}))}));
       const run:BrowserRun={id:randomUUID(),scope,stageId:context.stageId,mode,status:'queued',createdAt:now(),targetUrl:config.targetUrl,sourceRevision:context.scan.repo.sha||null,caseIds:cases.map(c=>c.id),approvedCases:structuredClone(cases),progress:{revision:0,cases:progressCases},...(concurrency!==undefined?{engine:'playwright',concurrency,...journeyConcurrency({cases:coded,concurrency,account:!!credentials}),specHashes:Object.fromEntries(coded.map((item):[string,string]=>[item.id,codes[item.id].hash!]))}:{})};
       if(environment)run.environmentId=environment.id;
@@ -909,7 +964,8 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 const {code,hash,checkVersion}=codes[item.id] as {code:string;hash:string;checkVersion:number};
                 // A control run blocks every state-changing request, so a reviewed check of a journey that keeps something fails.
                 // The account signs in on the sign-in page when the application URL shows no sign-in form.
-                const job=playwright.start({...workerInput,case:item,spec:{code,hash},checkVersion,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),...(videoDir?{videoDir}:{}),...(run.verification?.control?{blockWrites:true}:{})},onEvent);
+                // An external application's journey starts once its start is recorded.
+                const job=ownedStart(owner,options=>playwright.start({...workerInput,case:item,spec:{code,hash},checkVersion,...(config.signInUrl?{signInUrl:config.signInUrl}:{}),...(videoDir?{videoDir}:{}),...(run.verification?.control?{blockWrites:true}:{})},onEvent,options));
                 return {cancel:()=>job.cancel(),promise:job.promise.then(()=>{
                   assertCurrent();if(!facts)throw new Error('Browser runtime did not return results.');
                   return journeyResult(item,facts,steps());
@@ -935,7 +991,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
             // Every journey has a result row by now.
             run.status=runStatus(run.results!,run.caseIds);
           }else{
-            const job=runtime!.start(workerInput,event=>{
+            const job=ownedStart(owner,options=>runtime!.start(workerInput,event=>{
               if(event.type==='discovery'){
                 if(discovery)throw new Error('Browser runtime returned unexpected discovery.');
                 // A journey the controller cannot accept is named in the summary; the valid ones are kept.
@@ -955,7 +1011,7 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
                 if(page&&stored?.targetUrl===config.targetUrl&&!stored.signInUrl)state.configs[scope]={...stored,signInUrl:page};
               }
               else progressEvent(event,'discovery');
-            });
+            },options));
             entry.cancel=()=>job.cancel();if(entry.cancelled)job.cancel();
             await job.promise;
             if(entry.cancelled)throw new Error('Browser operation cancelled.');
@@ -1137,7 +1193,11 @@ export async function createBrowserManager({dataDir,runtime,playwright=createPla
     interruptedEnvironmentIds:()=>[...new Set(state.runs.filter((run):run is BrowserRun&{environmentId:string}=>Boolean(run.environmentUseUncertain&&run.environmentId)).map(run=>run.environmentId))],
     draft:(...args:Parameters<typeof draft>)=>admit(()=>draft(...args)),transcribe:(...args:Parameters<typeof transcribe>)=>admit(()=>transcribe(...args)),
     hasPendingInput:()=>inputJobs.size>0,
-    async view(context:BrowserStageContext):Promise<BrowserViewReply>{const scope=scopeId(context);return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities()};},
+    async view(context:BrowserStageContext):Promise<BrowserViewReply>{
+      const scope=scopeId(context),held=cleanupHold(scope)?.held,cleanup:BrowserCleanupHold|null=held?{operation:held.operation,startedAt:held.startedAt}:null;
+      return {config:publicConfig(scope),cases:structuredClone(state.cases[scope]||[]),specs:specView(scope),runs:state.runs.filter(r=>r.scope===scope).slice(0,30).map(publicRun),preparation:structuredClone(state.preparations[scope]||null),analysis:structuredClone(state.analyses[scope]||null),accounts:targetAccounts(state.configs[scope]?.targetUrl),capabilities:await capabilities(),...(cleanup?{cleanup}:{})};
+    },
+    confirmCleanup,
     saveModel(context:BrowserStageContext,input:unknown){return admit(()=>{requireIdle(context);return updateModel(()=>modelSettings.save(input));});},
     async saveConfig(context:BrowserStageContext,config:unknown){
       requireIdle(context);const normalized=normalizedConfig(config,context),scope=scopeId(context),target=state.configTargets[scope];

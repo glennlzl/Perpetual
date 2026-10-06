@@ -18,14 +18,22 @@ export type WorkerError=Error&{cleanupIncomplete?:true;timedOut?:true};
 export type WorkerJob<T=void>={promise:Promise<T>;cancel():void};
 /** Supervisor-owned facts; child diagnostics use a separate, untrusted callback. Neither carries error text. */
 export type WorkerLifecycle={name:'worker-start'|'worker-stop'|'worker-signal'|'worker-exit'|'worker-close'|'worker-done'|'worker-diagnostic-truncated';reason?:'cancel'|'deadline'|'protocol'|'consumer'|'descendants';signal?:string;code?:number;failed?:boolean;cleanupIncomplete?:boolean;timedOut?:boolean};
-export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];errorSecrets?:unknown[];unavailable?:string;groupOnly?:boolean;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
+export type SuperviseWorkerOptions={command:string;args:string[];cwd?:string;env:NodeJS.ProcessEnv;stdin?:string;timeoutMs:number;cleanupGraceMs?:number;settleMs?:number;stopSignal?:NodeJS.Signals;secrets?:unknown[];errorSecrets?:unknown[];unavailable?:string;groupOnly?:boolean;onGroup?:(group:number)=>void;onLifecycle?:(event:WorkerLifecycle)=>void;onDiagnostic?:(event:unknown)=>void}
   // A worker speaks the event protocol, or only prints output.
   &({onEvent:(event:WorkerEvent)=>void;onOutput?:undefined}|{onOutput:(chunk:string,stream:WorkerStream)=>void;onEvent?:undefined});
 /** What a browser worker reads on its stdin: its mode and that mode's inputs. */
 export type BrowserWorkerInput={mode:string;timeoutSeconds?:number;credentials?:unknown;[key:string]:unknown};
 type Preflight={runtimeInstalled:boolean;browserInstalled:boolean};
 export type BrowserCapabilities={runtimeInstalled:boolean;browserInstalled:boolean;modelConfigured:boolean;modelError?:string;runtimeProject?:string};
-export type WorkerStartOptions={timeoutMs?:number;cleanupGraceMs?:number};
+/** onGroup is told the process group a started worker leads. */
+export type WorkerStartOptions={timeoutMs?:number;cleanupGraceMs?:number;onGroup?:(group:number)=>void};
+/**
+ * A worker an operation is about to start: started records the process group it leads, and release says that no worker
+ * started after all. A claim neither started nor released stays open, since a worker may have started.
+ */
+export type WorkerClaim={started(group:number):void;release():void};
+/** Records each worker an operation starts before it starts: claim() resolves once the start is recorded. */
+export type WorkerOwner={claim():Promise<WorkerClaim>};
 export type BrowserRuntime={capabilities():Promise<BrowserCapabilities>;start(input:BrowserWorkerInput,onEvent:(event:WorkerEvent)=>void,options?:WorkerStartOptions):WorkerJob};
 
 const isRecord=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==='object'&&!Array.isArray(value);
@@ -79,15 +87,33 @@ export function workerTimeoutMs({mode,timeoutSeconds}:{mode?:string;timeoutSecon
 }
 
 /**
+ * Starts a worker once its owner has recorded the start, and tells the owner the process group the worker leads, so the
+ * owner can tell later whether it is gone; without an owner it starts at once. Cancelled before then, it starts nothing.
+ */
+export function ownedStart<T>(owner:WorkerOwner|undefined,start:(options:Pick<WorkerStartOptions,'onGroup'>)=>WorkerJob<T>):WorkerJob<T>{
+  if(!owner)return start({});
+  let job:WorkerJob<T>|null=null,cancelled=false;
+  const promise=owner.claim().then(claim=>{
+    if(cancelled){claim.release();throw new Error('Browser operation cancelled.');}
+    // A start that throws at once started no worker, unless it already reported one.
+    try{job=start({onGroup:claim.started});}catch(error){claim.release();throw error;}
+    return job.promise;
+  });
+  return {promise,cancel(){cancelled=true;job?.cancel();}};
+}
+
+/**
  * Runs one owned worker process that speaks the browser worker contract: one JSON event per stdout line,
  * `error` events carrying the terminal error, and a zero exit once its work is reported. The worker's
  * process group is joined before completion: descendants still running settleMs after the worker exits count as
  * owned processes remaining. stopSignal asks it to clean up before the group is killed.
  * With onOutput, the process speaks no event protocol: its stdout and stderr chunks go to onOutput, and a zero exit completes it.
  * groupOnly says the process owns nothing but its group, so a forced kill leaves cleanup incomplete only while the group lives on.
+ * onGroup is told, as the worker starts, the process group it leads: its pid, as it starts detached.
  */
-export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],errorSecrets=[],unavailable='Browser runtime is unavailable.',groupOnly=false}:SuperviseWorkerOptions):WorkerJob {
+export function superviseWorker({command,args,cwd,env,stdin='',onEvent,onOutput,onGroup,onLifecycle,onDiagnostic,timeoutMs,cleanupGraceMs=40000,settleMs=0,stopSignal='SIGTERM',secrets=[],errorSecrets=[],unavailable='Browser runtime is unavailable.',groupOnly=false}:SuperviseWorkerOptions):WorkerJob {
   const child=spawn(command,args,{stdio:onDiagnostic?['pipe','pipe','pipe','pipe']:['pipe','pipe','pipe'],env,cwd,detached:process.platform!=='win32'}) as ChildProcessWithoutNullStreams;
+  if(child.pid&&process.platform!=='win32')try{onGroup?.(child.pid);}catch{/* Recording cannot interfere with supervision. */}
   const lifecycle=(event:WorkerLifecycle)=>{try{onLifecycle?.(event);}catch{/* Evidence cannot interfere with supervision. */}};
   lifecycle({name:'worker-start'});
   // A separate pipe cannot spend the business event budget or enter its secret-sensitive protocol parser.
@@ -193,7 +219,7 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
       // The check above has set preflight.
       const {modelConfigured,modelError}=modelConfiguration();return {...preflight!,modelConfigured,...(modelError?{modelError}:{}),...(python===`${base}.venv/bin/python`?{runtimeProject:base.replace(/\/$/,'')}:{})};
     },
-    start(input,onEvent,{timeoutMs=workerTimeoutMs(input),cleanupGraceMs=40000}={}) {
+    start(input,onEvent,{timeoutMs=workerTimeoutMs(input),cleanupGraceMs=40000,onGroup}={}) {
       // The agent discovers journeys; runs execute approved Playwright code instead (src/journeys/playwright).
       if(!['preflight','discover'].includes(input.mode))throw new Error('The browser agent only discovers journeys.');
       const credentials=validateRunCredentials(input.credentials);
@@ -202,7 +228,7 @@ export function createBrowserRuntime({python=process.env.PERPETUAL_BROWSER_PYTHO
       const configuration=modelConfiguration();
       if(input.mode!=='preflight'&&!configuration.modelConfigured)throw new Error(configuration.modelError);
       const env=childEnvironment(configuration);
-      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,timeoutMs,cleanupGraceMs,secrets:modelKeys(env.PERPETUAL_MODEL_API_KEY),unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
+      return superviseWorker({command:python,args:[runner],cwd:base,env,stdin:JSON.stringify(input),onEvent,onGroup,timeoutMs,cleanupGraceMs,secrets:modelKeys(env.PERPETUAL_MODEL_API_KEY),unavailable:'Browser runtime is unavailable. Install integrations/browser-use first.'});
     },
   };
   return runtime;

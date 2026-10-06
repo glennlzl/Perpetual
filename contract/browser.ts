@@ -87,6 +87,12 @@ export type JourneySpecs = Record<string, SpecSummary>;
 /** Code text is read separately for review, never in polling summaries. */
 export interface SpecCodeReply { authoring?: import('./authoring.ts').AuthoringRecord[]; approved?: { hash: string; code: string }; draft?: { hash: string; code: string } }
 export interface BrowserSummaryReply { cases: BrowserCase[]; specs: JourneySpecs; runs: RunSummary[]; preparation: BrowserPreparation | null }
+/** An unconfirmed browser cleanup holding the stage's application: the operation that left it and when it started. */
+export interface BrowserCleanupHold { operation: 'run' | 'discover' | 'generate'; startedAt: string }
+/** cleanup is present while an unconfirmed browser cleanup holds the stage's application. */
 export interface BrowserViewReply extends Omit<BrowserSummaryReply, 'runs'> {
   config: BrowserConfig; runs: PublicRun[]; analysis: BrowserAnalysis | null; accounts: EnvironmentAccount[]; capabilities: BrowserCapabilities;
+  cleanup?: BrowserCleanupHold;
 }
+/** POST /api/browser/cleanup: a person confirmed the cleanup, so it holds the stage's application no longer. */
+export interface BrowserCleanupReply { cleanup: null }

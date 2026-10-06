@@ -206,3 +206,30 @@ test('a journey cannot be edited while its code is generated, and can once gener
   await expect(ready.getByRole('dialog', { name: 'Edit test', exact: true })).toBeVisible();
   assert.deepEqual(fixture.pageErrors, []);
 });
+
+test('an unconfirmed browser cleanup offers Cleanup done, which asks first and then releases the application', { timeout: 60000 }, async t => {
+  const fixture = await journeyPanel(t);
+  fixture.controller.view = browserView({ cleanup: { operation: 'run', startedAt: '2026-10-01T00:00:00.000Z' } });
+  fixture.controller.reply = path => {
+    if (path !== '/api/browser/cleanup') return undefined;
+    fixture.controller.view = browserView();
+    return { json: { cleanup: null } };
+  };
+  const page = await fixture.open(t);
+  await expect(page.getByText('Cleanup unconfirmed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Cleanup done', exact: true }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog.getByRole('heading', { name: 'Confirm browser cleanup?' })).toBeVisible();
+  await expect(dialog.getByText('http://127.0.0.1:3000', { exact: true })).toBeVisible();
+  // Cancelling confirms nothing.
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  assert.deepEqual(fixture.controller.requests.filter(request => request.path === '/api/browser/cleanup'), []);
+  await page.getByRole('button', { name: 'Cleanup done', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Cleanup done', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText('Cleanup unconfirmed', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cleanup done', exact: true })).toHaveCount(0);
+  assert.deepEqual(fixture.controller.requests.filter(request => request.path === '/api/browser/cleanup').map(request => [request.input.repoPath, request.input.stageId]), [['/acme/app', 'beta']]);
+  assert.deepEqual(fixture.pageErrors, []);
+});

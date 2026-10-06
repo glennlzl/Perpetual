@@ -11,7 +11,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { OPENCODE, createOpencodeRunner, fingerprint, opencodeEnvironment, opencodeRun, opencodeSettings, setupCommand, setupEnvironment, type Harness, type OpencodeRunner } from '../../agents/opencode.ts';
-import type { WorkerEvent, WorkerJob } from '../../browser/runtime.ts';
+import { ownedStart, type WorkerEvent, type WorkerJob, type WorkerOwner, type WorkerStartOptions } from '../../browser/runtime.ts';
 import type { RunCredentials } from '../../browser/run-credentials.ts';
 import { RUN, SIGN_IN_ACTION, checkTemplate, readsRunData, type ApprovedCase, type Check, type JourneyStep } from './checks.ts';
 import { PLAYWRIGHT_CLI, PLAYWRIGHT_VERSION, createPlaywrightRuntime, journeyEnvironment, writeJourneyWorkspace, type JourneyRunInput } from './runtime.ts';
@@ -23,10 +23,11 @@ export type GenerationCase = ApprovedCase & { steps: JourneyStep[] };
 export type { Harness };
 export type GenerationStep = 'preparing' | 'generating' | 'repairing';
 /** What runs the seed once before the generator starts: the Playwright runtime that runs journeys. */
-export type SeedRuntime = { start(input: JourneyRunInput, onEvent: (event: WorkerEvent) => void): WorkerJob<unknown> };
+export type SeedRuntime = { start(input: JourneyRunInput, onEvent: (event: WorkerEvent) => void, options?: Pick<WorkerStartOptions, 'onGroup'>): WorkerJob<unknown> };
+/** owner records each worker the generation starts, the seed's and the harness's, before it starts. */
 export type GenerationOptions = {
   workspace: string; item: GenerationCase; targetUrl: string; allowedOrigins?: string[]; timeoutSeconds: number;
-  credentials?: RunCredentials; signInUrl?: string; apiKey: string; model: string; harness?: Harness; playwright?: SeedRuntime;
+  credentials?: RunCredentials; signInUrl?: string; apiKey: string; model: string; harness?: Harness; playwright?: SeedRuntime; owner?: WorkerOwner;
   reasoning?: { effort: 'medium' };
   feedback?: { error: string; previousErrors?: string[] };
   env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv); timeoutMs?: number; cleanupGraceMs?: number; onStep?: (step: GenerationStep) => void;
@@ -242,14 +243,14 @@ async function prepare({ project, run, home, item, targetUrl, timeoutSeconds, mo
  * The fixture says why; a seed that stopped before its sign-in began, as when the application does not load, says the
  * application could not be opened instead.
  */
-async function seedSignsIn(playwright: SeedRuntime, input: Pick<JourneyRunInput, 'case' | 'spec' | 'targetUrl' | 'timeoutSeconds' | 'allowedOrigins' | 'credentials' | 'signInUrl'>, signal: AbortSignal) {
+async function seedSignsIn(playwright: SeedRuntime, input: Pick<JourneyRunInput, 'case' | 'spec' | 'targetUrl' | 'timeoutSeconds' | 'allowedOrigins' | 'credentials' | 'signInUrl'>, signal: AbortSignal, owner?: WorkerOwner) {
   if (signal.aborted) throw new Error(CANCELLED);
   let facts: unknown = null, signing = false;
-  const job = playwright.start({ mode: 'run', ...input }, event => {
+  const job = ownedStart(owner, options => playwright.start({ mode: 'run', ...input }, event => {
     if (event.type === 'result') facts = event.result;
     // The reporter lists journey.signIn() as an action once it starts.
     else if (event.type === 'case' && Array.isArray(event.actions)) signing ||= event.actions.some(action => record(action)?.type === SIGN_IN_ACTION);
-  });
+  }, options));
   const cancel = () => job.cancel();
   signal.addEventListener('abort', cancel, { once: true });
   // A cancelled seed still reports a browser that outlived it, so its twin is marked uncertain, as the generator's is.
@@ -297,7 +298,7 @@ async function readSpec(project: string, item: GenerationCase, since: number): P
  * Resolves { code, provenance } with code validateJourneySpec accepts; invalid output gets one repair with its
  * validation error. Missing output stops: another exploration cannot grammar-repair code that was never written.
  */
-export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins, timeoutSeconds, credentials, signInUrl, apiKey, model, reasoning, feedback, harness = opencodeHarness, playwright = createPlaywrightRuntime(), env = process.env, timeoutMs = 10 * 60 * 1000, cleanupGraceMs = 15000, onStep = () => {} }: GenerationOptions): WorkerJob<GeneratedSpec> {
+export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins, timeoutSeconds, credentials, signInUrl, apiKey, model, reasoning, feedback, harness = opencodeHarness, playwright = createPlaywrightRuntime(), owner, env = process.env, timeoutMs = 10 * 60 * 1000, cleanupGraceMs = 15000, onStep = () => {} }: GenerationOptions): WorkerJob<GeneratedSpec> {
   const abort = new AbortController(), secrets = [apiKey, credentials?.password, credentials?.username];
   const started = Date.now(), attempts: AuthoringRecord['attempts'] = [];
   const provenance = { harness: OPENCODE, generator: `${GENERATOR_AGENT}@${PLAYWRIGHT_VERSION}`, model: redact(hide(secrets)(`openrouter/${model}`)) };
@@ -316,14 +317,14 @@ export function generateJourneySpec({ workspace, item, targetUrl, allowedOrigins
     const { seed, kept } = await prepare({ project, run, home, item, targetUrl, timeoutSeconds, model, reasoning, feedback: previous, signIn, values, userHome, signal: abort.signal });
     const intact = async () => { if (!isDeepStrictEqual(await fingerprint(Object.keys(kept)).catch(() => null), kept)) throw new Error('The code generation workspace changed.'); };
     // With or without an account, an application that does not open stops here, before any model call.
-    await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, ...(credentials ? { credentials } : {}), ...(signInUrl ? { signInUrl } : {}) }, abort.signal);
+    await seedSignsIn(playwright, { case: item, spec: { code: seed, hash: specHash(seed) }, targetUrl, allowedOrigins, timeoutSeconds, ...(credentials ? { credentials } : {}), ...(signInUrl ? { signInUrl } : {}) }, abort.signal, owner);
     const childEnv = {
       // The seed runs as a journey does, without reporting: its hash is the one the fixture accepts.
       ...journeyEnvironment(values, run, { hash: specHash(seed), targetUrl, allowedOrigins, credentials, signInUrl, events: false }),
       ...opencodeEnvironment(values, { home, userHome, apiKey }),
     };
     if (abort.signal.aborted) throw new Error(CANCELLED);
-    const agent = runner = createOpencodeRunner({ harness, model, cwd: project, env: childEnv, secrets, timeoutMs, cleanupGraceMs, settleMs: SETTLE_MS, messages: MESSAGES, structuredOutput: harness === opencodeHarness });
+    const agent = runner = createOpencodeRunner({ harness, model, cwd: project, env: childEnv, secrets, timeoutMs, cleanupGraceMs, settleMs: SETTLE_MS, messages: MESSAGES, structuredOutput: harness === opencodeHarness, owner });
     onStep('generating');
     let since = Date.now();
     const author = async (prompt: string, phase: 'generation' | 'grammar-repair') => {
