@@ -63,7 +63,7 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; noPipe
       else {
         state.source = { ...state.source, ...selection };
         state.scan.repo = { ...state.scan.repo, name: selection.repository.split('/')[1], remote: `https://github.com/${selection.repository}.git`, branch: selection.branch };
-        state.pipeline = { ...defaultPipeline(repoPath), id: 'pipeline:12345678-1234-1234-1234-123456789abc' };
+        state.pipeline = { ...defaultPipeline(repoPath), id: 'pipeline:12345678-1234-1234-1234-123456789abc', productionBranch: selection.branch };
         state.pipelineId = state.pipeline.id!; state.pipelineRemoval = null;
         json = { scan: state.scan, source: state.source, pipeline: state.pipeline, pipelineId: state.pipelineId };
       }
@@ -84,10 +84,14 @@ test('Create pipeline asks a connected account to select its repository before c
   await expect(form.getByRole('button', { name: 'Create pipeline', exact: true })).toBeDisabled();
   assert.deepEqual(posts, []); assert.equal(structuredClone(state).pipeline, null);
   await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/other' }).click();
-  await expect(form.getByRole('combobox', { name: 'Branch', exact: true })).toHaveText('main');
+  const productionBranch = form.getByRole('combobox', { name: 'Production branch', exact: true });
+  await expect(productionBranch).toHaveText('main');
+  await productionBranch.click(); await page.getByRole('option', { name: 'dev', exact: true }).click();
   await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await expect(form).toHaveCount(0); await expect(page.getByRole('link', { name: 'acme/other', exact: true })).toHaveAttribute('href', 'https://github.com/acme/other');
-  assert.equal(state.source.repository, 'acme/other'); assert.equal(state.pipeline?.productionBranch, undefined);
+  assert.equal(state.source.repository, 'acme/other'); assert.equal(state.source.branch, 'dev'); assert.equal(state.pipeline?.productionBranch, 'dev');
+  await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('dev');
+  await page.reload(); await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('dev');
   assert.deepEqual(posts, ['/api/source/github']); assert.deepEqual(errors, []);
 });
 
@@ -107,6 +111,7 @@ test('Create pipeline connects GitHub first, continues to repository selection, 
   await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/app' }).click();
   await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('main');
   assert.deepEqual(posts, ['/api/github/connect', '/api/source/github']); assert.deepEqual(errors, []);
 });
 

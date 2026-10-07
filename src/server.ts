@@ -819,7 +819,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
             const saved=pipelines[key]??pipelines[typedKey];
             const removed=current.removedPipelines?.some(item=>item===key||item===typedKey);
             if(input.createPipeline&&saved&&!removed)throw conflict('This project already has a pipeline. Choose another repository or root directory.');
-            const pipeline=input.createPipeline?{...defaultPipeline(scan.repo.path),id:`pipeline:${randomUUID()}`}
+            const pipeline=input.createPipeline?{...defaultPipeline(scan.repo.path),id:`pipeline:${randomUUID()}`,productionBranch:prepared.branch}
               :removed?null:normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
             const removedPipelines=input.createPipeline?(current.removedPipelines??[]).filter(item=>item!==key&&item!==typedKey):current.removedPipelines;
             if(pipeline)pipelines[key]=pipeline;

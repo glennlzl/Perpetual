@@ -356,9 +356,9 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
 
     <Section>
       <div className="grid gap-2">
-        <Label htmlFor="source-branch">Branch</Label>
+        <Label htmlFor="source-branch">{creating ? 'Production branch' : 'Branch'}</Label>
         <Select value={branch} disabled={disableFields || !repository || branchesLoading && !branches.length} onValueChange={value => { if (value) setBranch(value); }}>
-          <SelectTrigger ref={branchTrigger} id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
+          <SelectTrigger ref={branchTrigger} id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : creating ? 'Select production branch' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
           <SelectContent position="popper" align="start" collisionPadding={16} className={selectListClass}>
             <BranchOptions names={[savedBranch, ...branches.map(item => item.name)]} pinned={[branch, savedBranch, defaultBranch]} defaultBranch={defaultBranch} localBranch={savedLocalOnly ? savedBranch : ''} labelClassName="min-w-0 whitespace-normal [overflow-wrap:anywhere]" />
           </SelectContent>
