@@ -18,7 +18,7 @@ async function repository(t: TestContext) {
   await mkdir(path);
   await git('init', '--quiet', '--initial-branch', 'main');
   const commit = async (message: string) => { await git('commit', '--quiet', '--allow-empty', '-m', message); return git('rev-parse', 'HEAD'); };
-  const read = (options: { scope?: string; limit?: number } = {}) => readGitHistory({ repo: { path, remote: 'https://github.com/acme/app.git', name: 'app' } }, options);
+  const read = (options: { scope?: string; limit?: number; cursor?: string | null } = {}) => readGitHistory({ repo: { path, remote: 'https://github.com/acme/app.git', name: 'app' } }, options);
   return { dir, path, git, commit, read };
 }
 const byHash = (history: GitHistory) => Object.fromEntries(history.commits.map(commit => [commit.hash, commit]));
@@ -70,6 +70,39 @@ test('an empty repository has no commits, and a longer history stops at its limi
   const first = await repo.read({ scope: 'current' }), all = await repo.read({ scope: 'current', limit: 200 });
   assert.deepEqual([first.commits.length, first.hasMore, first.commits[0].message, all.commits.length, all.hasMore], [100, true, '100', 101, false]);
   await assert.rejects(repo.read({ limit: 99 }), /history limit between 100 and 500/);
+});
+
+test('history pages pass 500 commits without gaps or duplicates when the branch advances', async t => {
+  const repo = await repository(t);
+  const stream = Array.from({ length: 601 }, (_, index) => `commit refs/heads/main\nmark :${index + 1}\ncommitter Perpetual <test@example.test> ${1_800_000_000 + index} +0000\ndata ${String(index).length}\n${index}\n${index ? `from :${index}\n` : ''}`).join('\n');
+  execFileSync('git', ['-C', repo.path, 'fast-import', '--quiet'], { input: stream });
+  let page = await repo.read({ scope: 'current' });
+  const commits = [...page.commits];
+  const newTip = await repo.commit('new push');
+  let pages = 1;
+  while (page.nextCursor) {
+    assert.ok(pages++ < 8, 'Pagination must terminate.');
+    page = await repo.read({ scope: 'current', cursor: page.nextCursor });
+    assert.ok(page.commits.length <= 100);
+    assert.deepEqual(commits.at(-1)?.parents, [page.commits[0].hash], 'The actual parent joins the next page.');
+    commits.push(...page.commits);
+  }
+  assert.equal(pages, 7);
+  assert.deepEqual(commits.map(commit => commit.message), Array.from({ length: 601 }, (_, i) => String(600 - i)));
+  assert.equal(new Set(commits.map(commit => commit.hash)).size, 601);
+  assert.equal(page.hasMore, false);
+  assert.equal(page.nextCursor, null);
+  assert.equal((await repo.read({ scope: 'current' })).commits[0].hash, newTip, 'A refresh follows the new tip.');
+});
+
+test('untrusted history cursors cannot become Git options or invalid offsets', async t => {
+  const repo = await repository(t);
+  const tip = await repo.commit('one');
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  for (const cursor of ['', '!invalid', 'a'.repeat(513), encode({ tip, skip: 100 }), encode(['--all', 100]), encode([tip, -1]), encode([tip, 1.5]), encode([tip, Number.MAX_SAFE_INTEGER + 1])]) {
+    await assert.rejects(repo.read({ scope: 'current', cursor }), /Invalid history page/);
+  }
+  await assert.rejects(repo.read({ scope: 'all', cursor: encode([tip, 100]) }), /History pages follow the current branch/);
 });
 
 test('a directory that is not a repository has no history to read', async t => {

@@ -854,6 +854,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           const history=await readGitHistory(scan,{
             scope:requestUrl.searchParams.get('scope')??'all',
             limit:Number(requestUrl.searchParams.get('limit')??100),
+            cursor:requestUrl.searchParams.get('cursor'),
             ...(sync ? {currentRef:`refs/remotes/origin/${source!.branch}`} : {}),
           });
           return {...history,...sync} satisfies GitHistory;

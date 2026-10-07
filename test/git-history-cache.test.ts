@@ -35,6 +35,24 @@ test('a failed preload is retried when the viewer opens history', async () => {
   assert.equal(reads, 2);
 });
 
+test('continuations are coalesced by cursor and cannot replace the first page', async () => {
+  const urls: string[] = [];
+  const continuation = { ...history('preview'), commits: [{ hash: 'b'.repeat(40), parents: [], author: { name: 'Example' }, date: '2026-01-01T00:00:00Z', message: 'Older commit' }] };
+  const cache = createGitHistoryCache('/acme/app', async path => {
+    urls.push(path);
+    return new URL(path, 'http://localhost').searchParams.has('cursor') ? continuation : history('preview');
+  });
+  await cache.load();
+  const pending = cache.load('current', 100, false, 'page-two');
+  assert.equal(cache.load('current', 100, false, 'page-two'), pending);
+  assert.equal(await pending, continuation);
+  assert.equal(new URL(urls[1], 'http://localhost').searchParams.get('cursor'), 'page-two');
+  assert.equal(cache.peek()?.commits.length, 0);
+  await cache.load('current', 100, true);
+  await cache.load('current', 100, false, 'page-two');
+  assert.equal(urls.length, 4, 'Refresh also invalidates continuation pages.');
+});
+
 test('a previous source finishing cannot populate a new source snapshot', async () => {
   const pending = Promise.withResolvers<GitHistory>();
   const old = createGitHistoryCache('/acme/app', () => pending.promise);

@@ -119,12 +119,25 @@ function readCommits(output: string): GitCommit[] {
   return commits;
 }
 
+function historyCursor(value: unknown): { tip: string; skip: number } | null {
+  if (value === null || value === undefined) return null;
+  try {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/.test(value)) throw new Error();
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== 'string' || !HASH.test(parsed[0])
+      || !Number.isSafeInteger(parsed[1]) || parsed[1] < 1) throw new Error();
+    return { tip: parsed[0], skip: parsed[1] };
+  } catch { throw new GitHistoryError('Invalid history page. Refresh history and try again.'); }
+}
+
 /** Read the connected checkout only. Never fetch, checkout, or execute its code. */
-export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remote' | 'name'> }, { scope = 'all', limit = 100, currentRef = null }: { scope?: string; limit?: number; currentRef?: string | null } = {}): Promise<GitHistory> {
+export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remote' | 'name'> }, { scope = 'all', limit = 100, currentRef = null, cursor = null }: { scope?: string; limit?: number; currentRef?: string | null; cursor?: string | null } = {}): Promise<GitHistory> {
   const root = scan?.repo?.path;
   if (typeof root !== 'string' || !isAbsolute(root) || root.includes('\0')) throw new GitHistoryError('Connect a local repository to view Git history.');
   if (!['all', 'current'].includes(scope)) throw new GitHistoryError('Choose all branches or the current branch.');
   if (!Number.isInteger(limit) || limit < 100 || limit > 500) throw new GitHistoryError('Choose a history limit between 100 and 500.');
+  const page = historyCursor(cursor);
+  if (page && scope !== 'current') throw new GitHistoryError('History pages follow the current branch.');
 
   // First establish that the trusted scan path still points to a Git repo.
   const shallowText = (await git(root, ['rev-parse', '--is-shallow-repository'])).trim();
@@ -148,7 +161,7 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   if (scope === 'current' && currentRef !== null && !currentReference) throw new GitHistoryError('The selected GitHub branch is unavailable. Choose another branch.');
   const localBranchCount = references.filter(ref => !ref.symbolic && ref.type === 'commit' && ref.name.startsWith('refs/heads/')).length;
   const remoteBranchCount = references.filter(ref => !ref.symbolic && ref.type === 'commit' && ref.name.startsWith('refs/remotes/')).length;
-  const tip = scope === 'current' ? currentReference?.hash || head : head;
+  const tip = page?.tip ?? (scope === 'current' ? currentReference?.hash || head : head);
   const tips = new Set(tip ? [tip] : []);
   if (scope === 'all') {
     for (const ref of references) {
@@ -157,7 +170,7 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
   }
   const logOutput = tips.size ? await git(root, [
     'log', '--topo-order', '--no-show-signature', '--no-decorate', '--no-notes', '--no-color',
-    `--max-count=${limit + 1}`, '-z', '--format=%H%x00%P%x00%an%x00%cI%x00%s',
+    `--max-count=${limit + 1}`, `--skip=${page?.skip ?? 0}`, '-z', '--format=%H%x00%P%x00%an%x00%cI%x00%s',
     ...tips, '--',
   ]) : '';
   const history = readCommits(logOutput);
@@ -185,6 +198,8 @@ export async function readGitHistory(scan: { repo: Pick<ScanRepo, 'path' | 'remo
     repository: parseGitHubRemote(scan.repo.remote) || scan.repo.name || null,
     refCount: localBranchCount + remoteBranchCount, localBranchCount, remoteBranchCount,
     shallow: shallowText === 'true', hasMore: history.length > limit, limit, scope,
+    ...(scope === 'current' ? { nextCursor: history.length > limit && tip
+      ? Buffer.from(JSON.stringify([tip, (page?.skip ?? 0) + commits.length])).toString('base64url') : null } : {}),
     readAt: new Date().toISOString(), source: 'local',
   };
 }
