@@ -161,6 +161,19 @@ test('configuration failures need a person with the reason, and never rerun or r
   assert.deepEqual([a.contexts.length, h.calls.reruns], [0, []]);
 });
 
+test('an HTTP client authorization refusal stops before any paid repair and reaches Build as actionable', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = 'Error: ExampleCloud GET /v6/deployments?projectId=project&limit=20: Not authorized';
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category, a.contexts.length, h.calls.reruns], ['needs-person', 'configuration', 0, []]);
+  const change = autopilotStages(h.manager.view(), 'build').build.changes[0];
+  assert.equal(change.status, 'needs-attention');
+  assert.match(change.reason ?? '', /Credentials or permissions need attention/);
+  assert.equal(change.steps.find(step => step.id === 'change')?.status, 'pending');
+});
+
 test('an availability failure reruns its failed jobs once, and a passing rerun is flaky, never silently green', async t => {
   const a = agent();
   const h = await harness(t, { steps: a.steps });

@@ -25,9 +25,9 @@ const words = (status: string) => status.replaceAll('-', ' ');
 type Names = (stageId: string) => string;
 
 // running while the manager works; merged; passed when the failure cleared without a change; a fix that waits for a
-// person is under review, and one that ended without a fix, or whose pull request is closed, is not merged.
+// person is under review with an open pull request, or needs attention without one. Other unsuccessful endings are not merged.
 const changeStatus = (repair: PublicRepair): ChangeStatus => repair.status === 'queued' ? 'queued' : ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' || repair.status === 'passed' ? 'passed'
-  : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
+  : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : repair.status === 'needs-person' ? 'needs-attention' : 'not-merged';
 
 // The step a repair is at: the ones before it are done, it is active or how the repair ended, the rest are pending. A
 // ready repair waits at Verify until the manager recorded its pull request's head verified, by CI and every journey

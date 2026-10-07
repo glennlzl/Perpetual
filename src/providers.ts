@@ -94,6 +94,9 @@ export function diagnoseFailure(log: unknown): FailureDiagnosis {
     // permission, a push the token may not make, GitHub refusing a token, git asking for or refusing credentials, gh,
     // curl or a registry answering 401 or 403, and a registry asking for authentication.
     [/Input required and not supplied: |Resource not accessible by (?:integration|personal access token)|\bPermission to \S+ denied to |HttpError\]?: Bad credentials|"message":\s*"Bad credentials"|Authentication failed for '|could not read Username for '|\bHTTP 40[13]\b|returned error: 40[13]\b|\b40[13] (?:Unauthorized|Forbidden)\b|\bcode E40[13]\b|\bENEEDAUTH\b/,'configuration',access],
+    // Some HTTP clients print the request and authorization error without a status code. Require the complete error
+    // line, method and resource so a test name, assertion or ordinary mention of unauthorized remains code.
+    [/^[ \t]*Error:[ \t]+(?:[\w.-]+[ \t]+)?(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)[ \t]+(?:https?:\/\/|\/)\S+:[ \t]+(?:Not authorized|Unauthorized|Forbidden)[.!]?[ \t]*$/m,'configuration',access],
     [/ERR_PNPM_OUTDATED_LOCKFILE|npm ci.*lock|lockfile.*(?:outdated|mismatch)/i,'dependency','Dependency manifest and lockfile disagree. Regenerate with the pinned package manager, then rerun the original build.'],
     [/error TS\d+|Type error:|Cannot find module/i,'build','Compilation or module resolution failed. Reproduce with the pinned toolchain and workspace root.'],
     [/\b(?:AssertionError(?: \[[^\]\r\n]+\])?|TestingLibraryElementError):/,'test-regression',assertion],

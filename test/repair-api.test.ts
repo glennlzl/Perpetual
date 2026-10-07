@@ -123,7 +123,7 @@ test('a person\'s Repair triages the failed head and, without an OpenRouter API 
   assert.deepEqual([change(started.body)?.status, change(started.body)?.title, change(started.body)?.kind, marks(change(started.body))], ['running', 'Fixing build', 'fix', [['Read the failure', 'active'], ['Diagnose', 'pending'], ['Change', 'pending'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual(change(started.body)?.steps[0].detail, [{ text: 'CI' }, ' failed at ', { text: 'cb9292c' }]);
   const settled = await f.until(f.ended);
-  assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['not-merged', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
+  assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['needs-attention', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual([change(settled)?.steps[1].detail, change(settled)?.steps[2].detail], [['The build does not compile.'], ['Add an OpenRouter API key in Settings.']]);
   assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
   // A view observes the terminal state before the background job's final atomic save settles.
@@ -247,7 +247,7 @@ test('a restored queue is visible and Resume is scoped to the active Build stage
   assert.equal(other.status, 409);
   const resumed = await f.post('/api/autopilot/resume', { repoPath: f.dir, stageId: 'build' });
   assert.equal(resumed.status, 200);
-  const result = change(await f.until(v => change(v)?.status === 'not-merged'));
+  const result = change(await f.until(v => change(v)?.status === 'needs-attention'));
   assert.equal(result?.reason, 'Add an OpenRouter API key in Settings.');
   assert.equal(result?.paused, undefined);
 });

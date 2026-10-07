@@ -13,9 +13,9 @@ export const MODE_CHOICES: Record<AutopilotMode, string> = { merge: 'Merge chang
 export const isAutopilotMode = (value: unknown): value is AutopilotMode => MODES.includes(value as AutopilotMode);
 
 export const STEP_LABELS: Record<StepStatus, string> = { pending: 'Not started', active: 'In progress', done: 'Done', failed: 'Failed', waiting: 'Waiting for review' };
-export const CHANGE_LABELS: Record<ChangeStatus, string> = { queued: 'Queued', running: 'Running', merged: 'Merged', passed: 'Passed', 'needs-review': 'Needs review', 'not-merged': 'Not merged' };
+export const CHANGE_LABELS: Record<ChangeStatus, string> = { queued: 'Queued', running: 'Running', merged: 'Merged', passed: 'Passed', 'needs-review': 'Needs review', 'needs-attention': 'Needs attention', 'not-merged': 'Not merged' };
 export type AutopilotTone = 'idle' | 'working' | 'passed' | 'failed' | 'blocked';
-const TONES: Record<ChangeStatus, AutopilotTone> = { queued: 'idle', running: 'working', merged: 'passed', passed: 'passed', 'needs-review': 'blocked', 'not-merged': 'failed' };
+const TONES: Record<ChangeStatus, AutopilotTone> = { queued: 'idle', running: 'working', merged: 'passed', passed: 'passed', 'needs-review': 'blocked', 'needs-attention': 'blocked', 'not-merged': 'failed' };
 
 export const changeActive = (change: Pick<AutopilotChange, 'status'> | null | undefined) => change?.status === 'running';
 export const stageActive = (stage: Pick<StageAutopilot, 'changes'> | null | undefined) => Boolean(stage?.changes?.some(changeActive));

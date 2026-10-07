@@ -53,7 +53,7 @@ Each change records the five steps the interface shows, with the facts each step
 | 4 | Verify | Verify | CI on the pull request, each journey gate's verdict at the head |
 | 5 | Merge | Merge | the pull request, target branch and merge commit, or why it waits |
 
-States: a change is `queued` while it waits without starting steps; `running` while the manager works; `merged`; `passed` when the failure cleared without a change, such as a rerun that passed; `needs-review` when it waits for a person with an open pull request (the mode is `ask`, a change rule held it, a gate did not pass, or protection refused the merge); `not-merged` when it ended without a fix, or its pull request is closed. The full mapping is in [Build repair](../repair.md#interface).
+States: a change is `queued` while it waits without starting steps; `running` while the manager works; `merged`; `passed` when the failure cleared without a change, such as a rerun that passed; `needs-review` when it waits for a person with an open pull request (the mode is `ask`, a change rule held it, a gate did not pass, or protection refused the merge); `needs-attention` when the controller needs a person without an open pull request, with its reason visible even while collapsed; `not-merged` when it otherwise ended without a fix, or its pull request is closed. The full mapping is in [Build repair](../repair.md#interface).
 
 Concurrency: one change per stage at a time. Observed commits arriving during active work enter the durable Build queue in FIFO order; a new head never aborts active work. Each queued commit's own CI is checked before repair starts, after the previous change and its cleanup finish. A restart pauses the saved queue until Resume queue; a head first seen at start is still a baseline that opens nothing by itself. Polling is not a complete push-event history.
 
@@ -89,7 +89,7 @@ Major version updates will take the `ask` path even where the journey gate passe
 
 ## Failure handling and limits
 
-- A controller restart ends a running change as `needs-person` with `Interrupted by a controller restart.`, keeps its branch and pull request, removes its box and directory, and reports it `Not merged`; nothing is retried on its own.
+- A controller restart ends a running change as `needs-person` with `Interrupted by a controller restart.`, keeps its branch and pull request, removes its box and directory, and reports it `Needs review` with an open pull request or `Needs attention` without one; nothing is retried on its own.
 - A box is removed when its change ends; a branch is never deleted while its pull request is open.
 - A repository without a GitHub connection, or a session without write access, records no changes; the first refused write ends the change with the message the gate uses for the same refusal.
 - Rate limits and network failures are tried again at the next poll; while CI runs, GitHub may stay unreadable for 15 minutes before the change ends.

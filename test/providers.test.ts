@@ -16,6 +16,18 @@ test('missing credentials are classified as configuration, not a code failure',(
   assert.equal(diagnoseFailure('Error: VERCEL_TOKEN is required').category,'configuration');
   assert.equal(diagnoseFailure('ERR_PNPM_OUTDATED_LOCKFILE').category,'dependency');
 });
+test('a provider HTTP client denied access needs a person even without an HTTP status code',async()=>{
+  for (const message of ['Not authorized', 'Unauthorized', 'Forbidden']) {
+    const log=`deploy\tPublish\t2026-09-25T10:14:01.0000000Z Error: ExampleCloud GET /v6/deployments?projectId=project&limit=20: ${message}`;
+    const run: CommandRunner=async(_file,args)=>({stdout:args[0]==='run'?log:'{"jobs":[]}'});
+    assert.equal((await getGitHubFailure({repository:'acme/app',runId:'1'},{run})).diagnosis.category,'configuration',message);
+  }
+});
+test('assertions and passing tests that mention a provider authorization error remain application code',()=>{
+  const message='Error: ExampleCloud GET /v6/deployments: Not authorized';
+  for(const log of [`AssertionError: ${message}`, `AssertionError: failed\nExpected: "${message}"`, `AssertionError: failed\nReceived: "${message}"`, `FAIL test/auth.test.ts > ${message}\nAssertionError: failed`, `✓ ${message}\nsrc/app.ts: error TS2322: wrong type`])
+    assert.notEqual(diagnoseFailure(log).category,'configuration',log);
+});
 test('a failed assertion about a 401 or 403 is the application\'s code, not the run\'s credentials',()=>{
   for(const log of ["AssertionError: expected '401 Unauthorized' to equal '200 OK'",'FAIL src/auth.test.ts > signs in\n    Expected: "403 Forbidden"\n    Received: "200 OK"'])
     assert.equal(diagnoseFailure(log).category,'test-regression',log);
