@@ -1,6 +1,6 @@
 import React, { lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { ReactFlow, ReactFlowProvider, Handle, Position, BaseEdge, MarkerType, getStraightPath, useNodesInitialized, useReactFlow, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps, type Viewport } from '@xyflow/react';
-import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
+import { Box, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleDot, CircleMinus, CirclePause, CircleX, ExternalLink, Eye, GitBranch, GitGraph, HeartPulse, LoaderCircle, Maximize, Moon, Pause, Pencil, Play, Plug, Plus, Settings2, Sun, Trash2, Workflow, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
 import { BaseNode, BaseNodeHeader, BaseNodeHeaderTitle } from '@/components/base-node';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -55,6 +55,7 @@ import type { PipelineRemovalReply, PipelineStateReply, SourceReply } from '../.
 import { githubRepositoryUrl } from '../../src/github-remote.ts';
 
 const AppSettings = lazy(() => import('./AppSettings'));
+const Connectors = lazy(() => import('./Connectors'));
 
 // The pipeline as GET /api/state reports it. Scans may predate the current discovery shape, so their fields are optional.
 export type ScanRepo = Pick<ScanReply['repo'], 'path'> & Partial<Omit<ScanReply['repo'], 'path'>>;
@@ -79,11 +80,11 @@ export type PipelineDialog = {
 };
 export type OpenDialog = (next: PipelineDialog | null) => void;
 export type SourceResult = Omit<SourceReply, 'scan' | 'pipeline'> & { scan: Scan; pipeline: PipelineView | null; environments?: PipelineStateReply['environments'] };
-type Page = 'pipelines' | 'pipeline' | 'settings';
+type Page = 'pipelines' | 'pipeline' | 'connectors' | 'settings';
 const initialPage = (): Page => {
   const query = new URLSearchParams(window.location.search);
   if (query.has('watch') || query.has('preview') || query.get('view') === 'environments') return 'pipeline';
-  return window.location.hash === '#settings' ? 'settings' : window.location.hash === '#pipeline' ? 'pipeline' : 'pipelines';
+  return window.location.hash === '#settings' ? 'settings' : window.location.hash === '#connectors' ? 'connectors' : window.location.hash === '#pipeline' ? 'pipeline' : 'pipelines';
 };
 /** The dialog Settings was opened from, handed back on return to the Pipeline. */
 type SettingsReturn = { dialog: PipelineDialog | null; newTest: string };
@@ -151,8 +152,13 @@ function AppSidebar({ theme, page, onNavigate }: { theme: Theme; page: Page; onN
       <SidebarGroup>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton isActive={page !== 'settings'} tooltip="Project" aria-current={page !== 'settings' ? 'page' : undefined} onClick={() => navigate('pipelines')}>
+            <SidebarMenuButton isActive={page === 'pipelines' || page === 'pipeline'} tooltip="Project" aria-current={page === 'pipelines' || page === 'pipeline' ? 'page' : undefined} onClick={() => navigate('pipelines')}>
               <Workflow /><span>Project</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton isActive={page === 'connectors'} tooltip="Connectors" aria-current={page === 'connectors' ? 'page' : undefined} onClick={() => navigate('connectors')}>
+              <Plug /><span>Connectors</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -691,7 +697,7 @@ function PipelineApp() {
   const [workspace, tests] = useTestWorkspace();
   const [page, setPage] = useState<Page>(initialPage);
   const pageRef = useRef(page), settingsReturn = useRef<SettingsReturn | null>(null);
-  useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : 'Project'}`; }, [page]);
+  useEffect(() => { document.title = `Perpetual — ${page === 'settings' ? 'Settings' : page === 'connectors' ? 'Connectors' : 'Project'}`; }, [page]);
   const [state, setState] = useState<PipelineState>({ scan: null, defaultRepo: '' });
   const pipeline = tests.pipeline;
   const [loading, setLoading] = useState(true);
@@ -815,7 +821,7 @@ function PipelineApp() {
     if (!loading && page === 'pipeline' && (!connected || state.scan && !pipeline || state.pipelineRemoval && state.pipelineRemoval.status !== 'completed')) navigate('pipelines');
   }, [loading, page, connected, pipeline, state.scan, state.pipelineRemoval, navigate]);
   useEffect(() => githubConnectionChanges.subscribe(change => {
-    if (change === 'disconnect') { closeDialog(); navigate('pipelines'); }
+    if (change === 'disconnect') { closeDialog(); if (pageRef.current === 'pipeline') navigate('pipelines'); }
     void api<PipelineState>('/api/state').then(fresh => {
       setState(fresh);
       if (change === 'connect' && fresh.scan && !currentDialog.current?.create) closeDialog();
@@ -974,12 +980,12 @@ function PipelineApp() {
               <BreadcrumbItem><BreadcrumbLink href="#pipelines" onClick={event => { event.preventDefault(); navigate('pipelines'); }}>Project</BreadcrumbLink></BreadcrumbItem>
               <BreadcrumbSeparator />
               <BreadcrumbItem className="min-w-0"><BreadcrumbPage className="max-w-64 truncate" title={projectName}>{projectName}</BreadcrumbPage></BreadcrumbItem>
-            </> : <BreadcrumbItem><BreadcrumbPage>{page === 'settings' ? 'Settings' : 'Project'}</BreadcrumbPage></BreadcrumbItem>}
+            </> : <BreadcrumbItem><BreadcrumbPage>{page === 'settings' ? 'Settings' : page === 'connectors' ? 'Connectors' : 'Project'}</BreadcrumbPage></BreadcrumbItem>}
           </BreadcrumbList></Breadcrumb>
         </div>
         <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button>
       </header>
-      {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
+      {page === 'connectors' ? <DeferredView fallback={failed => <main className="min-h-0 flex-1 overflow-y-auto px-10 py-8" id="connectors"><div className="mx-auto max-w-5xl"><ViewLoadState failed={failed} /></div></main>}><Connectors connectionRevision={JSON.stringify(state.githubConnection ?? null)} /></DeferredView> : page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
         {loading ? <PipelineLoading /> : page === 'pipelines' && state.scan ? <Pipelines key={state.scan.repo.path} pipeline={pipeline} repository={state.source?.repository || state.scan.repo.name || ''} repositoryUrl={githubRepositoryUrl(state.scan.repo.remote)} onProductionBranchChange={branch => onAction({ action: 'set-production-branch', branch })} connected={connected} removal={state.pipelineRemoval} busy={busy} readError={error?.message} onOpen={() => navigate('pipeline')} onConnect={() => openDialog({ type: 'source', connect: true })} onCreate={createPipeline} onDelete={removePipeline} /> : pipeline && connected ? <ReactFlowProvider key={`${pipeline.repoPath}:${pipeline.id || ''}`} ><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
     </div>

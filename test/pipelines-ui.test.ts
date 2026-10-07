@@ -16,14 +16,14 @@ const initial = () => ({
   autopilot: { repoPath, stages: {} },
 });
 type State = Omit<ReturnType<typeof initial>, 'pipeline' | 'githubConnection'> & { pipeline: ReturnType<typeof defaultPipeline> | null; githubConnection: ReturnType<typeof initial>['githubConnection'] | null };
-async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean } = {}) {
+async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean; connectionReadFailure?: boolean; disconnectFailure?: boolean; unreachable?: boolean } = {}) {
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } }); await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } }), errors: string[] = [], posts: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const state: State = initial(); if (options.disconnected) state.githubConnection = null;
   if (options.noPipeline) state.pipeline = null;
-  let deletes = 0;
+  let deletes = 0, connectionReads = 0, disconnects = 0;
   const reads: string[] = [];
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname; if (req.method() === 'POST') posts.push(path);
@@ -38,14 +38,22 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; noPipe
       json = state;
     }
     const connection = () => ({ available: true, authenticated: true, account: { login: 'developer', name: null }, connected: Boolean(state.githubConnection), source: state.source });
-    if (path === '/api/github/connection') json = connection();
+    if (path === '/api/github/connection') {
+      connectionReads++;
+      json = options.unreachable ? { available: true, authenticated: false, account: null, connected: false, unreachable: true, message: 'GitHub is unreachable. Try again.', source: state.source } : connection();
+      if (options.connectionReadFailure && connectionReads === 2) { status = 503; json = { error: 'GitHub did not answer. Try again.' }; }
+    }
     if (path === '/api/github/repositories') json = { repositories: ['app', 'other'].map(name => ({ fullName: `acme/${name}`, name, defaultBranch: 'main', private: true })), nextPage: null };
     if (path === '/api/github/branches') json = { branches: [{ name: 'main' }, { name: 'dev' }], nextPage: null, defaultBranch: 'main' };
     if (path === '/api/pipeline/action') {
       if (options.productionFailure) { status = 409; json = { error: 'Resolve the current deployment before changing the Production branch.' }; }
       else { state.pipeline = applyPipelineAction(state.pipeline, req.postDataJSON()); json = { pipeline: state.pipeline }; }
     }
-    if (path === '/api/github/disconnect') { state.githubConnection = null; json = connection(); }
+    if (path === '/api/github/disconnect') {
+      disconnects++;
+      if (options.disconnectFailure && disconnects === 1) { status = 409; json = { error: 'Wait for the source change to finish.' }; }
+      else { state.githubConnection = null; json = connection(); }
+    }
     if (path === '/api/github/connect') { state.githubConnection = { login: 'developer', connectedAt: '2026-10-06T12:00:00Z' }; json = connection(); }
     if (path === '/api/gate') json = { repoPath, sha: state.scan.repo.sha, stages: {}, production: null };
     if (path === '/api/releases') json = { repoPath, sha: state.scan.repo.sha, target: null, canDeploy: false, current: null, unresolved: null, recent: [] };
@@ -235,4 +243,84 @@ test('a running-work refusal stays in the confirmation without hiding the pipeli
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete pipeline', exact: true }).click();
   await expect(page.getByRole('alertdialog').getByRole('alert')).toContainText('Stop the browser run');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Open pipeline', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+});
+
+test('Connectors manages the shared GitHub account without selecting a repository or creating a pipeline', { timeout: 60000 }, async t => {
+  const { page, state, posts, errors } = await fixture(t);
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  const navigation = page.getByRole('navigation', { name: 'Main navigation' });
+  await navigation.getByRole('button', { name: 'Connectors', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Connectors');
+  await expect(navigation.getByRole('button', { name: 'Project', exact: true })).not.toHaveAttribute('aria-current', 'page');
+  await expect(navigation.getByRole('button', { name: 'Connectors', exact: true })).toHaveAttribute('aria-current', 'page');
+  const app = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  await page.getByRole('searchbox', { name: 'Search connected apps' }).fill('missing');
+  await expect(page.getByText('No matching apps', { exact: true })).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search connected apps' }).fill('developer');
+  await app.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(app.getByRole('button', { name: 'Refresh GitHub' })).toBeEnabled();
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Disconnect GitHub?' });
+  await confirm.getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.deepEqual(posts, []);
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'No apps connected', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#connectors$/);
+  assert.ok(state.pipeline); assert.equal(state.source.repository, 'acme/app');
+  assert.equal(state.githubConnection, null);
+  await page.getByRole('button', { name: 'Connect app', exact: true }).first().click();
+  const picker = page.getByRole('dialog', { name: 'Available apps', exact: true });
+  await picker.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
+  const connect = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
+  await connect.getByRole('button', { name: 'Continue as developer', exact: true }).click();
+  await expect(connect).toHaveCount(0);
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  await expect(page.getByRole('dialog', { name: 'Source', exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/#connectors$/);
+  assert.deepEqual(posts, ['/api/github/disconnect', '/api/github/connect']);
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  await navigation.getByRole('button', { name: 'Project', exact: true }).click();
+  await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toContainText('Connected');
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Connectors', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  assert.deepEqual(errors, []);
+});
+
+test('Connectors preserves the account on read and disconnect failures, with explicit recovery', { timeout: 60000 }, async t => {
+  const { page, state, errors } = await fixture(t, { connectionReadFailure: true, disconnectFailure: true });
+  await page.goto(new URL('#connectors', page.url()).href);
+  const app = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(app).toContainText('Connected');
+  await app.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(page.getByRole('alert')).toHaveText('GitHub did not answer. Try again.');
+  await expect(app).toContainText('Unverified');
+  assert.ok(state.githubConnection);
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(app).toContainText('Connected');
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Disconnect GitHub?' });
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm.getByRole('alert')).toHaveText('Wait for the source change to finish.');
+  assert.ok(state.githubConnection); assert.ok(state.pipeline);
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'No apps connected' })).toBeVisible();
+  assert.deepEqual(errors, []);
+});
+
+test('Connectors keeps an unreachable account unverified instead of claiming it disconnected', { timeout: 60000 }, async t => {
+  const { page, posts, errors } = await fixture(t, { unreachable: true });
+  await page.goto(new URL('#connectors', page.url()).href);
+  await expect(page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem')).toContainText('GitHubUnverified');
+  await expect(page.getByRole('alert')).toHaveText('GitHub is unreachable. Try again.');
+  await expect(page.getByRole('heading', { name: 'No apps connected' })).toHaveCount(0);
+  assert.deepEqual(posts, []); assert.deepEqual(errors, []);
 });
