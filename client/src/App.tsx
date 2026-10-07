@@ -970,14 +970,11 @@ function PipelineApp() {
         <div className="workspace-context">
           <SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />
           <Breadcrumb aria-label="Breadcrumb"><BreadcrumbList className="flex-nowrap">
-            {page === 'settings' ? <BreadcrumbItem><BreadcrumbPage>Settings</BreadcrumbPage></BreadcrumbItem> : <>
-              <BreadcrumbItem>{projectName ? <BreadcrumbLink href="#pipelines" onClick={event => { event.preventDefault(); navigate('pipelines'); }}>Project</BreadcrumbLink> : <BreadcrumbPage>Project</BreadcrumbPage>}</BreadcrumbItem>
-              {projectName && <>
-                <BreadcrumbSeparator />
-                <BreadcrumbItem className="min-w-0">{page === 'pipeline' ? <BreadcrumbLink className="max-w-64 truncate" title={projectName} href="#pipelines" onClick={event => { event.preventDefault(); navigate('pipelines'); }}>{projectName}</BreadcrumbLink> : <BreadcrumbPage className="max-w-64 truncate" title={projectName}>{projectName}</BreadcrumbPage>}</BreadcrumbItem>
-                {page === 'pipeline' && <><BreadcrumbSeparator /><BreadcrumbItem><BreadcrumbPage>Pipeline</BreadcrumbPage></BreadcrumbItem></>}
-              </>}
-            </>}
+            {page === 'pipeline' && projectName ? <>
+              <BreadcrumbItem><BreadcrumbLink href="#pipelines" onClick={event => { event.preventDefault(); navigate('pipelines'); }}>Project</BreadcrumbLink></BreadcrumbItem>
+              <BreadcrumbSeparator />
+              <BreadcrumbItem className="min-w-0"><BreadcrumbPage className="max-w-64 truncate" title={projectName}>{projectName}</BreadcrumbPage></BreadcrumbItem>
+            </> : <BreadcrumbItem><BreadcrumbPage>{page === 'settings' ? 'Settings' : 'Project'}</BreadcrumbPage></BreadcrumbItem>}
           </BreadcrumbList></Breadcrumb>
         </div>
         <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button>

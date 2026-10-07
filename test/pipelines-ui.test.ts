@@ -89,7 +89,7 @@ test('Create pipeline asks a connected account to select its repository before c
   await productionBranch.click(); await page.getByRole('option', { name: 'dev', exact: true }).click();
   await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await expect(form).toHaveCount(0); await expect(page.getByRole('link', { name: 'acme/other', exact: true })).toHaveAttribute('href', 'https://github.com/acme/other');
-  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Projectother');
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Project');
   assert.equal(state.source.repository, 'acme/other'); assert.equal(state.source.branch, 'dev'); assert.equal(state.pipeline?.productionBranch, 'dev');
   await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('dev');
   await page.reload(); await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('dev');
@@ -165,7 +165,7 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
   const { page, errors } = await fixture(t);
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Projectapp');
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Project');
   const table = page.getByRole('table', { name: 'Pipelines', exact: true });
   const heading = await table.getByRole('columnheader', { name: 'Repository', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
   const content = await table.getByRole('link', { name: 'acme/app', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
@@ -176,8 +176,8 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Pipelines', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('ProjectappPipeline');
-  await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).getByRole('link', { name: 'app', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Projectapp');
+  await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).getByRole('link', { name: 'Project', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
   await expect(table.getByRole('link', { name: 'acme/app', exact: true })).toBeInViewport();
   await expect(table.getByRole('combobox', { name: 'Production branch', exact: true })).toBeInViewport();
