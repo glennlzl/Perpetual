@@ -12,8 +12,8 @@ export type StepStatus = 'pending' | 'active' | 'done' | 'failed' | 'waiting';
 /** A piece of a step's detail: text, or a fact set in a mono chip, linked when it has an https address. */
 export type DetailPart = string | { text: string; href?: string };
 export interface ChangeStep { id: string; name: string; status: StepStatus; detail?: DetailPart[] }
-/** A change is under way, merged, opened for a person's review, left unmerged, or passed: the failure cleared without a change, such as a rerun that passed. */
-export type ChangeStatus = 'queued' | 'running' | 'merged' | 'passed' | 'needs-review' | 'not-merged';
+/** A change is queued, under way, merged, passed without a change, waiting for review, needing a person's intervention, or left unmerged. */
+export type ChangeStatus = 'queued' | 'running' | 'merged' | 'passed' | 'needs-review' | 'needs-attention' | 'not-merged';
 /** A change Autopilot makes for a stage: a pull request and the steps that led to it. `title` names the work, such as Fixing build. */
 export interface AutopilotChange {
   id: string; stageId: string; kind: string; title: string; status: ChangeStatus; steps: ChangeStep[];

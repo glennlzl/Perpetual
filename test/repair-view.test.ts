@@ -61,9 +61,9 @@ test('a finished repair is merged, passed, under review or not merged, and says 
   const failedCi = repairChange(repair('failed', { attempts: [{ number: 4, model: 'm' }], pullRequest: { ...PULL, draft: true }, reason: 'The build was not fixed in 4 attempts.' }), 'build');
   assert.deepEqual([failedCi.status, marks(failedCi)[3]], ['not-merged', 'Verify: failed'], 'A draft that failed CI is not under review.');
   const person = repairChange(repair('needs-person', { category: 'configuration', reason: 'Credentials or permissions need attention.' }), 'build');
-  assert.deepEqual([person.status, marks(person)[1], person.steps[1].detail], ['not-merged', 'Diagnose: waiting', ['Credentials or permissions need a person.', ' ', 'Credentials or permissions need attention.']]);
+  assert.deepEqual([person.status, marks(person)[1], person.steps[1].detail], ['needs-attention', 'Diagnose: waiting', ['Credentials or permissions need a person.', ' ', 'Credentials or permissions need attention.']]);
   const unstarted = repairChange(repair('needs-person', { category: 'build', startedAt: '2026-09-25T10:00:30.000Z', reason: 'Add an OpenRouter API key in Settings.' }), 'build');
-  assert.deepEqual([unstarted.status, marks(unstarted)[2], unstarted.steps[2].detail], ['not-merged', 'Change: waiting', ['Add an OpenRouter API key in Settings.']], 'An agent that could not start is the Change step\'s wait.');
+  assert.deepEqual([unstarted.status, marks(unstarted)[2], unstarted.steps[2].detail], ['needs-attention', 'Change: waiting', ['Add an OpenRouter API key in Settings.']], 'An agent that could not start is the Change step\'s wait.');
   const interrupted = repairChange(repair('needs-person', { pullRequest: { ...PULL, draft: true }, reason: 'Interrupted by a controller restart.' }), 'build');
   assert.deepEqual([interrupted.status, marks(interrupted)[3]], ['needs-review', 'Verify: waiting'], 'An open pull request waits for a person.');
   const stopped = repairChange(repair('cancelled'), 'build');

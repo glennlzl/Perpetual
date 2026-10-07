@@ -12,7 +12,7 @@ import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 import { StepItem, StepList } from './StepList';
 
 const STEP_MARKS: Record<Exclude<StepStatus, 'active'>, LucideIcon> = { pending: Circle, done: CircleCheck, failed: CircleX, waiting: Eye };
-const CHANGE_MARKS: Record<string, LucideIcon> = { queued: Clock3, merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'not-merged': CircleX };
+const CHANGE_MARKS: Record<string, LucideIcon> = { queued: Clock3, merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'needs-attention': TriangleAlert, 'not-merged': CircleX };
 const BADGE_MARKS: Record<AutopilotTone, LucideIcon> = { idle: Sparkles, working: LoaderCircle, passed: CircleCheck, blocked: Eye, failed: CircleX };
 const BADGE_VARIANTS: Record<AutopilotTone, 'destructive' | 'outline' | 'secondary'> = { idle: 'outline', working: 'secondary', passed: 'secondary', blocked: 'secondary', failed: 'destructive' };
 // A fact links only to an https address the controller supplied.
@@ -70,6 +70,7 @@ export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoP
         <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform" />
       </Button>
     </CollapsibleTrigger>
+    {!open && change.status === 'needs-attention' && change.reason && <Detail parts={[change.reason]} />}
     <CollapsibleContent className="pt-1">
       <StepList label={`${change.title} steps`}>
         {change.steps.map(step => <StepItem key={step.id} compact icon={<StepMark status={step.status} />}>

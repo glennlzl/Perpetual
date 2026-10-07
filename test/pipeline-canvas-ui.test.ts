@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect as playwrightExpect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
+import { repairChange } from '../src/repair/view.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
 import type { ErrorReply } from '../contract/error.ts';
@@ -683,5 +684,28 @@ test('Build shows commit queue positions, cancels one item, and resumes a paused
   await expect(build.getByRole('button', { name: 'Fixing build, Running', exact: true })).toBeVisible();
   await expect(build.getByText('Read the failure', { exact: false })).toBeVisible();
   assert.deepEqual(posts.at(-1), { path: '/api/autopilot/resume', body: { repoPath, stageId: 'build' } });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a repair needing a person shows its reason even while its steps are collapsed', { timeout: 60000 }, async t => {
+  const reason = 'Credentials or permissions need attention. Check the provider settings.';
+  const change = repairChange({ id: 'held-repair', branch: 'main', sha, status: 'needs-person', trigger: 'push', category: 'configuration', reason, runs: [], createdAt: '2026-10-07T00:00:00Z', updatedAt: '2026-10-07T00:00:00Z' }, 'build');
+  const autopilot: AutopilotView = { repoPath, stages: { build: { mode: 'merge', changes: [change] } } };
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { autopilot }) };
+    if (path === '/api/autopilot') return { json: autopilot };
+  });
+  await open();
+  const build = page.getByRole('group', { name: 'Build', exact: true });
+  const row = build.getByRole('button', { name: 'Fixing build, Needs attention', exact: true });
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Needs attention', exact: true })).toBeVisible();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(build.getByText(reason, { exact: true })).toBeVisible();
+  await expect(build.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+  await row.click();
+  await expect(build.getByRole('list', { name: 'Fixing build steps', exact: true })).toBeVisible();
+  await expect(build.getByText('Credentials or permissions need a person. ' + reason, { exact: true })).toBeVisible();
+  await row.click();
+  await expect(build.getByText(reason, { exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });
