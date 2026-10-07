@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { GitBranch, GitGraph, LoaderCircle, RefreshCw } from 'lucide-react';
 import { CommitGraph } from '@/components/commit-graph';
 import { Badge } from '@/components/ui/badge';
@@ -6,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { GitHistoryCache } from '@/lib/git-history-cache';
 import { useActionFocus } from '@/lib/journey-focus';
-import { GitGraphHeader } from './InspectorHeaders';
 import type { Scan } from './App';
 import type { GitHistory } from '../../contract/git-history.ts';
 import './branch-map.css';
@@ -26,7 +26,7 @@ function HistoryLoading() {
   </div>;
 }
 
-export default function GitGraphPanel({ scan, historyCache, onClose, showHeader = true }: { scan: Scan | null; historyCache: GitHistoryCache; onClose: () => void; showHeader?: boolean }) {
+export default function GitGraphPanel({ scan, historyCache, headerActions }: { scan: Scan | null; historyCache: GitHistoryCache; headerActions: HTMLDivElement | null }) {
   const [history, setHistory] = useState<GitHistory | undefined>(() => historyCache.peek());
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(!history);
@@ -88,14 +88,13 @@ export default function GitGraphPanel({ scan, historyCache, onClose, showHeader 
   const branch = scan?.repo?.branch || history?.branch || 'Detached HEAD';
   const provenance = history ? `${history.source === 'github' ? 'GitHub' : 'Local'} history${history.shallow ? ' · Shallow clone' : ''}` : undefined;
   return <>
-    {showHeader && <GitGraphHeader onClose={onClose} />}
-    <div className="git-graph-toolbar flex items-center gap-2 px-4">
-      <Badge variant="outline" className="min-w-0 gap-2 whitespace-normal break-all text-left" aria-label={`History branch: ${branch}`} title={provenance}><GitBranch className="size-3.5 shrink-0" aria-hidden="true" />{branch}</Badge>
+    {headerActions && createPortal(<>
+      <Badge variant="outline" className="min-w-0 shrink gap-2" aria-label={`History branch: ${branch}`} title={`${branch}${provenance ? ` · ${provenance}` : ''}`}><GitBranch className="size-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{branch}</span></Badge>
       {history?.shallow && <Badge variant="outline">Shallow clone</Badge>}
-      <Button ref={refreshButton} variant="outline" size="icon" className="ml-auto size-10 shrink-0" aria-label="Refresh history" title="Refresh history" disabled={loading || pagePending} onClick={() => { rememberFocus(); focusAfterLoad.current = 0; setLoading(true); setRevision(value => value + 1); }}>
+      <Button ref={refreshButton} variant="ghost" size="icon" className="ml-auto shrink-0" aria-label="Refresh history" title="Refresh history" disabled={loading || pagePending} onClick={() => { rememberFocus(); focusAfterLoad.current = 0; setLoading(true); setRevision(value => value + 1); }}>
         <RefreshCw className={loading ? 'size-4 motion-safe:animate-spin' : 'size-4'} />
       </Button>
-    </div>
+    </>, headerActions)}
     <div ref={historyBody} className="inspector-body min-h-0 flex-1 overflow-auto px-4 pb-4" aria-label="Commit history" aria-busy={loading || pagePending}>
       {error && <div className="grid min-w-0 justify-items-start gap-3 py-6"><p className="max-w-full break-words text-sm leading-relaxed text-destructive [overflow-wrap:anywhere]" role="alert">{error}</p><Button ref={retryButton} variant="outline" aria-disabled={loading} aria-busy={loading} className="aria-disabled:opacity-50" onClick={() => { if (!loading) { rememberFocus(); focusAfterLoad.current = 0; setLoading(true); setRevision(value => value + 1); } }}>{loading && <RefreshCw className="motion-safe:animate-spin" aria-hidden="true" />}Retry</Button></div>}
       {!history && loading && !error ? <HistoryLoading /> : history && (history.commits.length

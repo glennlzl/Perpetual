@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import { Box, CircleDot, CircleMinus, CircleX, GitGraph, LoaderCircle, X, type LucideIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -8,10 +9,11 @@ import { useTestStage } from '@/lib/use-test-workspace';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 
 // Headers stay mounted while a deferred inspector loads, including its focused Close control.
-export function GitGraphHeader({ onClose }: { onClose: () => void }) {
+export function GitGraphHeader({ onClose, actionsRef }: { onClose: () => void; actionsRef: Ref<HTMLDivElement> }) {
   return <SheetHeader className="flex-row items-center gap-3 border-b">
     <GitGraph className="size-6 shrink-0" />
-    <SheetTitle className="min-w-0 flex-1 truncate text-xl">Git graph</SheetTitle>
+    <SheetTitle className="shrink-0 text-xl">Git graph</SheetTitle>
+    <div ref={actionsRef} className="flex min-w-0 flex-1 items-center gap-2" />
     <Button variant="ghost" size="icon" aria-label="Close Git graph" onClick={onClose}><X /></Button>
   </SheetHeader>;
 }
