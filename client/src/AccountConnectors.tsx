@@ -110,8 +110,8 @@ export function AccountConnectorDialogs({ state, focusTarget }: { state: Account
     <Dialog open={state.setupOpen} onOpenChange={open => { if (!state.busy) { state.setSetupOpen(open); if (!open) state.setApiKey(''); } }}>
       <DialogContent aria-describedby={undefined} className="sm:max-w-md" onCloseAutoFocus={returnFocus}><DialogHeader><DialogTitle>Set up Composio</DialogTitle></DialogHeader>
         <form className="space-y-4" onSubmit={event => { event.preventDefault(); void state.setup(); }}>
-          <div className="space-y-2"><Label htmlFor="composio-key">Composio API Key</Label><Input id="composio-key" type="password" autoComplete="off" spellCheck={false} value={state.apiKey} onChange={event => state.setApiKey(event.target.value)} disabled={state.busy} /></div>
-          <Button asChild variant="link" className="h-auto p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button>
+          <div className="space-y-2"><Label htmlFor="composio-key">Composio Project API Key</Label><Input id="composio-key" type="password" autoComplete="off" spellCheck={false} aria-describedby="composio-key-location" value={state.apiKey} onChange={event => state.setApiKey(event.target.value)} disabled={state.busy} /></div>
+          <div className="space-y-2"><Button asChild variant="link" className="h-auto p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button><p id="composio-key-location" className="text-sm text-muted-foreground">Platform → your project → API Keys</p></div>
           {state.dialogError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{state.dialogError}</p>}
           <DialogFooter><Button type="button" variant="outline" disabled={state.busy} onClick={() => { state.setSetupOpen(false); state.setApiKey(''); }}>Cancel</Button><Button type="submit" disabled={state.busy || !state.apiKey.trim()}>{state.busy && <LoaderCircle className="motion-safe:animate-spin" />}Save</Button></DialogFooter>
         </form>

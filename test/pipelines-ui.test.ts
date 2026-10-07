@@ -351,8 +351,9 @@ test('four app connectors offer real setup, pending authorization, refresh and c
   await expect(picker.getByRole('button', { name: 'Connect Slack' })).toHaveCount(0);
   await picker.getByRole('button', { name: 'Connect Gmail', exact: true }).click();
   const setup = page.getByRole('dialog', { name: 'Set up Composio' });
-  await expect(setup).toBeVisible(); await expect(setup.getByLabel('Composio API Key')).toHaveAttribute('type', 'password');
-  await setup.getByLabel('Composio API Key').fill('fixture-key'); await setup.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(setup).toBeVisible(); await expect(setup.getByLabel('Composio Project API Key')).toHaveAttribute('type', 'password');
+  await expect(setup.getByText('Platform → your project → API Keys', { exact: true })).toBeVisible();
+  await setup.getByLabel('Composio Project API Key').fill('fixture-key'); await setup.getByRole('button', { name: 'Save', exact: true }).click();
   const auth = page.getByRole('dialog', { name: 'Connect Gmail', exact: true });
   await expect(auth.getByRole('button', { name: 'Sign in with Gmail' })).toBeEnabled();
   const popup = page.waitForEvent('popup'); await auth.getByRole('button', { name: 'Sign in with Gmail' }).click(); await (await popup).close();

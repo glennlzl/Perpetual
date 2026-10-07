@@ -16,7 +16,7 @@ function providerOf(value: unknown): ConnectorProvider {
   return value as ConnectorProvider;
 }
 function keyOf(value: unknown): string {
-  if (typeof value !== 'string' || !/^[\x21-\x7e]{8,512}$/.test(value)) throw new Error('Enter a valid Composio API key.');
+  if (typeof value !== 'string' || !/^[\x21-\x7e]{8,512}$/.test(value)) throw new Error('Enter a valid Composio project API key.');
   return value;
 }
 function load(value: unknown): State {
@@ -80,6 +80,8 @@ export async function createConnectorManager({ dataDir, transport }: ConnectorMa
     read: () => serialize(async () => { for (const app of APPS) await refresh(app.provider); return view(); }),
     setup: (input: unknown) => serialize(async () => {
       const apiKey = keyOf(object(input).apiKey);
+      if (apiKey.startsWith('ck_')) throw new Error('This is a Composio Connect key. Get a project API key in Platform → your project → API Keys.');
+      if (apiKey.startsWith('uak_')) throw new Error('This is a Composio user key. Get a project API key in Platform → your project → API Keys.');
       // Validate access without creating configs, accounts, or invoking provider tools.
       await vendor.configs(apiKey, 'slack');
       for (const app of APPS) { const record = state.accounts[app.provider]; if (record) await inspect(app.provider, record, apiKey); }

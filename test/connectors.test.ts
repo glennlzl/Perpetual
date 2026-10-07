@@ -40,6 +40,28 @@ async function fixture(t: TestContext) {
 }
 async function start(manager: Awaited<ReturnType<typeof createConnectorManager>>, provider: ConnectorProvider) { return manager.start({ provider, configId: `ac_${provider}` }); }
 
+test('setup explains incompatible Composio key types before sending or saving them', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-connectors-key-'));
+  let calls = 0;
+  const manager = await createConnectorManager({ dataDir, transport: async () => {
+    calls++;
+    return new Response('{}', { status: 401 });
+  } });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  for (const [apiKey, kind] of [['ck_example_consumer', 'Connect'], ['uak_example_user', 'user']] as const) {
+    await assert.rejects(manager.setup({ apiKey }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(`${kind} key`));
+      assert.match(error.message, /Platform.*project.*API Keys/);
+      assert.ok(!error.message.includes(apiKey));
+      return true;
+    });
+  }
+  assert.equal(calls, 0);
+  assert.equal((await manager.read()).configured, false);
+  await assert.rejects(readFile(join(dataDir, 'connectors', 'connectors.json')), { code: 'ENOENT' });
+});
+
 test('four actual OAuth lifecycles persist, verify ownership, and clean up without executing provider tools', async t => {
   const f = await fixture(t), m = f.manager;
   assert.equal((await m.read()).configured, false); assert.equal(f.calls.length, 0);
@@ -109,6 +131,9 @@ test('connector HTTP routes require the launch session and mutation token, and r
   const { token } = await (await controllerFetch(app.url + '/api/session')).json() as { token: string };
   const post = (path: string, body: unknown, authenticated = true) => controllerFetch(app.url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(authenticated ? { 'X-Perpetual-Token': token } : {}) }, body: JSON.stringify(body) });
   assert.equal((await post('/api/connectors/setup', { apiKey: 'fixture-key' }, false)).status, 403);
+  const incompatible = await post('/api/connectors/setup', { apiKey: 'ck_example_consumer' });
+  assert.equal(incompatible.status, 400);
+  const incompatibleReply = await incompatible.text(); assert.match(incompatibleReply, /Composio Connect key/); assert.ok(!incompatibleReply.includes('ck_example_consumer')); assert.equal(f.calls.length, 0);
   const setup = await post('/api/connectors/setup', { apiKey: 'fixture-key' }); assert.equal(setup.status, 200); assert.ok(!JSON.stringify(await setup.json()).includes('fixture-key'));
   const options = await post('/api/connectors/options', { provider: 'jira' }); assert.equal(options.status, 200);
   const started = await post('/api/connectors/start', { provider: 'jira', configId: 'ac_jira' }); assert.equal(started.status, 200); const text = await started.text(); assert.ok(text.includes('pending')); assert.ok(!text.includes('secret-account-token'));
