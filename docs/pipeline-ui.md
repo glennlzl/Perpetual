@@ -14,6 +14,8 @@ The row's menu offers **Delete pipeline**, with confirmation. It first removes t
 
 After deletion, **No pipelines** and **Create pipeline** replace the row. Rescanning, reconnecting and restarting never recreate it implicitly. Explicit creation starts with Source, Build and Production and a new resource identity, so old tests, gates and Autopilot records do not become the replacement's records. Other open pages observe connection and deletion changes through their existing source poll.
 
+**Create pipeline** opens repository selection for a connected GitHub account; a disconnected account first sees **Connect GitHub**, then continues to the same selection. The creation form starts without a repository selected. Choose the repository, branch and root, then confirm **Create pipeline**. The selected source and new pipeline save together; cancelling or failing creates no partial pipeline and leaves the previous source intact. Choosing a project that already owns a pipeline reports that conflict rather than overwriting it.
+
 Stages run horizontally, **Source → Build → Production**, on a dotted React Flow canvas with directional arrows. Source and Production stay the first and last stages.
 
 The first frame shows the pipeline from its first stage at a readable zoom. When the pipeline is wider than the canvas, pan it. The canvas toolbar holds only zoom and **Fit view**, which shows the whole pipeline at any zoom. The canvas frames itself again after a window or sidebar resize, and after a layout change (a stage added, removed, expanded or collapsed) unless you have panned or zoomed since. Expanding nested content inside a card keeps the current zoom.

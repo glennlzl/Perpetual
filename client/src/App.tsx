@@ -75,7 +75,7 @@ export type PipelineState = Pick<PipelineStateReply, 'defaultRepo'> & Partial<Om
 export type PipelineDialog = {
   type: 'source' | 'service' | 'stage' | 'rename-stage' | 'remove-stage' | 'transition' | 'environment' | 'git-graph';
   stageId?: string; nodeId?: string; afterStageId?: string; sourceStageId?: string; targetStageId?: string;
-  connect?: boolean; connectRequest?: number; tab?: string; runId?: string; watch?: boolean; caseId?: string; caseRequestKey?: number; error?: string;
+  connect?: boolean; connectRequest?: number; create?: boolean; tab?: string; runId?: string; watch?: boolean; caseId?: string; caseRequestKey?: number; error?: string;
 };
 export type OpenDialog = (next: PipelineDialog | null) => void;
 export type SourceResult = Omit<SourceReply, 'scan' | 'pipeline'> & { scan: Scan; pipeline: PipelineView | null; environments?: PipelineStateReply['environments'] };
@@ -712,6 +712,8 @@ function PipelineApp() {
     return query.get('preview') === 'branch-map' ? { type: 'git-graph' } : null;
   });
   // The sandbox whose card opened New test; closing returns focus to that card.
+  const currentDialog = useRef(dialog);
+  currentDialog.current = dialog;
   const [newTest, setNewTest] = useState('');
   const newTestReturn = useRef('');
   const mutation = useRef(false);
@@ -816,7 +818,7 @@ function PipelineApp() {
     if (change === 'disconnect') { closeDialog(); navigate('pipelines'); }
     void api<PipelineState>('/api/state').then(fresh => {
       setState(fresh);
-      if (change === 'connect' && fresh.scan) closeDialog();
+      if (change === 'connect' && fresh.scan && !currentDialog.current?.create) closeDialog();
     }).catch(failure => setError((failure as Error).message));
   }), [closeDialog, navigate, setError]);
   // Only an accepted deletion polls quickly; a failed one waits for Retry deletion.
@@ -942,9 +944,7 @@ function PipelineApp() {
   };
   const createPipeline = async () => {
     if (mutation.current) throw new Error('Wait for the previous change to finish saving.');
-    mutation.current = true; setBusy(true);
-    try { await api('/api/pipeline/create', { repoPath: state.scan?.repo.path }); await load(); }
-    finally { mutation.current = false; setBusy(false); }
+    openDialog({ type: 'source', create: true, connect: !connected });
   };
 
   // The canvas shows its own failure first, then workspace and Autopilot poll

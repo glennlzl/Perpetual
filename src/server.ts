@@ -800,6 +800,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/source/github') {
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const connection=await requireGitHub(),input=await body(req);
+          if(input.createPipeline!==undefined&&typeof input.createPipeline!=='boolean')throw new Error('Pipeline creation must be explicitly selected.');
           const prepared=await prepareGitHubSource({repository:input.repository,branch:input.branch,rootDirectory:input.rootDirectory,dataDir});
           // A copy whose scan or save fails is never saved, so nothing refers to it: it goes, as a failed clone does.
           const discard=async(error: unknown): Promise<never>=>{await discardGitHubSource(prepared).catch(()=>{});throw error;};
@@ -814,11 +815,16 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
               pipelines[legacyKey] ??= current.pipelines[current.scan!.repo.path];
             }
             // A root saved as it was typed, before roots were saved as the checkout spells them, keeps its pipeline.
-            const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
-            const pipeline=current.removedPipelines?.includes(key)?null:normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
+            const typedKey=sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)});
+            const saved=pipelines[key]??pipelines[typedKey];
+            const removed=current.removedPipelines?.some(item=>item===key||item===typedKey);
+            if(input.createPipeline&&saved&&!removed)throw conflict('This project already has a pipeline. Choose another repository or root directory.');
+            const pipeline=input.createPipeline?{...defaultPipeline(scan.repo.path),id:`pipeline:${randomUUID()}`}
+              :removed?null:normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
+            const removedPipelines=input.createPipeline?(current.removedPipelines??[]).filter(item=>item!==key&&item!==typedKey):current.removedPipelines;
             if(pipeline)pipelines[key]=pipeline;
-            return {state:{...current,scan,source,pipelines},
-              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;},
+            return {state:{...current,scan,source,pipelines,removedPipelines},
+              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;state.removedPipelines=removedPipelines;},
               result:{scan,source,pipeline,pipelineId:pipeline?.id??(pipeline?key:null)} satisfies SourceReply};
           }).catch(discard);
           return reply(res,200,result);

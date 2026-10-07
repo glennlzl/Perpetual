@@ -16,12 +16,13 @@ const initial = () => ({
   autopilot: { repoPath, stages: {} },
 });
 type State = Omit<ReturnType<typeof initial>, 'pipeline' | 'githubConnection'> & { pipeline: ReturnType<typeof defaultPipeline> | null; githubConnection: ReturnType<typeof initial>['githubConnection'] | null };
-async function fixture(t: TestContext, options: { disconnected?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean } = {}) {
+async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean } = {}) {
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } }); await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } }), errors: string[] = [], posts: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const state: State = initial(); if (options.disconnected) state.githubConnection = null;
+  if (options.noPipeline) state.pipeline = null;
   let deletes = 0;
   const reads: string[] = [];
   await page.route('**/api/**', async route => {
@@ -38,7 +39,7 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; deleti
     }
     const connection = () => ({ available: true, authenticated: true, account: { login: 'developer', name: null }, connected: Boolean(state.githubConnection), source: state.source });
     if (path === '/api/github/connection') json = connection();
-    if (path === '/api/github/repositories') json = { repositories: [{ fullName: 'acme/app', name: 'app', owner: 'acme', defaultBranch: 'main', private: true }], hasMore: false };
+    if (path === '/api/github/repositories') json = { repositories: ['app', 'other'].map(name => ({ fullName: `acme/${name}`, name, defaultBranch: 'main', private: true })), nextPage: null };
     if (path === '/api/github/branches') json = { branches: [{ name: 'main' }, { name: 'dev' }], nextPage: null, defaultBranch: 'main' };
     if (path === '/api/pipeline/action') {
       if (options.productionFailure) { status = 409; json = { error: 'Resolve the current deployment before changing the Production branch.' }; }
@@ -56,13 +57,71 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; deleti
       if (options.deletion === 'conflict') { status = 409; json = { error: 'Stop the browser run before deleting the pipeline.' }; }
       else { status = 202; state.pipelineRemoval = { id: 'removal', status: 'removing' }; json = { removal: state.pipelineRemoval }; }
     }
-    if (path === '/api/pipeline/create') { state.pipeline = defaultPipeline(repoPath); state.pipeline.id = 'pipeline:12345678-1234-1234-1234-123456789abc'; state.pipelineId = state.pipeline.id; json = { pipeline: state.pipeline }; }
+    if (path === '/api/source/github') {
+      const selection = req.postDataJSON(); assert.equal(selection.createPipeline, true);
+      if (options.creationFailure) { status = 400; json = { error: 'Could not read this repository. Choose another repository or try again.' }; }
+      else {
+        state.source = { ...state.source, ...selection };
+        state.scan.repo = { ...state.scan.repo, name: selection.repository.split('/')[1], remote: `https://github.com/${selection.repository}.git`, branch: selection.branch };
+        state.pipeline = { ...defaultPipeline(repoPath), id: 'pipeline:12345678-1234-1234-1234-123456789abc' };
+        state.pipelineId = state.pipeline.id!; state.pipelineRemoval = null;
+        json = { scan: state.scan, source: state.source, pipeline: state.pipeline, pipelineId: state.pipelineId };
+      }
+    }
     await route.fulfill({ status, json });
   });
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
   await page.goto(`${origin}/build/`);
   return { page, state, errors, posts, reads };
 }
+
+test('Create pipeline asks a connected account to select its repository before creating', { timeout: 60000 }, async t => {
+  const { page, state, posts, errors } = await fixture(t, { noPipeline: true });
+  await page.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  const form = page.getByRole('dialog', { name: 'Create pipeline', exact: true });
+  await expect(form).toBeVisible(); await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toHaveCount(0);
+  await expect(form.getByRole('combobox', { name: 'Repository', exact: true })).toHaveText('Select repository');
+  await expect(form.getByRole('button', { name: 'Create pipeline', exact: true })).toBeDisabled();
+  assert.deepEqual(posts, []); assert.equal(structuredClone(state).pipeline, null);
+  await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/other' }).click();
+  await expect(form.getByRole('combobox', { name: 'Branch', exact: true })).toHaveText('main');
+  await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  await expect(form).toHaveCount(0); await expect(page.getByRole('link', { name: 'acme/other', exact: true })).toHaveAttribute('href', 'https://github.com/acme/other');
+  assert.equal(state.source.repository, 'acme/other'); assert.equal(state.pipeline?.productionBranch, undefined);
+  assert.deepEqual(posts, ['/api/source/github']); assert.deepEqual(errors, []);
+});
+
+test('Create pipeline connects GitHub first, continues to repository selection, and cancellation creates nothing', { timeout: 60000 }, async t => {
+  const { page, state, posts, errors } = await fixture(t, { disconnected: true, noPipeline: true });
+  await page.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toBeVisible();
+  assert.deepEqual(posts, []);
+  await page.getByRole('button', { name: 'Continue as developer', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toHaveCount(0);
+  const form = page.getByRole('dialog', { name: 'Create pipeline', exact: true });
+  await expect(form).toBeVisible(); await expect(form.getByRole('combobox', { name: 'Repository', exact: true })).toHaveText('Select repository');
+  await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByText('No pipelines', { exact: true })).toBeVisible();
+  assert.equal(structuredClone(state).pipeline, null); assert.deepEqual(posts, ['/api/github/connect']);
+  await page.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/app' }).click();
+  await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
+  assert.deepEqual(posts, ['/api/github/connect', '/api/source/github']); assert.deepEqual(errors, []);
+});
+
+test('failed creation retains repository selection and never leaves a partial pipeline', { timeout: 60000 }, async t => {
+  const { page, state, errors } = await fixture(t, { noPipeline: true, creationFailure: true });
+  await page.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  const form = page.getByRole('dialog', { name: 'Create pipeline', exact: true });
+  await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/other' }).click();
+  await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
+  await expect(form.getByRole('alert')).toContainText('Could not read this repository');
+  await expect(form.getByRole('combobox', { name: 'Repository', exact: true })).toHaveText('acme/other');
+  assert.equal(structuredClone(state).pipeline, null); assert.equal(state.source.repository, 'acme/app');
+  await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByText('No pipelines', { exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+});
 
 test('repository links to GitHub and the Production branch persists without switching the viewed branch', { timeout: 60000 }, async t => {
   const { page, state, errors, posts } = await fixture(t);
@@ -148,6 +207,9 @@ test('Delete pipeline confirms once, retains a failed row for Retry and recreate
   await expect(page.getByText('No pipelines', { exact: true })).toBeVisible();
   await page.reload(); await expect(page.getByText('No pipelines', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Create pipeline' }).click();
+  const creation = page.getByRole('dialog', { name: 'Create pipeline', exact: true });
+  await creation.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/app' }).click();
+  await creation.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();

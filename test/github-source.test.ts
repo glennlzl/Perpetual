@@ -168,7 +168,44 @@ test('a root saved as it was typed keeps its pipeline when the source is saved a
   });
 });
 
-test('a connection whose save fails removes the copy it made', async t => {
+test('explicit creation saves the selected source with a fresh pipeline and a duplicate leaves both unchanged', async t => {
+  const hub = await github(t, { user: { login: 'developer' }, 'repos/acme/app/branches/main': { name: 'main' } });
+  await hub.commit({ 'README.md': 'one\n' });
+  const key = 'github:acme/app:/', selection = { repository: 'acme/app', branch: 'main', rootDirectory: '/' };
+  await withController(t, { removedPipelines: [key] }, async ({ dataDir, connect }) => {
+    assert.equal((await connect(selection)).body.pipeline, null, 'An ordinary source save does not recreate a deleted pipeline.');
+    const created = await connect({ ...selection, createPipeline: true });
+    assert.equal(created.status, 200); assert.match(created.body.pipeline!.id!, /^pipeline:/);
+    assert.equal(created.body.pipelineId, created.body.pipeline!.id);
+    assert.equal(created.body.pipeline!.productionBranch, undefined);
+    const disk = JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf8'));
+    assert.deepEqual(disk.state.removedPipelines, []);
+    assert.equal(disk.state.pipelines[key].id, created.body.pipeline!.id);
+    const resaved = await connect(selection);
+    assert.equal(resaved.body.pipeline!.id, created.body.pipeline!.id);
+    const before = await readFile(join(dataDir, 'state.json'), 'utf8'), copies = await readdir(join(dataDir, 'sources'));
+    const duplicate = await connect({ ...selection, createPipeline: true });
+    assert.equal(duplicate.status, 409);
+    assert.equal(await readFile(join(dataDir, 'state.json'), 'utf8'), before);
+    assert.deepEqual(await readdir(join(dataDir, 'sources')), copies, 'An unaccepted duplicate copy is cleaned up.');
+  });
+});
+
+test('explicit creation for a selected source keeps another project and rejects non-boolean intent before cloning', async t => {
+  const hub = await github(t, { user: { login: 'developer' }, 'repos/acme/app/branches/main': { name: 'main' } });
+  await hub.commit({ 'README.md': 'one\n' });
+  const other = { repoPath: '/acme/other', stages: [['source', 'Source', 'source'], ['build', 'Build', 'build'], ['production', 'Production', 'production']].map(([id, name, kind]) => ({ id, name, kind, collapsed: false })), productionBranch: 'release' };
+  await withController(t, { pipelines: { 'github:acme/other:/': other } }, async ({ dataDir, connect }) => {
+    const selection = { repository: 'acme/app', branch: 'main', rootDirectory: '/' };
+    assert.equal((await connect({ ...selection, createPipeline: 'true' })).status, 400);
+    assert.equal((await connect({ ...selection, createPipeline: true })).status, 200);
+    const disk = JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf8'));
+    assert.deepEqual(disk.state.pipelines['github:acme/other:/'], other);
+    assert.match(disk.state.pipelines['github:acme/app:/'].id, /^pipeline:/);
+  });
+});
+
+test('a source or creation whose save fails removes its copy', async t => {
   const hub = await github(t, { user: { login: 'developer' }, 'repos/acme/app/branches/main': { name: 'main' } });
   await hub.commit({ 'README.md': 'one\n' });
   await withController(t, {}, async ({ dataDir, connect }) => {
@@ -177,5 +214,7 @@ test('a connection whose save fails removes the copy it made', async t => {
     await mkdir(join(dataDir, 'state.json', 'kept'), { recursive: true });
     assert.equal((await connect({ repository: 'acme/app', branch: 'main', rootDirectory: '/' })).status, 400);
     assert.deepEqual(await readdir(join(dataDir, 'sources')), [], 'A copy that was never saved does not stay behind.');
+    assert.equal((await connect({ repository: 'acme/app', branch: 'main', rootDirectory: '/', createPipeline: true })).status, 400);
+    assert.deepEqual(await readdir(join(dataDir, 'sources')), [], 'A failed creation leaves no copy behind.');
   });
 });

@@ -198,7 +198,7 @@ function DialogForm({ dialog, scan, onClose, onSourceSave, busy, setPending }: {
   }
 
   const titles: Partial<Record<PipelineDialog['type'], string>> = {
-    source: scan?.repo?.name || 'Source',
+    source: dialog.create ? 'Create pipeline' : scan?.repo?.name || 'Source',
     service: node?.label || 'Service',
   };
 
@@ -211,7 +211,7 @@ function DialogForm({ dialog, scan, onClose, onSourceSave, busy, setPending }: {
     <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit} aria-busy={busy}>
       <div className="inspector-body min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
         <fieldset disabled={busy} className="m-0 min-w-0 space-y-6 border-0 p-0">
-          {type === 'source' && <SourceSettings ref={sourceSettings} scan={scan} autoConnect={Boolean(dialog.connect)} busy={busy} onSourceSave={onSourceSave} onBusyChange={setPending} onStateChange={setSourceState} />}
+          {type === 'source' && <SourceSettings ref={sourceSettings} scan={scan} creating={Boolean(dialog.create)} autoConnect={Boolean(dialog.connect)} busy={busy} onSourceSave={onSourceSave} onBusyChange={setPending} onStateChange={setSourceState} />}
 
           {type === 'service' && <ServiceSettings nodeId={dialog.nodeId} repoPath={scan?.repo?.path} deployBranches={node?.deployBranches} branch={scan?.repo?.branch} />}
         </fieldset>
@@ -222,7 +222,7 @@ function DialogForm({ dialog, scan, onClose, onSourceSave, busy, setPending }: {
       {type !== 'service' && <SheetFooter className="shrink-0 flex-row flex-wrap justify-end border-t">
         <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
         <Button type="submit" disabled={busy || type === 'source' && !sourceState.canSave}>
-          {saving ? 'Saving…' : type === 'source' ? 'Save source' : 'Save changes'}
+          {saving ? dialog.create ? 'Creating…' : 'Saving…' : type === 'source' ? dialog.create ? 'Create pipeline' : 'Save source' : 'Save changes'}
         </Button>
       </SheetFooter>}
     </form>
@@ -239,7 +239,7 @@ export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSou
   const panel = useRef<HTMLElement | null>(null);
   const focusOrigin = useRef<HTMLElement | null>(null);
   const locked = busy || pending;
-  const dialogKey = dialog ? [dialog.type, dialog.stageId, dialog.nodeId, dialog.afterStageId, dialog.sourceStageId, dialog.targetStageId, dialog.connect, dialog.connectRequest].join(':') : '';
+  const dialogKey = dialog ? [dialog.type, dialog.stageId, dialog.nodeId, dialog.afterStageId, dialog.sourceStageId, dialog.targetStageId, dialog.connect, dialog.connectRequest, dialog.create].join(':') : '';
   useEffect(() => {
     if (!dialog) return;
     const focused = document.activeElement;
