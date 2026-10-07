@@ -110,7 +110,7 @@ test('Create pipeline connects GitHub first, continues to repository selection, 
   await page.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/app' }).click();
   await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open pipeline', exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Production branch', exact: true })).toHaveText('main');
   assert.deepEqual(posts, ['/api/github/connect', '/api/source/github']); assert.deepEqual(errors, []);
 });
@@ -166,26 +166,32 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Project');
   const table = page.getByRole('table', { name: 'Pipelines', exact: true });
-  const heading = await table.getByRole('columnheader', { name: 'Pipeline', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
-  const content = await table.getByRole('button', { name: 'Pipeline', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
-  assert.ok(Math.abs(heading - content) <= 1, 'Pipeline name aligns with its column heading.');
+  const heading = await table.getByRole('columnheader', { name: 'Repository', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
+  const content = await table.getByRole('link', { name: 'acme/app', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
+  assert.ok(Math.abs(heading - content) <= 1, 'Repository aligns with its column heading.');
+  await expect(table.getByRole('columnheader', { name: 'Pipeline', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Toggle sidebar' }).click();
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Project', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Pipelines', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('ProjectPipeline');
   await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).getByRole('link', { name: 'Project', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(table.getByRole('link', { name: 'acme/app', exact: true })).toBeInViewport();
+  await expect(table.getByRole('combobox', { name: 'Production branch', exact: true })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Pipeline actions' })).toBeInViewport();
+  const open = table.getByRole('button', { name: 'Open pipeline', exact: true });
+  await expect(open).toBeInViewport(); await open.focus(); await page.keyboard.press('Enter');
+  await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
 });
 
 test('Disconnect closes Source and returns to the retained Disconnected pipeline; reconnect restores it', { timeout: 60000 }, async t => {
   const { page, state, errors } = await fixture(t);
   const original = structuredClone(state.pipeline);
-  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
   await page.getByRole('button', { name: 'Configure source', exact: true }).click();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Disconnect', exact: true }).click();
@@ -195,7 +201,7 @@ test('Disconnect closes Source and returns to the retained Disconnected pipeline
   await page.getByRole('button', { name: 'Reconnect GitHub', exact: true }).click();
   await page.getByRole('button', { name: 'Continue as developer', exact: true }).click();
   await expect(page.getByText('Connected', { exact: true }).filter({ visible: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Beta', exact: true })).toBeVisible(); assert.deepEqual(state.pipeline, original); assert.deepEqual(errors, []);
 });
 
@@ -216,8 +222,8 @@ test('Delete pipeline confirms once, retains a failed row for Retry and recreate
   const creation = page.getByRole('dialog', { name: 'Create pipeline', exact: true });
   await creation.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/app' }).click();
   await creation.getByRole('button', { name: 'Create pipeline', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open pipeline', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
   await expect(page.getByText('Earlier pipeline observation', { exact: true })).toHaveCount(0);
   assert.equal(posts.filter(path => path === '/api/pipeline/remove').length, 2); assert.deepEqual(errors, []);
@@ -228,5 +234,5 @@ test('a running-work refusal stays in the confirmation without hiding the pipeli
   await page.getByRole('button', { name: 'Pipeline actions' }).click(); await page.getByRole('menuitem', { name: 'Delete pipeline' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete pipeline', exact: true }).click();
   await expect(page.getByRole('alertdialog').getByRole('alert')).toContainText('Stop the browser run');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Open pipeline', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
 });

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { MoreHorizontal, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowRight, MoreHorizontal, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -38,14 +38,16 @@ export default function Pipelines({ pipeline, repository, repositoryUrl, connect
     </div>
     <div className="rounded-lg border">
       <Table aria-label="Pipelines">
-        <TableHeader><TableRow><TableHead className="pl-4">Pipeline</TableHead><TableHead className="hidden md:table-cell">Repository</TableHead><TableHead className="whitespace-normal">Production branch</TableHead><TableHead className="hidden md:table-cell">Stages</TableHead><TableHead className="hidden sm:table-cell">Status</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
+        <TableHeader><TableRow><TableHead className="pl-4">Repository</TableHead><TableHead className="whitespace-normal">Production branch</TableHead><TableHead className="hidden md:table-cell">Stages</TableHead><TableHead className="hidden sm:table-cell">Status</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
         <TableBody>{pipeline ? <TableRow>
-          <TableCell className="pl-4"><Button variant="ghost" className="h-9 border-0 px-0 font-normal hover:bg-transparent hover:underline" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}>Pipeline</Button><div className="sm:hidden"><Badge variant="outline" className="text-[10px]">{status}</Badge></div></TableCell>
-          <TableCell className="hidden max-w-80 whitespace-normal break-words md:table-cell">{repositoryUrl ? <Button asChild variant="link" className="h-auto max-w-full justify-start whitespace-normal border-0 px-0 text-left font-normal"><a href={repositoryUrl} target="_blank" rel="noopener noreferrer">{repository}</a></Button> : repository}</TableCell>
+          <TableCell className="max-w-24 whitespace-normal break-all pl-4 sm:max-w-80 sm:break-words">{repositoryUrl ? <Button asChild variant="link" className="h-auto max-w-full justify-start whitespace-normal border-0 px-0 text-left font-normal"><a href={repositoryUrl} target="_blank" rel="noopener noreferrer">{repository}</a></Button> : repository}<div className="sm:hidden"><Badge variant="outline" className="text-[10px]">{status}</Badge></div></TableCell>
           <TableCell><ProductionBranchSelect key={`${repository}:${pipeline.id || ''}:${connected}`} repository={repository} value={pipeline.productionBranch} disabled={!connected || busy || deleting || failed} onChange={onProductionBranchChange} /></TableCell><TableCell className="hidden tabular-nums md:table-cell">{pipeline.stages.length}</TableCell>
           <TableCell className="hidden sm:table-cell"><Badge variant="outline">{status}</Badge></TableCell>
-          <TableCell className="pr-4 text-right">{failed ? <Button variant="outline" aria-label="Retry deletion" disabled={busy} onClick={() => void remove()}><RotateCcw /><span className="hidden sm:inline">Retry deletion</span></Button> : <DropdownMenu><DropdownMenuTrigger asChild><Button ref={actions} variant="ghost" size="icon" aria-label="Pipeline actions" disabled={busy || deleting}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem variant="destructive" onSelect={() => { setError(''); setConfirm(true); }}><Trash2 />Delete pipeline</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}</TableCell>
-        </TableRow> : <TableRow><TableCell colSpan={6} className="h-32 text-center text-muted-foreground">No pipelines</TableCell></TableRow>}</TableBody>
+          <TableCell className="pr-4 text-right"><div className="flex flex-col items-end gap-1 sm:flex-row sm:justify-end">
+            <Button variant="ghost" className="size-9 sm:w-auto" aria-label="Open pipeline" title="Open pipeline" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}><span className="hidden sm:inline">Open pipeline</span><ArrowRight /></Button>
+            {failed ? <Button variant="outline" aria-label="Retry deletion" disabled={busy} onClick={() => void remove()}><RotateCcw /><span className="hidden sm:inline">Retry deletion</span></Button> : <DropdownMenu><DropdownMenuTrigger asChild><Button ref={actions} variant="ghost" size="icon" aria-label="Pipeline actions" disabled={busy || deleting}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem variant="destructive" onSelect={() => { setError(''); setConfirm(true); }}><Trash2 />Delete pipeline</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+          </div></TableCell>
+        </TableRow> : <TableRow><TableCell colSpan={5} className="h-32 text-center text-muted-foreground">No pipelines</TableCell></TableRow>}</TableBody>
       </Table>
     </div>
     {!confirm && (error || failed && removal?.error || readError) && <p role="alert" className="mt-4 text-sm text-destructive">{error || (failed ? removal?.error : '') || readError}</p>}

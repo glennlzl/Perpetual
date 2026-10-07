@@ -59,7 +59,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     assert.equal(requested.has(chunks.AppSettings), true);
     assert.equal(requested.has(chunks.EnvironmentSettings), false);
     await page.getByRole('button', { name: 'Project', exact: true }).click();
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     await expect(page.getByText('No commits found', { exact: true })).toBeVisible();
     assert.equal(requested.has(chunks.GitGraphPanel), true);
@@ -142,7 +142,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     const key = page.getByLabel('OpenRouter API Key', { exact: true });
     await key.fill('unsaved-ui-draft');
     await page.getByRole('button', { name: 'Project', exact: true }).click();
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
     await expect(sheet.getByRole('alert')).toHaveText('Could not load this view.');
