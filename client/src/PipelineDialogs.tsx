@@ -1,4 +1,4 @@
-import { lazy, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { lazy, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Box, GitBranch, X } from 'lucide-react';
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -12,6 +12,7 @@ import ServiceSettings from './ServiceSettings';
 import TransitionConfirmation from './TransitionConfirmation';
 import DeferredView, { ViewLoadState } from './DeferredView';
 import { EnvironmentHeader, GitGraphHeader } from './InspectorHeaders';
+import { createGitHistoryCache } from '@/lib/git-history-cache';
 import StageSettingsDialog from './StageSettingsDialog';
 import { monochromeAsset, providerAsset } from '@/lib/provider-assets';
 import type { PipelineView } from '@/lib/pipeline-nodes.ts';
@@ -232,9 +233,17 @@ function DialogForm({ dialog, scan, onClose, onSourceSave, busy, setPending }: {
 type PipelineDialogsProps = {
   dialog: PipelineDialog | null; onClose: () => void; scan: Scan | null; pipeline: PipelineView | null | undefined;
   onSourceSave: (selection: SourceSelection) => Promise<unknown>; onAction: OnAction; onStageRemoved: () => Promise<void>;
-  busy?: boolean; onAppSettings: () => void;
+  busy?: boolean; onAppSettings: () => void; preloadHistory: boolean; historyConnection: string;
 };
-export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSourceSave, onAction, onStageRemoved, busy = false, onAppSettings }: PipelineDialogsProps) {
+export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSourceSave, onAction, onStageRemoved, busy = false, onAppSettings, preloadHistory, historyConnection }: PipelineDialogsProps) {
+  const repoPath = scan?.repo?.path;
+  const historyKey = JSON.stringify([repoPath, scan?.repo?.branch, scan?.repo?.sha, scan?.scannedAt, historyConnection, preloadHistory]);
+  // This owner stays mounted when the Sheet closes. A different source or account
+  // gets a separate cache, including while the previous source's request finishes.
+  const historyCache = useMemo(() => createGitHistoryCache(repoPath), [repoPath, historyKey]);
+  useEffect(() => {
+    if (preloadHistory && repoPath) void historyCache.load().catch(() => { /* Opening the graph retries and owns any error. */ });
+  }, [historyCache, preloadHistory, repoPath]);
   const [pending, setPending] = useState(false);
   const panel = useRef<HTMLElement | null>(null);
   const focusOrigin = useRef<HTMLElement | null>(null);
@@ -269,7 +278,7 @@ export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSou
       {/* Keyed like the view it holds, so another stage's view never inherits this one's failure. */}
       <DeferredView key={dialog.type === 'git-graph' ? `git-graph:${scan?.repo?.path}:${scan?.repo?.branch}` : `environment:${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} fallback={failed => <div className="inspector-body min-h-0 flex-1 overflow-y-auto p-4"><ViewLoadState failed={failed} /></div>}>
       {dialog.type === 'git-graph'
-        ? <GitGraphPanel key={`${scan?.repo?.path}:${scan?.repo?.branch}`} scan={scan} onClose={onClose} showHeader={false} />
+        ? <GitGraphPanel key={historyKey} scan={scan} historyCache={historyCache} onClose={onClose} showHeader={false} />
         : <EnvironmentSettings key={`${scan?.repo?.path}:${scan?.repo?.branch}:${dialog.stageId}`} repoPath={scan?.repo?.path} stage={pipeline?.stages?.find(stage => stage.id === dialog.stageId)} initialTab={dialog.tab} initialError={dialog.error} initialWatch={dialog.watch} initialRunId={dialog.runId} initialCaseId={dialog.caseId} caseRequestKey={dialog.caseRequestKey} onClose={onClose} onBusyChange={setPending} onAppSettings={onAppSettings} busy={busy} showHeader={false} />}
       </DeferredView>
       </>

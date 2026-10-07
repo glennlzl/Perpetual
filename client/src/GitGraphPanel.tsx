@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { SheetFooter } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api } from '@/lib/api';
+import type { GitHistoryCache } from '@/lib/git-history-cache';
 import { useActionFocus } from '@/lib/journey-focus';
 import { GitGraphHeader } from './InspectorHeaders';
 import type { Scan } from './App';
@@ -30,18 +30,20 @@ function HistoryLoading() {
   </div>;
 }
 
-export default function GitGraphPanel({ scan, onClose, showHeader = true }: { scan: Scan | null; onClose: () => void; showHeader?: boolean }) {
-  const [scope, setScope] = useState('current');
+export default function GitGraphPanel({ scan, historyCache, onClose, showHeader = true }: { scan: Scan | null; historyCache: GitHistoryCache; onClose: () => void; showHeader?: boolean }) {
+  const [scope, setScope] = useState<'current' | 'all'>('current');
   const [limit, setLimit] = useState(100);
   const [revision, setRevision] = useState(0);
-  const [result, setResult] = useState<HistoryResult | null>(null);
+  const [result, setResult] = useState<HistoryResult | null>(() => {
+    const history = historyCache.peek();
+    return history ? { key: JSON.stringify(['current', 100, 0]), history } : null;
+  });
   const syncedRevision = useRef(0);
   const historyBody = useRef<HTMLDivElement>(null);
   const retryButton = useRef<HTMLButtonElement>(null);
   const refreshButton = useRef<HTMLButtonElement>(null);
   const focusAfterLoad = useRef<number | null>(null);
-  const repoPath = scan?.repo?.path;
-  const requestKey = JSON.stringify([repoPath, scan?.scannedAt, scope, limit, revision]);
+  const requestKey = JSON.stringify([scope, limit, revision]);
   const loading = result?.key !== requestKey;
   const history = !loading ? result?.history : null;
   const error = !loading ? result?.error : null;
@@ -52,26 +54,21 @@ export default function GitGraphPanel({ scan, onClose, showHeader = true }: { sc
 
   useEffect(() => {
     let active = true;
-    if (!repoPath) {
-      setResult({ key: requestKey, error: 'Connect a repository to view its history.' });
-      return;
-    }
-    const params = new URLSearchParams({ repoPath, scope, limit: String(limit) });
-    if (syncedRevision.current !== revision) params.set('refresh', '1');
+    const refresh = syncedRevision.current !== revision;
     syncedRevision.current = revision;
-    api<GitHistory>(`/api/git-history?${params}`).then(
+    historyCache.load(scope, limit, refresh).then(
       history => { if (active) setResult({ key: requestKey, history }); },
       (failure: Error) => { if (active) setResult({ key: requestKey, error: failure.message }); },
     );
     return () => { active = false; };
-  }, [repoPath, scope, limit, revision, requestKey]);
+  }, [historyCache, scope, limit, revision, requestKey]);
 
   return <>
     {showHeader && <GitGraphHeader onClose={onClose} />}
     {/* One row down to 375px; a long repository name wraps inside its badge, after the slash first. */}
     <div className="git-graph-toolbar flex items-center gap-2 px-4">
       <Badge variant="outline" className="min-w-0 shrink whitespace-normal text-left"><span className="min-w-0 [overflow-wrap:anywhere]">{wrapAtSlash(history?.repository || scan?.repo?.name)}</span></Badge>
-      <Select value={scope} onValueChange={value => { focusAfterLoad.current = null; setScope(value); setLimit(100); }}>
+      <Select value={scope} onValueChange={value => { if (value !== 'current' && value !== 'all') return; focusAfterLoad.current = null; setScope(value); setLimit(100); }}>
         <SelectTrigger className="ml-auto w-auto shrink-0 sm:w-40" aria-label="History branches"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="all">All branches</SelectItem>

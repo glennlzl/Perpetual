@@ -30,7 +30,7 @@ test('Git history recovery and pagination respect the user’s current focus', {
       }
       await route.fulfill({ json: reply });
     });
-    await page.goto(app.url); await page.getByRole('button', { name: 'Git graph', exact: true }).click();
+    await page.goto(`${app.url}#pipeline`); await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     return { page, retry: page.getByRole('button', { name: 'Retry', exact: true }), more: page.getByRole('button', { name: 'Load more', exact: true }), closeButton: page.getByRole('button', { name: 'Close Git graph', exact: true }), entries: page.locator('[data-slot="commit-entry"]'),
       fail: () => { failed = true; }, recover: () => { failed = false; },
       hold() { held = Promise.withResolvers<void>(); started = Promise.withResolvers<void>(); return started.promise; },
