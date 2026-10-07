@@ -648,10 +648,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const latest = latestBranchBuildRuns(runs, sha, current.branch);
     failing.set(current.key, { branch: current.branch, login, sha, runs: latest.filter(failedRun).slice(0, 20).map(runOf) });
     const completed = completedRuns(latest, current.branch);
-    if (!completed) {
-      if (eligible() && (busy() || queued(current).length)) { open(current, login, sha, latest.filter(failedRun), 'push', 'queued'); await persist(); }
-      return;
+    if (eligible() && (busy() || queued(current).length)) {
+      open(current, login, sha, latest.filter(failedRun), 'push', 'queued');
+      await persist();
     }
+    if (!completed) return;
     if (completed.passed) {
       // A head that passed ends a run of failed repairs, which the breaker counts.
       const fresh = passing.get(current.key) !== sha;
@@ -667,7 +668,6 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     }
     // Runs that were cancelled or wait for approval neither pass nor fail: the head is read again at the next check.
     if (!completed.failed.length || !eligible()) return;
-    if (busy() || queued(current).length) { open(current, login, sha, completed.failed, 'push', 'queued'); await persist(); return; }
     // Loop guard: the merge of a repair's pull request that fails again needs a person, who may still start a Repair. A
     // head it cannot judge yet is read again at the next check, and after GUARD checks it gives up on what it waited for:
     // the head needs a person, and no later head waits for it.

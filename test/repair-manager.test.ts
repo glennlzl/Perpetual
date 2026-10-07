@@ -385,11 +385,14 @@ test('queued builds re-read their own CI and passing or cancelled builds never s
   await until(() => a.contexts.length === 1);
   await h.failHead([run('3', C, 'failure')], C);
   await h.failHead([run('4', D, null)], D);
+  await h.failHead([run('6', E, 'success')], E);
+  assert.equal(h.repair(E)?.status, 'queued', 'Even a build already passed on GitHub keeps its observed queue order.');
   h.github.runs[C] = [run('5', C, 'success')];
   h.github.runs[D] = [run('4', D, 'cancelled')];
   release.resolve();
   await h.manager.idle();
   assert.deepEqual([h.repair(C)?.status, h.repair(D)?.status, a.contexts.length], ['passed', 'needs-person', 1]);
+  assert.equal(h.repair(E)?.status, 'passed');
 });
 
 test('queued work survives restart paused, cancels individually, and resumes only on a person request', async t => {
