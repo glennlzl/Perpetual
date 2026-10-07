@@ -270,6 +270,8 @@ export default function PipelineDialogs({ dialog, onClose, scan, pipeline, onSou
       onCloseAutoFocus={event => {
         event.preventDefault();
         if (focusOrigin.current?.isConnected) focusOrigin.current.focus({ preventScroll: true });
+        // Setup replaces its invitation with a real stage, so its old opener is gone.
+        else if (dialog.stageId) document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(dialog.stageId)}"] .stage-title-button`)?.focus({ preventScroll: true });
         focusOrigin.current = null;
         panel.current = null;
       }}

@@ -135,6 +135,11 @@
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 
+/* First-time testing is a visible invitation, with no configured-stage status. */
+.delivery-app .testing-setup { position: relative; width: 280px; }
+.delivery-app .testing-setup-card { gap: 20px; padding-block: 20px; border: 1px dashed var(--pipeline-accent); border-radius: 16px; background: var(--pipeline-canvas); box-shadow: none; }
+.delivery-app .testing-setup-compact { display: flex; align-items: center; justify-content: center; width: 200px; min-height: 60px; }
+
 /* Selection lifts the border; keyboard focus is the focused control's own ring. */
 .delivery-app .pipeline-stage[data-selected="true"] { border-color: var(--pipeline-selection); box-shadow: var(--pipeline-surface-shadow); }
 /* Stage titles lead the canvas type scale: 18 titles, 14 rows, 12 badges and steps.
