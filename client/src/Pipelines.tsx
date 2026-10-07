@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { MoreHorizontal, Plus, RotateCcw, Trash2, Workflow } from 'lucide-react';
+import { MoreHorizontal, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -37,7 +37,7 @@ export default function Pipelines({ pipeline, repository, branch, connected, rem
       <Table aria-label="Pipelines">
         <TableHeader><TableRow><TableHead className="pl-4">Pipeline</TableHead><TableHead className="hidden md:table-cell">Repository</TableHead><TableHead>Branch</TableHead><TableHead className="hidden md:table-cell">Stages</TableHead><TableHead>Status</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
         <TableBody>{pipeline ? <TableRow>
-          <TableCell className="pl-4"><Button variant="ghost" className="-ml-2 gap-2" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}><Workflow />Delivery</Button></TableCell>
+          <TableCell className="pl-4"><Button variant="ghost" className="h-9 border-0 px-0 font-normal hover:bg-transparent hover:underline" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}>Delivery</Button></TableCell>
           <TableCell className="hidden max-w-80 whitespace-normal break-words md:table-cell">{repository}</TableCell>
           <TableCell>{branch || '—'}</TableCell><TableCell className="hidden tabular-nums md:table-cell">{pipeline.stages.length}</TableCell>
           <TableCell><Badge variant="outline">{deleting ? 'Deleting' : failed ? 'Deletion failed' : connected ? 'Connected' : 'Disconnected'}</Badge></TableCell>

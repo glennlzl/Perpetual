@@ -8,6 +8,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Separator } from '@/components/ui/separator';
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import Pipelines from './Pipelines';
 import { githubConnectionChanges } from '@/lib/github-connection-changes';
@@ -962,7 +963,19 @@ function PipelineApp() {
   return <>
     <AppSidebar theme={theme} page={page} onNavigate={navigate} />
     <div className="app-workspace">
-      <header className="workspace-header"><div className="workspace-context"><SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />{page === 'settings' ? <Settings2 size={16} /> : <Workflow size={16} />}<span className="workspace-title">{page === 'settings' ? 'Settings' : 'Project'}</span>{page !== 'settings' && state.scan?.repo?.name && <><ChevronRight size={14} /><span className="workspace-repo">{state.scan.repo.name}</span><ChevronRight size={14} /><Button variant="ghost" className="h-7 px-1" onClick={() => navigate('pipelines')}>Pipelines</Button>{page === 'pipeline' && <><ChevronRight size={14} /><span className="workspace-repo">Delivery</span></>}</>}</div><Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button></header>
+      <header className="workspace-header">
+        <div className="workspace-context">
+          <SidebarTrigger aria-label="Toggle sidebar" /><Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />
+          <Breadcrumb aria-label="Breadcrumb"><BreadcrumbList className="flex-nowrap">
+            {page === 'pipeline' ? <>
+              <BreadcrumbItem><BreadcrumbLink href="#pipelines" onClick={event => { event.preventDefault(); navigate('pipelines'); }}>Project</BreadcrumbLink></BreadcrumbItem>
+              <BreadcrumbSeparator />
+              <BreadcrumbItem><BreadcrumbPage>Delivery</BreadcrumbPage></BreadcrumbItem>
+            </> : <BreadcrumbItem><BreadcrumbPage>{page === 'settings' ? 'Settings' : 'Project'}</BreadcrumbPage></BreadcrumbItem>}
+          </BreadcrumbList></Breadcrumb>
+        </div>
+        <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</Button>
+      </header>
       {page === 'settings' ? <DeferredView fallback={failed => <main className="app-settings min-h-0 flex-1 overflow-y-auto px-6 py-10 sm:px-10 lg:py-14" id="settings"><div className="mx-auto max-w-xl"><ViewLoadState failed={failed} /></div></main>}><AppSettings settings={settings} /></DeferredView> : <main className="pipeline-page" id="pipeline">
         {loading ? <PipelineLoading /> : page === 'pipelines' && state.scan ? <Pipelines key={state.scan.repo.path} pipeline={pipeline} repository={state.source?.repository || state.scan.repo.name || ''} branch={state.scan.repo.branch} connected={connected} removal={state.pipelineRemoval} busy={busy} readError={error?.message} onOpen={() => navigate('pipeline')} onConnect={() => openDialog({ type: 'source', connect: true })} onCreate={createPipeline} onDelete={removePipeline} /> : pipeline && connected ? <ReactFlowProvider key={`${pipeline.repoPath}:${pipeline.id || ''}`} ><PipelineCanvas scan={state.scan} source={state.source} pipeline={pipeline} busy={busy} toggleStage={toggleStage} addTest={addTest} openDialog={openDialog} theme={theme} error={canvasError} onRetryError={retryError} onDismissError={dismissError} selection={dialog?.type === 'transition' ? null : dialog} environments={tests.environments} browserTests={tests.browserTests} stageRemovals={tests.stageRemovals} gates={gates} autopilot={autopilot} createSandbox={createSandbox} environmentBusy={tests.busyStages} branchSwitcher={<BranchSwitcher scan={state.scan} busy={busy} onSourceSave={switchBranch} onLocalScan={scanLocal} onConfigureSource={options => openDialog({ type: 'source', connect: Boolean(options?.connect) })} />} /></ReactFlowProvider> : <div className="pipeline-canvas canvas-empty"><GitBranch size={28} /><h1>{loadError ? 'Could not load pipeline' : 'Connect your GitHub'}</h1>{loadError && <p role="alert">{loadError}</p>}<Button onClick={loadError ? load : () => openDialog({ type: 'source', connect: true })}>{loadError ? 'Try again' : <><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Connect GitHub</>}</Button></div>}
       </main>}
