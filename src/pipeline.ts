@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isBranchName } from './github-cli.ts';
 import type { Pipeline, Stage, Transition } from '../contract/pipeline.ts';
 export type { Pipeline, Stage, StageKind, Transition } from '../contract/pipeline.ts';
 /** A definition that passed validatePipeline; saved transitions are checked when normalized. */
@@ -9,8 +10,8 @@ const FIXED = Object.freeze([
   { id: 'build', name: 'Build', kind: 'build' },
   { id: 'production', name: 'Production', kind: 'production' },
 ]);
-const ACTIONS = new Set<unknown>(['add-stage', 'rename-stage', 'remove-stage', 'toggle-stage', 'set-transition', 'set-github-workflow']);
-const INPUT_FIELDS = new Set(['repoPath', 'pipelineId', 'action', 'stageId', 'afterStageId', 'name', 'kind', 'sourceStageId', 'targetStageId', 'blocked', 'reason', 'workflowFile']);
+const ACTIONS = new Set<unknown>(['add-stage', 'rename-stage', 'remove-stage', 'toggle-stage', 'set-transition', 'set-github-workflow', 'set-production-branch']);
+const INPUT_FIELDS = new Set(['repoPath', 'pipelineId', 'action', 'stageId', 'afterStageId', 'name', 'kind', 'sourceStageId', 'targetStageId', 'blocked', 'reason', 'workflowFile', 'branch']);
 
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function checkedName(value: unknown, maximum: number, label: string) {
@@ -50,6 +51,7 @@ export function defaultPipeline(repoPath: unknown): Pipeline {
 function validatePipeline(pipeline: unknown): asserts pipeline is PipelineDefinition {
   if (!record(pipeline) || typeof pipeline.repoPath !== 'string' || !Array.isArray(pipeline.stages) || pipeline.stages.length < 3 || pipeline.stages.length > 12) throw new Error('Invalid pipeline definition.');
   if (pipeline.id !== undefined && (typeof pipeline.id !== 'string' || !/^pipeline:[a-f0-9-]{36}$/.test(pipeline.id))) throw new Error('Invalid pipeline identity.');
+  if (pipeline.productionBranch != null && !isBranchName(pipeline.productionBranch)) throw new Error('Invalid production branch.');
   if (pipeline.stages[0]?.id !== 'source' || pipeline.stages.at(-1)?.id !== 'production') throw new Error('Source and Production must remain the first and last fixed stages.');
   const ids = new Set(), names = new Set();
   for (const stage of pipeline.stages) {
@@ -106,6 +108,11 @@ export function applyPipelineAction(definition: unknown, input: unknown): Pipeli
   if (input.repoPath !== undefined && input.repoPath !== pipeline.repoPath) throw new Error('Pipeline action targets a different repository.');
   if (input.pipelineId !== undefined && input.pipelineId !== pipeline.id) throw new Error('Pipeline action targets a different pipeline.');
   const next = normalizedPipeline(pipeline);
+  if (input.action === 'set-production-branch') {
+    if (!isBranchName(input.branch)) throw new Error('Choose a valid production branch from the repository.');
+    next.productionBranch = input.branch;
+    return next;
+  }
   if (input.action === 'set-transition') {
     if (typeof input.blocked !== 'boolean') throw new Error('Transition blocked must be a boolean.');
     const edge = next.transitions.find(item => item.source === input.sourceStageId && item.target === input.targetStageId);

@@ -8,7 +8,7 @@ import type { AutopilotView } from './autopilot.ts';
 export type StageKind = 'source' | 'build' | 'production' | 'sandbox';
 export interface Stage { id: string; name: string; kind: StageKind; collapsed: boolean; githubWorkflow?: string | null }
 export interface Transition { id: string; source: string; target: string; blocked: boolean; reason: string }
-export interface Pipeline { repoPath: string; id?: string; stages: Stage[]; transitions: Transition[] }
+export interface Pipeline { repoPath: string; id?: string; productionBranch?: string | null; stages: Stage[]; transitions: Transition[] }
 /** A confirmed deletion, pinned to one project and one generation of its pipeline. */
 export interface PipelineRemoval {
   id: string; status: 'queued' | 'removing' | 'completed' | 'failed'; error?: string;

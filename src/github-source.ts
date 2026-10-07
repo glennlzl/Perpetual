@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub, unanswered, type GitHubFailureKind } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isBranchName, isRepository, parseGitHubResponse, runGitHub, unanswered, type GitHubFailureKind } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -86,9 +86,7 @@ function repositoryName(value: unknown) {
 }
 
 function branchName(value: unknown) {
-  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@' || value.endsWith('.')
-    || /[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) || value.includes('..') || value.includes('@{')
-    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) {
+  if (!isBranchName(value)) {
     throw new GitHubSourceError('Choose a valid Git branch name from the repository.');
   }
   return value;

@@ -16,15 +16,17 @@ const initial = () => ({
   autopilot: { repoPath, stages: {} },
 });
 type State = Omit<ReturnType<typeof initial>, 'pipeline' | 'githubConnection'> & { pipeline: ReturnType<typeof defaultPipeline> | null; githubConnection: ReturnType<typeof initial>['githubConnection'] | null };
-async function fixture(t: TestContext, options: { disconnected?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean } = {}) {
+async function fixture(t: TestContext, options: { disconnected?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean } = {}) {
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } }); await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } }), errors: string[] = [], posts: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const state: State = initial(); if (options.disconnected) state.githubConnection = null;
   let deletes = 0;
+  const reads: string[] = [];
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname; if (req.method() === 'POST') posts.push(path);
+    else reads.push(path);
     let status = 200, json: unknown = {};
     if (path === '/api/session') json = { token: 'fixture-token' };
     if (path === '/api/state') {
@@ -37,7 +39,11 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; deleti
     const connection = () => ({ available: true, authenticated: true, account: { login: 'developer', name: null }, connected: Boolean(state.githubConnection), source: state.source });
     if (path === '/api/github/connection') json = connection();
     if (path === '/api/github/repositories') json = { repositories: [{ fullName: 'acme/app', name: 'app', owner: 'acme', defaultBranch: 'main', private: true }], hasMore: false };
-    if (path === '/api/github/branches') json = { branches: [{ name: 'main' }], hasMore: false };
+    if (path === '/api/github/branches') json = { branches: [{ name: 'main' }, { name: 'dev' }], nextPage: null, defaultBranch: 'main' };
+    if (path === '/api/pipeline/action') {
+      if (options.productionFailure) { status = 409; json = { error: 'Resolve the current deployment before changing the Production branch.' }; }
+      else { state.pipeline = applyPipelineAction(state.pipeline, req.postDataJSON()); json = { pipeline: state.pipeline }; }
+    }
     if (path === '/api/github/disconnect') { state.githubConnection = null; json = connection(); }
     if (path === '/api/github/connect') { state.githubConnection = { login: 'developer', connectedAt: '2026-10-06T12:00:00Z' }; json = connection(); }
     if (path === '/api/gate') json = { repoPath, sha: state.scan.repo.sha, stages: {}, production: null };
@@ -55,8 +61,39 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; deleti
   });
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
   await page.goto(`${origin}/build/`);
-  return { page, state, errors, posts };
+  return { page, state, errors, posts, reads };
 }
+
+test('repository links to GitHub and the Production branch persists without switching the viewed branch', { timeout: 60000 }, async t => {
+  const { page, state, errors, posts } = await fixture(t);
+  const repository = page.getByRole('link', { name: 'acme/app', exact: true });
+  await expect(repository).toHaveAttribute('href', 'https://github.com/acme/app');
+  await expect(repository).toHaveAttribute('target', '_blank');
+  const branch = page.getByRole('combobox', { name: 'Production branch', exact: true });
+  await expect(branch).toHaveText('Not set');
+  await branch.click();
+  await page.getByRole('option', { name: 'dev', exact: true }).click();
+  await expect(branch).toHaveText('dev');
+  assert.equal(state.pipeline?.productionBranch, 'dev');
+  assert.equal(state.scan.repo.branch, 'main'); assert.equal(state.source.branch, 'main');
+  assert.deepEqual(posts, ['/api/pipeline/action']);
+  await page.reload();
+  await expect(branch).toHaveText('dev');
+  assert.deepEqual(errors, []);
+});
+
+test('a failed Production branch save keeps its confirmed value and a disconnected source cannot change it', { timeout: 60000 }, async t => {
+  const { page, state, errors } = await fixture(t, { productionFailure: true });
+  const branch = page.getByRole('combobox', { name: 'Production branch', exact: true });
+  await branch.click(); await page.getByRole('option', { name: 'dev', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Resolve the current deployment before changing the Production branch.');
+  await expect(branch).toHaveText('Not set');
+  assert.equal(state.pipeline?.productionBranch, undefined);
+  state.githubConnection = null; await page.reload();
+  await expect(branch).toBeDisabled();
+  await expect(branch).toHaveText('Not set');
+  assert.deepEqual(errors, []);
+});
 
 test('Project opens a Pipelines table without a sidebar submenu and the row opens the canvas', { timeout: 60000 }, async t => {
   const { page, errors } = await fixture(t);
@@ -65,14 +102,14 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
   await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Project');
   const table = page.getByRole('table', { name: 'Pipelines', exact: true });
   const heading = await table.getByRole('columnheader', { name: 'Pipeline', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
-  const content = await table.getByRole('button', { name: 'Delivery', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
+  const content = await table.getByRole('button', { name: 'Pipeline', exact: true }).evaluate(el => el.getBoundingClientRect().left + parseFloat(getComputedStyle(el).paddingLeft));
   assert.ok(Math.abs(heading - content) <= 1, 'Pipeline name aligns with its column heading.');
   await page.getByRole('button', { name: 'Toggle sidebar' }).click();
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Project', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Pipelines', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Delivery', exact: true }).click();
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('ProjectDelivery');
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('ProjectPipeline');
   await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).getByRole('link', { name: 'Project', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -83,17 +120,17 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
 test('Disconnect closes Source and returns to the retained Disconnected pipeline; reconnect restores it', { timeout: 60000 }, async t => {
   const { page, state, errors } = await fixture(t);
   const original = structuredClone(state.pipeline);
-  await page.getByRole('button', { name: 'Delivery', exact: true }).click();
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
   await page.getByRole('button', { name: 'Configure source', exact: true }).click();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
-  await expect(page.getByText('Disconnected', { exact: true })).toBeVisible();
+  await expect(page.getByText('Disconnected', { exact: true }).filter({ visible: true })).toBeVisible();
   await expect(page.locator('.pipeline-inspector')).toHaveCount(0); assert.deepEqual(state.pipeline, original);
   await page.getByRole('button', { name: 'Reconnect GitHub', exact: true }).click();
   await page.getByRole('button', { name: 'Continue as developer', exact: true }).click();
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Delivery', exact: true }).click();
+  await expect(page.getByText('Connected', { exact: true }).filter({ visible: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Beta', exact: true })).toBeVisible(); assert.deepEqual(state.pipeline, original); assert.deepEqual(errors, []);
 });
 
@@ -105,14 +142,14 @@ test('Delete pipeline confirms once, retains a failed row for Retry and recreate
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused(); await page.keyboard.press('Enter');
   await expect(page.getByRole('button', { name: 'Pipeline actions' })).toBeFocused(); assert.equal(posts.includes('/api/pipeline/remove'), false);
   await openRemoval(); await page.getByRole('alertdialog').getByRole('button', { name: 'Delete pipeline', exact: true }).click();
-  await expect(page.getByText('Deletion failed', { exact: true })).toBeVisible();
+  await expect(page.getByText('Deletion failed', { exact: true }).filter({ visible: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Sandbox cleanup failed');
   await page.getByRole('button', { name: 'Retry deletion' }).click();
   await expect(page.getByText('No pipelines', { exact: true })).toBeVisible();
   await page.reload(); await expect(page.getByText('No pipelines', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Create pipeline' }).click();
-  await expect(page.getByRole('button', { name: 'Delivery', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Delivery', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Build', exact: true })).toBeVisible();
   await expect(page.getByText('Earlier pipeline observation', { exact: true })).toHaveCount(0);
   assert.equal(posts.filter(path => path === '/api/pipeline/remove').length, 2); assert.deepEqual(errors, []);
@@ -123,5 +160,5 @@ test('a running-work refusal stays in the confirmation without hiding the pipeli
   await page.getByRole('button', { name: 'Pipeline actions' }).click(); await page.getByRole('menuitem', { name: 'Delete pipeline' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete pipeline', exact: true }).click();
   await expect(page.getByRole('alertdialog').getByRole('alert')).toContainText('Stop the browser run');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Delivery', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Pipeline', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
 });

@@ -6,6 +6,8 @@
 
 **Pipeline** — A Project's connected stages through which its source, delivery and business verification progress. Disconnecting GitHub retains the Pipeline; removing it cleans up its owned environments and test workspace.
 
+**Production branch** — A Pipeline's explicitly chosen GitHub branch from which Perpetual may request a Release. It is saved independently of the branch being viewed and never inferred from a repository default or a branch name. Its current commit still needs Build and every Sandbox journey gate to permit deployment.
+
 **Stage** — A named point in a pipeline, such as Source, Build, Beta or Production. A stage's environment readiness and test results are separate states.
 
 **Build** — The fixed stage holding the repository's workflow runner, GitHub Actions. A passing workflow is not a deployment.

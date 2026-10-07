@@ -16,6 +16,13 @@ export const SHA = /^[a-f\d]{40}$/i;
 const ENTITY_TAG = /^(?:W\/)?"[\x21\x23-\x7e]{1,200}"$/;
 const STATUS_LINE = /^HTTP\/[\d.]+ (\d{3})\b/;
 
+/** A Git branch ref, before it is placed in a command or an API path. */
+export function isBranchName(value: unknown): value is string {
+  return typeof value === 'string' && Boolean(value) && value.length <= 1024 && !value.startsWith('-') && value !== '@' && !value.endsWith('.')
+    && !/[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) && !value.includes('..') && !value.includes('@{')
+    && !value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'));
+}
+
 /** Whether `value` names a repository as owner/name; a name of `.` or `..` never does. */
 export const isRepository = (value: unknown): value is string => typeof value === 'string' && REPOSITORY.test(value) && !['.', '..'].includes(value.split('/')[1]);
 

@@ -7,17 +7,20 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import type { PipelineRemoval } from '../../contract/pipeline.ts';
 import type { PipelineView } from '@/lib/pipeline-nodes';
+import ProductionBranchSelect from './ProductionBranchSelect';
 
-export default function Pipelines({ pipeline, repository, branch, connected, removal, busy, readError, onOpen, onConnect, onCreate, onDelete }: {
-  pipeline: PipelineView | null; repository: string; branch?: string | null; connected: boolean;
+export default function Pipelines({ pipeline, repository, repositoryUrl, connected, removal, busy, readError, onOpen, onConnect, onCreate, onDelete, onProductionBranchChange }: {
+  pipeline: PipelineView | null; repository: string; repositoryUrl?: string | null; connected: boolean;
   removal?: PipelineRemoval | null; busy: boolean; onOpen(): void; onConnect(): void;
   readError?: string;
   onCreate(): Promise<void>; onDelete(): Promise<void>;
+  onProductionBranchChange(branch: string): Promise<unknown>;
 }) {
   const [confirm, setConfirm] = useState(false), [error, setError] = useState('');
   const actions = useRef<HTMLButtonElement>(null), heading = useRef<HTMLHeadingElement>(null);
   const deleting = removal?.status === 'queued' || removal?.status === 'removing';
   const failed = removal?.status === 'failed';
+  const status = deleting ? 'Deleting' : failed ? 'Deletion failed' : connected ? 'Connected' : 'Disconnected';
   async function remove() {
     setError('');
     try { await onDelete(); setConfirm(false); }
@@ -35,12 +38,12 @@ export default function Pipelines({ pipeline, repository, branch, connected, rem
     </div>
     <div className="rounded-lg border">
       <Table aria-label="Pipelines">
-        <TableHeader><TableRow><TableHead className="pl-4">Pipeline</TableHead><TableHead className="hidden md:table-cell">Repository</TableHead><TableHead>Branch</TableHead><TableHead className="hidden md:table-cell">Stages</TableHead><TableHead>Status</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
+        <TableHeader><TableRow><TableHead className="pl-4">Pipeline</TableHead><TableHead className="hidden md:table-cell">Repository</TableHead><TableHead className="whitespace-normal">Production branch</TableHead><TableHead className="hidden md:table-cell">Stages</TableHead><TableHead className="hidden sm:table-cell">Status</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
         <TableBody>{pipeline ? <TableRow>
-          <TableCell className="pl-4"><Button variant="ghost" className="h-9 border-0 px-0 font-normal hover:bg-transparent hover:underline" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}>Delivery</Button></TableCell>
-          <TableCell className="hidden max-w-80 whitespace-normal break-words md:table-cell">{repository}</TableCell>
-          <TableCell>{branch || '—'}</TableCell><TableCell className="hidden tabular-nums md:table-cell">{pipeline.stages.length}</TableCell>
-          <TableCell><Badge variant="outline">{deleting ? 'Deleting' : failed ? 'Deletion failed' : connected ? 'Connected' : 'Disconnected'}</Badge></TableCell>
+          <TableCell className="pl-4"><Button variant="ghost" className="h-9 border-0 px-0 font-normal hover:bg-transparent hover:underline" disabled={busy || deleting || failed} onClick={connected ? onOpen : onConnect}>Pipeline</Button><div className="sm:hidden"><Badge variant="outline" className="text-[10px]">{status}</Badge></div></TableCell>
+          <TableCell className="hidden max-w-80 whitespace-normal break-words md:table-cell">{repositoryUrl ? <Button asChild variant="link" className="h-auto max-w-full justify-start whitespace-normal border-0 px-0 text-left font-normal"><a href={repositoryUrl} target="_blank" rel="noopener noreferrer">{repository}</a></Button> : repository}</TableCell>
+          <TableCell><ProductionBranchSelect key={`${repository}:${pipeline.id || ''}:${connected}`} repository={repository} value={pipeline.productionBranch} disabled={!connected || busy || deleting || failed} onChange={onProductionBranchChange} /></TableCell><TableCell className="hidden tabular-nums md:table-cell">{pipeline.stages.length}</TableCell>
+          <TableCell className="hidden sm:table-cell"><Badge variant="outline">{status}</Badge></TableCell>
           <TableCell className="pr-4 text-right">{failed ? <Button variant="outline" aria-label="Retry deletion" disabled={busy} onClick={() => void remove()}><RotateCcw /><span className="hidden sm:inline">Retry deletion</span></Button> : <DropdownMenu><DropdownMenuTrigger asChild><Button ref={actions} variant="ghost" size="icon" aria-label="Pipeline actions" disabled={busy || deleting}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem variant="destructive" onSelect={() => { setError(''); setConfirm(true); }}><Trash2 />Delete pipeline</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}</TableCell>
         </TableRow> : <TableRow><TableCell colSpan={6} className="h-32 text-center text-muted-foreground">No pipelines</TableCell></TableRow>}</TableBody>
       </Table>

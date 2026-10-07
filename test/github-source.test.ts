@@ -161,9 +161,10 @@ test('a root saved as it was typed keeps its pipeline when the source is saved a
   if (!await lstat(join(hub.dir, 'WORK')).then(() => true, () => false)) return t.skip('The file system distinguishes letter case.');
   const stages = [['source', 'Source', 'source'], ['build', 'Build', 'build'], ['beta', 'Beta', 'sandbox'], ['production', 'Production', 'production']].map(([id, name, kind]) => ({ id, name, kind, collapsed: false }));
   // Saved under the root as typed; the branch selector posts that root again.
-  await withController(t, { pipelines: { 'github:acme/app:/backend': { repoPath: '/earlier/copy/backend', stages } } }, async ({ connect }) => {
+  await withController(t, { pipelines: { 'github:acme/app:/backend': { repoPath: '/earlier/copy/backend', stages, productionBranch: 'release/production' } } }, async ({ connect }) => {
     const { status, body } = await connect({ repository: 'acme/app', branch: 'main', rootDirectory: '/backend' });
     assert.deepEqual([status, body.source.rootDirectory, body.pipeline!.stages.map(stage => stage.name)], [200, '/Backend', ['Source', 'Build', 'Beta', 'Production']]);
+    assert.equal(body.pipeline!.productionBranch, 'release/production');
   });
 });
 

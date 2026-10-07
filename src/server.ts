@@ -421,10 +421,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     const scan=state.scan,source=state.source;
     if(!pipelineAvailable()||!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
     const connection=await connectedAccount();
-    if(!connection||state.scan!==scan||state.source!==source||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    if(!connection||state.scan!==scan||state.source!==source||!pipelineAvailable()||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    const productionBranch=currentPipeline(state).productionBranch;
+    const branchReason=!productionBranch?'Choose a Production branch in Pipelines before deploying.'
+      :source.branch!==productionBranch||scan.repo.branch!==productionBranch?`Switch to the Production branch (${productionBranch}) before deploying.`:undefined;
     const evidence=gates.releaseEvidence(scan.repo.sha);
     return {source:{key:pipelineKey(state),repository:source.repository,branch:source.branch,sha:scan.repo.sha,login:connection.login},
-      ready:Boolean(evidence),reason:evidence?undefined:'Every Sandbox gate must pass or be explicitly released and reported for this commit.',
+      ready:!branchReason&&Boolean(evidence),reason:branchReason??(evidence?undefined:'Every Sandbox gate must pass or be explicitly released and reported for this commit.'),
       gates:evidence?.stages.map(stage=>({id:stage.gateId,stageId:stage.id,sha:evidence.sha,context:stage.context,status:stage.status,updatedAt:stage.updatedAt,
         ...(stage.releasedBy?{releasedBy:stage.releasedBy,releasedAt:stage.releasedAt}:{})}))??[]};
   }});
@@ -864,8 +867,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/pipeline/action') {
         const input=await body(req);
         requireSourceIdle();
-        const pipeline=await save(current=>{
-          requireSourceIdle();
+        function edit(current: ControllerState) {
           const repoPath=current.scan?.repo?.path;
           if(!repoPath || input?.repoPath!==repoPath) {
             const error: HttpError=new Error('The active repository changed. Reload its pipeline before editing.');
@@ -879,9 +881,29 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           if(input.action==='set-github-workflow' && input.workflowFile!==null && !current.scan!.workflows?.some(workflow=>workflow.file===input.workflowFile)) {
             throw new Error('The selected GitHub Actions workflow is no longer available. Reload the pipeline.');
           }
+          return pipeline;
+        }
+        const commitEdit=(current: ControllerState)=>{
+          const pipeline=edit(current);
           const pipelines={...current.pipelines,[projectKey(current)]:pipeline};
           return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
+        };
+        if(input.action==='set-production-branch')return await withSourceHeld(requireSourceIdle,async()=>{
+          const scan=activeScan(input.repoPath),source=state.source,candidate=edit(state),key=pipelineKey(state);
+          if(!source||source.scanPath!==scan.repo.path)throw conflict('Connect a GitHub repository before choosing a Production branch.');
+          if(releases.hasWork(key))throw conflict('Resolve the current deployment before changing the Production branch.');
+          if(state.githubConnection===null)throw new Error('Connect your GitHub account before choosing a Production branch.');
+          await requireGitHub(await githubRuns.session());
+          const head=await (github.head??readBranchHead)({repository:source.repository,branch:candidate.productionBranch!,etag:null});
+          if(head.status!==200)throw conflict('Could not verify the Production branch. Reload its branches and try again.');
+          const pipeline=await save(current=>{
+            if(closed||current.scan!==scan||current.source!==source||pipelineKey(current)!==key)throw conflict(SOURCE_CHANGED);
+            if(releases.hasWork(key))throw conflict('Resolve the current deployment before changing the Production branch.');
+            return commitEdit(current);
+          });
+          return reply(res,200,{pipeline});
         });
+        const pipeline=await save(current=>{requireSourceIdle();return commitEdit(current);});
         return reply(res,200,{pipeline});
       }
       // A current-commit GitHub read as the connected account: an explicit Disconnect refuses before any

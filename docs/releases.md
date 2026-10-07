@@ -4,11 +4,11 @@ Production can request a deployment of a tested commit through GitHub. The repos
 
 ## Configure a target
 
-1. Connect a GitHub repository and branch. The connected account needs permission to create deployments.
+1. Connect a GitHub repository and explicitly choose its **Production branch** in the Pipelines table. Switch the canvas to that branch before deploying; browsing another branch does not change this saved release policy. The connected account needs permission to create deployments.
 2. Add a deployment handler to the repository, following the contract below. Keep it on both the selected commit and the default branch; Perpetual checks both before accepting the target.
 3. In Production, choose **Configure deployment**, enter the GitHub environment and handler's `.github/workflows/` file, and set whether it is a production environment. Saving verifies the handler; it does not deploy.
 4. Build must pass and every current Sandbox stage must pass or be explicitly released at the same commit. Their GitHub status reports must also succeed. Releasing a gate does not stand in for Build: a commit [released without a push or dispatch run](gate.md#what-a-gate-does) cannot be deployed until such a run passes.
-5. Choose **Deploy** and confirm the exact commit and target. A newer observed source commit, changed target, pending, failed or missing Build, or changed gate evidence refuses the request.
+5. Choose **Deploy** and confirm the exact commit and target. An unset or different Production branch, newer observed source commit, changed target, pending, failed or missing Build, or changed gate evidence refuses the request.
 
 The target is scoped to the connected repository, root and branch. Deploying checks the branch head and Build again, sends the full SHA, disables GitHub's automatic merge, and requires the recorded journey status contexts. It never substitutes the latest branch tip for the confirmed SHA. A manual journey release is retained in the release evidence; it does not become a passing test.
 

@@ -14,6 +14,7 @@ export type { Environment, EnvironmentHealth, EnvironmentService } from '../../.
 export type Resource = 'browser' | 'environment';
 /** The pipeline edits this workspace offers; collapsing is applied locally while its save is queued. */
 export type PipelineAction =
+  | { action: 'set-production-branch'; branch: string }
   | { action: 'add-stage'; afterStageId: string; name: string }
   | { action: 'rename-stage'; stageId: string; name: string }
   | { action: 'set-transition'; sourceStageId?: string; targetStageId?: string; blocked: boolean }
