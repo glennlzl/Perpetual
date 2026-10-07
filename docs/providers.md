@@ -23,6 +23,8 @@ Once the controller verifies a connected account, the dialog closes and the Sour
 
 This uses [GitHub CLI's browser authorization](https://cli.github.com/manual/gh_auth_login), not a hosted GitHub App. CLI credentials stay in the CLI's credential store and never enter browser responses or Perpetual's state. Perpetual requests no additional OAuth scopes; GitHub CLI's standard consent screen names the authorizing application and its permissions. Device sign-in is cancelled when the dialog closes and expires after 15 minutes; cancelling does not revoke credentials already authorized on GitHub. An environment-token login can use **Continue as …** but cannot be replaced through the browser flow.
 
+Managed GitHub clones and remote fetches authenticate their first HTTPS request with the existing CLI credential. Its authorization header is scoped to GitHub in the Git child's temporary environment, never saved in checkout configuration, and redirects are refused. This also works on Git versions that otherwise wait for an HTTP 401 challenge; a server may refuse an anonymous request with 403 instead.
+
 **Disconnect** detaches GitHub from this Perpetual instance. It does not sign the machine out of GitHub CLI or delete the last scanned graph.
 
 ### Choose a source

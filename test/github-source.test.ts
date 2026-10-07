@@ -1,6 +1,8 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -9,6 +11,7 @@ import { ensureGitHubHistory, listGitHubBranches, listGitHubRepositories, prepar
 import { readGitHistory } from '../src/git-history.ts';
 import { fetch, startServer } from './fixtures/controller.ts';
 import type { SourceReply } from '../contract/pipeline.ts';
+import { gitReadOnlyEnvironment } from '../src/process.ts';
 
 const exec = promisify(execFile);
 
@@ -17,19 +20,52 @@ const exec = promisify(execFile);
  * https://github.com/ from bare repositories under origin/ through an insteadOf rule that only those two commands see,
  * so a managed copy keeps GitHub's address and the real fetch flags run. `commit` pushes acme/app's main branch.
  */
-async function github(t: TestContext, replies: Record<string, unknown> = {}) {
+async function github(t: TestContext, replies: Record<string, unknown> = {}, { authenticatedHttp = false } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-github-source-')));
   const bin = join(dir, 'bin'), work = join(dir, 'work'), origin = join(dir, 'origin/acme/app.git'), repliesFile = join(dir, 'replies.json');
   const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const requests: { authenticated: boolean }[] = [];
+  let networkOrigin = `file://${dir}/origin/`;
+  if (authenticatedHttp) {
+    // Real Git HTTP, with a server that refuses anonymous requests before offering a credential challenge.
+    const server = createServer((request, response) => {
+      const authenticated = request.headers.authorization === `Basic ${Buffer.from('x-access-token:fixture-token').toString('base64')}`;
+      requests.push({ authenticated });
+      if (!authenticated) { response.writeHead(403); response.end('Forbidden'); return; }
+      const url = new URL(request.url!, 'http://127.0.0.1');
+      const child = spawn(realGit, ['http-backend'], { env: { ...gitReadOnlyEnvironment(), GIT_PROJECT_ROOT: join(dir, 'origin'), GIT_HTTP_EXPORT_ALL: '1', REQUEST_METHOD: request.method, PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1), CONTENT_TYPE: request.headers['content-type'], CONTENT_LENGTH: request.headers['content-length'], REMOTE_USER: 'developer' } });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', chunk => chunks.push(chunk));
+      child.on('close', () => {
+        const output = Buffer.concat(chunks), boundary = output.indexOf('\r\n\r\n');
+        if (boundary < 0) { response.writeHead(500); response.end(); return; }
+        let status = 200;
+        const headers: Record<string, string> = {};
+        for (const line of output.subarray(0, boundary).toString().split('\r\n')) {
+          const at = line.indexOf(':');
+          if (at < 0) continue;
+          if (line.slice(0, at).toLowerCase() === 'status') status = Number(line.slice(at + 1).trim().split(' ')[0]);
+          else headers[line.slice(0, at)] = line.slice(at + 1).trim();
+        }
+        response.writeHead(status, headers); response.end(output.subarray(boundary + 4));
+      });
+      request.pipe(child.stdin);
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeAllConnections(); }));
+    networkOrigin = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  }
   await mkdir(bin);
   await writeFile(join(bin, 'git'), [
     '#!/bin/sh', 'network=',
     'for arg do', '  shift', '  case "$arg" in', '    clone|fetch) network=1 ;;', '    protocol.file.allow=never) arg=protocol.file.allow=always ;;', '  esac', '  set -- "$@" "$arg"', 'done',
-    `if [ -n "$network" ]; then exec "${realGit}" -c "url.file://${dir}/origin/.insteadOf=https://github.com/" "$@"; fi`,
+    ...(authenticatedHttp ? [`if [ "$GIT_CONFIG_KEY_0" = "http.https://github.com/.extraHeader" ]; then export GIT_CONFIG_KEY_0="http.${networkOrigin}.extraHeader"; fi`] : []),
+    `if [ -n "$network" ]; then exec "${realGit}" -c "url.${networkOrigin}.insteadOf=https://github.com/" "$@"; fi`,
     `exec "${realGit}" "$@"`, '',
   ].join('\n'), { mode: 0o755 });
   await writeFile(join(bin, 'gh'), [
     `#!${process.execPath}`,
+    `if (process.argv[2] === 'auth' && process.argv[3] === 'token') { process.stdout.write('fixture-token\\n'); process.exit(0); }`,
     `const replies = JSON.parse(require('node:fs').readFileSync(${JSON.stringify(repliesFile)}, 'utf8')), endpoint = process.argv.at(-1);`,
     `if (!Object.hasOwn(replies, endpoint)) { process.stderr.write('gh: Not Found (HTTP 404)\\n'); process.exit(1); }`,
     `process.stdout.write('HTTP/2.0 200 OK\\n\\n' + JSON.stringify(replies[endpoint]));`, '',
@@ -54,8 +90,18 @@ async function github(t: TestContext, replies: Record<string, unknown> = {}) {
     await git('-C', work, 'push', '--quiet', origin, 'HEAD:refs/heads/main');
     return (await git('-C', work, 'rev-parse', 'HEAD')).stdout.trim();
   };
-  return { dir, dataDir: join(dir, 'data'), commit, push: (...args: string[]) => git('-C', work, 'push', '--quiet', origin, ...args), git: (...args: string[]) => git('-C', work, ...args) };
+  return { dir, dataDir: join(dir, 'data'), commit, requests, push: (...args: string[]) => git('-C', work, 'push', '--quiet', origin, ...args), git: (...args: string[]) => git('-C', work, ...args) };
 }
+
+test('a managed clone authenticates its first HTTP request when anonymous Git traffic is refused without a challenge', async t => {
+  const hub = await github(t, { 'repos/acme/app/branches/main': { name: 'main' } }, { authenticatedHttp: true });
+  await hub.commit({ 'README.md': 'one\n' });
+  const source = await prepareGitHubSource({ repository: 'acme/app', branch: 'main', dataDir: hub.dataDir });
+  assert.equal(source.branch, 'main');
+  assert.ok(hub.requests.length >= 2, 'The real Git clone reads refs and uploads a pack request.');
+  assert.ok(hub.requests.every(request => request.authenticated), 'The first request already carries the existing account.');
+  assert.equal((await readFile(join(source.checkoutPath, '.git/config'), 'utf8')).includes('Authorization'), false, 'The credential is never stored in the checkout.');
+});
 
 /** The controller signed in to GitHub as developer, with `state` saved, for `work`; it closes before GitHub's fixture goes. */
 async function withController(t: TestContext, state: object, work: (controller: { dataDir: string; connect(input: object): Promise<{ status: number; body: SourceReply }> }) => Promise<void>) {

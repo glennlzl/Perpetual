@@ -907,7 +907,7 @@ function PipelineApp() {
       setState(previous => ({ ...previous, scan: result.scan, source: result.source, pipelineId: result.pipelineId || result.pipeline?.id, pipelineRemoval: null, environments: result.environments || [], browserTests: {} }));
       setError('');
       return result;
-    } catch (failure) { setError((failure as Error).message); throw failure; }
+    } catch (failure) { if (currentDialog.current?.type !== 'source') setError((failure as Error).message); throw failure; }
     finally { mutation.current = false; setBusy(false); }
   }, [workspace]);
 

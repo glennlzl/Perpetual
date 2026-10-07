@@ -122,6 +122,7 @@ test('failed creation retains repository selection and never leaves a partial pi
   await form.getByRole('combobox', { name: 'Repository', exact: true }).click(); await page.getByRole('option', { name: 'acme/other' }).click();
   await form.getByRole('button', { name: 'Create pipeline', exact: true }).click();
   await expect(form.getByRole('alert')).toContainText('Could not read this repository');
+  await expect(page.getByRole('alert')).toHaveCount(1);
   await expect(form.getByRole('combobox', { name: 'Repository', exact: true })).toHaveText('acme/other');
   assert.equal(structuredClone(state).pipeline, null); assert.equal(state.source.repository, 'acme/app');
   await form.getByRole('button', { name: 'Cancel', exact: true }).click();

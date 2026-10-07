@@ -44,6 +44,17 @@ export function runGitHub(args: string[], { timeout = 20_000, maxBuffer = 4 * 10
   return run('gh', args, { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env });
 }
 
+/** Authenticate Git's first HTTPS request, including Git versions without proactiveAuth. Credentials live only in the child environment, scoped to GitHub; redirects are refused. */
+export async function githubGitEnvironment({ env = githubEnvironment(), run = exec as GitHubRun }: { env?: NodeJS.ProcessEnv; run?: GitHubRun } = {}): Promise<NodeJS.ProcessEnv> {
+  const { stdout } = await runGitHub(['auth', 'token', '--hostname', 'github.com'], { env, run, timeout: 10_000, maxBuffer: 4096 });
+  const token = stdout.trim();
+  if (!token || /\s|[\u0000-\u001f\u007f]/u.test(token)) throw new Error(GITHUB_MESSAGES.unauthenticated);
+  return { ...env, GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraHeader', GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+    GIT_CONFIG_KEY_1: 'http.followRedirects', GIT_CONFIG_VALUE_1: 'false',
+  };
+}
+
 /** A streamed device login; its caller owns parsing, deadlines and cancellation, never the CLI credential store. */
 export function startGitHubLogin() {
   // Colour, debugging and clipboard output cannot change the device-code protocol. Omitting --git-protocol
