@@ -13,9 +13,9 @@ export const MODE_CHOICES: Record<AutopilotMode, string> = { merge: 'Merge chang
 export const isAutopilotMode = (value: unknown): value is AutopilotMode => MODES.includes(value as AutopilotMode);
 
 export const STEP_LABELS: Record<StepStatus, string> = { pending: 'Not started', active: 'In progress', done: 'Done', failed: 'Failed', waiting: 'Waiting for review' };
-export const CHANGE_LABELS: Record<ChangeStatus, string> = { running: 'Running', merged: 'Merged', passed: 'Passed', 'needs-review': 'Needs review', 'not-merged': 'Not merged' };
+export const CHANGE_LABELS: Record<ChangeStatus, string> = { queued: 'Queued', running: 'Running', merged: 'Merged', passed: 'Passed', 'needs-review': 'Needs review', 'not-merged': 'Not merged' };
 export type AutopilotTone = 'idle' | 'working' | 'passed' | 'failed' | 'blocked';
-const TONES: Record<ChangeStatus, AutopilotTone> = { running: 'working', merged: 'passed', passed: 'passed', 'needs-review': 'blocked', 'not-merged': 'failed' };
+const TONES: Record<ChangeStatus, AutopilotTone> = { queued: 'idle', running: 'working', merged: 'passed', passed: 'passed', 'needs-review': 'blocked', 'not-merged': 'failed' };
 
 export const changeActive = (change: Pick<AutopilotChange, 'status'> | null | undefined) => change?.status === 'running';
 export const stageActive = (stage: Pick<StageAutopilot, 'changes'> | null | undefined) => Boolean(stage?.changes?.some(changeActive));
@@ -28,8 +28,9 @@ export const autopilotActive = (view: AutopilotView | null | undefined) => Objec
  */
 export function autopilotBadge(stage: StageAutopilot | null | undefined, sha?: string | null) {
   if (!stage) return null;
-  const running = stage.changes.find(changeActive), latest = stage.changes[0];
-  if (running) return { text: running.title, tone: TONES.running, change: running };
+  const running = stage.changes.find(changeActive), latest = stage.changes[0], queued = stage.changes.filter(change => change.status === 'queued');
+  if (running) return { text: queued.length ? `${running.title} · ${queued.length} queued` : running.title, tone: TONES.running, change: running };
+  if (queued.length) return { text: `${queued.length} queued`, tone: 'idle' as const, change: queued[0] };
   if (latest && (!latest.sha || latest.sha === sha || latest.sha === stage.failed?.sha)) return { text: CHANGE_LABELS[latest.status], tone: TONES[latest.status], change: latest };
   return { text: MODE_LABELS[stage.mode], tone: 'idle' as const, change: null };
 }
@@ -73,6 +74,11 @@ export async function startRepair(controller: Controller, input: { repoPath: str
   await controller('/api/autopilot/repair', input);
   autopilotChanges.notify();
 }
+export async function resumeQueue(controller: Controller, input: { repoPath: string; stageId: string }) {
+  await controller('/api/autopilot/resume', input);
+  autopilotChanges.notify();
+}
+
 /** Stops a change under way through POST /api/autopilot/stop; a pull request it opened stays open. */
 export async function stopChange(controller: Controller, input: { repoPath: string; stageId: string; id: string }) {
   await controller('/api/autopilot/stop', input);

@@ -120,9 +120,7 @@ test('Repair is a Button on the failed workflow row, Stop a Button on the change
   assert.match(card, /offer=\{repairOffer\(autopilot, workflow\.file, runs\?\.sha\)\}/);
   assert.doesNotMatch(card, /stopChange|<Square|repairs\.ts|Switch/, 'The card offers Repair alone; Stop is on the change.');
   const changes = await source('StageChanges.tsx');
-  assert.match(changes, /\{changeActive\(change\) && repoPath && <StopChange repoPath=\{repoPath\} change=\{change\} \/>\}/);
   assert.match(changes, /await stopChange\(api, \{ repoPath, stageId: change\.stageId, id: change\.id \}\);/);
-  assert.match(changes, /<Button type="button" variant="ghost" size="sm"[^>]*onClick=\{\(\) => void stop\(\)\}><Square \/>Stop<\/Button>/);
   assert.match(changes, /passed: CircleCheck/);
   const app = await source('App.tsx');
   assert.match(app, /<GitHubActionsCard repoPath=\{repoPath\} scannedAt=\{scannedAt\} scannedSha=\{sha\} runs=\{github\} readError=\{data\.buildReadError\} stageId=\{stage\.id\} autopilot=\{autopilot\} onConnect=\{data\.buildUnreachable \? undefined : \(\) => openDialog\(\{ type: 'source', connect: true \}\)\} \/>/);
@@ -142,4 +140,14 @@ test("cleanup is shown independently of a confirmed merge and preserves the mana
   const projected = autopilotView(view, { repoPath: '/work/app', stageId: 'build' });
   assert.deepEqual(projected.stages!.build.failed?.runs, []);
   assert.equal(projected.watchError, view.watchError, "A global cleanup reason is visible without copying another source's repair into this stage.");
+});
+
+test('queue records have no invented progress and render after active work in FIFO order', () => {
+  const waiting = repair('queued', { id: 'first', sha: OLDER, paused: true });
+  const later = repair('queued', { id: 'second', sha: HEAD });
+  const active = repair('repairing');
+  const stage = autopilotStages({ autoMerge: true, repairs: [later, waiting, active], head: { sha: HEAD, branch: 'main', failed: [RUN] } }, 'build').build;
+  assert.deepEqual(stage.changes.map(c => [c.id, c.queuePosition, c.paused]), [[active.id, undefined, undefined], ['first', 1, true], ['second', 2, undefined]]);
+  assert.deepEqual(stage.changes[1].steps, []);
+  assert.deepEqual(stage.failed?.runs, [], 'A queued head never offers a duplicate Repair.');
 });

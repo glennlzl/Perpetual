@@ -26,7 +26,7 @@ type Names = (stageId: string) => string;
 
 // running while the manager works; merged; passed when the failure cleared without a change; a fix that waits for a
 // person is under review, and one that ended without a fix, or whose pull request is closed, is not merged.
-const changeStatus = (repair: PublicRepair): ChangeStatus => ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' ? 'passed'
+const changeStatus = (repair: PublicRepair): ChangeStatus => repair.status === 'queued' ? 'queued' : ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' || repair.status === 'passed' ? 'passed'
   : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
 
 // The step a repair is at: the ones before it are done, it is active or how the repair ended, the rest are pending. A
@@ -63,6 +63,8 @@ function details(repair: PublicRepair, names: Names): DetailPart[][] {
 }
 
 function steps(repair: PublicRepair, names: Names, reason: string | undefined): ChangeStep[] {
+  if (repair.status === 'queued') return [];
+  if (repair.status === 'passed') return [{ id: 'build', name: 'Build passed', status: 'done' }];
   const at = reached(repair), { status } = repair;
   const end: StepStatus = ACTIVE.includes(status) ? 'active' : status === 'merged' || status === 'flaky' ? 'done' : status === 'failed' ? 'failed' : 'waiting';
   const parts = details(repair, names);
@@ -84,7 +86,7 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
   if (repair.cleanup && (!ACTIVE.includes(repair.status) || repair.cleanup.status === 'failed')) progress.push({ id: 'cleanup', name: 'Clean up', status: repair.cleanup.status === 'failed' ? 'waiting' : 'active',
     ...(repair.cleanup.reason ? { detail: [repair.cleanup.reason] } : {}) });
   return {
-    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha,
+    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: repair.status === 'queued' || repair.status === 'passed' ? 'Build' : rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha, ...(repair.paused ? { paused: true } : {}),
     ...(repair.pullRequest ? { pullRequest: { number: repair.pullRequest.number, url: repair.pullRequest.url } } : {}), ...(reason ? { reason } : {}),
     startedAt: repair.createdAt, ...(repair.completedAt ? { endedAt: repair.completedAt } : {}),
   };
@@ -99,7 +101,10 @@ export function autopilotStages(view: RepairView, stageId: string | null, names:
   if (!stageId || view.autoMerge === undefined) return {};
   const { head } = view, current = head && view.repairs.find(repair => repair.sha === head.sha);
   const runs = head && (!current || retryable(current)) ? head.failed : [];
-  return { [stageId]: { mode: view.autoMerge ? 'merge' : 'ask', changes: view.repairs.map(repair => repairChange(repair, stageId, names)), ...(head ? { failed: { sha: head.sha, runs } } : {}) } };
+  const queued = view.repairs.filter(repair => repair.status === 'queued').reverse();
+  const ordered = [...view.repairs.filter(repair => ACTIVE.includes(repair.status)), ...queued, ...view.repairs.filter(repair => repair.status !== 'queued' && !ACTIVE.includes(repair.status))];
+  const changes = ordered.map(repair => ({ ...repairChange(repair, stageId, names), ...(repair.status === 'queued' ? { queuePosition: queued.indexOf(repair) + 1 } : {}) }));
+  return { [stageId]: { mode: view.autoMerge ? 'merge' : 'ask', changes, ...(head ? { failed: { sha: head.sha, runs } } : {}) } };
 }
 
 /** GET /api/autopilot, and the state's autopilot field. */

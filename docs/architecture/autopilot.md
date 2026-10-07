@@ -53,9 +53,9 @@ Each change records the five steps the interface shows, with the facts each step
 | 4 | Verify | Verify | CI on the pull request, each journey gate's verdict at the head |
 | 5 | Merge | Merge | the pull request, target branch and merge commit, or why it waits |
 
-States: a change is `running` while the manager works; `merged`; `passed` when the failure cleared without a change, such as a rerun that passed; `needs-review` when it waits for a person with an open pull request (the mode is `ask`, a change rule held it, a gate did not pass, or protection refused the merge); `not-merged` when it ended without a fix, or its pull request is closed. The full mapping is in [Build repair](../repair.md#interface).
+States: a change is `queued` while it waits without starting steps; `running` while the manager works; `merged`; `passed` when the failure cleared without a change, such as a rerun that passed; `needs-review` when it waits for a person with an open pull request (the mode is `ask`, a change rule held it, a gate did not pass, or protection refused the merge); `not-merged` when it ended without a fix, or its pull request is closed. The full mapping is in [Build repair](../repair.md#interface).
 
-Concurrency: one change per stage at a time; only the newest head is repaired, and a newer head supersedes active work at once, except a fix whose gates or merge are under way, which verifies a moved target branch itself. A head first seen at start is a baseline that opens nothing by itself; a person may still press Repair.
+Concurrency: one change per stage at a time. Observed commits arriving during active work enter the durable Build queue in FIFO order; a new head never aborts active work. Each queued commit's own CI is checked before repair starts, after the previous change and its cleanup finish. A restart pauses the saved queue until Resume queue; a head first seen at start is still a baseline that opens nothing by itself. Polling is not a complete push-event history.
 
 ## Triggers and verification
 

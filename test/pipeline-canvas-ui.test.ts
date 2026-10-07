@@ -653,3 +653,35 @@ test('a GitHub sign-in that ends without connecting reads Build, the recorded de
   await expect.poll(() => [reads.build - before.build, reads.deployments - before.deployments, reads.releases - before.releases]).toEqual([1, 1, 1]);
   assert.deepEqual(pageErrors, []);
 });
+
+test('Build shows commit queue positions, cancels one item, and resumes a paused queue', { timeout: 60000 }, async t => {
+  const running: AutopilotChange = { id: 'active', stageId: 'build', kind: 'fix', title: 'Fixing build', status: 'running', sha, steps: [{ id: 'change', name: 'Change', status: 'active' }] };
+  const first: AutopilotChange = { id: 'queued-1', stageId: 'build', kind: 'fix', title: 'Build', status: 'queued', sha: 'b'.repeat(40), queuePosition: 1, steps: [] };
+  const second: AutopilotChange = { ...first, id: 'queued-2', sha: 'c'.repeat(40), queuePosition: 2 };
+  let changes = [running, first, second];
+  const view = (): AutopilotView => ({ repoPath, stages: { build: { mode: 'merge', changes } } });
+  const { page, posts, pageErrors, refresh, open } = await openApp(t, (path, request) => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { autopilot: view() }) };
+    if (path === '/api/autopilot/stop') changes = changes.filter(c => c.id !== request.postDataJSON().id);
+    if (path === '/api/autopilot/resume') changes = [{ ...first, status: 'running', title: 'Fixing build', paused: undefined, queuePosition: undefined, steps: [{ id: 'read', name: 'Read the failure', status: 'active' }] }];
+    if (path.startsWith('/api/autopilot')) return { json: view() };
+  });
+  await open();
+  const build = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Fixing build · 2 queued', exact: true })).toBeVisible();
+  await expect(build.getByRole('button', { name: 'Build, Queued #1', exact: true })).toContainText('bbbbbbb');
+  await expect(build.getByRole('button', { name: 'Build, Queued #2', exact: true })).toContainText('ccccccc');
+  await page.screenshot({ path: '.perpetual/build-queue-verified.png', clip: { x: 345, y: 155, width: 340, height: 360 } });
+  await build.getByRole('button', { name: 'Build, Queued #2', exact: true }).click();
+  await build.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(build.getByRole('button', { name: 'Build, Queued #2', exact: true })).toHaveCount(0);
+  assert.deepEqual(posts.at(-1), { path: '/api/autopilot/stop', body: { repoPath, stageId: 'build', id: second.id } });
+  changes = [{ ...first, paused: true }];
+  await refresh('/api/autopilot', '/build/src/lib/pipeline-autopilot.ts', 'autopilotChanges');
+  await build.getByRole('button', { name: 'Build, Paused #1', exact: true }).click();
+  await build.getByRole('button', { name: 'Resume queue', exact: true }).click();
+  await expect(build.getByRole('button', { name: 'Fixing build, Running', exact: true })).toBeVisible();
+  await expect(build.getByText('Read the failure', { exact: false })).toBeVisible();
+  assert.deepEqual(posts.at(-1), { path: '/api/autopilot/resume', body: { repoPath, stageId: 'build' } });
+  assert.deepEqual(pageErrors, []);
+});

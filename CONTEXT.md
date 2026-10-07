@@ -62,6 +62,8 @@
 
 **Repair** — An agent's fix for one failed build of the target branch, delivered as a pull request. It merges itself only when CI and every Sandbox journey gate passed at its exact head, no change rule held it for a person and the Build stage's Autopilot mode is `Autopilot` rather than `Ask first`; credential and permission failures never become repairs. A repair's merge that fails again needs a person, never another automatic repair. Avoid calling a rerun that passed a repair: it is recorded as flaky.
 
+**Build queue** — Commits waiting for Build to finish its current change, in the order Perpetual observed them. New commits keep their place without interrupting active work; a waiting commit is checked before a repair starts.
+
 **Repair box** — The Docker container that is a repair agent's whole workspace: a copy of the failing commit, where every agent tool runs. It has no host mount, Docker socket or credential, and no route to the host: it reaches public addresses only through its egress proxy. Only the host copy it came from pushes, and only the repair branch.
 
 **Application environment** — The running application and dependencies targeted by a test. Its availability alone does not mean a business journey passed. Users call it a _twin_, such as the Beta twin.

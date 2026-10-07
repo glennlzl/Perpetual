@@ -680,11 +680,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(path==='/api/autopilot'||path.startsWith('/api/autopilot/')) {
         // GET reads the view; a mode, a person's Repair of a failed run at the watched head, and Stop are posted for the Build stage.
         const operation=path.slice('/api/autopilot'.length);
-        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
+        if(!['','/mode','/repair','/stop','/resume'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/repair'?202:200,await withActiveScan(input.repoPath,async scan=>{
           if(operation==='/mode'){autopilotStage(input.stageId);await repairs.setAutoMerge({enabled:autopilotMode(input.mode)==='merge'});}
           if(operation==='/repair'){autopilotStage(input.stageId);await repairs.repair({runId:input.runId});}
+          if(operation==='/resume'){autopilotStage(input.stageId);await repairs.resume();}
           if(operation==='/stop'){autopilotStage(input.stageId);await repairs.stop({id:input.id});}
           return autopilotView(scan);
         }));

@@ -29,7 +29,7 @@ Guardrails:
    - A stage without reviewed journeys needs release, so it never auto-merges.
 3. **Exact head.**
    - The merge names the verified sha (`--match-head-commit`; as built, the REST merge's equivalent `sha`, amended 2026-09-25).
-   - A moved base is verified again. A new push therefore does not supersede a repair whose gates or merge are under way until that push passes (amended 2026-09-25).
+   - A moved base is verified again. New observed commits queue behind the active repair instead of superseding it, including during gate verification; exact-head and moved-base checks still apply before merge (amended 2026-10-07).
 4. **Bounded.**
    - Four attempts, escalating the model after two, under a cost cap.
    - A repair Perpetual opens by itself goes to a person, without the agent, after three repairs of the same failure failed in a row or once the pipeline's repairs cost a fixed daily cap, which also bounds what it spends; a person's Repair may still start it (amended 2026-10-05).

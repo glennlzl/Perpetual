@@ -183,7 +183,7 @@ test('an availability failure reruns its failed jobs once as Rerunning build, an
   const stopped = await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: change(rerunning)!.id });
   assert.deepEqual([stopped.status, change(stopped.body)?.status, change(stopped.body)?.reason, change(stopped.body)?.steps[1].status], [200, 'not-merged', 'Stopped.', 'waiting']);
   const again = await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: change(rerunning)!.id });
-  assert.deepEqual([again.status, again.body.error], [409, 'This repair is not running.']);
+  assert.deepEqual([again.status, again.body.error], [409, 'This repair is not running or queued.']);
   assert.equal((await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: 'missing' })).status, 404);
 });
 
@@ -230,4 +230,24 @@ test('the failed-run endpoint reads as the connected account, for its repository
   const refused = await disconnected.get('/api/providers/github/runs/123/failure');
   assert.deepEqual([refused.status, refused.body.error], [400, 'Connect your GitHub account to read workflow runs.']);
   assert.deepEqual(disconnected.seams.calls.failures, []);
+});
+
+test('a restored queue is visible and Resume is scoped to the active Build stage', async t => {
+  const f = await start(t, { async beforeStart(dataDir) {
+    await mkdir(join(dataDir, 'repairs'));
+    const time = '2026-09-25T10:00:00.000Z';
+    await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'queued-test', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'developer', checkoutPath: '/data/app', rootDirectory: '/', trigger: 'push', status: 'queued', runs: [], createdAt: time, updatedAt: time }] }));
+  } });
+  const queued = change(await f.view());
+  assert.deepEqual([queued?.status, queued?.paused, queued?.queuePosition], ['queued', true, 1]);
+  f.seams.commits[SHA] = [run('41', 'failure')];
+  const wrong = await f.post('/api/autopilot/resume', { repoPath: f.dir, stageId: 'production' });
+  assert.equal(wrong.status, 400);
+  const other = await f.post('/api/autopilot/resume', { repoPath: '/other', stageId: 'build' });
+  assert.equal(other.status, 409);
+  const resumed = await f.post('/api/autopilot/resume', { repoPath: f.dir, stageId: 'build' });
+  assert.equal(resumed.status, 200);
+  const result = change(await f.until(v => change(v)?.status === 'not-merged'));
+  assert.equal(result?.reason, 'Add an OpenRouter API key in Settings.');
+  assert.equal(result?.paused, undefined);
 });

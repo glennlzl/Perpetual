@@ -1,18 +1,18 @@
 import { Fragment, useState } from 'react';
-import { ChevronDown, Circle, CircleCheck, CircleX, ExternalLink, Eye, LoaderCircle, Sparkles, Square, TriangleAlert, type LucideIcon } from 'lucide-react';
+import { ChevronDown, Circle, CircleCheck, CircleX, ExternalLink, Eye, LoaderCircle, Sparkles, Square, Play, Clock3, TriangleAlert, type LucideIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Spinner } from '@/components/ui/spinner';
 import { api } from '@/lib/api';
-import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
+import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, resumeQueue, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 import { StepItem, StepList } from './StepList';
 
 const STEP_MARKS: Record<Exclude<StepStatus, 'active'>, LucideIcon> = { pending: Circle, done: CircleCheck, failed: CircleX, waiting: Eye };
-const CHANGE_MARKS: Record<string, LucideIcon> = { merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'not-merged': CircleX };
+const CHANGE_MARKS: Record<string, LucideIcon> = { queued: Clock3, merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'not-merged': CircleX };
 const BADGE_MARKS: Record<AutopilotTone, LucideIcon> = { idle: Sparkles, working: LoaderCircle, passed: CircleCheck, blocked: Eye, failed: CircleX };
 const BADGE_VARIANTS: Record<AutopilotTone, 'destructive' | 'outline' | 'secondary'> = { idle: 'outline', working: 'secondary', passed: 'secondary', blocked: 'secondary', failed: 'destructive' };
 // A fact links only to an https address the controller supplied.
@@ -44,14 +44,15 @@ function Detail({ parts }: { parts: DetailPart[] }) {
 function StopChange({ repoPath, change }: { repoPath: string; change: AutopilotChange }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  async function stop() {
+  async function stop(resume = false) {
     setPending(true); setError('');
-    try { await stopChange(api, { repoPath, stageId: change.stageId, id: change.id }); }
+    try { if (resume) await resumeQueue(api, { repoPath, stageId: change.stageId }); else await stopChange(api, { repoPath, stageId: change.stageId, id: change.id }); }
     catch (failure) { setError((failure as Error).message); }
     finally { setPending(false); }
   }
   return <div className="flex min-w-0 flex-wrap items-center gap-1 px-1 pt-1">
-    <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop()}><Square />Stop</Button>
+    <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop()}><Square />{change.status === 'queued' ? 'Cancel' : 'Stop'}</Button>
+    {change.paused && change.queuePosition === 1 && <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop(true)}><Play />Resume queue</Button>}
     {error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
   </div>;
 }
@@ -59,13 +60,13 @@ function StopChange({ repoPath, change }: { repoPath: string; change: AutopilotC
 // A change on the stage rail: its title and end, and its steps beneath. A change
 // under way starts expanded; a viewer's choice is kept for the page session.
 export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoPath?: string }) {
-  const [open, setOpen] = useRememberedOpen(`${repoPath}\n${change.stageId}\n${change.id}`, changeActive(change));
-  const state = CHANGE_LABELS[change.status];
+  const [open, setOpen] = useRememberedOpen(`${repoPath}\n${change.stageId}\n${change.id}\n${change.status === 'queued' ? 'queued' : 'started'}`, changeActive(change));
+  const state = change.status === 'queued' ? `${change.paused ? 'Paused' : 'Queued'}${change.queuePosition ? ` #${change.queuePosition}` : ''}` : CHANGE_LABELS[change.status];
   return <Collapsible open={open} onOpenChange={setOpen} className="nodrag nopan min-w-0">
     <CollapsibleTrigger asChild>
       <Button type="button" variant="ghost" size="sm" className="h-auto min-h-6 min-w-0 w-full items-start justify-between gap-2 whitespace-normal px-1 py-0.5 text-left leading-5 [&[data-state=open]>svg]:rotate-180" aria-label={`${change.title}, ${state}`} title={change.reason || undefined}>
-        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{change.title}</span>
-        <span className="shrink-0 text-xs font-normal text-muted-foreground">{state}</span>
+        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{change.title}{change.sha && <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">{change.sha.slice(0, 7)}</span>}</span>
+        <Badge variant="outline" className="shrink-0 text-xs font-normal">{state}</Badge>
         <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform" />
       </Button>
     </CollapsibleTrigger>
@@ -76,7 +77,7 @@ export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoP
           {step.status !== 'pending' && step.detail?.length ? <Detail parts={step.detail} /> : null}
         </StepItem>)}
       </StepList>
-      {changeActive(change) && repoPath && <StopChange repoPath={repoPath} change={change} />}
+      {(changeActive(change) || change.status === 'queued') && repoPath && <StopChange repoPath={repoPath} change={change} />}
     </CollapsibleContent>
   </Collapsible>;
 }
