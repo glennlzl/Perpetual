@@ -1,6 +1,6 @@
 # Connectors
 
-Connectors is an app-wide account page, independent of repository and pipeline selection. It preserves the neutral shadcn interface and uses the flat connected-app list, search, refresh, available-app picker and confirmed disconnect from the CelerFlow `main` reference.
+Connectors is an app-wide account page, independent of repository and pipeline selection. It preserves the neutral shadcn interface and uses the flat connected-app list, search, refresh, available-app picker and confirmed disconnect from the pinned main-branch reference.
 
 GitHub uses Perpetual's existing verified CLI account and browser sign-in. Connect and Disconnect update the shared GitHub connection while keeping projects, pipelines, test cases and run evidence. CLI tokens never reach the page. An unreachable account remains Unverified; an unsuccessful read or disconnect retains its recoverable state.
 
