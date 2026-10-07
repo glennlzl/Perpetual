@@ -32,6 +32,7 @@ export default function Pipelines({ pipeline, repository, repositoryUrl, connect
     catch (failure) { setError((failure as Error).message); }
   }
   return <section className="min-h-0 flex-1 overflow-y-auto px-5 py-8 sm:px-8 lg:px-10" aria-labelledby="pipelines-heading">
+    <div className="mx-auto w-full max-w-5xl">
     <div className="mb-6 flex items-center justify-between gap-4"><h1 ref={heading} tabIndex={-1} id="pipelines-heading" className="text-xl font-semibold">Pipelines</h1>
       {!pipeline && <Button disabled={busy || deleting} onClick={() => void create()}><Plus />Create pipeline</Button>}
       {pipeline && !connected && !deleting && <Button disabled={busy} onClick={onConnect}><span className="brand-mark" style={{ maskImage: 'url(/assets/providers/github.svg)' }} aria-hidden="true" />Reconnect GitHub</Button>}
@@ -51,6 +52,7 @@ export default function Pipelines({ pipeline, repository, repositoryUrl, connect
       </Table>
     </div>
     {!confirm && (error || failed && removal?.error || readError) && <p role="alert" className="mt-4 text-sm text-destructive">{error || (failed ? removal?.error : '') || readError}</p>}
+    </div>
     <AlertDialog open={confirm} onOpenChange={value => { if (!busy) setConfirm(value); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); (actions.current && !actions.current.disabled ? actions.current : heading.current)?.focus(); }}><AlertDialogHeader><AlertDialogTitle>Delete pipeline?</AlertDialogTitle><AlertDialogDescription>Delete this pipeline, its Sandbox environments, tests and run history. Keep the project and repository.</AlertDialogDescription></AlertDialogHeader>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={busy} onClick={event => { event.preventDefault(); void remove(); }}>Delete pipeline</AlertDialogAction></AlertDialogFooter>
