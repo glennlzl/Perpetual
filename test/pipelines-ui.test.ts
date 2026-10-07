@@ -178,7 +178,6 @@ test('Project opens a Pipelines table without a sidebar submenu and the row open
   await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('ProjectPipeline');
   await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).getByRole('link', { name: 'Project', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
   await expect(table.getByRole('link', { name: 'acme/app', exact: true })).toBeInViewport();
   await expect(table.getByRole('combobox', { name: 'Production branch', exact: true })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Pipeline actions' })).toBeInViewport();
