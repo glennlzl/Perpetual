@@ -20,6 +20,7 @@ import { readGitHistory } from './git-history.ts';
 import { createGitHubAuthManager } from './github-auth.ts';
 import { createGitHubRunsReader, latestBranchBuildRuns } from './github-runs.ts';
 import { createGitHubDeploymentsReader } from './github-deployments.ts';
+import { createConnectorManager } from './connectors/manager.ts';
 import { createEnvironmentManager } from './environments/manager.ts';
 import { createBrowserManager, type BrowserManagerOptions } from './browser/manager.ts';
 import { sendVideo } from './browser/video-file.ts';
@@ -75,6 +76,8 @@ export interface ControllerState {
 }
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
+  /** Tests replace the account connector transport; no external authorization runs for them. */
+  connectors?: { transport?: typeof fetch };
   /**
    * Tests supply the sign-in manager, runs and deployments readers, branch head, commit status, failed-run reader, rerun
    * and the managed source copy's move to a commit; no CLI is spawned for them.
@@ -193,7 +196,7 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   }
 }
 
-async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
+async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},connectors:connectorOptions={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
@@ -222,6 +225,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
   onCleanup(()=>githubAuth.dispose());
+  const connectors=await createConnectorManager({dataDir,...connectorOptions});
+  onCleanup(()=>connectors.close());
   const usage=createEnvironmentUsage();let environments: Awaited<ReturnType<typeof createEnvironmentManager<StageContext>>> | undefined;
   onCleanup(()=>usage.stopAdmissions());
   const browser=await createBrowserManager({dataDir,usage,...journeys,resolveEnvironment:url=>environments?.resolveTarget(url),onEnvironmentUncertain:(id,error)=>environments!.markUsageUncertain(id,error)});
@@ -584,6 +589,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/favicon.ico'){res.writeHead(204);return res.end();}
       if(req.method==='GET'&&path==='/api/session')return reply(res,200,{token});
+      if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,await connectors.read());
+      if(req.method==='POST'&&path==='/api/connectors/setup')return reply(res,200,await connectors.setup(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/options')return reply(res,200,await connectors.options(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/start')return reply(res,200,await connectors.start(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/remove')return reply(res,200,await connectors.remove(await body(req,4096)));
       if(req.method==='GET'&&path==='/api/settings/model')return reply(res,200,await browser.viewModel());
       if(req.method==='GET'&&path==='/api/settings/models')return reply(res,200,await browser.listModels());
       if(req.method==='POST'&&path==='/api/settings/model')return reply(res,200,await browser.saveModelSettings(await body(req,16384)));
@@ -988,7 +998,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    const draining=[releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),connectors.close(),tickTask];
     // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
     // still unfinished a moment later, such as one whose body never arrives, is cut off.
     closing=(async()=>{

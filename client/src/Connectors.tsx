@@ -16,6 +16,7 @@ import { deploymentChanges } from '@/lib/pipeline-deployments';
 import { releaseChanges } from '@/lib/production-release';
 import { restoreFocus } from '@/lib/journey-focus';
 import GitHubConnectDialog from './GitHubConnectDialog';
+import { AccountConnectorDialogs, AccountConnectorRow, AppMark, matchesApp, useAccountConnectors } from './AccountConnectors';
 import type { GitHubConnection } from '../../contract/github.ts';
 
 const readGitHubAgain = () => { buildChanges.notify(); deploymentChanges.notify(); releaseChanges.notify(); };
@@ -35,6 +36,7 @@ function SearchConnectors({ value, onChange, label }: { value: string; onChange:
 
 // Account management is app-wide; it neither selects a repository nor creates a pipeline.
 export default function Connectors({ connectionRevision }: { connectionRevision: string }) {
+  const accounts = useAccountConnectors();
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<'connect' | 'disconnect' | null>(null);
@@ -107,19 +109,23 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
   const busy = loading || Boolean(action);
   const openPicker = () => { setPickerQuery(''); setPickerOpen(true); };
   const connectionError = error || (connection?.unreachable ? connection.message || 'GitHub is unreachable. Try again.' : '');
+  const accountRows = accounts.reply?.apps.filter(app => app.account) ?? [];
+  const matchingAccounts = accountRows.filter(app => matchesApp(query, app));
+  const githubMatches = listed && matches(query, account);
+  const anyListed = listed || accountRows.length > 0;
 
   return <main id="connectors" className="min-h-0 flex-1 overflow-y-auto px-10 py-8">
     <div className="mx-auto w-full max-w-5xl">
       <div className="mb-6 flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Connectors</h1>
-        <Button ref={addButton} size="sm" disabled={busy} onClick={openPicker}><Plus />Connect app</Button>
+        <div className="flex items-center gap-2"><Button variant="ghost" size="sm" disabled={accounts.busy} onClick={accounts.resetSetup}>{accounts.reply?.configured ? 'Manage Composio' : 'Set up Composio'}</Button><Button ref={addButton} size="sm" disabled={busy || accounts.busy} onClick={openPicker}><Plus />Connect app</Button></div>
       </div>
       <h2 className="mb-4 text-sm font-medium">Connected apps</h2>
       <SearchConnectors label="Search connected apps" value={query} onChange={setQuery} />
       <div className="mt-4">
         {loading && !connection ? <div className="space-y-3" role="status" aria-label="Loading connectors"><Skeleton className="h-20 w-full" /></div>
-          : listed && matches(query, account) ? <ItemGroup aria-label="Connected apps">
-            <Item role="listitem" className="flex-nowrap gap-3 p-4">
+          : githubMatches || matchingAccounts.length ? <ItemGroup aria-label="Connected apps">
+            {githubMatches && <><Item role="listitem" className="flex-nowrap gap-3 p-4">
               <ItemMedia><GitHubMark /></ItemMedia>
               <ItemContent className="min-w-0">
                 <ItemTitle>GitHub<Badge variant="outline">{unavailable ? 'Unverified' : 'Connected'}</Badge></ItemTitle>
@@ -133,27 +139,33 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
                 </DropdownMenu>
               </ItemActions>
             </Item>
-            <Separator />
+            <Separator /></>}
+            {matchingAccounts.map(app => <AccountConnectorRow key={app.provider} app={app} state={accounts} />)}
           </ItemGroup>
-            : listed ? <p className="py-12 text-center text-sm text-muted-foreground">No matching apps</p>
-              : !connectionError && <div className="flex flex-col items-center gap-4 py-16">
+            : anyListed ? <p className="py-12 text-center text-sm text-muted-foreground">No matching apps</p>
+              : !connectionError && !accounts.error && accounts.reply && <div className="flex flex-col items-center gap-4 py-16">
                 <Plug className="size-8 text-muted-foreground" aria-hidden="true" />
                 <h3 className="text-base font-medium">No apps connected</h3>
                 <Button size="sm" disabled={busy} onClick={openPicker}><Plus />Connect app</Button>
               </div>}
       </div>
       {connectionError && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{connectionError}</p><Button variant="outline" size="sm" disabled={busy} onClick={() => void readConnection()}>Try again</Button></div>}
+      {accounts.error && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{accounts.error}</p><Button variant="outline" size="sm" disabled={accounts.busy || accounts.reading} onClick={() => void accounts.refresh()}>Try again</Button></div>}
     </div>
     <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
-      <DialogContent className="sm:max-w-xl" aria-describedby={undefined} onCloseAutoFocus={event => { event.preventDefault(); if (!connectOpen) restoreFocus([addButton.current]); }}>
+      <DialogContent className="sm:max-w-xl" aria-describedby={undefined} onCloseAutoFocus={event => { event.preventDefault(); if (!connectOpen && !accounts.setupOpen && !accounts.authApp) restoreFocus([addButton.current]); }}>
         <DialogHeader><DialogTitle>Available apps</DialogTitle></DialogHeader>
         <SearchConnectors label="Search available apps" value={pickerQuery} onChange={setPickerQuery} />
         {!connected && !unavailable && matches(pickerQuery) ? <Item className="flex-nowrap gap-3 px-2 py-3">
           <ItemMedia><GitHubMark /></ItemMedia><ItemContent><ItemTitle>GitHub</ItemTitle></ItemContent>
           <ItemActions><Button variant="outline" size="sm" disabled={busy} onClick={() => { setPickerOpen(false); setConnectOpen(true); }}>Connect GitHub</Button></ItemActions>
-        </Item> : <p className="py-8 text-center text-sm text-muted-foreground">{unavailable ? 'Refresh GitHub to check available apps.' : connected ? 'All available apps are connected' : 'No matching apps'}</p>}
+        </Item> : null}
+        {accounts.reply?.apps.filter(app => !app.account && matchesApp(pickerQuery, app)).map(app => <Item key={app.provider} className="flex-nowrap gap-3 px-2 py-3"><ItemMedia><AppMark app={app} /></ItemMedia><ItemContent><ItemTitle>{app.name}</ItemTitle></ItemContent><ItemActions><Button variant="outline" size="sm" disabled={accounts.busy} onClick={() => { setPickerOpen(false); void accounts.choose(app); }}>Connect {app.name}</Button></ItemActions></Item>)}
+        {!accounts.reply && <p className="py-4 text-sm text-muted-foreground">{accounts.error ? 'Could not read available apps.' : 'Loading apps…'}</p>}
+        {accounts.reply && !accounts.reply.apps.some(app => !app.account && matchesApp(pickerQuery, app)) && (connected || unavailable || !matches(pickerQuery)) && <p className="py-8 text-center text-sm text-muted-foreground">No matching apps</p>}
       </DialogContent>
     </Dialog>
+    <AccountConnectorDialogs state={accounts} focusTarget={() => addButton.current} />
     {connectOpen && <GitHubConnectDialog connection={connection} checking={loading} onConnect={() => changeConnection('connect')} onSignInEnded={readGitHubAgain} onClose={() => setConnectOpen(false)} focusTargets={() => [addButton.current]} />}
     <AlertDialog open={disconnectOpen} onOpenChange={open => { if (!action) setDisconnectOpen(open); }}>
       <AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); restoreFocus([menuButton.current, addButton.current]); }}>

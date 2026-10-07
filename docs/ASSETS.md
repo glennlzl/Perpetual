@@ -89,4 +89,6 @@ Exact dependency versions are recorded in `package-lock.json`, and the libraries
 
 ## Checks
 
+Slack, Linear, Gmail and Jira marks are original SVGs from `https://logos.composio.dev/api/<provider>`, as used by the pinned connector reference. Their downloaded geometry and brand colors are unchanged. Source URLs, byte counts and SHA-256 digests are recorded in `public/assets/providers/provenance.json`; the interface serves local copies and does not invert these colored marks.
+
 Every local SVG parses as XML and contains no script, external image or remote reference.
