@@ -46,7 +46,16 @@ export function useAccountConnectors() {
     readTask.current = { id, promise };
     return promise;
   }, []);
-  useEffect(() => { active.current = true; void refresh(undefined, true); return () => { active.current = false; }; }, [refresh]);
+  useEffect(() => {
+    active.current = true;
+    const id = ++request.current;
+    void api<ConnectorsReply>('/api/connectors?cached=1').then(data => {
+      if (active.current && id === request.current) { setReply(data); setError(''); }
+    }, failure => { if (active.current && id === request.current) setError(messageOf(failure)); }).finally(() => {
+      if (active.current && id === request.current) void refresh(undefined, true);
+    });
+    return () => { active.current = false; };
+  }, [refresh]);
   const pending = reply?.apps.some(app => app.account?.status === 'pending') ?? false;
   useEffect(() => {
     const visible = () => { if (document.visibilityState === 'visible') void refresh(undefined, true); };
@@ -106,13 +115,13 @@ export type AccountConnections = ReturnType<typeof useAccountConnectors>;
 export function AccountConnectorRow({ app, state }: { app: ConnectorApp; state: AccountConnections }) {
   const account = app.account!;
   const refreshing = state.refreshing.includes('all') || state.refreshing.includes(app.provider);
-  const status = state.error ? 'Unverified' : { connected: 'Connected', pending: 'Awaiting sign-in', 'needs-auth': 'Sign-in required', unverified: 'Unverified' }[account.status];
+  const status = state.error ? 'Unverified' : account.checking ? 'Checking' : { connected: 'Connected', pending: 'Awaiting sign-in', 'needs-auth': 'Sign-in required', unverified: 'Unverified' }[account.status];
   return <><Item role="listitem" className="flex-nowrap gap-3 p-4">
     <ItemMedia><AppMark app={app} /></ItemMedia>
-    <ItemContent className="min-w-0"><ItemTitle>{app.name}<Badge variant="outline">{status}</Badge></ItemTitle>{account.error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{account.error}</p>}</ItemContent>
+    <ItemContent className="min-w-0"><ItemTitle>{app.name}<Badge variant="outline">{status}</Badge></ItemTitle>{!account.checking && account.error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{account.error}</p>}</ItemContent>
     <ItemActions>
-      {account.status === 'pending' && account.redirectUrl && <Button asChild variant="outline" size="sm"><a href={account.redirectUrl} target="_blank" rel="noopener noreferrer">Continue sign-in<ExternalLink /></a></Button>}
-      {account.method === 'browser' && (account.status === 'needs-auth' || account.status === 'unverified') && <Button variant="outline" size="sm" disabled={state.busy} onClick={() => void state.choose(app)}>Sign in again</Button>}
+      {!account.checking && account.status === 'pending' && account.redirectUrl && <Button asChild variant="outline" size="sm"><a href={account.redirectUrl} target="_blank" rel="noopener noreferrer">Continue sign-in<ExternalLink /></a></Button>}
+      {!account.checking && account.method === 'browser' && (account.status === 'needs-auth' || account.status === 'unverified') && <Button variant="outline" size="sm" disabled={state.busy} onClick={() => void state.choose(app)}>Sign in again</Button>}
       <Button variant="outline" size="sm" disabled={state.busy || refreshing} aria-label={`Refresh ${app.name}`} onClick={() => void state.refresh(app.provider)}>{refreshing ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" className="size-8" disabled={state.busy} aria-label={`${app.name} actions`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         {account.status === 'pending' ? <DropdownMenuItem onSelect={() => void state.remove(app, true)}>Cancel sign-in</DropdownMenuItem> : <DropdownMenuItem variant="destructive" onSelect={() => state.confirmRemove(app)}><Unplug />Disconnect</DropdownMenuItem>}

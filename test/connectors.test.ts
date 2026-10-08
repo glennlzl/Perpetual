@@ -51,6 +51,19 @@ async function fixture(t: TestContext) {
 }
 async function start(manager: Awaited<ReturnType<typeof createConnectorManager>>, provider: ConnectorProvider) { return manager.start({ provider, configId: `ac_${provider}` }); }
 
+test('project snapshots check stale and restarted bindings while cancellation verifies fresh authorization', async t => {
+  const f = await fixture(t); await f.manager.setup({ apiKey: 'fixture-key' }); await start(f.manager, 'gmail');
+  assert.equal(f.manager.snapshot().apps.find(app => app.provider === 'gmail')?.account?.status, 'pending');
+  f.accounts.get('ca_gmail')!.status = 'ACTIVE';
+  await assert.rejects(f.manager.remove({ provider: 'gmail', cancel: true }), /Sign-in completed/);
+  const account = () => f.manager.snapshot().apps.find(app => app.provider === 'gmail')!.account!;
+  assert.equal(account().status, 'connected'); assert.equal(account().checking, undefined);
+  const now = Date.now(); t.mock.method(Date, 'now', () => now + 30_000);
+  const before = f.calls.length; assert.equal(account().checking, true); assert.equal(f.calls.length, before);
+  await f.restart(); assert.equal(account().checking, true); assert.equal(account().status, 'unverified');
+  await f.manager.read(); assert.equal(account().status, 'connected'); assert.equal(account().checking, undefined);
+});
+
 test('setup explains incompatible Composio key types before sending or saving them', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-connectors-key-'));
   let calls = 0;

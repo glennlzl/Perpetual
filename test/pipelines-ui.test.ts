@@ -464,12 +464,12 @@ test('browser errors recover through consumer help without directing users to pr
   assert.deepEqual(errors, []);
 });
 
-test('Connectors first list waits for both account sources before revealing rows', { timeout: 60000 }, async t => {
+test('Connectors first list waits for the local account snapshot and GitHub before revealing rows', { timeout: 60000 }, async t => {
   const { page, connectors } = await fixture(t);
   connectors.apps.find(app => app.provider === 'slack')!.account = { status: 'connected' };
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
-  await page.route('**/api/connectors', async route => { await held; await route.fulfill({ json: connectors }); });
+  await page.route('**/api/connectors?cached=1', async route => { await held; await route.fulfill({ json: connectors }); });
   const githubFinished = page.waitForResponse('**/api/github/connection');
   await page.goto(page.url() + '#connectors');
   await (await githubFinished).finished();
@@ -485,7 +485,8 @@ test('Connectors does not repeatedly poll an unverified account', { timeout: 600
   const { page, connectors, reads } = await fixture(t);
   connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'unverified', error: 'This connection was removed. Reconnect.' };
   connectors.apps.find(app => app.provider === 'linear')!.account = { status: 'needs-auth' };
-  await page.clock.install(); await page.goto(page.url() + '#connectors');
+  await page.clock.install(); const initialCheck = page.waitForResponse('**/api/connectors');
+  await page.goto(page.url() + '#connectors'); await (await initialCheck).finished();
   await expect(page.getByRole('button', { name: 'Refresh Slack', exact: true })).toBeEnabled();
   const before = reads.filter(path => path === '/api/connectors').length;
   await page.clock.runFor(15000);
@@ -498,7 +499,7 @@ test('Connectors keeps the first list loading when GitHub is the slower source',
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
   await page.route('**/api/github/connection', async route => { await held; await route.fallback(); });
-  const accountsFinished = page.waitForResponse('**/api/connectors');
+  const accountsFinished = page.waitForResponse('**/api/connectors?cached=1');
   await page.goto(page.url() + '#connectors'); await (await accountsFinished).finished();
   await expect(page.getByRole('status', { name: 'Loading connectors', exact: true })).toBeVisible();
   await expect(page.getByRole('list', { name: 'Connected apps', exact: true })).toHaveCount(0);
@@ -529,7 +530,8 @@ test('Connectors polls pending sign-in quietly and coalesces a manual refresh', 
   const { page, connectors } = await fixture(t);
   connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'pending', redirectUrl: 'https://example.com/sign-in' };
   connectors.apps.find(app => app.provider === 'linear')!.account = { status: 'connected' };
-  await page.clock.install(); await page.goto(page.url() + '#connectors');
+  await page.clock.install(); const initialCheck = page.waitForResponse('**/api/connectors');
+  await page.goto(page.url() + '#connectors'); await (await initialCheck).finished();
   const slack = page.getByRole('button', { name: 'Refresh Slack', exact: true });
   const linear = page.getByRole('button', { name: 'Refresh Linear', exact: true });
   await expect(slack).toBeEnabled();
@@ -557,7 +559,8 @@ for (const operation of ['start', 'remove'] as const) test(`Connectors reconcile
   const { page, connectors } = await fixture(t, { browserConnector: true });
   connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'connected' };
   connectors.apps.find(app => app.provider === 'linear')!.account = { method: 'browser', status: 'connected' };
-  await page.goto(page.url() + '#connectors');
+  const initialCheck = page.waitForResponse('**/api/connectors');
+  await page.goto(page.url() + '#connectors'); await (await initialCheck).finished();
   // The recovery dialog hides the background rows from the accessibility tree.
   const slack = page.locator('button[aria-label="Refresh Slack"]');
   const linear = page.locator('button[aria-label="Refresh Linear"]');
@@ -581,4 +584,18 @@ for (const operation of ['start', 'remove'] as const) test(`Connectors reconcile
   await expect(slack.locator('.motion-safe\\:animate-spin')).toHaveCount(0);
   await expect(linear.locator('.motion-safe\\:animate-spin')).toHaveCount(0);
   release();
+});
+
+test('Connectors displays bound accounts while remote verification is still pending', { timeout: 60000 }, async t => {
+  const { page, connectors } = await fixture(t);
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'unverified', checking: true };
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  await page.route('**/api/connectors', async route => { await held; await route.fulfill({ json: connectors }); });
+  await page.goto(page.url() + '#connectors');
+  const row = page.getByRole('listitem').filter({ hasText: 'Slack' });
+  await expect(row).toBeVisible({ timeout: 1500 }); await expect(row).toContainText('Checking');
+  await expect(page.getByRole('button', { name: 'Refresh Slack', exact: true })).toBeEnabled();
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'connected' };
+  release(); await expect(row).toContainText('Connected'); await expect(row).not.toContainText('Checking');
 });
