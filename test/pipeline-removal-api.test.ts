@@ -70,11 +70,19 @@ test('failed owned sandbox cleanup retains the pipeline and blocks edits until e
   const f = await fixture(t, runtime), context = { repoPath: f.repo, stageId: f.beta };
   const plan = await f.request('/api/environments/plan', { ...context, plan: { services: {}, apps: { web: { start: 'node server.mjs', port: 3000 } }, fixtures: [] } }); assert.equal(plan.status, 200, JSON.stringify(plan.body));
   const created = await f.request('/api/environments/create', context); assert.equal(created.status, 202, JSON.stringify(created.body));
-  for (let n = 0; n < 200; n++) { const view = (await f.request('/api/state')).body; if (view.environments[0]?.status === 'ready') break; await new Promise(resolve => setTimeout(resolve, 5)); }
+  let ready = false;
+  for (let n = 0; n < 200; n++) { const view = (await f.request('/api/state')).body; if (view.environments[0]?.status === 'ready') { ready = true; break; } await new Promise(resolve => setTimeout(resolve, 5)); }
+  assert.ok(ready, 'The owned environment must be ready before testing cleanup failure.');
+  // Ready precedes the browser preparation hook's final save and lease release.
+  // Shutdown joins that admitted work; restart keeps the ready twin without replaying discovery.
+  await f.close(); await f.start();
+  assert.equal((await f.request('/api/state')).body.environments[0]?.status, 'ready');
+  assert.equal(destroyed.length, 0, 'Settling creation must preserve the ready environment.');
   const input = { repoPath: f.repo, pipelineId: f.repo };
   assert.equal((await f.request('/api/pipeline/remove', input)).status, 202);
   const failed = await f.settled(); assert.equal(failed.pipelineRemoval.status, 'failed'); assert.ok(failed.pipeline);
   assert.match(failed.pipelineRemoval.error, /cleanup failed/i);
+  assert.equal(destroyed.length, 1, 'Deletion must attempt the owned sandbox cleanup exactly once.');
   assert.equal((await f.request('/api/pipeline/action', { repoPath: f.repo, action: 'add-stage', name: 'Gamma' })).status, 409);
   await f.close(); await f.start();
   assert.equal((await f.request('/api/state')).body.pipelineRemoval.status, 'failed'); assert.equal(destroyed.length, 1);

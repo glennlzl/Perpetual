@@ -12,7 +12,7 @@ test('the source is held in one place, and every change to it runs under that ho
   const text = await source();
   assert.equal(count(text, 'sourceBusy=true;'), 1, 'withSourceHeld sets the hold');
   assert.equal(count(text, 'sourceBusy=false;'), 1, 'and releases it in its finally');
-  assert.equal(count(text, 'withSourceHeld('), 5, 'the move, connect, disconnect, source and scan changes');
+  assert.equal(count(text, 'withSourceHeld('), 6, 'the move, connect, disconnect, source, scan and Production branch changes');
   assert.match(text, /guard\(\);sourceBusy=true;try\{return await work\(\);\}finally\{sourceBusy=false;\}/, 'The guard runs before the hold, and the hold outlives a failed save.');
 });
 
