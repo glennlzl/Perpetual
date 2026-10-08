@@ -9,6 +9,9 @@ import type { BranchHead, BranchHeadInput } from '../gate/github.ts';
 import { latestBranchBuildRuns, type WorkflowRun } from '../github-runs.ts';
 import type { FailedJob, GitHubFailure, PullRequestRead } from './github.ts';
 import { branchRuns, completedRuns, failedRun, passedRun, triage } from './triage.ts';
+import type { BuildRecovery } from '../../contract/build-recovery.ts';
+import { recoveryFor, validRecovery } from './recovery.ts';
+import type { CredentialInput, CredentialSnapshot } from './credentials.ts';
 
 // New observed heads wait in FIFO order without interrupting active work. Finished fixes can still be retired
 // when a newer head passes. Restarted queues require an explicit Resume before starting paid work.
@@ -36,6 +39,7 @@ export interface Repair {
   /** A queue restored after restart waits for a person's Resume. */
   paused?: true;
   runs: RepairRun[]; failures?: GitHubFailure[]; category?: string; reruns?: { id: string; attempt: number }[];
+  recovery?: BuildRecovery;
   pullRequest?: RepairPullRequest; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; closeError?: string;
   /** The last commit Perpetual pushed to this commit's repair branch; a person's next Repair of the commit leases it. */
   pushed?: string;
@@ -59,6 +63,8 @@ export interface RepairGitHub {
   runs(input: { repository: string; sha: string; login: string }): Promise<{ runs: WorkflowRun[] }>;
   failure(input: { repository: string; runId: string }): Promise<GitHubFailure>;
   rerun(input: { repository: string; runId: string }): Promise<void>;
+  credentials?(input: CredentialInput): Promise<CredentialSnapshot>;
+  workflow?(input: { repository: string; sha: string; path: string }): Promise<string>;
 }
 /** What the agent step may record while it works; each report is persisted before it resolves. */
 export interface RepairProgress { status?: 'repairing' | 'verifying-ci' | 'verifying-gates'; pullRequest?: RepairPullRequest; pushed?: string; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; holds?: string[]; gates?: RepairGate[]; verified?: string; merged?: string }
@@ -104,7 +110,7 @@ export type PublicRun = Pick<RepairRun, 'id' | 'name' | 'path' | 'url'>;
  * A repair as the pipeline's Autopilot shows it (src/repair/view.ts): its record without the logs, redacted. verified:
  * the pull request's head, as Perpetual last pushed it, passed CI and every journey gate.
  */
-export type PublicRepair = Pick<Repair, 'id' | 'branch' | 'sha' | 'status' | 'reason' | 'trigger' | 'category' | 'merged' | 'holds' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'cleanup' | 'paused'>
+export type PublicRepair = Pick<Repair, 'id' | 'branch' | 'sha' | 'status' | 'reason' | 'trigger' | 'category' | 'merged' | 'holds' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'cleanup' | 'paused' | 'recovery'>
   & { runs: PublicRun[]; pullRequest?: Pick<RepairPullRequest, 'number' | 'url' | 'draft' | 'closed'>; attempts?: Pick<RepairAttempt, 'number' | 'model' | 'reproduced' | 'failure' | 'cost'>[]; gates?: Pick<RepairGate, 'stageId' | 'sha' | 'status'>[]; verified?: true };
 /**
  * head is the watched head of a connected, managed source's target branch, with the branch's own failed workflow runs
@@ -156,6 +162,7 @@ const GUARD = 10;
 export const BREAKER = 3, DAILY_COST = 10;
 const DAY = 24 * 60 * 60_000;
 const RUN_ID = /^\d{1,20}$/;
+const unresolvedRecovery = (repair: Repair) => repair.recovery?.requests.some(request => ['requested', 'accepted', 'uncertain'].includes(request.status));
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isText = (value: unknown): value is string => typeof value === 'string';
 const optionalText = (value: unknown) => value === undefined || isText(value);
@@ -184,6 +191,7 @@ const validRepair = (value: unknown): value is Repair => isRecord(value)
   && /^[\w-]{1,64}$/.test(value.id as string) && SHA.test(value.sha as string) && (value.trigger === 'push' || value.trigger === 'person') && isText(value.status) && Object.hasOwn(STATUSES, value.status)
   && Array.isArray(value.runs) && value.runs.every(validRun)
   && (value.paused === undefined || value.paused === true)
+  && (value.recovery === undefined || validRecovery(value.recovery))
   && (['reason', 'category', 'closeError', 'startedAt', 'completedAt'] as const).every(field => optionalText(value[field]))
   && (value.failures === undefined || Array.isArray(value.failures) && value.failures.every(validFailure))
   && (value.reruns === undefined || Array.isArray(value.reruns) && value.reruns.every(item => isRecord(item) && isText(item.id) && count(item.attempt)))
@@ -206,8 +214,9 @@ const scrubbed = (failure: GitHubFailure): GitHubFailure => ({ ...failure, log: 
 // What a finished repair keeps of a failure, since only the agent step reads the whole of it: its first jobs and their
 // failed steps, its diagnosis, the start of its error lines and the end of its log.
 const brief = (failure: GitHubFailure): GitHubFailure => ({ ...failure, jobs: failure.jobs.slice(0, 5).map(job => ({ ...job, failedSteps: job.failedSteps.slice(0, 5) })), log: failure.log.slice(0, 2000), tail: failure.tail.slice(-2000) });
-const publicRepair = ({ id, branch, sha, status, reason, paused, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, pushed, verified, merged, createdAt, updatedAt, startedAt, completedAt }: Repair): PublicRepair => ({
+const publicRepair = ({ id, branch, sha, status, reason, paused, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, pushed, verified, merged, createdAt, updatedAt, startedAt, completedAt, recovery }: Repair): PublicRepair => ({
   id, branch, sha, status, ...(paused ? { paused } : {}), ...(reason ? { reason: redact(reason) } : {}), trigger, ...(category ? { category } : {}), ...(merged ? { merged } : {}),
+  ...(recovery ? { recovery: structuredClone(recovery) } : category === 'configuration' && !pullRequest && !attempts?.length && status === 'needs-person' ? { recovery: { status: 'required' as const, runs: [], requests: [] } } : {}),
   // A head verified before GitHub's update of the branch is not the pull request's head any more.
   ...(verified && verified === pushed ? { verified: true as const } : {}),
   ...(cleanup ? { cleanup: { status: cleanup.status, ...(cleanup.reason ? { reason: text(cleanup.reason) } : {}) } } : {}),
@@ -249,6 +258,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   for (const repair of state.repairs) {
     if (repair.status === 'queued') repair.paused = true;
     if (!ACTIVE.includes(repair.status)) continue;
+    if (repair.recovery?.status === 'verifying') repair.recovery.status = 'unconfirmed';
     if (repair.merged) Object.assign(repair, { status: 'merged', completedAt: now(), updatedAt: now() } satisfies Partial<Repair>);
     else Object.assign(repair, { status: 'needs-person', reason: 'Interrupted by a controller restart.', completedAt: now(), updatedAt: now() } satisfies Partial<Repair>);
   }
@@ -257,6 +267,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const saves = createSaveQueue();
   let closed = false, checking: Promise<void> | null = null, timer: NodeJS.Timeout | undefined, watchError: string | null = null, recoveryError: string | null = null, reads = 0;
   const tasks = new Set<Promise<unknown>>(), controllers = new Map<string, { controller: AbortController; finished: Promise<void> }>();
+  const recoveryOperations = new Set<string>();
   // The head each source was last read at with its ETag (reads counts the reads that succeeded), the branch's own failed
   // runs of that head as last read, the first head seen since start (a baseline that opens nothing by itself), a head
   // whose runs all passed, which is not read again, the head the loop guard judges with the repairs whose pull requests
@@ -276,7 +287,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       for (const spare of [(repair: Repair) => !repair.merged && (!repair.pullRequest || repair.pullRequest.closed), () => true]) {
         for (let index = state.repairs.length - 1; index >= 0 && Buffer.byteLength(content) > SAVE_LIMIT; index -= 1) {
           const repair = state.repairs[index];
-          if (repair.status === 'queued' || ACTIVE.includes(repair.status) || repair.cleanup || !spare(repair)) continue;
+          if (repair.status === 'queued' || ACTIVE.includes(repair.status) || repair.cleanup || unresolvedRecovery(repair) || !spare(repair)) continue;
           state.repairs.splice(index, 1);
           content = JSON.stringify(state);
         }
@@ -290,10 +301,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const current = source();
     return current?.key && current.repository && current.branch && current.checkoutPath ? { ...current, repository: current.repository, branch: current.branch, checkoutPath: current.checkoutPath, rootDirectory: current.rootDirectory || '/' } : null;
   };
+  const recoverySource = (repair: Repair, current: Managed | null) => Boolean(current && repair.key === current.key && repair.branch === current.branch && repair.repository === current.repository && repair.checkoutPath === current.checkoutPath && repair.rootDirectory === current.rootDirectory);
   // One repair at a time: an active repair, or a stopped or superseded one whose aborted step has not settled yet. A
   // startup sweep still owed holds only agent work, which needs Docker as the sweep does; triage and reruns go ahead.
   const running = () => state.repairs.some(repair => ACTIVE.includes(repair.status));
-  const busy = () => running() || controllers.size > 0 || state.repairs.some(repair => repair.cleanup);
+  const busy = () => running() || controllers.size > 0 || recoveryOperations.size > 0 || state.repairs.some(repair => repair.cleanup);
   const recoveryHold = () => `${CLEANUP_HOLD}${recoveryError ? ` ${recoveryError}` : ''}`;
   const scoped = (current: Managed) => state.repairs.filter(repair => repair.key === current.key && repair.branch === current.branch);
   const queued = (current: Managed) => scoped(current).filter(repair => repair.status === 'queued').reverse();
@@ -354,7 +366,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     state.repairs = state.repairs.filter(item => {
       const count = (counts.get(item.key) ?? 0) + 1;
       counts.set(item.key, count);
-      return count <= LIMIT || item.status === 'queued' || ACTIVE.includes(item.status) || item.cleanup;
+      return count <= LIMIT || item.status === 'queued' || ACTIVE.includes(item.status) || item.cleanup || unresolvedRecovery(item);
     });
     return repair;
   }
@@ -509,7 +521,12 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (!live()) return;
       const decision = triage(failures, Boolean(repair.reruns));
       Object.assign(repair, { failures: failures.slice(0, 20).map(scrubbed), category: decision.category });
-      if (decision.next === 'needs-person') return await settle(repair, 'needs-person', decision.reason);
+      if (decision.next === 'needs-person') {
+        repair.recovery = await recoveryFor({ ...repair, failures }, github.workflow);
+        if (github.credentials) await credentialSnapshot(repair);
+        if (!live()) return;
+        return await settle(repair, 'needs-person', 'Authorization failed in GitHub Actions. Recovery continues automatically after credentials change.');
+      }
       if (decision.next === 'rerun') {
         await transition(repair, 'rerunning', { reruns: repair.runs.map(({ id, attempt }) => ({ id, attempt })) });
         for (const run of repair.runs) { if (!live() || !await connected()) return; await github.rerun({ repository: repair.repository, runId: run.id }); }
@@ -719,6 +736,10 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   // the pipeline left its branch or root directory, every attempt passing is flaky, and an attempt that was cancelled
   // or waits for approval needs a person.
   async function followRerun(repair: Repair, login: string) {
+    if (repair.recovery) {
+      if (login !== repair.login || recoveryOperations.has(repair.id)) return;
+      return observeRecovery(repair);
+    }
     const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login });
     if (closed || repair.status !== 'rerunning') return;
     const found = (repair.reruns || []).map(rerun => runs.find(run => run.id === rerun.id && run.attempt > rerun.attempt && run.status === 'completed'));
@@ -730,6 +751,182 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     if (!other) return await settle(repair, 'flaky');
     await settle(repair, 'needs-person', `The rerun ended as ${String(other.conclusion ?? 'unknown').replaceAll('_', ' ')}.`);
   }
+
+  // A connection is not evidence that CI recovered. Only a new execution of its original runs can clear it.
+  async function observeRecovery(repair: Repair) {
+    const recovery = repair.recovery!;
+    const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login: repair.login });
+    if (closed || repair.status === 'cancelled') return;
+    const account = await github.connection();
+    if (closed || (repair as Repair).status === 'cancelled') return;
+    if (account?.login !== repair.login || account.repository !== repair.repository) throw conflict('Connect the GitHub account that observed this failure.');
+    const own = branchRuns(runs.filter(run => run.sha === repair.sha), repair.branch);
+    recovery.checkedAt = now();
+    const found = recovery.runs.map(ref => own.find(run => run.id === ref.id && run.path?.split('@')[0] === ref.workflow));
+    if (!found.length || found.some(run => !run)) {
+      recovery.status = 'unconfirmed';
+      return settle(repair, 'needs-person', 'The original workflow runs could not be verified. Open the failed run on GitHub.');
+    }
+    for (const request of recovery.requests) {
+      if (own.some(run => run.id === request.runId && run.attempt > request.attempt)) request.status = 'observed';
+    }
+    const unresolved = recovery.requests.filter(request => ['requested', 'accepted', 'uncertain'].includes(request.status));
+    if (unresolved.length) {
+      const uncertain = unresolved.some(request => request.status !== 'accepted' || Date.parse(now()) - Date.parse(request.requestedAt) > 15 * 60_000);
+      recovery.status = uncertain ? 'unconfirmed' : 'verifying';
+      if (uncertain) return settle(repair, 'needs-person', 'The rerun has not been confirmed. Recheck its status before trying again.');
+      delete repair.reason; delete repair.completedAt; await transition(repair, 'rerunning'); return;
+    }
+    const observed = found as WorkflowRun[];
+    if (observed.some(run => run.status !== 'completed')) {
+      recovery.status = 'verifying';
+      delete repair.reason; delete repair.completedAt; await transition(repair, 'rerunning'); return;
+    }
+    const allPassed = observed.every((run, index) => passedRun(run) && run.attempt > recovery.runs[index].attempt);
+    if (!allPassed) {
+      recovery.status = 'required';
+      const attempted = recovery.requests.length > 0 || observed.some((run, index) => run.attempt > recovery.runs[index].attempt);
+      return settle(repair, 'needs-person', attempted ? 'The workflow has not recovered. Review the latest failure before retrying.' : 'Waiting for workflow credentials. Recovery continues automatically after they change.');
+    }
+    const latest = latestBranchBuildRuns(runs, repair.sha, repair.branch), completed = completedRuns(latest, repair.branch);
+    if (!completed) {
+      recovery.status = 'verifying'; delete repair.reason; delete repair.completedAt; await transition(repair, 'rerunning'); return;
+    }
+    recovery.status = 'passed';
+    if (!completed.passed) return settle(repair, 'needs-person', 'Authorization recovery passed; another workflow still needs attention.');
+    await settle(repair, 'passed', 'The original workflows passed at this commit after recovery.');
+    // The ordinary gate watcher independently observes CI; this never promotes a commit or marks Production ready.
+  }
+
+  async function recoverBuild({ id, action }: { id: unknown; action: unknown }, credentialRevision?: string) {
+    guard();
+    if (action !== 'recheck' && action !== 'rerun') throw new Error('Choose Recheck or Rerun failed jobs.');
+    const repair = state.repairs.find(item => item.id === id);
+    if (!repair) throw Object.assign(new Error('Repair not found.'), { statusCode: 404 });
+    if (repair.pullRequest || repair.attempts?.length || repair.category !== 'configuration') throw conflict('This record is not an authorization recovery.');
+    if (recoveryOperations.has(repair.id)) throw conflict('Recovery is already being checked.');
+    if (repair.status === 'cancelled' || repair.status === 'superseded' || repair.status === 'queued' || ACTIVE.includes(repair.status) && repair.status !== 'rerunning') throw conflict('This recovery is not available.');
+    if (action === 'rerun' && busy()) throw conflict('Build is busy. Wait for its current work to finish.');
+    const current = managed();
+    const sameSource = () => {
+      guard();
+      const active = managed();
+      if (!current || !recoverySource(repair, active) || repair.status === 'cancelled') throw conflict('The active source changed or recovery stopped. Reload the pipeline.');
+    };
+    const connection = async () => {
+      const account = await github.connection(); sameSource();
+      if (account?.login !== repair.login || account.repository !== repair.repository) throw conflict('Connect the GitHub account that observed this failure.');
+    };
+    recoveryOperations.add(repair.id);
+    try {
+      await connection();
+      if (!repair.recovery) {
+        const failures = repair.failures?.length ? repair.failures : await Promise.all(repair.runs.map(run => github.failure({ repository: repair.repository, runId: run.id })));
+        await connection();
+        repair.recovery = await recoveryFor({ ...repair, failures }, github.workflow);
+        sameSource(); await persist();
+      }
+      await observeRecovery(repair); sameSource();
+      if (action === 'recheck') {
+        if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && github.credentials) await credentialSnapshot(repair);
+        return view();
+      }
+      if (repair.recovery.status === 'passed' || repair.recovery.status === 'verifying') return view();
+      const recovery = repair.recovery;
+      if (recovery.requests.some(request => ['requested', 'accepted', 'uncertain'].includes(request.status))) throw conflict('A prior rerun is unconfirmed. Recheck or open the workflow on GitHub; it will not be sent twice.');
+      if (recovery.requests.length + recovery.runs.length > 100) throw conflict('This recovery reached its rerun limit. Open the workflow on GitHub.');
+      // Prevent replaying an older deployment after the branch advanced. The user explicitly reruns only its current commit.
+      const head = await github.head({ repository: repair.repository, branch: repair.branch });
+      sameSource();
+      if (head.status !== 200 || head.sha !== repair.sha) throw conflict('The branch has moved. Open its current failed build instead.');
+      const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login: repair.login });
+      const own = branchRuns(runs.filter(run => run.sha === repair.sha), repair.branch);
+      const failed = recovery.runs.map(ref => own.find(run => run.id === ref.id && run.path?.split('@')[0] === ref.workflow)).filter((run): run is WorkflowRun => Boolean(run && failedRun(run)));
+      if (!failed.length) throw conflict('No original failed jobs are available to rerun. Recheck their status.');
+      await connection();
+      const latestHead = await github.head({ repository: repair.repository, branch: repair.branch });
+      sameSource();
+      if (latestHead.status !== 200 || latestHead.sha !== repair.sha) throw conflict('The branch has moved. Reload the pipeline.');
+      if (credentialRevision) {
+        const snapshot = await github.credentials!({ repository: repair.repository, runs: recovery.runs });
+        await connection();
+        if (!('revision' in snapshot) || snapshot.ready === false || snapshot.revision !== credentialRevision) throw conflict('Workflow credentials changed during recovery. The next check will verify them again.');
+        if (recovery.requests.some(request => request.credentialRevision === credentialRevision)) return view();
+      }
+      recovery.status = 'verifying';
+      delete repair.completedAt;
+      delete repair.reason;
+      await transition(repair, 'rerunning');
+      for (const run of failed) {
+        await connection();
+        const head = await github.head({ repository: repair.repository, branch: repair.branch }); sameSource();
+        if (head.status !== 200 || head.sha !== repair.sha) {
+          recovery.status = 'unconfirmed';
+          await settle(repair, 'needs-person', 'The branch moved before all reruns were requested. Recheck the original runs.');
+          return view();
+        }
+        const request: BuildRecovery['requests'][number] = { runId: run.id, attempt: run.attempt, requestedAt: now(), status: 'requested', ...(credentialRevision ? { credentialRevision } : {}) };
+        recovery.requests.push(request);
+        await persist(); // Persist intent before the external write; an uncertain outcome is never resent automatically.
+        sameSource();
+        try { await github.rerun({ repository: repair.repository, runId: run.id }); request.status = 'accepted'; }
+        catch (error) {
+          request.status = isRecord(error) && error.refused === true ? 'refused' : 'uncertain';
+          recovery.status = request.status === 'refused' ? 'required' : 'unconfirmed';
+          if ((repair as Repair).status !== 'cancelled') await settle(repair, 'needs-person', text(error));
+          else await persist();
+          return view();
+        }
+        await persist(); sameSource();
+      }
+      return view();
+    } finally { recoveryOperations.delete(repair.id); }
+  }
+  const credentialBindingsRead = new Set<string>();
+  async function credentialSnapshot(repair: Repair) {
+    const recovery = repair.recovery!;
+    // Older recovery records predate provider bindings; retrace only the immutable failed workflow once per session.
+    if (!credentialBindingsRead.has(repair.id) && github.workflow && repair.failures?.length) {
+      credentialBindingsRead.add(repair.id);
+      const fresh = await recoveryFor({ repository: repair.repository, sha: repair.sha, runs: repair.runs, failures: repair.failures }, github.workflow);
+      for (const run of recovery.runs) { const updated = fresh.runs.find(item => item.id === run.id); if (updated?.vercelSecret) run.vercelSecret = updated.vercelSecret; }
+    }
+    const snapshot = await github.credentials!({ repository: repair.repository, runs: recovery.runs });
+    if (closed || repair.status === 'cancelled') return null;
+    if (!('revision' in snapshot)) {
+      recovery.automation = { status: 'unavailable', reason: text(snapshot.reason) };
+      await persist(); return null;
+    }
+    recovery.automation = snapshot.ready === false ? { status: 'unavailable', reason: text(snapshot.reason || 'Waiting for workflow credentials.') } : { status: 'watching' };
+    // Old records establish a baseline on their first observation; a restart never invents a credential change.
+    recovery.credentialRevision ??= snapshot.revision;
+    await persist(); return snapshot.ready === false ? null : snapshot.revision;
+  }
+
+  async function followAuthorization(current: Managed, account: { login: string; repository: string }) {
+    // Only the newest recovery of a commit is eligible; historical retries cannot each launch the same workflow.
+    const seen = new Set<string>();
+    for (const repair of scoped(current)) {
+      if (seen.has(repair.sha)) continue;
+      seen.add(repair.sha);
+      if (repair.category !== 'configuration' || repair.pullRequest || repair.attempts?.length || repair.login !== account.login || repair.repository !== account.repository || !recoverySource(repair, current) || repair.status !== 'needs-person' || recoveryOperations.has(repair.id)) continue;
+      if (!repair.recovery) await recoverBuild({ id: repair.id, action: 'recheck' });
+      if (!repair.recovery) continue;
+      recoveryOperations.add(repair.id);
+      let revision: string | null = null;
+      try {
+        await observeRecovery(repair);
+        if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && github.credentials) revision = await credentialSnapshot(repair);
+      } finally { recoveryOperations.delete(repair.id); }
+      if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && new Set(repair.recovery.requests.flatMap(request=>request.credentialRevision?[request.credentialRevision]:[])).size >= 3) {
+        repair.recovery.automation={status:'unavailable',reason:'Three credential updates did not recover the workflow. Review its latest failure.'};await persist();continue;
+      }
+      if (closed || repair.status !== 'needs-person' || !revision || busy() || queued(current).length || unresolvedRecovery(repair) || revision === repair.recovery.credentialRevision || repair.recovery.requests.some(request => request.credentialRevision === revision)) continue;
+      // The same admission checks as a manual rerun recheck account, source, current head and original run identity.
+      await recoverBuild({ id: repair.id, action: 'rerun' }, revision);
+    }
+  }
+
   function check() {
     if (closed) return Promise.resolve();
     checking ??= Promise.resolve().then(async () => {
@@ -759,7 +956,8 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       // A rerun's result is followed even while the head cannot be read.
       if (current) await watchHead(current, connection).catch(failure);
       const rerunning = state.repairs.find(repair => repair.status === 'rerunning');
-      if (rerunning && !closed) await followRerun(rerunning, connection.login).catch(failure);
+      if (rerunning && !closed && (!rerunning.recovery || connection.login === rerunning.login && connection.repository === rerunning.repository)) await followRerun(rerunning, connection.login).catch(failure);
+      if (current && !closed) await followAuthorization(current, connection).catch(failure);
       if (current && !closed) {
         let first: string | undefined;
         do {
@@ -785,6 +983,12 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   const guard = () => { if (closed) throw conflict('The controller is shutting down.'); };
   return {
     view,
+    credentialContext(id: unknown) {
+      const current=managed(),repair=current?scoped(current).find(item=>item.id===id):undefined;
+      return repair?.recovery&&repair.category==='configuration'&&!repair.pullRequest&&!repair.attempts?.length
+        ?{key:repair.key,repository:repair.repository,login:repair.login,runs:structuredClone(repair.recovery.runs)}:null;
+    },
+    recover(input: { id: unknown; action: unknown }) { return track(recoverBuild(input)); },
     hasWork(key: string) { return state.repairs.some(item=>item.key===key&&(controllers.has(item.id)||item.status==='queued'||ACTIVE.includes(item.status)||Boolean(item.cleanup))); },
     check,
     /**
@@ -895,7 +1099,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       guard();
       const repair = state.repairs.find(item => item.id === id);
       if (!repair) throw Object.assign(new Error('Repair not found.'), { statusCode: 404 });
-      if (repair.status !== 'queued' && !ACTIVE.includes(repair.status)) throw conflict('This repair is not running or queued.');
+      if (repair.status !== 'queued' && !ACTIVE.includes(repair.status) && !(repair.recovery && repair.status === 'needs-person' && repair.recovery.status !== 'passed')) throw conflict('This repair is not running or queued.');
       controllers.get(repair.id)?.controller.abort();
       await settle(repair, 'cancelled');
       return view();

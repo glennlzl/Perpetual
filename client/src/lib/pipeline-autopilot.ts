@@ -74,6 +74,12 @@ export async function startRepair(controller: Controller, input: { repoPath: str
   await controller('/api/autopilot/repair', input);
   autopilotChanges.notify();
 }
+
+/** Explicit recovery never starts a model or writes credentials; rerun repeats the original failed jobs. */
+export async function recoverBuild(controller: Controller, input: { repoPath: string; stageId: string; id: string; action: 'recheck' | 'rerun' }) {
+  await controller('/api/autopilot/recover', input);
+  autopilotChanges.notify();
+}
 export async function resumeQueue(controller: Controller, input: { repoPath: string; stageId: string }) {
   await controller('/api/autopilot/resume', input);
   autopilotChanges.notify();
@@ -87,5 +93,5 @@ export async function stopChange(controller: Controller, input: { repoPath: stri
 
 /** Polls the view every 2 seconds while a change is under way and every 15 otherwise, only while the page is visible. */
 export function createAutopilotPoller({ repoPath, ...options }: { repoPath: string } & Omit<GitHubPollerOptions<AutopilotView>, 'path' | 'active' | 'activeDelay' | 'idleDelay'>) {
-  return createGitHubPoller<AutopilotView>({ ...options, path: `/api/autopilot?repoPath=${encodeURIComponent(repoPath)}`, active: autopilotActive, activeDelay: 2000, idleDelay: 15000 });
+  return createGitHubPoller<AutopilotView>({ ...options, path: `/api/autopilot?repoPath=${encodeURIComponent(repoPath)}`, active: view => autopilotActive(view) || Object.values(view?.stages || {}).some(stage => stage.changes.some(change => change.status === 'needs-attention' && change.recovery?.automation?.status === 'watching')), activeDelay: 2000, idleDelay: 15000 });
 }

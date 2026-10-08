@@ -5,8 +5,10 @@ import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Spinner } from '@/components/ui/spinner';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import type { CredentialAuthorizationReply } from '../../contract/build-recovery';
 import { api } from '@/lib/api';
-import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, resumeQueue, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
+import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, autopilotChanges, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, resumeQueue, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 import { StepItem, StepList } from './StepList';
@@ -57,6 +59,45 @@ function StopChange({ repoPath, change }: { repoPath: string; change: AutopilotC
   </div>;
 }
 
+function RecoveryActions({ change, repoPath }: { change: AutopilotChange; repoPath: string }) {
+  const recovery = change.recovery!;
+  const credential = recovery.credential;
+  const [open, setOpen] = useState(false), [pending, setPending] = useState(false), [error, setError] = useState('');
+  async function connect() {
+    setPending(true); setError('');
+    try {
+      const result = await api<CredentialAuthorizationReply>('/api/autopilot/connect-vercel', { repoPath, stageId: change.stageId, id: change.id });
+      const url = new URL(result.url);
+      if (url.origin !== 'https://vercel.com' || !/^\/integrations\/[a-z0-9][a-z0-9-]{0,31}\/new$/.test(url.pathname)) throw new Error('The authorization link is invalid.');
+      window.location.assign(url.href);
+    } catch (failure) { setError((failure as Error).message); setPending(false); }
+  }
+  const finished = change.status === 'passed' || change.status === 'not-merged';
+  async function disconnect() {
+    setPending(true); setError('');
+    try { await api('/api/autopilot/disconnect-vercel', { repoPath, stageId: change.stageId, id: change.id }); autopilotChanges.notify(); }
+    catch (failure) { setError((failure as Error).message); }
+    finally { setPending(false); }
+  }
+  const settings = [...new Set(recovery.runs.filter(run => run.binding === 'references').map(run => run.settingsUrl))];
+  return <div className="flex min-w-0 flex-wrap items-center gap-1 px-1 pt-1">
+    {!finished && credential?.canConnect && <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => setOpen(true)}>{credential.status === 'reconnect' || credential.status === 'held' ? 'Reconnect Vercel' : 'Connect Vercel'}</Button>}
+    {!finished && (!credential || credential.status === 'unavailable') && settings.filter(href => link(href)).map(href => <Button key={href} asChild variant="ghost" size="sm" className="h-6 px-2 text-xs"><a href={href} target="_blank" rel="noreferrer"><ExternalLink />Update credentials</a></Button>)}
+    {!finished && !settings.length && recovery.runs[0] && <Button asChild variant="ghost" size="sm" className="h-6 px-2 text-xs"><a href={link(recovery.runs[0].url)} target="_blank" rel="noreferrer"><ExternalLink />Open failed run</a></Button>}
+    {!finished && (credential?.reason ? <p className="basis-full break-words text-xs text-muted-foreground">{credential.reason}</p> : recovery.automation && <p className="basis-full break-words text-xs text-muted-foreground">{credential?.status === 'not-connected' ? 'Connect once to enable automatic recovery.' : recovery.automation.status === 'watching' ? 'Recovery continues automatically.' : recovery.automation.reason}</p>)}
+    {credential?.canDisconnect && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void disconnect()}>Stop managing access</Button>}
+    {!open && error && <p role="alert" className="basis-full text-xs text-destructive">{error}</p>}
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Connect Vercel</DialogTitle><DialogDescription>Allow Perpetual to maintain this Vercel connection, update the workflow credential in GitHub, and resume failed jobs automatically.</DialogDescription></DialogHeader>
+        <dl className="space-y-2 text-sm">{credential?.destination && <div className="flex justify-between gap-4"><dt>Repository</dt><dd>{credential.destination.repository}</dd></div>}{recovery.runs.filter(run => run.vercelSecret).map(run => <div key={run.id} className="flex justify-between gap-4"><dt>{run.name}</dt><dd className="font-mono">{run.vercelSecret}{run.environment ? ` · ${run.environment}` : ''}</dd></div>)}</dl>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        <DialogFooter><Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>Cancel</Button><Button onClick={() => void connect()} disabled={pending}>{pending ? 'Connecting…' : 'Authorize recovery'}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </div>;
+}
+
 // A change on the stage rail: its title and end, and its steps beneath. A change
 // under way starts expanded; a viewer's choice is kept for the page session.
 export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoPath?: string }) {
@@ -71,14 +112,16 @@ export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoP
       </Button>
     </CollapsibleTrigger>
     {!open && change.status === 'needs-attention' && change.reason && <Detail parts={[change.reason]} />}
+    {change.recovery && repoPath && change.status !== 'passed' && change.status !== 'not-merged' && <RecoveryActions change={change} repoPath={repoPath} />}
     <CollapsibleContent className="pt-1">
+      {change.recovery?.credential?.canDisconnect && repoPath && (change.status === 'passed' || change.status === 'not-merged') && <RecoveryActions change={change} repoPath={repoPath} />}
       <StepList label={`${change.title} steps`}>
         {change.steps.map(step => <StepItem key={step.id} compact icon={<StepMark status={step.status} />}>
           <p className={`min-w-0 px-1 text-xs font-medium leading-6 [overflow-wrap:anywhere] ${step.status === 'pending' ? 'text-muted-foreground' : 'text-foreground'}`}>{step.name}<span className="sr-only">, {STEP_LABELS[step.status]}</span></p>
           {step.status !== 'pending' && step.detail?.length ? <Detail parts={step.detail} /> : null}
         </StepItem>)}
       </StepList>
-      {(changeActive(change) || change.status === 'queued') && repoPath && <StopChange repoPath={repoPath} change={change} />}
+      {(changeActive(change) || change.status === 'queued' || change.recovery && change.status === 'needs-attention' && change.recovery.status !== 'passed') && repoPath && <StopChange repoPath={repoPath} change={change} />}
     </CollapsibleContent>
   </Collapsible>;
 }

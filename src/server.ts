@@ -20,6 +20,7 @@ import { readGitHistory } from './git-history.ts';
 import { createGitHubAuthManager } from './github-auth.ts';
 import { createGitHubRunsReader, latestBranchBuildRuns } from './github-runs.ts';
 import { createGitHubDeploymentsReader } from './github-deployments.ts';
+import { createConnectorManager } from './connectors/manager.ts';
 import { createEnvironmentManager } from './environments/manager.ts';
 import { createBrowserManager, type BrowserManagerOptions } from './browser/manager.ts';
 import { sendVideo } from './browser/video-file.ts';
@@ -43,8 +44,12 @@ import type { BuildReply, GitHubConnection, GitHubSource as PublicGitHubSource }
 import type { PipelineStateReply, SourceReply } from '../contract/pipeline.ts';
 import type { GitHistory } from '../contract/git-history.ts';
 import type { TwinService, TwinServiceInputView, TwinInputsReply, TwinServicesReply } from '../contract/twin.ts';
+import { readRecoveryCredentials } from './repair/credentials.ts';
+import { createCredentialManager } from './authorization/manager.ts';
+import { createVercelIntegration } from './authorization/vercel.ts';
+import type { CredentialAuthorizationReply } from '../contract/build-recovery.ts';
 import { createRepairManager, type Repair } from './repair/manager.ts';
-import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs } from './repair/github.ts';
+import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs, readRecoveryWorkflow } from './repair/github.ts';
 import { createRepairAgent, type CI, type ModelFactory, type RepairAgentGitHub } from './repair/agent.ts';
 import { createRepairMerge, type MERGE, type MergeGitHub } from './repair/merge.ts';
 import { createRepairBoxes, type RepairBoxes } from './repair/box.ts';
@@ -75,13 +80,17 @@ export interface ControllerState {
 }
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
+  /** Tests replace the account connector transport; no external authorization runs for them. */
+  connectors?: { transport?: typeof fetch; consumerTransport?: typeof fetch };
   /**
    * Tests supply the sign-in manager, runs and deployments readers, branch head, commit status, failed-run reader, rerun
    * and the managed source copy's move to a commit; no CLI is spawned for them.
    */
-  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; build?: typeof readBuild; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; update?: typeof updateGitHubSource };
+  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; build?: typeof readBuild; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; recoveryWorkflow?: typeof readRecoveryWorkflow; recoveryCredentials?: typeof readRecoveryCredentials; update?: typeof updateGitHubSource };
   /** Tests supply a shorter branch head poll. */
   gate?: { pollInterval?: number };
+  /** Provider grants and CI writes are replaceable in controller acceptance tests. */
+  credentials?: Pick<Parameters<typeof createCredentialManager>[0], 'clientId' | 'provider' | 'write' | 'clock'>;
   /** Deployment writes and observations; tests provide an adapter without calling GitHub. */
   releases?: { github?: ReleaseGitHub };
   /** Tests supply provisioning's docker and git email; no container runs for them. */
@@ -193,7 +202,7 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   }
 }
 
-async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
+async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},credentials:credentialOptions={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},connectors:connectorOptions={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
@@ -222,6 +231,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
   onCleanup(()=>githubAuth.dispose());
+  let listeningPort: number | undefined;
+  const connectors=await createConnectorManager({dataDir,...connectorOptions,callbackUrl:()=>`http://127.0.0.1:${listeningPort}/connectors/oauth/callback`});
+  onCleanup(()=>connectors.close());
   const usage=createEnvironmentUsage();let environments: Awaited<ReturnType<typeof createEnvironmentManager<StageContext>>> | undefined;
   onCleanup(()=>usage.stopAdmissions());
   const browser=await createBrowserManager({dataDir,usage,...journeys,resolveEnvironment:url=>environments?.resolveTarget(url),onEnvironmentUncertain:(id,error)=>environments!.markUsageUncertain(id,error)});
@@ -457,6 +469,19 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     models:repairModels,boxes:repairBoxes,host:repairHost,model:repair.model,deployFiles,ci:repair.ci,merge:repairMerge,
     github:{connection:connectedAccount,runs:input=>githubRuns.read(input),failure:input=>(github.failure??getGitHubFailure)(input),pullRequests:repair.pullRequests??createRepairPullRequests()},
   });
+  const vercelClientId=credentialOptions.clientId??process.env.PERPETUAL_VERCEL_CLIENT_ID,vercelSecret=process.env.PERPETUAL_VERCEL_CLIENT_SECRET,vercelSlug=process.env.PERPETUAL_VERCEL_INTEGRATION_SLUG;
+  const credentials=await createCredentialManager({dataDir,clientId:vercelClientId,
+    provider:credentialOptions.provider??(vercelClientId&&vercelSecret&&vercelSlug?createVercelIntegration({id:vercelClientId,secret:vercelSecret,slug:vercelSlug}):undefined),
+    write:credentialOptions.write,clock:credentialOptions.clock,
+    async authority(){
+      if(!state.source||!pipelineAvailable())return null;
+      const account=await connectedAccount();
+      return account&&account.repository===state.source.repository?{key:pipelineKey(state),...account}:null;
+    },
+    metadata:github.recoveryCredentials??readRecoveryCredentials,
+  });
+  const credentialTimer=setInterval(()=>{void credentials.check().catch(()=>{});},60_000);credentialTimer.unref();
+  onCleanup(async()=>{clearInterval(credentialTimer);await credentials.close();});
   const repairs=await createRepairManager({dataDir,
     source(){
       if(!state.scan||!pipelineAvailable())return null;
@@ -469,6 +494,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       runs:input=>githubRuns.read(input),
       failure:input=>(github.failure??getGitHubFailure)(input),
       rerun:input=>(github.rerun??rerunFailedJobs)(input),
+      workflow:github.recoveryWorkflow??readRecoveryWorkflow,
+      credentials:github.recoveryCredentials??readRecoveryCredentials,
     },
     steps:{
       async unavailable(){return await repairModels()?repairBoxes.available():'Add an OpenRouter API key in Settings.';},
@@ -478,7 +505,11 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   onCleanup(()=>repairs.close());
   // Autopilot as the pipeline reads it: the Build stage carries the repairs, and its mode is the pipeline's auto-merge switch.
   const buildStage=()=>hasPipeline(state)?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
-  const autopilotView=(scan: Scan)=>autopilotOf(repairs.view(),{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
+  const autopilotView=(scan: Scan)=>{
+    const view=repairs.view();
+    for(const repair of view.repairs){const context=repairs.credentialContext(repair.id);if(repair.recovery&&context)repair.recovery.credential=credentials.view(context);}
+    return autopilotOf(view,{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
+  };
   function autopilotStage(stageId: unknown){const build=buildStage();if(!build||build.id!==stageId)throw new Error('Autopilot is available for Build.');return build;}
   const removals=await createStageRemovalManager({dataDir,usage,environments,browser,removeStage:context=>save(current=>{
     // Deletion belongs to the confirmed source, even after the user changes
@@ -540,7 +571,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return input as RequestInput;
   }
   // The port it listens on, kept: a closing server has no address, and its last replies still check the Host they name.
-  let listeningPort: number | undefined;
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
@@ -549,10 +579,23 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
+    // Only the OAuth callback accepts a cross-site top-level navigation. Its persisted state and PKCE verifier
+    // bind one explicit sign-in; every other route keeps the launch-session and same-origin checks below.
+    const callbackTarget=URL.parse(req.url??'','http://localhost');
+    if(req.method==='GET'&&req.headers.host===`127.0.0.1:${actualPort}`&&callbackTarget?.pathname==='/connectors/oauth/callback') {
+      res.setHeader('Referrer-Policy','no-referrer');
+      if(closed)return reply(res,503,{error:'The controller is shutting down.'});
+      try {
+        if(['code','state','error'].some(name=>callbackTarget.searchParams.getAll(name).length>1))throw new Error('Invalid sign-in callback.');
+        const redirect=await connectors.complete(Object.fromEntries(callbackTarget.searchParams));
+        res.writeHead(302,{Location:redirect??'/#connectors'});return res.end();
+      } catch { res.writeHead(400,{'Content-Type':'text/plain; charset=utf-8'});return res.end('Sign-in could not finish. Return to Perpetual and connect again.'); }
+    }
     const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
+    const authorizationCallback=req.method==='GET'&&req.headers.host===`127.0.0.1:${actualPort}`&&URL.parse(req.url??'','http://localhost')?.pathname==='/authorization/vercel/callback';
     // A browser names where a request comes from: the page itself, or a person's own visit. Another site on this host,
     // such as a twin's app on another port, is same-site, not same-origin.
-    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
+    if(!hosts.includes(req.headers.host!) || !authorizationCallback&&((origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none'))return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
     // The path the routes below read, so the checks here hold for the route a request reaches.
     const target=URL.parse(req.url??'','http://localhost');
     if(!target)return reply(res,400,{error:'Invalid URL.'});
@@ -567,6 +610,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     // A connection still open at shutdown, such as a polling page's, ends with this reply.
     if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
+      if(authorizationCallback){
+        res.setHeader('Referrer-Policy','no-referrer');
+        try {
+          if(['state','code','error'].some(name=>requestUrl.searchParams.getAll(name).length>1))throw new Error('Invalid authorization callback.');
+          await credentials.complete({state:requestUrl.searchParams.get('state')??'',code:requestUrl.searchParams.get('code')??'',callback:`http://127.0.0.1:${actualPort}/authorization/vercel/callback`});
+          void repairs.check().catch(()=>{});
+        } catch { /* The private connection record carries the safe failure; URL codes never enter a response. */ }
+        res.writeHead(303,{Location:'/#pipeline'});return res.end();
+      }
       if(req.method==='GET'&&!publicFiles[path]&&/^\/(build\/)?assets\//.test(path))await refreshAssets();
       if(req.method==='GET'&&publicFiles[path]) {
         const [file,type]=publicFiles[path];
@@ -584,6 +636,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/favicon.ico'){res.writeHead(204);return res.end();}
       if(req.method==='GET'&&path==='/api/session')return reply(res,200,{token});
+      if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,await connectors.read());
+      if(req.method==='POST'&&path==='/api/connectors/setup')return reply(res,200,await connectors.setup(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/browser')return reply(res,200,await connectors.useBrowser());
+      if(req.method==='POST'&&path==='/api/connectors/options')return reply(res,200,await connectors.options(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/start')return reply(res,200,await connectors.start(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/remove')return reply(res,200,await connectors.remove(await body(req,4096)));
       if(req.method==='GET'&&path==='/api/settings/model')return reply(res,200,await browser.viewModel());
       if(req.method==='GET'&&path==='/api/settings/models')return reply(res,200,await browser.listModels());
       if(req.method==='POST'&&path==='/api/settings/model')return reply(res,200,await browser.saveModelSettings(await body(req,16384)));
@@ -677,16 +735,30 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         }
         return reply(res,404,{error:'Gate operation not found.'});
       }
+      if(req.method==='POST'&&path==='/api/autopilot/connect-vercel'){
+        const input=await body(req);requireSourceIdle();activeScan(input.repoPath);autopilotStage(input.stageId);
+        await repairs.recover({id:input.id,action:'recheck'});
+        const repair=repairs.view().repairs.find(item=>item.id===input.id&&item.status==='needs-person'&&item.recovery),context=repairs.credentialContext(input.id);
+        if(!repair?.recovery||!context)throw conflict('This recovery is no longer waiting for authorization.');
+        const url=await credentials.begin(context,`http://127.0.0.1:${actualPort}/authorization/vercel/callback`);
+        return reply(res,200,{url} satisfies CredentialAuthorizationReply);
+      }
       if(path==='/api/autopilot'||path.startsWith('/api/autopilot/')) {
         // GET reads the view; a mode, a person's Repair of a failed run at the watched head, and Stop are posted for the Build stage.
         const operation=path.slice('/api/autopilot'.length);
-        if(!['','/mode','/repair','/stop','/resume'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
+        if(!['','/mode','/repair','/stop','/resume','/recover','/disconnect-vercel'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/repair'?202:200,await withActiveScan(input.repoPath,async scan=>{
           if(operation==='/mode'){autopilotStage(input.stageId);await repairs.setAutoMerge({enabled:autopilotMode(input.mode)==='merge'});}
           if(operation==='/repair'){autopilotStage(input.stageId);await repairs.repair({runId:input.runId});}
           if(operation==='/resume'){autopilotStage(input.stageId);await repairs.resume();}
-          if(operation==='/stop'){autopilotStage(input.stageId);await repairs.stop({id:input.id});}
+          if(operation==='/recover'){autopilotStage(input.stageId);await repairs.recover({id:input.id,action:input.action});}
+          if(operation==='/stop'||operation==='/disconnect-vercel'){
+            autopilotStage(input.stageId);
+            const context=repairs.credentialContext(input.id);
+            if(context)await credentials.disable(context);
+            if(operation==='/stop')await repairs.stop({id:input.id});
+          }
           return autopilotView(scan);
         }));
       }
@@ -986,10 +1058,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   repairs.start();
   const url=`http://127.0.0.1:${listeningPort}`;
   return {url,launchUrl:launch.link(url),server,close(){
-    if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
+    if(closing)return closing;closed=true;clearInterval(timer);clearInterval(credentialTimer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    const draining=[credentials.close(),releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),connectors.close(),tickTask];
     // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
     // still unfinished a moment later, such as one whose body never arrives, is cut off.
     closing=(async()=>{

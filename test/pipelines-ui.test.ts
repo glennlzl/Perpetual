@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { chromium, expect as playwrightExpect } from '@playwright/test';
 import { createUiServer } from './fixtures/ui-server.ts';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
+import type { ConnectorsReply } from '../contract/connectors.ts';
 
 const expect = playwrightExpect.configure({ timeout: 10000 }), repoPath = '/acme/app';
 const initial = () => ({
@@ -16,20 +17,38 @@ const initial = () => ({
   autopilot: { repoPath, stages: {} },
 });
 type State = Omit<ReturnType<typeof initial>, 'pipeline' | 'githubConnection'> & { pipeline: ReturnType<typeof defaultPipeline> | null; githubConnection: ReturnType<typeof initial>['githubConnection'] | null };
-async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean } = {}) {
+async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean; connectionReadFailure?: boolean; disconnectFailure?: boolean; unreachable?: boolean; connectorFailure?: boolean; emptyConnectorConfigs?: boolean; browserConnector?: boolean; multipleAccounts?: boolean; browserOptionsFailure?: boolean } = {}) {
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } }); await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } }), errors: string[] = [], posts: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const state: State = initial(); if (options.disconnected) state.githubConnection = null;
   if (options.noPipeline) state.pipeline = null;
-  let deletes = 0;
+  let deletes = 0, connectionReads = 0, disconnects = 0;
   const reads: string[] = [];
+  const connectors: ConnectorsReply = { configured: false, ...(options.browserConnector ? { method: 'browser' as const } : {}), apps: [{ provider: 'slack', name: 'Slack' }, { provider: 'linear', name: 'Linear' }, { provider: 'gmail', name: 'Gmail' }, { provider: 'jira', name: 'Jira' }].map(app => ({ ...app, account: null })) as ConnectorsReply['apps'] };
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname; if (req.method() === 'POST') posts.push(path);
     else reads.push(path);
     let status = 200, json: unknown = {};
     if (path === '/api/session') json = { token: 'fixture-token' };
+    if (path === '/api/connectors') json = connectors;
+    if (path === '/api/connectors/setup') {
+      assert.equal(req.postDataJSON().apiKey, 'fixture-key'); connectors.configured = true; json = connectors;
+    }
+    if (path === '/api/connectors/options') json = { configs: options.emptyConnectorConfigs ? [] : [{ id: 'ac_example', name: 'Example OAuth' }], accounts: options.multipleAccounts ? [{ id: 'ca_work', name: 'Work' }, { id: 'ca_personal', name: 'Personal' }] : [] };
+    if (path === '/api/connectors/options' && options.browserOptionsFailure) { status = 503; json = { error: 'Could not read Composio connections. Sign in again or try Refresh.' }; }
+    if (path === '/api/connectors/start') {
+      if (options.emptyConnectorConfigs) assert.equal(req.postDataJSON().configId, undefined);
+      const app = connectors.apps.find(app => app.provider === req.postDataJSON().provider)!;
+      if (options.multipleAccounts) assert.equal(req.postDataJSON().accountId, 'ca_work');
+      if (options.browserConnector || app.account?.method === 'browser') assert.equal(req.postDataJSON().configId, undefined);
+      app.account = { ...(options.browserConnector ? { method: 'browser' as const } : {}), status: 'pending', redirectUrl: 'https://connect.composio.dev/link/ln_example' }; json = connectors;
+    }
+    if (path === '/api/connectors/remove') {
+      if (options.connectorFailure) { status = 503; json = { error: 'Composio could not complete the request. Try again.' }; }
+      else { connectors.apps.find(app => app.provider === req.postDataJSON().provider)!.account = null; json = connectors; }
+    }
     if (path === '/api/state') {
       if (state.pipelineRemoval?.status === 'removing') {
         if (options.deletion === 'fail-once' && deletes === 1) state.pipelineRemoval = { id: 'removal', status: 'failed', error: 'Sandbox cleanup failed. Retry deletion.' };
@@ -38,14 +57,22 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; noPipe
       json = state;
     }
     const connection = () => ({ available: true, authenticated: true, account: { login: 'developer', name: null }, connected: Boolean(state.githubConnection), source: state.source });
-    if (path === '/api/github/connection') json = connection();
+    if (path === '/api/github/connection') {
+      connectionReads++;
+      json = options.unreachable ? { available: true, authenticated: false, account: null, connected: false, unreachable: true, message: 'GitHub is unreachable. Try again.', source: state.source } : connection();
+      if (options.connectionReadFailure && connectionReads === 2) { status = 503; json = { error: 'GitHub did not answer. Try again.' }; }
+    }
     if (path === '/api/github/repositories') json = { repositories: ['app', 'other'].map(name => ({ fullName: `acme/${name}`, name, defaultBranch: 'main', private: true })), nextPage: null };
     if (path === '/api/github/branches') json = { branches: [{ name: 'main' }, { name: 'dev' }], nextPage: null, defaultBranch: 'main' };
     if (path === '/api/pipeline/action') {
       if (options.productionFailure) { status = 409; json = { error: 'Resolve the current deployment before changing the Production branch.' }; }
       else { state.pipeline = applyPipelineAction(state.pipeline, req.postDataJSON()); json = { pipeline: state.pipeline }; }
     }
-    if (path === '/api/github/disconnect') { state.githubConnection = null; json = connection(); }
+    if (path === '/api/github/disconnect') {
+      disconnects++;
+      if (options.disconnectFailure && disconnects === 1) { status = 409; json = { error: 'Wait for the source change to finish.' }; }
+      else { state.githubConnection = null; json = connection(); }
+    }
     if (path === '/api/github/connect') { state.githubConnection = { login: 'developer', connectedAt: '2026-10-06T12:00:00Z' }; json = connection(); }
     if (path === '/api/gate') json = { repoPath, sha: state.scan.repo.sha, stages: {}, production: null };
     if (path === '/api/releases') json = { repoPath, sha: state.scan.repo.sha, target: null, canDeploy: false, current: null, unresolved: null, recent: [] };
@@ -72,7 +99,7 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; noPipe
   });
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
   await page.goto(`${origin}/build/`);
-  return { page, state, errors, posts, reads };
+  return { page, state, errors, posts, reads, connectors };
 }
 
 test('Create pipeline asks a connected account to select its repository before creating', { timeout: 60000 }, async t => {
@@ -235,4 +262,204 @@ test('a running-work refusal stays in the confirmation without hiding the pipeli
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete pipeline', exact: true }).click();
   await expect(page.getByRole('alertdialog').getByRole('alert')).toContainText('Stop the browser run');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('button', { name: 'Open pipeline', exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+});
+
+test('Connectors manages the shared GitHub account without selecting a repository or creating a pipeline', { timeout: 60000 }, async t => {
+  const { page, state, posts, errors } = await fixture(t);
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  const navigation = page.getByRole('navigation', { name: 'Main navigation' });
+  await navigation.getByRole('button', { name: 'Connectors', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb', exact: true })).toHaveText('Connectors');
+  await expect(navigation.getByRole('button', { name: 'Project', exact: true })).not.toHaveAttribute('aria-current', 'page');
+  await expect(navigation.getByRole('button', { name: 'Connectors', exact: true })).toHaveAttribute('aria-current', 'page');
+  const app = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  await page.getByRole('searchbox', { name: 'Search connected apps' }).fill('missing');
+  await expect(page.getByText('No matching apps', { exact: true })).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search connected apps' }).fill('developer');
+  await app.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(app.getByRole('button', { name: 'Refresh GitHub' })).toBeEnabled();
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Disconnect GitHub?' });
+  await confirm.getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.deepEqual(posts, []);
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'No apps connected', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#connectors$/);
+  assert.ok(state.pipeline); assert.equal(state.source.repository, 'acme/app');
+  assert.equal(state.githubConnection, null);
+  await page.getByRole('button', { name: 'Connect app', exact: true }).first().click();
+  const picker = page.getByRole('dialog', { name: 'Available apps', exact: true });
+  await picker.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
+  const connect = page.getByRole('dialog', { name: 'Connect GitHub', exact: true });
+  await connect.getByRole('button', { name: 'Continue as developer', exact: true }).click();
+  await expect(connect).toHaveCount(0);
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  await expect(page.getByRole('dialog', { name: 'Source', exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/#connectors$/);
+  assert.deepEqual(posts, ['/api/github/disconnect', '/api/github/connect']);
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  await navigation.getByRole('button', { name: 'Project', exact: true }).click();
+  await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toContainText('Connected');
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Connectors', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(app).toContainText('GitHubConnecteddeveloper');
+  assert.deepEqual(errors, []);
+});
+
+test('Connectors preserves the account on read and disconnect failures, with explicit recovery', { timeout: 60000 }, async t => {
+  const { page, state, errors } = await fixture(t, { connectionReadFailure: true, disconnectFailure: true });
+  await page.goto(new URL('#connectors', page.url()).href);
+  const app = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(app).toContainText('Connected');
+  await app.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(page.getByRole('alert')).toHaveText('GitHub did not answer. Try again.');
+  await expect(app).toContainText('Unverified');
+  assert.ok(state.githubConnection);
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(app).toContainText('Connected');
+  await app.getByRole('button', { name: 'GitHub actions' }).click();
+  await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Disconnect GitHub?' });
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm.getByRole('alert')).toHaveText('Wait for the source change to finish.');
+  assert.ok(state.githubConnection); assert.ok(state.pipeline);
+  await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'No apps connected' })).toBeVisible();
+  assert.deepEqual(errors, []);
+});
+
+test('Connectors keeps an unreachable account unverified instead of claiming it disconnected', { timeout: 60000 }, async t => {
+  const { page, posts, errors } = await fixture(t, { unreachable: true });
+  await page.goto(new URL('#connectors', page.url()).href);
+  await expect(page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem')).toContainText('GitHubUnverified');
+  await expect(page.getByRole('alert')).toHaveText('GitHub is unreachable. Try again.');
+  await expect(page.getByRole('heading', { name: 'No apps connected' })).toHaveCount(0);
+  assert.deepEqual(posts, []); assert.deepEqual(errors, []);
+});
+
+test('four app connectors offer real setup, pending authorization, refresh and confirmed account removal', { timeout: 60000 }, async t => {
+  const { page, connectors, posts, errors } = await fixture(t);
+  await page.goto(page.url() + '#connectors');
+  await expect(page.getByRole('heading', { name: 'Connectors', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Available apps' });
+  for (const name of ['Slack', 'Linear', 'Gmail', 'Jira']) await expect(picker.getByRole('button', { name: `Connect ${name}`, exact: true })).toBeVisible();
+  await picker.getByRole('searchbox', { name: 'Search available apps' }).fill('gmail');
+  await expect(picker.getByRole('button', { name: 'Connect Slack' })).toHaveCount(0);
+  await picker.getByRole('button', { name: 'Connect Gmail', exact: true }).click();
+  const setup = page.getByRole('dialog', { name: 'Project API Key', exact: true });
+  await expect(setup).toBeVisible(); await expect(setup.getByLabel('Composio Project API Key')).toHaveAttribute('type', 'password');
+  await expect(setup.getByText('Platform → your project → API Keys', { exact: true })).toBeVisible();
+  await setup.getByLabel('Composio Project API Key').fill('fixture-key'); await setup.getByRole('button', { name: 'Save', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Gmail', exact: true });
+  await expect(auth.getByRole('button', { name: 'Sign in with Gmail' })).toBeEnabled();
+  const popup = page.waitForEvent('popup'); await auth.getByRole('button', { name: 'Sign in with Gmail' }).click(); await (await popup).close();
+  await expect(auth).toHaveCount(0); await expect(page.getByText('Awaiting sign-in', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toHaveAttribute('href', 'https://connect.composio.dev/link/ln_example');
+  connectors.apps.find(app => app.provider === 'gmail')!.account = { status: 'connected' };
+  await page.getByRole('button', { name: 'Refresh Gmail' }).click();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toHaveCount(0);
+  await page.reload(); await expect(page.getByRole('button', { name: 'Gmail actions' })).toBeVisible();
+  await page.getByRole('button', { name: 'Gmail actions' }).click(); await page.getByRole('menuitem', { name: 'Disconnect' }).click();
+  const confirm = page.getByRole('alertdialog'); await confirm.getByRole('button', { name: 'Cancel' }).click();
+  assert.ok(connectors.apps.find(app => app.provider === 'gmail')!.account);
+  await page.getByRole('button', { name: 'Gmail actions' }).click(); await page.getByRole('menuitem', { name: 'Disconnect' }).click(); await confirm.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect.poll(() => connectors.apps.find(app => app.provider === 'gmail')!.account).toBeNull(); await expect(page.getByRole('button', { name: 'Gmail actions' })).toHaveCount(0);
+  assert.ok(!posts.includes('/api/source/github')); assert.deepEqual(errors, []);
+});
+
+test('connector authorization cancellation and failed disconnect preserve their actual account state', { timeout: 60000 }, async t => {
+  const { page, connectors, errors, posts } = await fixture(t, { connectorFailure: true });
+  connectors.configured = true; connectors.apps.find(app => app.provider === 'slack')!.account = { status: 'connected' };
+  await page.goto(page.url() + '#connectors'); await expect(page.getByRole('button', { name: 'Slack actions' })).toBeVisible();
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click(); await page.getByRole('button', { name: 'Connect Jira', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Connect Jira' })).toBeVisible(); await page.getByRole('dialog', { name: 'Connect Jira' }).getByRole('button', { name: 'Close' }).click();
+  assert.equal(connectors.apps.find(app => app.provider === 'jira')!.account, null); assert.ok(!posts.includes('/api/connectors/start'));
+  await page.getByRole('button', { name: 'Slack actions' }).click(); await page.getByRole('menuitem', { name: 'Disconnect' }).click(); await page.getByRole('alertdialog').getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(page.getByRole('alertdialog').getByRole('alert')).toHaveText('Composio could not complete the request. Try again.');
+  assert.equal(connectors.apps.find(app => app.provider === 'slack')!.account?.status, 'connected');
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click(); await expect(page.getByRole('button', { name: 'Slack actions' })).toBeVisible(); assert.deepEqual(errors, []);
+});
+
+test('a configured fresh project can sign in to Linear without manual OAuth setup', { timeout: 60000 }, async t => {
+  const { page, connectors, posts, errors } = await fixture(t, { emptyConnectorConfigs: true });
+  connectors.configured = true;
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect Linear', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Linear', exact: true });
+  await expect(auth.getByRole('button', { name: 'Sign in with Linear' })).toBeEnabled();
+  await expect(auth.getByRole('alert')).toHaveCount(0);
+  assert.ok(!posts.includes('/api/connectors/start'));
+  const popup = page.waitForEvent('popup');
+  await auth.getByRole('button', { name: 'Sign in with Linear' }).click(); await (await popup).close();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toBeVisible();
+  assert.equal(posts.filter(path => path === '/api/connectors/start').length, 1);
+  assert.deepEqual(errors, []);
+});
+
+
+test('browser connection opens authorization from Connect with no project key setup', { timeout: 60000 }, async t => {
+  const { page, connectors, posts, errors } = await fixture(t, { browserConnector: true });
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+  const opened = page.waitForEvent('popup');
+  await page.getByRole('button', { name: 'Connect Slack', exact: true }).click();
+  const popup = await opened;
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toBeVisible();
+  await popup.close();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByLabel('Composio Project API Key')).toHaveCount(0);
+  assert.equal(connectors.configured, false);
+  assert.equal(posts.filter(path => path === '/api/connectors/start').length, 1);
+  assert.ok(!posts.includes('/api/connectors/setup')); assert.deepEqual(errors, []);
+  await page.getByRole('button', { name: 'Connection settings', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Project API Key…', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Project API Key', exact: true })).toBeVisible();
+});
+
+test('browser connection asks only when several actual accounts need a choice', { timeout: 60000 }, async t => {
+  const { page, posts, errors } = await fixture(t, { browserConnector: true, multipleAccounts: true });
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect Gmail', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Gmail', exact: true });
+  await expect(auth.getByLabel('Account')).toBeVisible();
+  assert.ok(!posts.includes('/api/connectors/start'));
+  await auth.getByLabel('Account').click(); await page.getByRole('option', { name: 'Work', exact: true }).click();
+  const opened = page.waitForEvent('popup'); await auth.getByRole('button', { name: 'Sign in with Gmail', exact: true }).click(); await (await opened).close();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toBeVisible();
+  assert.equal(posts.filter(path => path === '/api/connectors/start').length, 1); assert.deepEqual(errors, []);
+});
+
+
+test('browser-owned recovery keeps account selection and consumer help after a project-mode switch', { timeout: 60000 }, async t => {
+  const { page, connectors, posts, errors } = await fixture(t, { multipleAccounts: true });
+  connectors.method = 'project'; connectors.configured = true;
+  connectors.apps.find(app => app.provider === 'gmail')!.account = { method: 'browser', status: 'needs-auth' };
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Sign in again', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Gmail', exact: true });
+  await expect(auth.getByLabel('Account')).toBeVisible();
+  await auth.getByLabel('Account').click(); await page.getByRole('option', { name: 'Work', exact: true }).click();
+  const opened = page.waitForEvent('popup'); await auth.getByRole('button', { name: 'Sign in with Gmail', exact: true }).click(); await (await opened).close();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toBeVisible();
+  assert.ok(!posts.includes('/api/connectors/setup')); assert.deepEqual(errors, []);
+});
+
+test('browser errors recover through consumer help without directing users to project configuration', { timeout: 60000 }, async t => {
+  const { page, errors } = await fixture(t, { browserConnector: true, browserOptionsFailure: true });
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click(); await page.getByRole('button', { name: 'Connect Jira', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Jira', exact: true });
+  await expect(auth.getByRole('alert')).toHaveText('Could not read Composio connections. Sign in again or try Refresh.');
+  await expect(auth.getByRole('link', { name: 'Open Composio' })).toHaveAttribute('href', 'https://connect.composio.dev');
+  assert.deepEqual(errors, []);
 });

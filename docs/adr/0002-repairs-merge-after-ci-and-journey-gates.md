@@ -40,7 +40,7 @@ Guardrails:
 
 - An auto-merged repair can trigger the user's own deployment workflows. The journey gate itself still never deploys.
 - Repairs cost one or more twin rebuilds per PR head. Gates remain one at a time.
-- Credential and permission failures never become code changes. They wait for a person.
+- Credential and permission failures never become code changes. A separately authorized host capability may renew and synchronize an explicitly bound CI credential, then verify the original workflow; new or expanded access still needs its owner (amended 2026-10-07, user-approved autonomous recovery). See [Managed CI credentials](../managed-credentials.md).
 - A repository without a Sandbox stage merges repairs on CI alone.
 - GitHub's merge guards only the head, so the target branch can still move in the moment between Perpetual's last read of it and the merge. Such a merge is named in the repair's reason, and the target branch's push gate judges it (amended 2026-09-25).
 - The same bar will apply to every change Autopilot makes; the design and the order to build the rest in are in [Autopilot](../architecture/autopilot.md).

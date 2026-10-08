@@ -11,6 +11,7 @@ import { GITHUB_MESSAGES, SHA as COMMIT, githubFailureKind, githubHttpStatus, is
 import { commandEnvironment, gitArgs } from '../github-source.ts';
 import { diagnoseFailure, type FailureDiagnosis } from '../providers.ts';
 import { redact } from '../redaction.ts';
+import { workflowPath } from './recovery.ts';
 
 /** A job of the run; failedSteps names the steps that concluded failure. */
 export interface FailedJob { id: string; name: string; conclusion: string | null; failedSteps: string[] }
@@ -90,6 +91,16 @@ export async function rerunFailedJobs(input: RunInput, { run = exec }: { run?: C
   const { repository, runId } = target(input);
   await gh(run, ['api', '--hostname', 'github.com', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repository}/actions/runs/${runId}/rerun-failed-jobs`],
     'Rerunning the failed jobs', 'GitHub denied the rerun. Check write access to Actions in this repository.');
+}
+
+/** Configuration evidence from the failed commit; never from the current default branch. */
+export async function readRecoveryWorkflow({ repository, sha, path }: { repository: string; sha: string; path: string }, { run = exec }: { run?: CommandRunner } = {}): Promise<string> {
+  if (!isRepository(repository) || !COMMIT.test(sha) || !workflowPath(path)) throw new Error('Choose a workflow at the failed commit.');
+  const raw = await gh(run, ['api', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json',
+    `repos/${repository}/contents/${path}?ref=${sha}`], 'Reading workflow configuration', 'GitHub denied access to workflow configuration.', 512 * 1024);
+  const value: unknown = JSON.parse(raw);
+  if (!isRecord(value) || value.type !== 'file' || value.encoding !== 'base64' || typeof value.content !== 'string' || typeof value.size !== 'number' || value.size > 256 * 1024) throw new Error('Workflow configuration is unavailable.');
+  return Buffer.from(value.content, 'base64').toString('utf8');
 }
 
 /** The only branch a repair pushes: perpetual/repair/<short sha of the failing commit>. */

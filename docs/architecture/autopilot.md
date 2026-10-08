@@ -94,3 +94,9 @@ Major version updates will take the `ask` path even where the journey gate passe
 - A repository without a GitHub connection, or a session without write access, records no changes; the first refused write ends the change with the message the gate uses for the same refusal.
 - Rate limits and network failures are tried again at the next poll; while CI runs, GitHub may stay unreadable for 15 minutes before the change ends.
 - Logs, model output and pull request bodies are redacted through `src/redaction.ts` before storage, and the OpenRouter key reaches only the model provider, never the box, a command, a log or a report.
+
+## Authorization recovery automation
+
+Authorization refusals do not authorize code edits or grant the repair box credentials. Their existing recovery record is watched by the controller: it reads effective GitHub Secret metadata, automatically retries the original failed jobs once per observed credential revision, and verifies their exact-run results. Observation continues after restart and never resends an uncertain write. The person is involved only where the credential owner or missing permission cannot currently be repaired through an authorized capability. This does not add provider credential rotation or relax ADR 0002's code and merge rules. See [Authorization recovery](../repair.md#authorization-recovery).
+
+A separately authorized host capability can now maintain a managed provider credential; this extends the observation-only recovery above. It never grants permissions on behalf of the person or exposes a token to the repair model. A one-time provider consent and exact CI destination binding authorize renewal and synchronization, after which the original workflow recovery needs no Recheck/Rerun click. See [Managed CI credentials](../managed-credentials.md). Application registration and real provider acceptance remain explicit prerequisites.

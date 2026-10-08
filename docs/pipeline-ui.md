@@ -95,3 +95,9 @@ The **Git graph** button beside the branch selector opens the same non-modal rig
 - An original user checkout is read-only and records **Local history** in the branch badge’s tooltip; this feature never fetches or modifies it. **Shallow clone** marks incomplete local history.
 
 The graph is a community registry component, not an official shadcn primitive. Its license and local adaptations are recorded in [Asset provenance](ASSETS.md#registry-components).
+
+### Workflow authorization recovery
+
+Authorization failures show **Waiting for access**, **Needs attention**, and a concise actionable reason. The controller automatically monitors credential metadata, retries the original jobs once after a verified metadata change, and follows their results. Known references expose **Update credentials**; unknown references expose **Open failed run**. The row keeps **Stop**, but has no Recheck or Rerun controls. Expanded steps show the actual failure, credential references and verification evidence. An unavailable metadata check remains explicit. A real retry shows **Verifying recovery**; only successful newer attempts of the original workflows at the same commit show **Build recovered**. Page navigation never drives the recovery loop.
+
+When a failed step directly references a supported managed provider credential, Build offers **Connect Vercel** once. Its shadcn Dialog names the repository and workflow credential and explains that authorization permits credential maintenance, synchronization and resumption. The provider's consent page grants access; a callback returns to the canvas. Credential maintenance and original-job verification subsequently run without UI actions. Stop cancels maintenance; completed recoveries keep Stop managing access. **Reconnect Vercel** appears for a revoked grant or held write. Missing Perpetual Integration application setup is shown as unavailable, never as automatic recovery in progress.

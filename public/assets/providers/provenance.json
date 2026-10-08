@@ -103,6 +103,38 @@
       "bytes": 684,
       "ok": true,
       "sha256": "9148696e3a06d23e8fe2b743ebd3ee1173354dbd7b58d33d1ca6a40ee0018d53"
+    },
+    {
+      "name": "slack",
+      "url": "https://logos.composio.dev/api/slack",
+      "bytes": 2109,
+      "sha256": "e830e224a020d33dd2d70cb2234d1a0184fdb49ec1c01735f001396ece25f417",
+      "ok": true,
+      "transformation": "Original SVG from the provider logo CDN used by the referenced connector UI; geometry and brand colors unchanged."
+    },
+    {
+      "name": "linear",
+      "url": "https://logos.composio.dev/api/linear",
+      "bytes": 708,
+      "sha256": "219bea2ab65fbde25868bfd992a75096c6d438cb4163556b29078adf26bc341d",
+      "ok": true,
+      "transformation": "Original SVG from the provider logo CDN used by the referenced connector UI; geometry and brand colors unchanged."
+    },
+    {
+      "name": "gmail",
+      "url": "https://logos.composio.dev/api/gmail",
+      "bytes": 1298,
+      "sha256": "3fb6577179fc89b5d939eb7772364766fb407bfcc16f55c827fc0ef6a092ecbd",
+      "ok": true,
+      "transformation": "Original SVG from the provider logo CDN used by the referenced connector UI; geometry and brand colors unchanged."
+    },
+    {
+      "name": "jira",
+      "url": "https://logos.composio.dev/api/jira",
+      "bytes": 1050,
+      "sha256": "b27341d267876f455f3e8b78716d2595b36ef7d59a55979ae42a32fe6b5a619c",
+      "ok": true,
+      "transformation": "Original SVG from the provider logo CDN used by the referenced connector UI; geometry and brand colors unchanged."
     }
   ],
   "simpleIconsMetadataUrl": "https://raw.githubusercontent.com/simple-icons/simple-icons/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/data/simple-icons.json"

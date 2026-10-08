@@ -38,11 +38,18 @@ export function githubEnvironment({ strip = [], set = {} }: { strip?: readonly s
   return { ...env, GH_HOST: 'github.com', GH_PROMPT_DISABLED: '1', GH_PAGER: 'cat', ...set };
 }
 
-export type GitHubRun = (file: string, args: string[], options: { timeout: number; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
+export type GitHubRun = (file: string, args: string[], options: { timeout: number; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: NodeJS.ProcessEnv; input?: string }) => Promise<{ stdout: string }>;
 /** Runs gh with `githubEnvironment()`; a failure rejects as execFile's does, for `githubFailureKind` to read. */
-export function runGitHub(args: string[], { timeout = 20_000, maxBuffer = 4 * 1024 * 1024, env = githubEnvironment(), run = exec as GitHubRun }: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv; run?: GitHubRun } = {}) {
-  return run('gh', args, { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env });
+export function runGitHub(args: string[], { timeout = 20_000, maxBuffer = 4 * 1024 * 1024, env = githubEnvironment(), input, run = input === undefined ? exec as GitHubRun : runWithInput }: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv; input?: string; run?: GitHubRun } = {}) {
+  return run('gh', args, { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env, ...(input === undefined ? {} : { input }) });
 }
+
+// gh encrypts secret input before sending it to GitHub. Values use stdin, never argv or a temporary file.
+const runWithInput: GitHubRun = (file, args, options) => new Promise((resolve, reject) => {
+  const child = execFile(file, args, options, (error, stdout) => error ? reject(error) : resolve({ stdout }));
+  child.stdin?.on('error', () => {}); // The bounded child exit owns EPIPE failures too.
+  child.stdin?.end(options.input);
+});
 
 /** Authenticate Git's first HTTPS request, including Git versions without proactiveAuth. Credentials live only in the child environment, scoped to GitHub; redirects are refused. */
 export async function githubGitEnvironment({ env = githubEnvironment(), run = exec as GitHubRun }: { env?: NodeJS.ProcessEnv; run?: GitHubRun } = {}): Promise<NodeJS.ProcessEnv> {

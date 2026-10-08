@@ -6,6 +6,7 @@
 // repairs (src/repair/view.ts) and the client reads it (client/src/lib/pipeline-autopilot.ts). Types only.
 
 /** How a stage handles the changes Autopilot makes: merge them once verified, or open them and ask. */
+import type { BuildRecovery } from './build-recovery.ts';
 export type AutopilotMode = 'merge' | 'ask';
 /** A step is still to come, under way, done, failed, or waiting for a person. */
 export type StepStatus = 'pending' | 'active' | 'done' | 'failed' | 'waiting';
@@ -22,6 +23,7 @@ export interface AutopilotChange {
   /** One-based FIFO position; a restored queue needs Resume before it starts work. */
   queuePosition?: number; paused?: true;
   pullRequest?: { number: number; url: string } | null; reason?: string; startedAt?: string; endedAt?: string;
+  recovery?: BuildRecovery;
 }
 /** A failed workflow run at the watched head, which a person may hand to Autopilot. */
 export interface RepairableRun { id: string; name: string | null; path: string | null; url: string | null }

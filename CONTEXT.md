@@ -2,6 +2,8 @@
 
 ## Language
 
+**Connector** — An app-wide authorized account for an external service, independent of a Project or Pipeline. A saved sign-in attempt is pending until the service verifies its account; a repository address alone is no account authorization.
+
 **Project** — A configured repository and source root whose delivery and business verification Perpetual manages. A Project initially owns one Pipeline and remains when that Pipeline is removed.
 
 **Pipeline** — A Project's connected stages through which its source, delivery and business verification progress. Disconnecting GitHub retains the Pipeline; removing it cleans up its owned environments and test workspace.

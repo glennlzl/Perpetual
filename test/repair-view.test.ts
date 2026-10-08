@@ -19,7 +19,7 @@ const source = (file: string) => readFile(new URL(`../client/src/${file}`, impor
 
 test('a repair under way is a running change whose steps follow the manager\'s status', () => {
   const triaging = repairChange(repair('triaging'), 'build');
-  assert.deepEqual([triaging.id, triaging.stageId, triaging.kind, triaging.title, triaging.status, triaging.startedAt, triaging.endedAt, triaging.reason], ['repair-triaging', 'build', 'fix', 'Fixing build', 'running', '2026-09-25T10:00:00.000Z', undefined, undefined]);
+  assert.deepEqual([triaging.id, triaging.stageId, triaging.kind, triaging.title, triaging.status, triaging.startedAt, triaging.endedAt, triaging.reason], ['repair-triaging', 'build', 'fix', 'Diagnosing build', 'running', '2026-09-25T10:00:00.000Z', undefined, undefined]);
   assert.deepEqual(marks(triaging), ['Read the failure: active', 'Diagnose: pending', 'Change: pending', 'Verify: pending', 'Merge: pending']);
   assert.deepEqual(triaging.steps[0].detail, [{ text: 'CI', href: RUN.url }, ' failed at ', { text: 'cb9292c' }]);
   const rerunning = repairChange(repair('rerunning', { category: 'availability' }), 'build');

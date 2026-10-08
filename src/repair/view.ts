@@ -83,10 +83,19 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
   const cleanupReason = repair.cleanup?.status === 'failed' ? `Cleanup incomplete: ${repair.cleanup.reason || 'Resource deletion could not be confirmed.'}` : repair.cleanup && !ACTIVE.includes(repair.status) ? 'Cleanup pending.' : undefined;
   const reason = [businessReason, cleanupReason].filter(Boolean).join(' ') || undefined;
   const progress = steps(repair, names, businessReason);
+  if (repair.recovery) {
+    const recovery = repair.recovery;
+    progress.splice(0, progress.length,
+      { id: 'failure', name: 'Read the failure', status: 'done', detail: repair.runs.flatMap((run, index) => [...(index ? [' · '] : []), chip(run.name || 'Workflow', run.url)]) },
+      { id: 'authorization', name: 'Check workflow authorization', status: recovery.status === 'passed' ? 'done' : 'waiting',
+        detail: recovery.runs.flatMap((run, index) => [...(index ? [' · '] : []), chip(run.name, run.url), ...(run.secrets.length ? [' references ', ...list(run.secrets.map(name => [chip(name)]))] : [' — credential source unverified']), ...(run.environment ? [' in ', chip(run.environment)] : [])]) },
+      { id: 'verify', name: 'Verify original workflows', status: repair.status === 'passed' ? 'done' : repair.status === 'rerunning' ? 'active' : 'waiting', ...(reason ? { detail: [reason] } : {}) });
+  }
   if (repair.cleanup && (!ACTIVE.includes(repair.status) || repair.cleanup.status === 'failed')) progress.push({ id: 'cleanup', name: 'Clean up', status: repair.cleanup.status === 'failed' ? 'waiting' : 'active',
     ...(repair.cleanup.reason ? { detail: [repair.cleanup.reason] } : {}) });
   return {
-    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: repair.status === 'queued' || repair.status === 'passed' ? 'Build' : rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha, ...(repair.paused ? { paused: true } : {}),
+    id: repair.id, stageId, kind: repair.recovery ? 'recovery' : rerun ? 'rerun' : 'fix', title: repair.recovery ? repair.status === 'passed' ? 'Build recovered' : repair.status === 'rerunning' ? 'Verifying recovery' : 'Waiting for access' : repair.status === 'queued' || repair.status === 'passed' ? 'Build' : repair.status === 'triaging' ? 'Diagnosing build' : rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha, ...(repair.paused ? { paused: true } : {}),
+    ...(repair.recovery ? { recovery: repair.recovery } : {}),
     ...(repair.pullRequest ? { pullRequest: { number: repair.pullRequest.number, url: repair.pullRequest.url } } : {}), ...(reason ? { reason } : {}),
     startedAt: repair.createdAt, ...(repair.completedAt ? { endedAt: repair.completedAt } : {}),
   };
@@ -100,7 +109,8 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
 export function autopilotStages(view: RepairView, stageId: string | null, names: Names = id => id): Record<string, StageAutopilot> {
   if (!stageId || view.autoMerge === undefined) return {};
   const { head } = view, current = head && view.repairs.find(repair => repair.sha === head.sha);
-  const runs = head && (!current || retryable(current)) ? head.failed : [];
+  const waitingForAccess = current?.recovery && current.status === 'needs-person' && current.recovery.status !== 'passed';
+  const runs = head && !waitingForAccess && (!current || retryable(current)) ? head.failed : [];
   const queued = view.repairs.filter(repair => repair.status === 'queued').reverse();
   const ordered = [...view.repairs.filter(repair => ACTIVE.includes(repair.status)), ...queued, ...view.repairs.filter(repair => repair.status !== 'queued' && !ACTIVE.includes(repair.status))];
   const changes = ordered.map(repair => ({ ...repairChange(repair, stageId, names), ...(repair.status === 'queued' ? { queuePosition: queued.indexOf(repair) + 1 } : {}) }));
