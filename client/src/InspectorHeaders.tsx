@@ -39,10 +39,11 @@ export function EnvironmentHeader({ repoPath, stage, busy = false, onClose }: { 
   const [, snapshot] = useTestStage(stage?.id, validStage ? ['environment'] : []);
   const current = latestEnvironment(snapshot.environment.environments);
   const disabled = busy || Boolean(snapshot.pending);
+  const requestFailed = snapshot.environmentCreationError && (!current || ['failed', 'destroyed', 'cleanup_failed'].includes(current.status));
   return <SheetHeader className="flex-row items-center gap-3">
     <Box className="size-6 shrink-0" />
     <SheetTitle className="min-w-0 flex-1 truncate text-xl">{stage?.name || 'Sandbox'}</SheetTitle>
-    {(current || !snapshot.loading.environment) && <EnvironmentStatus status={current?.status} step={current?.step} />}
+    {(current || snapshot.pending === 'create' || !snapshot.loading.environment) && <EnvironmentStatus status={snapshot.pending === 'create' ? 'preparing' : requestFailed ? 'failed' : current?.status} step={current?.step} />}
     <Button variant="ghost" size="icon" disabled={disabled} aria-label="Close" onClick={onClose}><X /></Button>
   </SheetHeader>;
 }

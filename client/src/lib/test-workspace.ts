@@ -44,7 +44,7 @@ export interface ActionReply { environment?: Environment; run?: BrowserRun; case
 export interface StageDrafts { config?: BrowserConfig; [key: string]: unknown }
 export type StageView = {
   browser: BrowserView; environment: EnvironmentView; drafts: StageDrafts; dirty: Record<string, boolean>; loading: Record<Resource, boolean>;
-  pending: string; error: string; pollErrors: Record<Resource, string>; pollError: string;
+  pending: string; error: string; environmentCreationError?: string; pollErrors: Record<Resource, string>; pollError: string;
 };
 /** The source-scoped state every view subscribes to. */
 export type WorkspaceSnapshot = SourceLifecycle & { pipeline: PipelineView | null; browserTests: Record<string, BrowserView>; environments: Environment[]; stageRemovals: StageRemoval[]; busyStages: string[]; previews: PreviewTarget[]; branch: string; error: string };
@@ -307,7 +307,8 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
       assertCurrent(entry);
       if (entry.view.pending) throw new Error('Wait for the current action.');
       entry.revisions.browser++; entry.revisions.environment++;
-      update(entry, { pending: name, error: '' });
+      const creatingEnvironment = resource === 'environment' && name === 'create';
+      update(entry, { pending: name, error: '', ...(creatingEnvironment ? { environmentCreationError: '' } : {}) });
       const post = async (action: string, input: Record<string, unknown> = {}, options: ApiOptions = {}) => {
         assertCurrent(entry);
         const result = await controller(`${endpoint(resource)}/${action}`, { ...input, repoPath: source!.path, stageId: id }, options) as ActionReply;
@@ -344,7 +345,7 @@ export function createTestWorkspace({ controller, pollInterval = 3000, document 
         // A stale case list conflicts in a case save and in the case write a replacing Generate makes, and a refused
         // operation, such as a run an unconfirmed cleanup holds, means the stage changed too.
         if (resource === 'browser' && error.statusCode === 409) await refresh(entry, resource, true);
-        if (error.name !== 'AbortError') update(entry, { error: error.message });
+        if (error.name !== 'AbortError') update(entry, { error: error.message, ...(creatingEnvironment ? { environmentCreationError: error.message } : {}) });
         throw failure;
       } finally { update(entry, { pending: '' }); }
     }

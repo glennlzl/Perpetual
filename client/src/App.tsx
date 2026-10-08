@@ -15,6 +15,7 @@ import { githubConnectionChanges } from '@/lib/github-connection-changes';
 import PipelineDialogs from './PipelineDialogs';
 import PipelineLoading from './PipelineLoading';
 import TestingSetupNode, { TESTING_SETUP_ID, type TestingSetupFlowNode } from './TestingSetupNode';
+import { usePipelineLayout } from '@/lib/use-pipeline-layout';
 import SignedOut from './SignedOut';
 import { createAppSettings } from '@/lib/app-settings';
 import DeferredView, { ViewLoadState } from './DeferredView';
@@ -283,8 +284,12 @@ function StageTransition({ stageId, stageName, next, nextName, blocked, canInser
 
 function StageNode({ data }: NodeProps<StageFlowNode>) {
   const { stage, services, repoPath, scannedAt, sha, busy, openDialog, toggleStage, addTest, selected, selection, environment, createSandbox, environmentBusy, browserTests, activity, behind, repairHead, arrival, beat, build, buildStatus, github, origin, revision, next, nextName, nextBlocked, canInsert, atStageLimit, gate, gated, autopilot } = data;
-  const status = stageStatus(stage, { environment, buildStatus, origin, revision, discovered: data.discovered, gate, gated, releases: data.releases });
   const sandbox = stage.kind === 'sandbox';
+  const [, request] = useTestStage(sandbox ? stage.id : undefined);
+  const creating = sandbox && request.pending === 'create';
+  const creationError = sandbox && (!environment || behind || ['failed', 'destroyed', 'cleanup_failed'].includes(environment.status)) && request.environmentCreationError;
+  const status = creating ? { kind: 'working', text: 'Preparing' } : creationError ? { kind: 'failed', text: 'Setup failed', hint: creationError }
+    : stageStatus(stage, { environment, buildStatus, origin, revision, discovered: data.discovered, gate, gated, releases: data.releases });
   // The changes Autopilot records for the stage; one under way lights the card's beam.
   const changes = autopilot?.changes || [];
   const businessCases: BrowserCase[] = browserTests?.cases || [];
@@ -338,7 +343,8 @@ function StageNode({ data }: NodeProps<StageFlowNode>) {
         {stage.kind === 'production' && <div className="px-3 pb-3"><ProductionRelease key={repoPath} repoPath={repoPath} view={data.releases ?? null} readError={data.releaseReadError} disabled={busy} /></div>}
         {sandbox && <div className="flex min-w-0 flex-col gap-3 px-3 pb-3">
           <TwinServices repoPath={repoPath} scannedAt={scannedAt} stageId={stage.id} environment={environment} />
-          {(!environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status) || behind) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy} onClick={() => createSandbox(stage.id)}><Box />{`Create ${stage.name} environment`}</Button>}
+          {(creating || !environment || ['destroyed', 'failed', 'cleanup_failed'].includes(environment.status) || behind) && <Button className="nodrag nopan" size="sm" disabled={busy || environmentBusy || creating} onClick={() => createSandbox(stage.id)}>{creating ? <LoaderCircle className="motion-safe:animate-spin" /> : <Box />}{creating ? 'Preparing environment…' : creationError || environment?.status === 'failed' ? 'Retry environment' : `Create ${stage.name} environment`}</Button>}
+          {creationError && <p role="alert" className="break-words text-sm text-destructive">{creationError}</p>}
           <div className="flex items-center justify-between gap-3">
             <Button variant="ghost" size="sm" className="nodrag nopan h-8 justify-start gap-2 px-1 text-xs" aria-label={`Integration tests, ${businessCases.length}`} onClick={openTests}>Integration tests<Badge variant="outline" className="tabular-nums">{businessCases.length}</Badge></Button>
             {preparingTests || activeBrowserRun ? <Badge variant="outline"><LoaderCircle className="motion-safe:animate-spin" />{activeBrowserRun?.mode === 'run' ? 'Running' : 'Generating'}</Badge>
@@ -532,6 +538,9 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, se
       return result;
     });
   }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, buildUnreachable, gates, production, moreRecords, releases, releaseReadError, autopilot, testingEntry, compactTestingEntry, setupTesting]);
+  const displayedNodes = usePipelineLayout(nodes, TESTING_SETUP_ID);
+  const layoutNodes = useRef(nodes);
+  layoutNodes.current = nodes;
   const edges = useMemo(() => (pipeline?.transitions || []).flatMap((edge): Edge[] => {
     const flow = transitionFlow(edge, { stages: pipeline.stages, snapshot: activitySnapshot, build, latest, sha, gates });
     const sourceName = pipeline.stages.find(stage => stage.id === edge.source)?.name, targetName = pipeline.stages.find(stage => stage.id === edge.target)?.name;
@@ -588,7 +597,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, se
     else void flow.setViewport(next);
   }, [flow, sheetViewport, pan]);
   const frame = useCallback(() => {
-    const width = canvas.current?.clientWidth || 0, nodes = flow.getNodes();
+    const width = canvas.current?.clientWidth || 0, nodes = layoutNodes.current;
     if (!width || !nodes.length) return;
     void flow.setViewport(entryViewport(stageBoxes(nodes), { width }));
     view.current.moved = false;
@@ -669,7 +678,7 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, se
     <div className="pipeline-branch-toolbar">{branchSwitcher}<Button variant="outline" className="h-11 shrink-0 gap-2 bg-card dark:bg-card" aria-label="Git graph" disabled={busy} onClick={() => openDialog({ type: 'git-graph' })}><GitGraph className="size-4" /><span className="branch-map-trigger-label">Git graph</span></Button></div>
     <div className="flow-viewport" ref={canvas}>
     {error && <CanvasError error={error} onRetry={onRetryError} onDismiss={onDismissError} />}
-    <ReactFlow ref={flowElement} className="release-flow" colorMode={theme} nodes={nodes} edges={edges} onNodesChange={measureStages} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} nodesDraggable={false} nodesConnectable={false} nodesFocusable={false} edgesFocusable={false} edgesReconnectable={false} elementsSelectable={false} disableKeyboardA11y ariaLabelConfig={ARIA_LABELS} deleteKeyCode={null} minZoom={0.02} maxZoom={1.6} zoomOnDoubleClick={false} panOnScroll selectionOnDrag={false} onMoveStart={onMoveStart} defaultViewport={INITIAL_PIPELINE_VIEWPORT} proOptions={FLOW_OPTIONS}>
+    <ReactFlow ref={flowElement} className="release-flow" colorMode={theme} nodes={displayedNodes} edges={edges} onNodesChange={measureStages} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} nodesDraggable={false} nodesConnectable={false} nodesFocusable={false} edgesFocusable={false} edgesReconnectable={false} elementsSelectable={false} disableKeyboardA11y ariaLabelConfig={ARIA_LABELS} deleteKeyCode={null} minZoom={0.02} maxZoom={1.6} zoomOnDoubleClick={false} panOnScroll selectionOnDrag={false} onMoveStart={onMoveStart} defaultViewport={INITIAL_PIPELINE_VIEWPORT} proOptions={FLOW_OPTIONS}>
     </ReactFlow>
     <div className="canvas-toolbar"><div className="canvas-view-actions">
       <Hint text="Zoom out"><Button variant="ghost" size="icon" aria-label="Zoom out" onClick={zoomOut}><ZoomOut size={16} /></Button></Hint>
@@ -916,9 +925,15 @@ function PipelineApp() {
     const scope = workspace.stage(build.id);
     try {
       const result = await onAction({ action: 'add-stage', afterStageId: build.id, name: 'Beta' });
-      if (!scope.isCurrent() || pageRef.current !== 'pipeline') return;
+      if (!scope.isCurrent()) return;
       const added = result.pipeline.stages.find(stage => stage.kind === 'sandbox' && !current.stages.some(previous => previous.id === stage.id));
-      if (added) openDialog({ type: 'environment', stageId: added.id, tab: 'browser' });
+      if (!added) return;
+      // This explicit setup action owns both steps. Opening a saved stage or
+      // reloading the page never starts environment creation.
+      if (pageRef.current === 'pipeline') openDialog({ type: 'environment', stageId: added.id, tab: 'browser' });
+      const stage = workspace.stage(added.id);
+      try { await stage.createEnvironment(); }
+      catch { /* The stage keeps its request error and its environment retry. */ }
     } catch (failure) {
       if (scope.isCurrent() && (failure as Error).name !== 'AbortError') setError((failure as Error).message, setupTesting);
     }
