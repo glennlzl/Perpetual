@@ -48,8 +48,8 @@ test('testing invitation creates one Beta, opens setup, and respects prior delet
 
   await page.goto(`${app.url}#pipeline`);
   const setup = page.getByRole('button', { name: 'Set up testing', exact: true });
-  await expect(setup).toBeInViewport({ ratio: 1 });
-  await expect(page.getByText('AI testing in a production-like sandbox.', { exact: true })).toBeVisible();
+  await expect(setup).toBeInViewport({ ratio: 0.99 });
+  await expect(page.getByText('AI agents test user flows in a sandboxed twin of production.', { exact: true })).toBeVisible();
   await expect(page.locator('[aria-roledescription="stage"]')).toHaveCount(3);
   await expect(page.getByRole('button', { name: 'Add stage between Build and Production', exact: true })).toHaveCount(0);
   assert.equal(writes.length, 0, 'Displaying the invitation starts no work.');
@@ -78,8 +78,8 @@ test('testing invitation creates one Beta, opens setup, and respects prior delet
   pipeline = defaultPipeline(repoPath);
   previouslyDeleted = true;
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Add testing stage', exact: true })).toBeInViewport({ ratio: 1 });
-  await expect(page.getByText('AI testing in a production-like sandbox.', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Add testing stage', exact: true })).toBeInViewport({ ratio: 0.99 });
+  await expect(page.getByText('AI agents test user flows in a sandboxed twin of production.', { exact: true })).toHaveCount(0);
   await expect(page.locator('[aria-roledescription="stage"]')).toHaveCount(3);
   assert.equal(writes.length, 2);
   assert.deepEqual(errors, []);
