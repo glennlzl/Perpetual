@@ -67,24 +67,22 @@ export async function createConsumerConnections(options: BrowserAuthOptions) {
       throw new ConnectionError('Could not read Composio connections. Sign in again or try Refresh.');
     } finally { await client.close().catch(() => {}); }
   }
-  function actionSupported(schema: Record<string, unknown>, action: string) {
-    const values = object(object(schema.properties).action).enum;
-    return Array.isArray(values) && values.includes(action);
+  function connectionOperation(schema: Record<string, unknown>, provider: ConnectorProvider, action: 'list' | 'add') {
+    const toolkit = object(object(object(schema.properties).toolkits).items);
+    const values = object(object(toolkit.properties).action).enum;
+    if (!Array.isArray(values) || !values.includes(action)) throw new ConnectionError('Composio account management is unavailable. Try again.');
+    // The vendor defaults an omitted action to add: every read must explicitly say list.
+    return { toolkits: [{ name: provider, action }] };
   }
   async function list(provider: ConnectorProvider): Promise<Account[]> {
-    const data = await manage(async (invoke, schema) => {
-      if (!actionSupported(schema, 'list')) throw new ConnectionError('Composio account management is unavailable. Try again.');
-      const fields = object(schema.properties);
-      return invoke({ action: 'list', ...(fields.toolkits ? { toolkits: [provider] } : {}) });
-    });
-    const group = object(data.results)[provider];
-    const raw = Array.isArray(data.connections) ? data.connections : Array.isArray(data.connected_accounts) ? data.connected_accounts : Array.isArray(data.accounts) ? data.accounts : Array.isArray(group) ? group : undefined;
-    if (!raw) throw new ConnectionError('Could not read Composio connection data.');
+    const data = await manage(async (invoke, schema) => invoke(connectionOperation(schema, provider, 'list')));
+    const group = object(object(data.results)[provider]);
+    if (group.toolkit !== provider || !Array.isArray(group.accounts)) throw new ConnectionError('Could not read Composio connection data.');
     const secret = await authorization.token();
-    return raw.flatMap(value => {
+    return group.accounts.flatMap(value => {
       const account = object(value), toolkit = object(account.toolkit).slug ?? account.toolkit_slug ?? account.toolkit;
-      const id = account.connected_account_id ?? account.id;
-      if (toolkit !== provider && !(Array.isArray(group) && toolkit === undefined)) return [];
+      const id = account.connected_account_id ?? account.account_id ?? account.id;
+      if (toolkit !== undefined && toolkit !== provider) throw new ConnectionError('Could not read Composio connection data.');
       if (!identifier(id) || typeof account.status !== 'string') throw new ConnectionError('Could not read Composio connection data.');
       return [{ id, status: account.is_disabled === true ? 'DISABLED' : account.status.toUpperCase(), name: typeof account.alias === 'string' ? redact(account.alias, { secrets: [secret] }).slice(0, 160) : id }];
     });
@@ -98,13 +96,16 @@ export async function createConsumerConnections(options: BrowserAuthOptions) {
       await save({ ...state, accounts: { ...state.accounts, [provider]: { id: chosen.id } } }); return;
     }
     const binding = state.accounts[provider], current = accounts.find(account => account.id === binding?.id);
+    if (current && ['INITIATED', 'INITIALIZING'].includes(current.status) && binding?.redirectUrl) return;
     if (binding && (!binding.id || current && !['EXPIRED', 'FAILED', 'REVOKED', 'INACTIVE', 'DISABLED'].includes(current.status))) throw new ConnectionError('Sign-in is still pending or unconfirmed. Continue it, or disconnect before trying again.');
     await save({ ...state, accounts: { ...state.accounts, [provider]: { initiating: true } } });
-    const data = await manage(async (invoke, schema) => { if (!actionSupported(schema, 'add')) throw new ConnectionError('Composio account management is unavailable. Try again.'); return invoke({ action: 'add', toolkits: [provider] }); });
-    const record = object(object(data.results)[provider]), id = record.connected_account_id, redirectUrl = authUrl(record.redirect_url);
-    if (record.toolkit !== provider || !identifier(id) || !['active', 'initiated'].includes(String(record.status))) throw new ConnectionError('Sign-in could not be confirmed. Check Composio before trying again.');
+    const data = await manage(async (invoke, schema) => invoke(connectionOperation(schema, provider, 'add')));
+    const record = object(object(data.results)[provider]), redirectUrl = authUrl(record.redirect_url);
+    const added = Array.isArray(record.accounts) ? record.accounts.map(object).filter(account => !accounts.some(existing => existing.id === account.id)) : [];
+    const id = added[0]?.id, addedStatus = String(added[0]?.status).toLowerCase();
+    if (record.toolkit !== provider || added.length !== 1 || !identifier(id) || !['active', 'initiated'].includes(String(record.status)) || !['active', 'initiated', 'initializing'].includes(addedStatus)) throw new ConnectionError('Sign-in could not be confirmed. Check Composio before trying again.');
     await save({ ...state, accounts: { ...state.accounts, [provider]: { id, ...(redirectUrl ? { redirectUrl } : {}) } } });
-    if (record.status === 'initiated' && !redirectUrl) throw new ConnectionError('Composio did not return a sign-in link. Disconnect and try again.');
+    if (addedStatus !== 'active' && !redirectUrl) throw new ConnectionError('Composio did not return a sign-in link. Disconnect and try again.');
   }
   return {
     owns: (provider: ConnectorProvider) => Boolean(state.accounts[provider]) || authorization.pending()?.provider === provider,

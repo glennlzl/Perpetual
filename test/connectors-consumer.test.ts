@@ -17,6 +17,8 @@ test('consumer authorization and account binding survive restart; reads cannot a
   await assert.rejects(manager.complete({ code: 'fixture-code', state: 'bad-state' }), /does not match/); assert.equal(f.accounts.length, 0);
   assert.equal(await manager.complete({ code: 'fixture-code', state: signIn.searchParams.get('state') }), 'https://connect.composio.dev/link/ln_fixture');
   assert.equal(f.accounts.length, 1); assert.equal((await manager.read()).slack?.status, 'pending');
+  assert.equal(await manager.start('slack'), 'https://connect.composio.dev/link/ln_fixture');
+  assert.equal(f.calls.filter(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'add').length, 1);
   f.accounts[0].status = 'ACTIVE'; f.accounts[0].alias = 'private_fixture_bearer';
   assert.equal((await manager.read()).slack?.status, 'connected');
   await assert.rejects(manager.remove('slack', true), /completed/);
@@ -26,7 +28,7 @@ test('consumer authorization and account binding survive restart; reads cannot a
   assert.deepEqual(await manager.options('slack'), []);
   const again = new URL((await manager.start('slack'))!); assert.equal(again.origin, 'https://connect.composio.dev'); assert.equal((await manager.read()).slack?.status, 'pending');
   await manager.remove('slack'); assert.deepEqual(await manager.read(), {}); assert.equal(f.accounts.length, 1);
-  assert.equal(f.calls.filter(c => c.args?.action === 'add').length, 1); assert.ok(!f.calls.some(c => c.args?.action === 'remove'));
+  assert.equal(f.calls.filter(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'add').length, 1); assert.ok(!f.calls.some(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'remove'));
 });
 
 test('lost consumer add replies hold their intent; an incompatible list schema cannot trigger a write', async t => {
@@ -38,9 +40,9 @@ test('lost consumer add replies hold their intent; an incompatible list schema c
   await assert.rejects(manager.complete({ state: signIn.searchParams.get('state'), code: 'fixture-code' }));
   await manager.close(); manager = await createConsumerConnections(options);
   assert.equal((await manager.read()).gmail?.status, 'unverified'); await assert.rejects(manager.start('gmail'), /pending/);
-  assert.equal(f.calls.filter(c => c.args?.action === 'add').length, 1);
+  assert.equal(f.calls.filter(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'add').length, 1);
   f.flags = { supportsList: false }; await assert.rejects(manager.start('jira'), /unavailable/);
-  assert.equal(f.calls.filter(c => c.args?.action === 'add').length, 1);
+  assert.equal(f.calls.filter(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'add').length, 1);
   assert.ok((await readFile(join(dataDir, 'connectors/browser-connections.json'), 'utf8')).includes('initiating'));
 });
 
@@ -76,6 +78,6 @@ test('browser-owned recovery stays in browser mode after optional project setup 
   await manager.start({ provider: 'gmail', accountId: f.accounts[0].id });
   f.accounts[0].status = 'FAILED'; assert.equal((await manager.read()).apps.find(a => a.provider === 'gmail')!.account!.status, 'needs-auth');
   const reconnected = await manager.start({ provider: 'gmail' }); assert.equal(reconnected.apps.find(a => a.provider === 'gmail')!.account!.status, 'pending');
-  assert.equal(f.calls.filter(c => c.args?.action === 'add').length, 2);
+  assert.equal(f.calls.filter(c => (c.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'add').length, 2);
   assert.equal(f.accounts[0].status, 'FAILED'); assert.equal(f.accounts.length, 2);
 });
