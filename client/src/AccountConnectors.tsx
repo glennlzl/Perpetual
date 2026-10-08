@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { api } from '@/lib/api';
 import { restoreFocus } from '@/lib/journey-focus';
-import type { ConnectorApp, ConnectorAuthConfig, ConnectorOptionsReply, ConnectorsReply } from '../../contract/connectors.ts';
+import type { ConnectorApp, ConnectorAuthConfig, ConnectorOptionsReply, ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
 
 const messageOf = (error: unknown) => error instanceof Error ? error.message : 'Could not read connectors. Try again.';
 export const matchesApp = (query: string, app: ConnectorApp) => app.name.toLowerCase().includes(query.trim().toLowerCase());
@@ -22,22 +22,34 @@ export function AppMark({ app }: { app: ConnectorApp }) {
 
 export function useAccountConnectors() {
   const [reply, setReply] = useState<ConnectorsReply | null>(null), [error, setError] = useState('');
-  const [busy, setBusy] = useState(false), [reading, setReading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState<readonly (ConnectorProvider | 'all')[]>([]);
+  const reading = refreshing.length > 0;
   const [setupOpen, setSetupOpen] = useState(false), [authApp, setAuthApp] = useState<ConnectorApp | null>(null), [removeApp, setRemoveApp] = useState<ConnectorApp | null>(null);
   const [configs, setConfigs] = useState<ConnectorAuthConfig[]>([]), [configId, setConfigId] = useState('');
   const [apiKey, setApiKey] = useState(''), [dialogError, setDialogError] = useState('');
-  const active = useRef(true), changing = useRef(false), readingNow = useRef(false), request = useRef(0), resume = useRef<ConnectorApp | null>(null);
-  const refresh = useCallback(async () => {
-    if (changing.current || readingNow.current) return;
-    readingNow.current = true; const id = ++request.current; setReading(true);
-    try { const data = await api<ConnectorsReply>('/api/connectors'); if (active.current && id === request.current) { setReply(data); setError(''); } }
-    catch (failure) { if (active.current && id === request.current) setError(messageOf(failure)); }
-    finally { readingNow.current = false; if (active.current && id === request.current) setReading(false); }
+  const active = useRef(true), changing = useRef(false), request = useRef(0), resume = useRef<ConnectorApp | null>(null);
+  const readTask = useRef<{ id: number; promise: Promise<void> } | null>(null);
+  const refresh = useCallback(async (provider?: ConnectorProvider, quiet = false) => {
+    if (changing.current) return;
+    if (!quiet) { const target = provider ?? 'all'; setRefreshing(current => current.includes(target) ? current : [...current, target]); }
+    if (readTask.current?.id === request.current) return readTask.current.promise;
+    const id = ++request.current;
+    const promise = (async () => {
+      try { const data = await api<ConnectorsReply>('/api/connectors'); if (active.current && id === request.current) { setReply(data); setError(''); } }
+      catch (failure) { if (active.current && id === request.current) setError(messageOf(failure)); }
+      finally {
+        if (readTask.current?.id === id) readTask.current = null;
+        if (active.current && id === request.current) setRefreshing([]);
+      }
+    })();
+    readTask.current = { id, promise };
+    return promise;
   }, []);
-  useEffect(() => { active.current = true; void refresh(); return () => { active.current = false; request.current++; }; }, [refresh]);
-  const pending = reply?.apps.some(app => app.account?.status === 'pending' || app.account?.status === 'unverified') ?? false;
+  useEffect(() => { active.current = true; void refresh(undefined, true); return () => { active.current = false; }; }, [refresh]);
+  const pending = reply?.apps.some(app => app.account?.status === 'pending') ?? false;
   useEffect(() => {
-    const visible = () => { if (document.visibilityState === 'visible') void refresh(); };
+    const visible = () => { if (document.visibilityState === 'visible') void refresh(undefined, true); };
     window.addEventListener('focus', visible); document.addEventListener('visibilitychange', visible);
     const timer = pending ? window.setInterval(visible, 5000) : undefined;
     return () => { window.removeEventListener('focus', visible); document.removeEventListener('visibilitychange', visible); if (timer) clearInterval(timer); };
@@ -47,7 +59,7 @@ export function useAccountConnectors() {
     changing.current = true; request.current++; setBusy(true); setDialogError(''); setError('');
     try { return await operation(); }
     catch (failure) { if (active.current) { setError(messageOf(failure)); setDialogError(messageOf(failure)); } }
-    finally { changing.current = false; if (active.current) { setBusy(false); setReading(false); } }
+    finally { changing.current = false; if (active.current) { setBusy(false); setRefreshing([]); } }
   }
   async function choose(app: ConnectorApp, configured = reply?.configured) {
     resume.current = app; setDialogError('');
@@ -76,7 +88,7 @@ export function useAccountConnectors() {
       if (active.current) { setReply(data); setAuthApp(null); }
       return true;
     });
-    if (!started) { popup?.close(); await refresh(); }
+    if (!started) { popup?.close(); await refresh(undefined, true); }
   }
   async function remove(app: ConnectorApp, cancel = false) {
     const removed = await work(async () => {
@@ -84,15 +96,16 @@ export function useAccountConnectors() {
       if (active.current) { setReply(data); setRemoveApp(null); }
       return true;
     });
-    if (!removed) await refresh();
+    if (!removed) await refresh(undefined, true);
   }
   async function useBrowser() { await work(async () => { const data = await api<ConnectorsReply>('/api/connectors/browser', {}); if (active.current) setReply(data); }); }
-  return { reply, error, busy, reading, refresh, choose, setup, start, remove, useBrowser, setupOpen, setSetupOpen, authApp, setAuthApp, removeApp, setRemoveApp, configs, configId, setConfigId, apiKey, setApiKey, dialogError, confirmRemove(app: ConnectorApp) { setDialogError(''); setRemoveApp(app); }, resetSetup() { resume.current = null; setDialogError(''); setSetupOpen(true); } };
+  return { reply, error, busy, reading, refreshing, refresh, choose, setup, start, remove, useBrowser, setupOpen, setSetupOpen, authApp, setAuthApp, removeApp, setRemoveApp, configs, configId, setConfigId, apiKey, setApiKey, dialogError, confirmRemove(app: ConnectorApp) { setDialogError(''); setRemoveApp(app); }, resetSetup() { resume.current = null; setDialogError(''); setSetupOpen(true); } };
 }
 export type AccountConnections = ReturnType<typeof useAccountConnectors>;
 
 export function AccountConnectorRow({ app, state }: { app: ConnectorApp; state: AccountConnections }) {
   const account = app.account!;
+  const refreshing = state.refreshing.includes('all') || state.refreshing.includes(app.provider);
   const status = state.error ? 'Unverified' : { connected: 'Connected', pending: 'Awaiting sign-in', 'needs-auth': 'Sign-in required', unverified: 'Unverified' }[account.status];
   return <><Item role="listitem" className="flex-nowrap gap-3 p-4">
     <ItemMedia><AppMark app={app} /></ItemMedia>
@@ -100,7 +113,7 @@ export function AccountConnectorRow({ app, state }: { app: ConnectorApp; state: 
     <ItemActions>
       {account.status === 'pending' && account.redirectUrl && <Button asChild variant="outline" size="sm"><a href={account.redirectUrl} target="_blank" rel="noopener noreferrer">Continue sign-in<ExternalLink /></a></Button>}
       {account.method === 'browser' && (account.status === 'needs-auth' || account.status === 'unverified') && <Button variant="outline" size="sm" disabled={state.busy} onClick={() => void state.choose(app)}>Sign in again</Button>}
-      <Button variant="outline" size="sm" disabled={state.busy || state.reading} aria-label={`Refresh ${app.name}`} onClick={() => void state.refresh()}>{state.reading ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
+      <Button variant="outline" size="sm" disabled={state.busy || refreshing} aria-label={`Refresh ${app.name}`} onClick={() => void state.refresh(app.provider)}>{refreshing ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" className="size-8" disabled={state.busy} aria-label={`${app.name} actions`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         {account.status === 'pending' ? <DropdownMenuItem onSelect={() => void state.remove(app, true)}>Cancel sign-in</DropdownMenuItem> : <DropdownMenuItem variant="destructive" onSelect={() => state.confirmRemove(app)}><Unplug />Disconnect</DropdownMenuItem>}
       </DropdownMenuContent></DropdownMenu>

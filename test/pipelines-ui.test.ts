@@ -463,3 +463,122 @@ test('browser errors recover through consumer help without directing users to pr
   await expect(auth.getByRole('link', { name: 'Open Composio' })).toHaveAttribute('href', 'https://connect.composio.dev');
   assert.deepEqual(errors, []);
 });
+
+test('Connectors first list waits for both account sources before revealing rows', { timeout: 60000 }, async t => {
+  const { page, connectors } = await fixture(t);
+  connectors.apps.find(app => app.provider === 'slack')!.account = { status: 'connected' };
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  await page.route('**/api/connectors', async route => { await held; await route.fulfill({ json: connectors }); });
+  const githubFinished = page.waitForResponse('**/api/github/connection');
+  await page.goto(page.url() + '#connectors');
+  await (await githubFinished).finished();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByRole('status', { name: 'Loading connectors', exact: true })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Connected apps', exact: true })).toHaveCount(0);
+  release();
+  const rows = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(rows).toHaveCount(2); await expect(rows.nth(0)).toContainText('GitHub'); await expect(rows.nth(1)).toContainText('Slack');
+});
+
+test('Connectors does not repeatedly poll an unverified account', { timeout: 60000 }, async t => {
+  const { page, connectors, reads } = await fixture(t);
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'unverified', error: 'This connection was removed. Reconnect.' };
+  connectors.apps.find(app => app.provider === 'linear')!.account = { status: 'needs-auth' };
+  await page.clock.install(); await page.goto(page.url() + '#connectors');
+  await expect(page.getByRole('button', { name: 'Refresh Slack', exact: true })).toBeEnabled();
+  const before = reads.filter(path => path === '/api/connectors').length;
+  await page.clock.runFor(15000);
+  assert.equal(reads.filter(path => path === '/api/connectors').length, before, 'Unverified accounts require explicit recovery, not repeated polling');
+});
+
+test('Connectors keeps the first list loading when GitHub is the slower source', { timeout: 60000 }, async t => {
+  const { page, connectors } = await fixture(t);
+  connectors.apps.find(app => app.provider === 'slack')!.account = { status: 'connected' };
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  await page.route('**/api/github/connection', async route => { await held; await route.fallback(); });
+  const accountsFinished = page.waitForResponse('**/api/connectors');
+  await page.goto(page.url() + '#connectors'); await (await accountsFinished).finished();
+  await expect(page.getByRole('status', { name: 'Loading connectors', exact: true })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Connected apps', exact: true })).toHaveCount(0);
+  release();
+  const rows = page.getByRole('list', { name: 'Connected apps', exact: true }).getByRole('listitem');
+  await expect(rows).toHaveCount(2); await expect(rows.nth(0)).toContainText('GitHub'); await expect(rows.nth(1)).toContainText('Slack');
+});
+
+test('Connectors checks GitHub quietly on focus and shares that read with manual refresh', { timeout: 60000 }, async t => {
+  const { page } = await fixture(t);
+  await page.goto(page.url() + '#connectors');
+  const github = page.getByRole('button', { name: 'Refresh GitHub', exact: true });
+  await expect(github).toBeEnabled();
+  let release!: () => void, received!: () => void, heldReads = 0;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  const started = new Promise<void>(resolve => { received = resolve; });
+  await page.route('**/api/github/connection', async route => { heldReads++; received(); await held; await route.fallback(); });
+  await page.evaluate(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+  await started;
+  await expect(github).toBeEnabled(); await expect(github.locator('.motion-safe\\:animate-spin')).toHaveCount(0);
+  await github.click(); await expect(github).toBeDisabled();
+  await expect(github.locator('.motion-safe\\:animate-spin')).toHaveCount(1);
+  assert.equal(heldReads, 1, 'Focus, visibility and manual refresh should share a GitHub read');
+  release(); await expect(github).toBeEnabled();
+});
+
+test('Connectors polls pending sign-in quietly and coalesces a manual refresh', { timeout: 60000 }, async t => {
+  const { page, connectors } = await fixture(t);
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'pending', redirectUrl: 'https://example.com/sign-in' };
+  connectors.apps.find(app => app.provider === 'linear')!.account = { status: 'connected' };
+  await page.clock.install(); await page.goto(page.url() + '#connectors');
+  const slack = page.getByRole('button', { name: 'Refresh Slack', exact: true });
+  const linear = page.getByRole('button', { name: 'Refresh Linear', exact: true });
+  await expect(slack).toBeEnabled();
+  let release!: () => void, received!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  const started = new Promise<void>(resolve => { received = resolve; });
+  let heldReads = 0;
+  await page.route('**/api/connectors', async route => { heldReads++; received(); await held; await route.fulfill({ json: connectors }); });
+  await page.clock.runFor(5000); await started;
+  await expect(slack).toBeEnabled(); await expect(linear).toBeEnabled();
+  await expect(slack.locator('.animate-spin, .motion-safe\\:animate-spin')).toHaveCount(0);
+  await slack.click();
+  await expect(slack).toBeDisabled(); await expect(linear).toBeEnabled();
+  await expect(slack.locator('.motion-safe\\:animate-spin')).toHaveCount(1);
+  await linear.click();
+  await expect(slack).toBeDisabled(); await expect(linear).toBeDisabled();
+  assert.equal(heldReads, 1, 'The held background read should serve the manual refresh');
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'connected' };
+  release();
+  await expect(slack).toBeEnabled(); await expect(linear).toBeEnabled(); await expect(page.getByRole('link', { name: 'Continue sign-in' })).toHaveCount(0);
+  await expect(page.getByRole('listitem').filter({ hasText: 'Slack' })).toContainText('Connected');
+});
+
+for (const operation of ['start', 'remove'] as const) test(`Connectors reconciles a failed ${operation} without animating Refresh buttons`, { timeout: 60000 }, async t => {
+  const { page, connectors } = await fixture(t, { browserConnector: true });
+  connectors.apps.find(app => app.provider === 'slack')!.account = { method: 'browser', status: 'connected' };
+  connectors.apps.find(app => app.provider === 'linear')!.account = { method: 'browser', status: 'connected' };
+  await page.goto(page.url() + '#connectors');
+  // The recovery dialog hides the background rows from the accessibility tree.
+  const slack = page.locator('button[aria-label="Refresh Slack"]');
+  const linear = page.locator('button[aria-label="Refresh Linear"]');
+  await expect(slack).toBeEnabled();
+  let release!: () => void, received!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  const started = new Promise<void>(resolve => { received = resolve; });
+  await page.route('**/api/connectors', async route => { received(); await held; await route.fulfill({ json: connectors }); });
+  await page.route(`**/api/connectors/${operation}`, route => route.fulfill({ status: 503, json: { error: 'Could not complete sign-in. Try again.' } }));
+  if (operation === 'start') {
+    await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+    await page.getByRole('button', { name: 'Connect Gmail', exact: true }).click();
+  } else {
+    await page.getByRole('button', { name: 'Slack actions', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Disconnect', exact: true }).click();
+    await page.getByRole('alertdialog', { name: 'Disconnect Slack?', exact: true }).getByRole('button', { name: 'Disconnect', exact: true }).click();
+  }
+  await started;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  assert.equal(await slack.isEnabled(), true); assert.equal(await linear.isEnabled(), true);
+  await expect(slack.locator('.motion-safe\\:animate-spin')).toHaveCount(0);
+  await expect(linear.locator('.motion-safe\\:animate-spin')).toHaveCount(0);
+  release();
+});

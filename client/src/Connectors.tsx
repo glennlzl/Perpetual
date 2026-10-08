@@ -39,6 +39,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
   const accounts = useAccountConnectors();
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [action, setAction] = useState<'connect' | 'disconnect' | null>(null);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
@@ -47,34 +48,42 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
   const [connectOpen, setConnectOpen] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const active = useRef(true), request = useRef(0), changing = useRef(false);
+  const readTask = useRef<{ id: number; promise: Promise<void> } | null>(null);
   const addButton = useRef<HTMLButtonElement>(null), menuButton = useRef<HTMLButtonElement>(null);
 
-  const readConnection = useCallback(async () => {
+  const readConnection = useCallback(async (manual = false, changed = false) => {
     if (changing.current) return;
+    // Account changes supersede a read started before the change; focus and manual reads can share it.
+    if (changed) request.current++;
+    if (manual) setRefreshing(true);
+    if (readTask.current?.id === request.current) return readTask.current.promise;
     const id = ++request.current;
-    setLoading(true);
-    setError('');
-    try {
-      const next = await api<GitHubConnection>('/api/github/connection');
-      if (active.current && request.current === id) setConnection(next);
-    } catch (failure) {
-      if (active.current && request.current === id) setError(messageOf(failure));
-    } finally {
-      if (active.current && request.current === id) setLoading(false);
-    }
+    const promise = (async () => {
+      try {
+        const next = await api<GitHubConnection>('/api/github/connection');
+        if (active.current && request.current === id) { setConnection(next); setError(''); }
+      } catch (failure) {
+        if (active.current && request.current === id) setError(messageOf(failure));
+      } finally {
+        if (readTask.current?.id === id) readTask.current = null;
+        if (active.current && request.current === id) { setLoading(false); setRefreshing(false); }
+      }
+    })();
+    readTask.current = { id, promise };
+    return promise;
   }, []);
 
   useEffect(() => {
     active.current = true;
-    return () => { active.current = false; request.current++; };
+    return () => { active.current = false; };
   }, []);
   // The workspace observes changes in other tabs. Refresh the verified account when its record changes.
-  useEffect(() => { void readConnection(); }, [connectionRevision, readConnection]);
+  useEffect(() => { void readConnection(false, true); }, [connectionRevision, readConnection]);
   useEffect(() => {
     const visible = () => { if (document.visibilityState === 'visible') void readConnection(); };
     window.addEventListener('focus', visible);
     document.addEventListener('visibilitychange', visible);
-    const unsubscribe = githubConnectionChanges.subscribe(() => void readConnection());
+    const unsubscribe = githubConnectionChanges.subscribe(() => void readConnection(false, true));
     return () => { window.removeEventListener('focus', visible); document.removeEventListener('visibilitychange', visible); unsubscribe(); };
   }, [readConnection]);
 
@@ -97,7 +106,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
       throw failure;
     } finally {
       changing.current = false;
-      if (active.current) setAction(null);
+      if (active.current) { setAction(null); setRefreshing(false); }
       readGitHubAgain();
     }
   }
@@ -106,7 +115,8 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
   const connected = Boolean(connection?.connected);
   const listed = connected || Boolean(connection?.unreachable);
   const account = connection?.account?.login;
-  const busy = loading || Boolean(action);
+  const initialLoading = loading || !accounts.reply && !accounts.error;
+  const busy = initialLoading || refreshing || Boolean(action);
   const openPicker = () => { setPickerQuery(''); setPickerOpen(true); };
   const connectionError = error || (connection?.unreachable ? connection.message || 'GitHub is unreachable. Try again.' : '');
   const accountRows = accounts.reply?.apps.filter(app => app.account) ?? [];
@@ -123,7 +133,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
       <h2 className="mb-4 text-sm font-medium">Connected apps</h2>
       <SearchConnectors label="Search connected apps" value={query} onChange={setQuery} />
       <div className="mt-4">
-        {loading && !connection ? <div className="space-y-3" role="status" aria-label="Loading connectors"><Skeleton className="h-20 w-full" /></div>
+        {initialLoading ? <div className="space-y-3" role="status" aria-label="Loading connectors"><Skeleton className="h-20 w-full" /></div>
           : githubMatches || matchingAccounts.length ? <ItemGroup aria-label="Connected apps">
             {githubMatches && <><Item role="listitem" className="flex-nowrap gap-3 p-4">
               <ItemMedia><GitHubMark /></ItemMedia>
@@ -132,7 +142,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
                 {account && <span className="truncate text-sm text-muted-foreground">{account}</span>}
               </ItemContent>
               <ItemActions>
-                <Button size="sm" variant="outline" aria-label="Refresh GitHub" disabled={busy} onClick={() => void readConnection()}>{loading ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
+                <Button size="sm" variant="outline" aria-label="Refresh GitHub" disabled={busy} onClick={() => void readConnection(true)}>{refreshing ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild><Button ref={menuButton} size="icon" variant="outline" className="size-8" disabled={busy} aria-label="GitHub actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
                   <DropdownMenuContent align="end"><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectOpen(true)}><Unplug />Disconnect</DropdownMenuItem></DropdownMenuContent>
@@ -149,7 +159,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
                 <Button size="sm" disabled={busy} onClick={openPicker}><Plus />Connect app</Button>
               </div>}
       </div>
-      {connectionError && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{connectionError}</p><Button variant="outline" size="sm" disabled={busy} onClick={() => void readConnection()}>Try again</Button></div>}
+      {connectionError && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{connectionError}</p><Button variant="outline" size="sm" disabled={busy} onClick={() => void readConnection(true)}>Try again</Button></div>}
       {accounts.error && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{accounts.error}</p><Button variant="outline" size="sm" disabled={accounts.busy || accounts.reading} onClick={() => void accounts.refresh()}>Try again</Button></div>}
     </div>
     <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
