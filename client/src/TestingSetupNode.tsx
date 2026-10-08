@@ -26,7 +26,7 @@ export default function TestingSetupNode({ data }: NodeProps<TestingSetupFlowNod
     {data.compact ? action : <Card className="testing-setup-card">
       <CardHeader className="gap-2 px-5">
         <h3 className="text-lg font-semibold leading-[26px] tracking-[-.015em]">Test your app</h3>
-        <CardDescription className="whitespace-nowrap text-sm leading-[22px]">AI agents test user flows in a sandboxed twin of production.</CardDescription>
+        <CardDescription className="whitespace-nowrap text-sm leading-[22px]">Agents test your app like real users in a production-like sandbox.</CardDescription>
       </CardHeader>
       <CardFooter className="px-5">{action}</CardFooter>
     </Card>}
