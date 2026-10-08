@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 import { redact } from '../redaction.ts';
 import { authUrl, ComposioError, createComposio, identifier, object } from './composio.ts';
+import { createConsumerConnections } from './consumer.ts';
 import type { ConnectorAccount, ConnectorOptionsReply, ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
 
 const APPS = [{ provider: 'slack', name: 'Slack' }, { provider: 'linear', name: 'Linear' }, { provider: 'gmail', name: 'Gmail' }, { provider: 'jira', name: 'Jira' }] as const;
@@ -10,8 +11,8 @@ const INVALID = 'Cannot load saved connectors. Keep connectors.json and restore 
 const PENDING = new Set(['INITIATED', 'INITIALIZING']);
 interface Record { configId: string; alias: string; id?: string; redirectUrl?: string; expiresAt?: string }
 interface ConfigSetup { name: string; id?: string }
-interface State { schema: 1; userId: string; apiKey?: string; accounts: Partial<{ [K in ConnectorProvider]: Record }>; configSetups: Partial<{ [K in ConnectorProvider]: ConfigSetup }> }
-export type ConnectorManagerOptions = { dataDir: string; transport?: typeof fetch };
+interface State { schema: 1; userId: string; apiKey?: string; method?: 'browser' | 'project'; accounts: Partial<{ [K in ConnectorProvider]: Record }>; configSetups: Partial<{ [K in ConnectorProvider]: ConfigSetup }> }
+export type ConnectorManagerOptions = { dataDir: string; transport?: typeof fetch; callbackUrl?: () => string; consumerTransport?: typeof fetch };
 function providerOf(value: unknown): ConnectorProvider {
   if (!APPS.some(app => app.provider === value)) throw new Error('Choose an available app.');
   return value as ConnectorProvider;
@@ -24,8 +25,9 @@ function load(value: unknown): State {
   const state = object(value), accounts = object(state.accounts), configSetups = object(state.configSetups);
   if (state.schema !== 1 || typeof state.userId !== 'string' || !/^perpetual-[a-f0-9-]{36}$/.test(state.userId) || !state.accounts || typeof state.accounts !== 'object' || Array.isArray(state.accounts) || Object.keys(accounts).some(key => !APPS.some(app => app.provider === key))) throw new Error(INVALID);
   if (state.apiKey !== undefined) keyOf(state.apiKey);
+  if (state.method !== undefined && state.method !== 'browser' && state.method !== 'project') throw new Error(INVALID);
   if (state.configSetups !== undefined && (!state.configSetups || typeof state.configSetups !== 'object' || Array.isArray(state.configSetups) || Object.keys(configSetups).some(key => !APPS.some(app => app.provider === key)))) throw new Error(INVALID);
-  const result: State = { schema: 1, userId: state.userId, ...(state.apiKey ? { apiKey: state.apiKey as string } : {}), accounts: {}, configSetups: {} };
+  const result: State = { schema: 1, userId: state.userId, ...(state.apiKey ? { apiKey: state.apiKey as string } : {}), ...(state.method ? { method: state.method as 'browser' | 'project' } : {}), accounts: {}, configSetups: {} };
   for (const app of APPS) {
     const setup = configSetups[app.provider];
     if (setup !== undefined) {
@@ -43,18 +45,21 @@ function load(value: unknown): State {
 }
 
 /** A local installation owns only accounts it explicitly initiated. Opening the page only reads them. */
-export async function createConnectorManager({ dataDir, transport }: ConnectorManagerOptions) {
+export async function createConnectorManager({ dataDir, transport, callbackUrl, consumerTransport }: ConnectorManagerOptions) {
   const directory = await privateDirectory(join(dataDir, 'connectors'), INVALID), file = join(directory, 'connectors.json');
   const saved = await readStateFile(file, { limit: 32768, invalid: INVALID });
   let state: State = saved === undefined ? { schema: 1, userId: `perpetual-${randomUUID()}`, accounts: {}, configSetups: {} } : load(saved);
   const queue = createSaveQueue(), vendor = createComposio({ transport });
+  const consumer = callbackUrl ? await createConsumerConnections({ dataDir, callbackUrl, transport: consumerTransport }) : undefined;
   const observations = new Map<ConnectorProvider, ConnectorAccount>();
   let closed = false;
   const serialize = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new Error('The controller is stopping.'); return work(); });
   async function save(next: State) { await writeStateFile(file, JSON.stringify(next)); state = next; }
   function key() { if (!state.apiKey) throw new Error('Set up Composio to connect this app.'); return state.apiKey; }
-  function view(): ConnectorsReply {
-    return { configured: Boolean(state.apiKey), apps: APPS.map(app => ({ ...app, account: state.accounts[app.provider] ? observations.get(app.provider) ?? { status: 'unverified' } : null })) };
+  const method = () => state.method ?? (consumer ? 'browser' : 'project');
+  async function view(): Promise<ConnectorsReply> {
+    const browserAccounts = await consumer?.read();
+    return { configured: Boolean(state.apiKey), method: method(), apps: APPS.map(app => ({ ...app, account: state.accounts[app.provider] ? { ...(observations.get(app.provider) ?? { status: 'unverified' as const }), method: 'project' as const } : browserAccounts?.[app.provider] ?? null })) };
   }
   function owned(raw: unknown, provider: ConnectorProvider, record: Record) {
     const account = object(raw);
@@ -131,12 +136,17 @@ export async function createConnectorManager({ dataDir, transport }: ConnectorMa
       await vendor.configs(apiKey, 'slack');
       for (const app of APPS) { const record = state.accounts[app.provider]; if (record) await inspect(app.provider, record, apiKey); }
       for (const app of APPS) { const pending = state.configSetups[app.provider]; if (pending && !(await vendor.configRecords(apiKey, app.provider)).some(config => pending.id ? config.id === pending.id : config.name === pending.name)) throw new Error('Resolve the pending sign-in setup in Composio before replacing its project key.'); }
-      await save({ ...state, apiKey }); return view();
+      await save({ ...state, apiKey, method: 'project' }); return view();
     }),
-    options: (input: unknown): Promise<ConnectorOptionsReply> => serialize(async () => ({ configs: await vendor.configs(key(), providerOf(object(input).provider)) })),
+    options: (input: unknown): Promise<ConnectorOptionsReply> => serialize(async () => {
+      const provider = providerOf(object(input).provider);
+      return !state.accounts[provider] && consumer && (method() === 'browser' || consumer.owns(provider)) ? { configs: [], accounts: await consumer.options(provider) } : { configs: await vendor.configs(key(), provider) };
+    }),
     start: (input: unknown) => serialize(async () => {
-      const data = object(input), provider = providerOf(data.provider), apiKey = key();
+      const data = object(input), provider = providerOf(data.provider);
       if (state.accounts[provider]) throw new Error('This app already has a connection. Continue sign-in or disconnect it first.');
+      if (consumer && (method() === 'browser' || consumer.owns(provider))) { await consumer.start(provider, data.accountId); return view(); }
+      const apiKey = key();
       const configId = await prepareConfig(provider, data.configId);
       const record: Record = { configId, alias: `perpetual-${randomUUID()}` };
       // Persist intent before the remote write, so an uncertain response can be recovered without another account.
@@ -158,7 +168,7 @@ export async function createConnectorManager({ dataDir, transport }: ConnectorMa
     }),
     remove: (input: unknown) => serialize(async () => {
       const data = object(input), provider = providerOf(data.provider), record = state.accounts[provider];
-      if (!record) return view();
+      if (!record) { await consumer?.remove(provider, data.cancel === true); return view(); }
       // Cancellation cannot silently delete an account whose sign-in just finished.
       try {
         const observed = await inspect(provider, record);
@@ -171,6 +181,8 @@ export async function createConnectorManager({ dataDir, transport }: ConnectorMa
       const accounts = { ...state.accounts }; delete accounts[provider];
       await save({ ...state, accounts }); observations.delete(provider); return view();
     }),
-    async close() { closed = true; await queue.idle(); },
+    useBrowser: () => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); await save({ ...state, method: 'browser' }); return view(); }),
+    complete: (input: unknown) => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); return consumer.complete(input); }),
+    async close() { closed = true; await queue.idle(); await consumer?.close(); },
   };
 }

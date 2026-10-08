@@ -51,9 +51,12 @@ export function useAccountConnectors() {
   }
   async function choose(app: ConnectorApp, configured = reply?.configured) {
     resume.current = app; setDialogError('');
-    if (!configured) { setSetupOpen(true); return; }
+    const browser = app.account?.method === 'browser' || !app.account && reply?.method === 'browser';
+    if (!browser && !configured) { setSetupOpen(true); return; }
+    const popup = browser ? window.open('about:blank', '_blank') : undefined; if (popup) popup.opener = null;
     setAuthApp(app); setConfigs([]); setConfigId('');
-    await work(async () => { const data = await api<ConnectorOptionsReply>('/api/connectors/options', { provider: app.provider }); if (active.current) { setConfigs(data.configs); setConfigId(data.configs.length === 1 ? data.configs[0].id : ''); } });
+    const choices = await work(async () => { const data = await api<ConnectorOptionsReply>('/api/connectors/options', { provider: app.provider }); const choices = browser ? data.accounts ?? [] : data.configs; if (active.current) { setConfigs(choices); setConfigId(choices.length === 1 ? choices[0].id : ''); } return choices; });
+    if (browser && choices && choices.length <= 1) await start(app, popup, choices[0]?.id ?? ''); else popup?.close();
   }
   async function setup() {
     const saved = await work(async () => {
@@ -63,12 +66,11 @@ export function useAccountConnectors() {
     });
     if (saved && active.current && resume.current) await choose(resume.current, true);
   }
-  async function start() {
-    if (!authApp || changing.current) return;
-    const app = authApp;
-    const popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null;
+  async function start(app = authApp, existingPopup?: Window | null, selectedId = configId) {
+    if (!app || changing.current) return;
+    const popup = existingPopup === undefined ? window.open('about:blank', '_blank') : existingPopup; if (popup) popup.opener = null;
     const started = await work(async () => {
-      const data = await api<ConnectorsReply>('/api/connectors/start', { provider: app.provider, ...(configId ? { configId } : {}) });
+      const data = await api<ConnectorsReply>('/api/connectors/start', { provider: app.provider, ...(selectedId ? app.account?.method === 'browser' || !app.account && reply?.method === 'browser' ? { accountId: selectedId } : { configId: selectedId } : {}) });
       const url = data.apps.find(item => item.provider === app.provider)?.account?.redirectUrl;
       if (popup && url) popup.location.href = url; else popup?.close();
       if (active.current) { setReply(data); setAuthApp(null); }
@@ -84,7 +86,8 @@ export function useAccountConnectors() {
     });
     if (!removed) await refresh();
   }
-  return { reply, error, busy, reading, refresh, choose, setup, start, remove, setupOpen, setSetupOpen, authApp, setAuthApp, removeApp, setRemoveApp, configs, configId, setConfigId, apiKey, setApiKey, dialogError, confirmRemove(app: ConnectorApp) { setDialogError(''); setRemoveApp(app); }, resetSetup() { resume.current = null; setDialogError(''); setSetupOpen(true); } };
+  async function useBrowser() { await work(async () => { const data = await api<ConnectorsReply>('/api/connectors/browser', {}); if (active.current) setReply(data); }); }
+  return { reply, error, busy, reading, refresh, choose, setup, start, remove, useBrowser, setupOpen, setSetupOpen, authApp, setAuthApp, removeApp, setRemoveApp, configs, configId, setConfigId, apiKey, setApiKey, dialogError, confirmRemove(app: ConnectorApp) { setDialogError(''); setRemoveApp(app); }, resetSetup() { resume.current = null; setDialogError(''); setSetupOpen(true); } };
 }
 export type AccountConnections = ReturnType<typeof useAccountConnectors>;
 
@@ -96,6 +99,7 @@ export function AccountConnectorRow({ app, state }: { app: ConnectorApp; state: 
     <ItemContent className="min-w-0"><ItemTitle>{app.name}<Badge variant="outline">{status}</Badge></ItemTitle>{account.error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{account.error}</p>}</ItemContent>
     <ItemActions>
       {account.status === 'pending' && account.redirectUrl && <Button asChild variant="outline" size="sm"><a href={account.redirectUrl} target="_blank" rel="noopener noreferrer">Continue sign-in<ExternalLink /></a></Button>}
+      {account.method === 'browser' && (account.status === 'needs-auth' || account.status === 'unverified') && <Button variant="outline" size="sm" disabled={state.busy} onClick={() => void state.choose(app)}>Sign in again</Button>}
       <Button variant="outline" size="sm" disabled={state.busy || state.reading} aria-label={`Refresh ${app.name}`} onClick={() => void state.refresh()}>{state.reading ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" className="size-8" disabled={state.busy} aria-label={`${app.name} actions`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         {account.status === 'pending' ? <DropdownMenuItem onSelect={() => void state.remove(app, true)}>Cancel sign-in</DropdownMenuItem> : <DropdownMenuItem variant="destructive" onSelect={() => state.confirmRemove(app)}><Unplug />Disconnect</DropdownMenuItem>}
@@ -105,10 +109,11 @@ export function AccountConnectorRow({ app, state }: { app: ConnectorApp; state: 
 }
 
 export function AccountConnectorDialogs({ state, focusTarget }: { state: AccountConnections; focusTarget: () => HTMLElement | null }) {
+  const browserAuth = state.authApp?.account?.method === 'browser' || !state.authApp?.account && state.reply?.method === 'browser';
   const returnFocus = (event: Event) => { event.preventDefault(); restoreFocus([focusTarget()]); };
   return <>
     <Dialog open={state.setupOpen} onOpenChange={open => { if (!state.busy) { state.setSetupOpen(open); if (!open) state.setApiKey(''); } }}>
-      <DialogContent aria-describedby={undefined} className="sm:max-w-md" onCloseAutoFocus={returnFocus}><DialogHeader><DialogTitle>Set up Composio</DialogTitle></DialogHeader>
+      <DialogContent aria-describedby={undefined} className="sm:max-w-md" onCloseAutoFocus={returnFocus}><DialogHeader><DialogTitle>Project API Key</DialogTitle></DialogHeader>
         <form className="space-y-4" onSubmit={event => { event.preventDefault(); void state.setup(); }}>
           <div className="space-y-2"><Label htmlFor="composio-key">Composio Project API Key</Label><Input id="composio-key" type="password" autoComplete="off" spellCheck={false} aria-describedby="composio-key-location" value={state.apiKey} onChange={event => state.setApiKey(event.target.value)} disabled={state.busy} /></div>
           <div className="space-y-2"><Button asChild variant="link" className="h-auto p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button><p id="composio-key-location" className="text-sm text-muted-foreground">Platform → your project → API Keys</p></div>
@@ -119,14 +124,14 @@ export function AccountConnectorDialogs({ state, focusTarget }: { state: Account
     </Dialog>
     <Dialog open={Boolean(state.authApp)} onOpenChange={open => { if (!open && !state.busy) state.setAuthApp(null); }}>
       <DialogContent aria-describedby={undefined} className="sm:max-w-md" onCloseAutoFocus={returnFocus}><DialogHeader><DialogTitle>Connect {state.authApp?.name}</DialogTitle></DialogHeader>
-        {state.configs.length > 1 && <div className="space-y-2"><Label htmlFor="connector-auth">Authorization</Label><Select value={state.configId} onValueChange={state.setConfigId} disabled={state.busy}><SelectTrigger id="connector-auth" className="w-full"><SelectValue placeholder="Select authorization" /></SelectTrigger><SelectContent>{state.configs.map(config => <SelectItem key={config.id} value={config.id}>{config.name} · {config.id}</SelectItem>)}</SelectContent></Select></div>}
-        {state.dialogError && <Button asChild variant="link" className="h-auto justify-start p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button>}
+        {state.configs.length > 1 && <div className="space-y-2"><Label htmlFor="connector-auth">{browserAuth ? 'Account' : 'Authorization'}</Label><Select value={state.configId} onValueChange={state.setConfigId} disabled={state.busy}><SelectTrigger id="connector-auth" className="w-full"><SelectValue placeholder="Select account" /></SelectTrigger><SelectContent>{state.configs.map(config => <SelectItem key={config.id} value={config.id}>{config.name}</SelectItem>)}</SelectContent></Select></div>}
+        {state.dialogError && <Button asChild variant="link" className="h-auto justify-start p-0"><a href={browserAuth ? 'https://connect.composio.dev' : 'https://dashboard.composio.dev'} target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button>}
         {state.dialogError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{state.dialogError}</p>}
         <DialogFooter><Button variant="outline" disabled={state.busy} onClick={() => { if (state.authApp) void state.choose(state.authApp); }}>Refresh</Button><Button disabled={state.busy || Boolean(state.dialogError) || (state.configs.length > 1 && !state.configId)} onClick={() => void state.start()}>{state.busy && <LoaderCircle className="motion-safe:animate-spin" />}Sign in with {state.authApp?.name}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={Boolean(state.removeApp)} onOpenChange={open => { if (!open && !state.busy) state.setRemoveApp(null); }}><AlertDialogContent onCloseAutoFocus={returnFocus}>
-      <AlertDialogHeader><AlertDialogTitle>Disconnect {state.removeApp?.name}?</AlertDialogTitle><AlertDialogDescription>This removes the account from Perpetual and Composio. Sign in again to reconnect.</AlertDialogDescription></AlertDialogHeader>
+      <AlertDialogHeader><AlertDialogTitle>Disconnect {state.removeApp?.name}?</AlertDialogTitle><AlertDialogDescription>{state.removeApp?.account?.method === 'browser' ? 'This disconnects the account from Perpetual. Your Composio connection stays available.' : 'This removes the account from Perpetual and Composio. Sign in again to reconnect.'}</AlertDialogDescription></AlertDialogHeader>
       {state.dialogError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{state.dialogError}</p>}
       <AlertDialogFooter><AlertDialogCancel disabled={state.busy}>Cancel</AlertDialogCancel><AlertDialogAction disabled={state.busy} onClick={event => { event.preventDefault(); if (state.removeApp) void state.remove(state.removeApp); }}>{state.busy && <LoaderCircle className="motion-safe:animate-spin" />}Disconnect</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>

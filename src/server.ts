@@ -77,7 +77,7 @@ export interface ControllerState {
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
   /** Tests replace the account connector transport; no external authorization runs for them. */
-  connectors?: { transport?: typeof fetch };
+  connectors?: { transport?: typeof fetch; consumerTransport?: typeof fetch };
   /**
    * Tests supply the sign-in manager, runs and deployments readers, branch head, commit status, failed-run reader, rerun
    * and the managed source copy's move to a commit; no CLI is spawned for them.
@@ -225,7 +225,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
   onCleanup(()=>githubAuth.dispose());
-  const connectors=await createConnectorManager({dataDir,...connectorOptions});
+  let listeningPort: number | undefined;
+  const connectors=await createConnectorManager({dataDir,...connectorOptions,callbackUrl:()=>`http://127.0.0.1:${listeningPort}/connectors/oauth/callback`});
   onCleanup(()=>connectors.close());
   const usage=createEnvironmentUsage();let environments: Awaited<ReturnType<typeof createEnvironmentManager<StageContext>>> | undefined;
   onCleanup(()=>usage.stopAdmissions());
@@ -545,7 +546,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return input as RequestInput;
   }
   // The port it listens on, kept: a closing server has no address, and its last replies still check the Host they name.
-  let listeningPort: number | undefined;
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
@@ -554,6 +554,18 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
+    // Only the OAuth callback accepts a cross-site top-level navigation. Its persisted state and PKCE verifier
+    // bind one explicit sign-in; every other route keeps the launch-session and same-origin checks below.
+    const callbackTarget=URL.parse(req.url??'','http://localhost');
+    if(req.method==='GET'&&req.headers.host===`127.0.0.1:${actualPort}`&&callbackTarget?.pathname==='/connectors/oauth/callback') {
+      res.setHeader('Referrer-Policy','no-referrer');
+      if(closed)return reply(res,503,{error:'The controller is shutting down.'});
+      try {
+        if(['code','state','error'].some(name=>callbackTarget.searchParams.getAll(name).length>1))throw new Error('Invalid sign-in callback.');
+        const redirect=await connectors.complete(Object.fromEntries(callbackTarget.searchParams));
+        res.writeHead(302,{Location:redirect??'/#connectors'});return res.end();
+      } catch { res.writeHead(400,{'Content-Type':'text/plain; charset=utf-8'});return res.end('Sign-in could not finish. Return to Perpetual and connect again.'); }
+    }
     const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
     // A browser names where a request comes from: the page itself, or a person's own visit. Another site on this host,
     // such as a twin's app on another port, is same-site, not same-origin.
@@ -591,6 +603,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='GET'&&path==='/api/session')return reply(res,200,{token});
       if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,await connectors.read());
       if(req.method==='POST'&&path==='/api/connectors/setup')return reply(res,200,await connectors.setup(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/browser')return reply(res,200,await connectors.useBrowser());
       if(req.method==='POST'&&path==='/api/connectors/options')return reply(res,200,await connectors.options(await body(req,4096)));
       if(req.method==='POST'&&path==='/api/connectors/start')return reply(res,200,await connectors.start(await body(req,4096)));
       if(req.method==='POST'&&path==='/api/connectors/remove')return reply(res,200,await connectors.remove(await body(req,4096)));

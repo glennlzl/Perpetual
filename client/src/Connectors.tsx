@@ -118,7 +118,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
     <div className="mx-auto w-full max-w-5xl">
       <div className="mb-6 flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Connectors</h1>
-        <div className="flex items-center gap-2"><Button variant="ghost" size="sm" disabled={accounts.busy} onClick={accounts.resetSetup}>{accounts.reply?.configured ? 'Manage Composio' : 'Set up Composio'}</Button><Button ref={addButton} size="sm" disabled={busy || accounts.busy} onClick={openPicker}><Plus />Connect app</Button></div>
+        <div className="flex items-center gap-2"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="size-8" aria-label="Connection settings" disabled={accounts.busy}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void accounts.useBrowser()}>Use browser sign-in</DropdownMenuItem><DropdownMenuItem onSelect={accounts.resetSetup}>Project API Key…</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button ref={addButton} size="sm" disabled={busy || accounts.busy} onClick={openPicker}><Plus />Connect app</Button></div>
       </div>
       <h2 className="mb-4 text-sm font-medium">Connected apps</h2>
       <SearchConnectors label="Search connected apps" value={query} onChange={setQuery} />
