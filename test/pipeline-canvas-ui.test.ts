@@ -427,6 +427,7 @@ test('a refused Create environment is one canvas error that one Dismiss clears',
   await page.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
   const alert = page.locator('.canvas-alert');
   await expect(alert).toContainText(refusal);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await alert.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(alert).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
@@ -451,6 +452,7 @@ test('a twin an earlier checkout built stays on its Sandbox card as behind, and 
   await expect(page.getByRole('tooltip')).toHaveText('main · bbbbbbb → dev · aaaaaaa');
   await card.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
   await expect.poll(() => posts.filter(item => item.path === '/api/environments/create').map(item => item.body)).toEqual([{ repoPath, stageId: beta }]);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });
 

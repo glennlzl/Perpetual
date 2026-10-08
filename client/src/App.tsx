@@ -902,7 +902,7 @@ function PipelineApp() {
     const stage = workspace.stage(stageId);
     if (stage.getSnapshot().pending) return;
     setError('');
-    setDialog({ type: 'environment', stageId, tab: 'browser' });
+    setDialog(previous => previous?.type === 'environment' && previous.stageId === stageId ? { ...previous, error: undefined } : previous);
     // The workspace shows the stage's failed action on the canvas as well, so it is not raised here a second time.
     try { await stage.createEnvironment(); }
     catch (failure) {
@@ -929,14 +929,13 @@ function PipelineApp() {
       if (!added) return;
       // This explicit setup action owns both steps. Opening a saved stage or
       // reloading the page never starts environment creation.
-      if (pageRef.current === 'pipeline') openDialog({ type: 'environment', stageId: added.id, tab: 'browser' });
       const stage = workspace.stage(added.id);
       try { await stage.createEnvironment(); }
       catch { /* The stage keeps its request error and its environment retry. */ }
     } catch (failure) {
       if (scope.isCurrent() && (failure as Error).name !== 'AbortError') setError((failure as Error).message, setupTesting);
     }
-  }, [workspace, onAction, openDialog, setError]);
+  }, [workspace, onAction, setError]);
   // Collapsing is a saved view preference, not a release change: it applies at
   // once without the global busy lock and rolls back only if saving fails.
   const toggleStage = useCallback(async (stageId: string) => {
