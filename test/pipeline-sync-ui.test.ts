@@ -69,7 +69,8 @@ test('rapid collapses stay interactive, isolate a failed save and can be retried
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
-  const page = await browser.newPage(), repoPath = '/acme/app', first = Promise.withResolvers<void>();
+  // Keep both controls in view across the full-width testing invitation; this exercises concurrent saves, not canvas panning.
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } }), repoPath = '/acme/app', first = Promise.withResolvers<void>();
   t.after(() => first.resolve());
   let pipeline = defaultPipeline(repoPath), writes = 0;
   await page.route('**/api/**', async route => {

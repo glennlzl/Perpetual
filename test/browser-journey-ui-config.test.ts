@@ -269,7 +269,7 @@ test('unsaved forms offer Cancel and Save; read-only surfaces offer Close', asyn
   assert.doesNotMatch(header, /Close sandbox/);
   // One clear close: the view-only inspector has no second "Close" in a footer.
   assert.doesNotMatch(inspector, />Close<\/Button>|SheetFooter/);
-  assert.match(header, /\(current \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{current\?\.status\} step=\{current\?\.step\} \/>/);
+  assert.match(header, /\(current \|\| snapshot\.pending === 'create' \|\| !snapshot\.loading\.environment\) && <EnvironmentStatus status=\{snapshot\.pending === 'create' \? 'preparing' : requestFailed \? 'failed' : current\?\.status\} step=\{current\?\.step\} \/>/);
   // The header status reads like the stage card: outline + icon when absent or idle, secondary when ready or working, destructive when failed.
   const status = header.slice(header.indexOf('export function environmentTone'));
   assert.match(status, /variant=\{tone === 'failed' \? 'destructive' : quiet \? 'outline' : 'secondary'\}/);

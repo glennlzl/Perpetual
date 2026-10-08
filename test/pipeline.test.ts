@@ -419,9 +419,9 @@ test('focusable status badges are named buttons, not bare tab stops', async () =
   assert.match(status, /<TooltipContent className="max-w-sm break-words">\{hint\}<\/TooltipContent>/, 'A long error wraps.');
   assert.match(node, /<Hint text=\{behind\}><Badge asChild variant="outline" className="stage-behind"><button type="button">Behind<\/button><\/Badge><\/Hint>/);
   assert.match(node, /\{repairHead && <Hint text=\{repairHead\}><Badge asChild variant="outline" className="stage-behind"><button type="button">PR head<\/button><\/Badge><\/Hint>\}/, 'A repair twin names its pull request head.');
-  // A stage's twin is the pipeline's, as its inspector shows it, whichever checkout built it; one behind offers Create.
+  // A stage's twin is the pipeline's, as its inspector shows it, whichever checkout built it.
   assert.match(app, /const latest = useMemo\(\(\) => Object\.fromEntries\(\(pipeline\?\.stages \|\| \[\]\)\.map\(stage => \[stage\.id, latestEnvironment\(environments, stage\.id\)\]\)\), \[pipeline, environments\]\);/);
-  assert.match(node, /\{\(!environment \|\| \['destroyed', 'failed', 'cleanup_failed'\]\.includes\(environment\.status\) \|\| behind\) && <Button className="nodrag nopan" size="sm" disabled=\{busy \|\| environmentBusy\} onClick=\{\(\) => createSandbox\(stage\.id\)\}><Box \/>\{`Create \$\{stage\.name\} environment`\}<\/Button>\}/);
+  // Creation, pending state and retries are exercised in testing-entry-ui.test.ts.
 });
 
 test('a canvas failure is a dismissible Alert above the stages, with Try again only where it repeats', async () => {
