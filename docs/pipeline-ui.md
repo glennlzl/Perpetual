@@ -38,7 +38,7 @@ Provider rows, tests and nested GitHub workflow steps use shadcn Item and Separa
 
 ## Sandbox stages
 
-Before the first Sandbox stage is configured, an **Integration tests** invitation sits between Build and Production with **Generate end-to-end tests for your app with AI.** and **Set up testing**. This is a visual entry only, excluded from stage counts, persisted transitions and gate status. Choosing it explicitly adds **Beta** and opens its **Integration tests** inspector without a naming dialog; it starts no environment, discovery or test run. Once created, the real stage replaces the invitation. If this pipeline has a completed Sandbox deletion, the empty slot instead shows a quieter **Add testing stage** button.
+Before the first Sandbox stage is configured, a **Test your app** invitation sits between Build and Production with **An AI agent tests your app like a real user, in a production-like sandbox.** and **Set up testing**. This is a visual entry only, excluded from stage counts, persisted transitions and gate status. Choosing it explicitly adds **Beta** and opens its **Integration tests** inspector without a naming dialog; it starts no environment, discovery or test run. Once created, the real stage replaces the invitation. If this pipeline has a completed Sandbox deletion, the empty slot instead shows a quieter **Add testing stage** button.
 
 Once a Sandbox exists, the **+** on an eligible connection inserts another **Sandbox** stage there, such as Beta or Gamma. A Sandbox stage follows Build or another Sandbox stage; the Source → Build connection has no insertion control. A pipeline holds at most 12 stages.
 

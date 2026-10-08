@@ -25,8 +25,8 @@ export default function TestingSetupNode({ data }: NodeProps<TestingSetupFlowNod
     <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
     {data.compact ? action : <Card className="testing-setup-card">
       <CardHeader className="gap-2 px-5">
-        <h3 className="text-lg font-semibold leading-[26px] tracking-[-.015em]">Integration tests</h3>
-        <CardDescription className="text-sm leading-[22px]">Generate end-to-end tests for your app with AI.</CardDescription>
+        <h3 className="text-lg font-semibold leading-[26px] tracking-[-.015em]">Test your app</h3>
+        <CardDescription className="text-sm leading-[22px]">An AI agent tests your app like a real user, in a production-like sandbox.</CardDescription>
       </CardHeader>
       <CardFooter className="px-5">{action}</CardFooter>
     </Card>}
