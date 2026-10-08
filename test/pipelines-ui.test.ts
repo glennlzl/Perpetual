@@ -17,7 +17,7 @@ const initial = () => ({
   autopilot: { repoPath, stages: {} },
 });
 type State = Omit<ReturnType<typeof initial>, 'pipeline' | 'githubConnection'> & { pipeline: ReturnType<typeof defaultPipeline> | null; githubConnection: ReturnType<typeof initial>['githubConnection'] | null };
-async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean; connectionReadFailure?: boolean; disconnectFailure?: boolean; unreachable?: boolean; connectorFailure?: boolean } = {}) {
+async function fixture(t: TestContext, options: { disconnected?: boolean; noPipeline?: boolean; deletion?: 'fail-once' | 'conflict'; staleObservation?: boolean; productionFailure?: boolean; creationFailure?: boolean; connectionReadFailure?: boolean; disconnectFailure?: boolean; unreachable?: boolean; connectorFailure?: boolean; emptyConnectorConfigs?: boolean } = {}) {
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } }); await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } }), errors: string[] = [], posts: string[] = [];
@@ -36,8 +36,9 @@ async function fixture(t: TestContext, options: { disconnected?: boolean; noPipe
     if (path === '/api/connectors/setup') {
       assert.equal(req.postDataJSON().apiKey, 'fixture-key'); connectors.configured = true; json = connectors;
     }
-    if (path === '/api/connectors/options') json = { configs: [{ id: 'ac_example', name: 'Example OAuth' }] };
+    if (path === '/api/connectors/options') json = { configs: options.emptyConnectorConfigs ? [] : [{ id: 'ac_example', name: 'Example OAuth' }] };
     if (path === '/api/connectors/start') {
+      if (options.emptyConnectorConfigs) assert.equal(req.postDataJSON().configId, undefined);
       const app = connectors.apps.find(app => app.provider === req.postDataJSON().provider)!;
       app.account = { status: 'pending', redirectUrl: 'https://connect.composio.dev/link/ln_example' }; json = connectors;
     }
@@ -382,4 +383,21 @@ test('connector authorization cancellation and failed disconnect preserve their 
   await expect(page.getByRole('alertdialog').getByRole('alert')).toHaveText('Composio could not complete the request. Try again.');
   assert.equal(connectors.apps.find(app => app.provider === 'slack')!.account?.status, 'connected');
   await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click(); await expect(page.getByRole('button', { name: 'Slack actions' })).toBeVisible(); assert.deepEqual(errors, []);
+});
+
+test('a configured fresh project can sign in to Linear without manual OAuth setup', { timeout: 60000 }, async t => {
+  const { page, connectors, posts, errors } = await fixture(t, { emptyConnectorConfigs: true });
+  connectors.configured = true;
+  await page.goto(page.url() + '#connectors');
+  await page.getByRole('button', { name: 'Connect app', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect Linear', exact: true }).click();
+  const auth = page.getByRole('dialog', { name: 'Connect Linear', exact: true });
+  await expect(auth.getByRole('button', { name: 'Sign in with Linear' })).toBeEnabled();
+  await expect(auth.getByRole('alert')).toHaveCount(0);
+  assert.ok(!posts.includes('/api/connectors/start'));
+  const popup = page.waitForEvent('popup');
+  await auth.getByRole('button', { name: 'Sign in with Linear' }).click(); await (await popup).close();
+  await expect(page.getByRole('link', { name: 'Continue sign-in' })).toBeVisible();
+  assert.equal(posts.filter(path => path === '/api/connectors/start').length, 1);
+  assert.deepEqual(errors, []);
 });

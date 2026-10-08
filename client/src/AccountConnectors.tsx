@@ -68,7 +68,7 @@ export function useAccountConnectors() {
     const app = authApp;
     const popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null;
     const started = await work(async () => {
-      const data = await api<ConnectorsReply>('/api/connectors/start', { provider: app.provider, configId });
+      const data = await api<ConnectorsReply>('/api/connectors/start', { provider: app.provider, ...(configId ? { configId } : {}) });
       const url = data.apps.find(item => item.provider === app.provider)?.account?.redirectUrl;
       if (popup && url) popup.location.href = url; else popup?.close();
       if (active.current) { setReply(data); setAuthApp(null); }
@@ -120,10 +120,9 @@ export function AccountConnectorDialogs({ state, focusTarget }: { state: Account
     <Dialog open={Boolean(state.authApp)} onOpenChange={open => { if (!open && !state.busy) state.setAuthApp(null); }}>
       <DialogContent aria-describedby={undefined} className="sm:max-w-md" onCloseAutoFocus={returnFocus}><DialogHeader><DialogTitle>Connect {state.authApp?.name}</DialogTitle></DialogHeader>
         {state.configs.length > 1 && <div className="space-y-2"><Label htmlFor="connector-auth">Authorization</Label><Select value={state.configId} onValueChange={state.setConfigId} disabled={state.busy}><SelectTrigger id="connector-auth" className="w-full"><SelectValue placeholder="Select authorization" /></SelectTrigger><SelectContent>{state.configs.map(config => <SelectItem key={config.id} value={config.id}>{config.name} · {config.id}</SelectItem>)}</SelectContent></Select></div>}
-        {!state.busy && !state.configs.length && !state.dialogError && <p role="alert" className="text-sm text-destructive">Enable an OAuth configuration for {state.authApp?.name} in Composio, then try again.</p>}
-        <Button asChild variant="link" className="h-auto justify-start p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button>
+        {state.dialogError && <Button asChild variant="link" className="h-auto justify-start p-0"><a href="https://dashboard.composio.dev" target="_blank" rel="noopener noreferrer">Open Composio<ExternalLink /></a></Button>}
         {state.dialogError && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{state.dialogError}</p>}
-        <DialogFooter><Button variant="outline" disabled={state.busy} onClick={() => { if (state.authApp) void state.choose(state.authApp); }}>Refresh</Button><Button disabled={state.busy || !state.configId} onClick={() => void state.start()}>{state.busy && <LoaderCircle className="motion-safe:animate-spin" />}Sign in with {state.authApp?.name}</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" disabled={state.busy} onClick={() => { if (state.authApp) void state.choose(state.authApp); }}>Refresh</Button><Button disabled={state.busy || Boolean(state.dialogError) || (state.configs.length > 1 && !state.configId)} onClick={() => void state.start()}>{state.busy && <LoaderCircle className="motion-safe:animate-spin" />}Sign in with {state.authApp?.name}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={Boolean(state.removeApp)} onOpenChange={open => { if (!open && !state.busy) state.setRemoveApp(null); }}><AlertDialogContent onCloseAutoFocus={returnFocus}>

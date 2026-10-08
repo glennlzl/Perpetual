@@ -16,6 +16,7 @@ export class ComposioError extends Error {
   status: number;
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
+interface OAuthConfig extends ConnectorAuthConfig { enabled: boolean }
 /** Tests replace the transport, never the fixed production URL or credential header. */
 export function createComposio({ transport = fetch }: { transport?: typeof fetch } = {}) {
   async function request(key: string, path: string, method = 'GET', input?: unknown): Promise<unknown> {
@@ -51,14 +52,34 @@ export function createComposio({ transport = fetch }: { transport?: typeof fetch
     }
     throw new Error('Too many Composio records. Narrow the project configuration.');
   }
+  async function configRecords(key: string, provider: ConnectorProvider): Promise<OAuthConfig[]> {
+    const items = await pages(key, `/auth_configs?toolkit_slug=${provider}&show_disabled=true&limit=200`);
+    return items.flatMap(value => {
+      const item = object(value);
+      return object(item.toolkit).slug === provider && item.auth_scheme === 'OAUTH2' && identifier(item.id)
+        ? [{ id: item.id, name: typeof item.name === 'string' ? redact(item.name, { secrets: [key] }).slice(0, 160) : item.id, enabled: item.status === 'ENABLED' }] : [];
+    });
+  }
   return {
+    configRecords,
     async configs(key: string, provider: ConnectorProvider): Promise<ConnectorAuthConfig[]> {
-      const items = await pages(key, `/auth_configs?toolkit_slug=${provider}&show_disabled=false&limit=200`);
-      return items.flatMap(value => {
-        const item = object(value);
-        return object(item.toolkit).slug === provider && item.auth_scheme === 'OAUTH2' && item.status === 'ENABLED' && identifier(item.id)
-          ? [{ id: item.id, name: typeof item.name === 'string' ? redact(item.name, { secrets: [key] }).slice(0, 160) : item.id }] : [];
-      });
+      return (await configRecords(key, provider)).filter(item => item.enabled).map(({ id, name }) => ({ id, name }));
+    },
+    async supportsManagedOAuth(key: string, provider: ConnectorProvider) {
+      const data = object(await request(key, `/toolkits/${provider}`));
+      if (!Array.isArray(data.composio_managed_auth_schemes)) throw new Error('Could not verify managed sign-in. Refresh and try again.');
+      return data.composio_managed_auth_schemes.includes('OAUTH2');
+    },
+    async createManagedConfig(key: string, provider: ConnectorProvider, name: string) {
+      let data: Record<string, unknown>;
+      try { data = object(await request(key, '/auth_configs', 'POST', { toolkit: { slug: provider }, auth_config: { type: 'use_composio_managed_auth', name, credentials: {} } })); }
+      catch (error) {
+        if (error instanceof ComposioError && error.status === 403) throw new ComposioError(403, 'Composio refused sign-in setup. Check the project key and its Auth configs write permission.');
+        throw error;
+      }
+      const config = object(data.auth_config);
+      if (object(data.toolkit).slug !== provider || !identifier(config.id) || config.auth_scheme !== 'OAUTH2' || config.is_composio_managed !== true) throw new Error('Could not confirm sign-in setup. Refresh before trying again.');
+      return config.id;
     },
     link: (key: string, configId: string, userId: string, alias: string) => request(key, '/connected_accounts/link', 'POST', { auth_config_id: configId, user_id: userId, alias }),
     details: (key: string, id: string) => request(key, `/connected_accounts/${id}`),

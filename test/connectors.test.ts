@@ -11,14 +11,25 @@ async function fixture(t: TestContext) {
   const cleanup: (() => Promise<unknown>)[] = [];
   t.after(async () => { for (const close of cleanup) await close(); await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
   const calls: { path: string; method: string }[] = [], accounts = new Map<string, Record<string, unknown>>();
-  let linkReplyLost = false, rejected = false, readFailure = false, removeFailure = false, wrongOwner = false, unsafeLink = false;
+  const managedConfigs = new Map<string, { id: string; name: string }>();
+  let linkReplyLost = false, rejected = false, readFailure = false, removeFailure = false, wrongOwner = false, unsafeLink = false, emptyConfigs = false, configReplyLost = false, configNotCreated = false, configDenied = false, disabledConfigs = false, unsupportedManaged = false;
   const transport: typeof fetch = async (input, init) => {
     const url = new URL(String(input)), method = init?.method || 'GET'; calls.push({ path: url.pathname, method });
     assert.equal(url.origin, 'https://backend.composio.dev'); assert.equal(new Headers(init?.headers).get('x-api-key'), 'fixture-key');
     const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
+    if (url.pathname.includes('/toolkits/')) return response({ composio_managed_auth_schemes: unsupportedManaged ? [] : ['OAUTH2'] });
     if (url.pathname.endsWith('/auth_configs')) {
       if (rejected) return response({ api_key: 'fixture-key' }, 401);
+      if (method === 'POST') {
+        if (configDenied) return response({}, 403);
+        const body = JSON.parse(String(init?.body)) as { toolkit: { slug: string }; auth_config: { type: string; name: string } };
+        assert.equal(body.auth_config.type, 'use_composio_managed_auth');
+        const config = { id: `ac_${body.toolkit.slug}`, name: body.auth_config.name }; if (!configNotCreated) managedConfigs.set(body.toolkit.slug, config);
+        if (configReplyLost) throw new Error('Creation reply was lost');
+        return response({ toolkit: { slug: body.toolkit.slug }, auth_config: { ...config, auth_scheme: 'OAUTH2', is_composio_managed: true } }, 201);
+      }
       const provider = url.searchParams.get('toolkit_slug');
+      if (emptyConfigs) { const config = managedConfigs.get(provider!); return response({ items: config ? [{ ...config, toolkit: { slug: provider }, auth_scheme: 'OAUTH2', status: 'ENABLED' }] : disabledConfigs ? [{ id: `ac_${provider}`, name: 'Disabled OAuth', toolkit: { slug: provider }, auth_scheme: 'OAUTH2', status: 'DISABLED' }] : [] }); }
       return response({ items: [{ id: `ac_${provider}`, name: `${provider} OAuth`, toolkit: { slug: provider }, auth_scheme: 'OAUTH2', status: 'ENABLED' }, { id: 'wrong-provider', toolkit: { slug: 'other' }, auth_scheme: 'OAUTH2', status: 'ENABLED' }, { id: 'wrong-scheme', toolkit: { slug: provider }, auth_scheme: 'API_KEY', status: 'ENABLED' }, { id: 'disabled', toolkit: { slug: provider }, auth_scheme: 'OAUTH2', status: 'DISABLED' }] });
     }
     if (url.pathname.endsWith('/link')) {
@@ -36,7 +47,7 @@ async function fixture(t: TestContext) {
     return response(wrongOwner ? { ...account, user_id: 'other-installation' } : account);
   };
   let manager = await createConnectorManager({ dataDir, transport });
-  return { dataDir, calls, accounts, transport, cleanup, get manager() { return manager; }, async restart() { await manager.close(); manager = await createConnectorManager({ dataDir, transport }); }, set flags(value: { linkReplyLost?: boolean; rejected?: boolean; readFailure?: boolean; removeFailure?: boolean; wrongOwner?: boolean; unsafeLink?: boolean }) { ({ linkReplyLost = linkReplyLost, rejected = rejected, readFailure = readFailure, removeFailure = removeFailure, wrongOwner = wrongOwner, unsafeLink = unsafeLink } = value); } };
+  return { dataDir, calls, accounts, transport, cleanup, get manager() { return manager; }, async restart() { await manager.close(); manager = await createConnectorManager({ dataDir, transport }); }, set flags(value: { linkReplyLost?: boolean; rejected?: boolean; readFailure?: boolean; removeFailure?: boolean; wrongOwner?: boolean; unsafeLink?: boolean; emptyConfigs?: boolean; configReplyLost?: boolean; configNotCreated?: boolean; configDenied?: boolean; disabledConfigs?: boolean; unsupportedManaged?: boolean }) { ({ linkReplyLost = linkReplyLost, rejected = rejected, readFailure = readFailure, removeFailure = removeFailure, wrongOwner = wrongOwner, unsafeLink = unsafeLink, emptyConfigs = emptyConfigs, configReplyLost = configReplyLost, configNotCreated = configNotCreated, configDenied = configDenied, disabledConfigs = disabledConfigs, unsupportedManaged = unsupportedManaged } = value); } };
 }
 async function start(manager: Awaited<ReturnType<typeof createConnectorManager>>, provider: ConnectorProvider) { return manager.start({ provider, configId: `ac_${provider}` }); }
 
@@ -60,6 +71,57 @@ test('setup explains incompatible Composio key types before sending or saving th
   assert.equal(calls, 0);
   assert.equal((await manager.read()).configured, false);
   await assert.rejects(readFile(join(dataDir, 'connectors', 'connectors.json')), { code: 'ENOENT' });
+});
+
+test('a fresh project prepares managed OAuth only on sign-in and reuses it after restart', async t => {
+  const f = await fixture(t); f.flags = { emptyConfigs: true };
+  await f.manager.setup({ apiKey: 'fixture-key' });
+  assert.deepEqual((await f.manager.options({ provider: 'linear' })).configs, []);
+  assert.ok(f.calls.every(call => call.method === 'GET'));
+  const result = await f.manager.start({ provider: 'linear' });
+  assert.equal(result.apps.find(app => app.provider === 'linear')?.account?.status, 'pending');
+  assert.equal(f.calls.filter(call => call.path.endsWith('/auth_configs') && call.method === 'POST').length, 1);
+  await f.manager.remove({ provider: 'linear', cancel: true }); await f.restart();
+  await f.manager.start({ provider: 'linear' });
+  assert.equal(f.calls.filter(call => call.path.endsWith('/auth_configs') && call.method === 'POST').length, 1);
+});
+
+test('lost OAuth setup replies recover by the persisted name and never create duplicates', async t => {
+  const f = await fixture(t); f.flags = { emptyConfigs: true, configReplyLost: true };
+  await f.manager.setup({ apiKey: 'fixture-key' });
+  await assert.rejects(f.manager.start({ provider: 'gmail' }), /Could not read Composio/);
+  await f.restart();
+  assert.equal((await f.manager.read()).apps.find(app => app.provider === 'gmail')?.account, null);
+  const result = await f.manager.start({ provider: 'gmail' });
+  assert.equal(result.apps.find(app => app.provider === 'gmail')?.account?.status, 'pending');
+  assert.equal(f.calls.filter(call => call.path.endsWith('/auth_configs') && call.method === 'POST').length, 1);
+});
+
+test('an uncertain missing configuration holds its intent across restart instead of repeating the write', async t => {
+  const f = await fixture(t); f.flags = { emptyConfigs: true, configReplyLost: true, configNotCreated: true };
+  await f.manager.setup({ apiKey: 'fixture-key' });
+  await assert.rejects(f.manager.start({ provider: 'jira' }), /Could not read Composio/);
+  await f.restart();
+  await assert.rejects(f.manager.start({ provider: 'jira' }), /could not be confirmed/);
+  assert.equal(f.calls.filter(call => call.path.endsWith('/auth_configs') && call.method === 'POST').length, 1);
+  assert.equal(f.accounts.size, 0);
+});
+
+test('managed sign-in respects disabled configurations, unsupported OAuth, invalid choices and write permissions', async t => {
+  const f = await fixture(t); f.flags = { emptyConfigs: true, disabledConfigs: true };
+  await f.manager.setup({ apiKey: 'fixture-key' });
+  await assert.rejects(f.manager.start({ provider: 'slack' }), /Check the OAuth configuration/);
+  f.flags = { disabledConfigs: false, unsupportedManaged: true };
+  await assert.rejects(f.manager.start({ provider: 'slack' }), /needs an OAuth configuration/);
+  f.flags = { unsupportedManaged: false };
+  await assert.rejects(f.manager.start({ provider: 'slack', configId: 'ac_unselected' }), /Choose an enabled/);
+  assert.ok(f.calls.every(call => call.method === 'GET'));
+  f.flags = { configDenied: true };
+  await assert.rejects(f.manager.start({ provider: 'slack' }), /Auth configs write permission/);
+  const saved = JSON.parse(await readFile(join(f.dataDir, 'connectors', 'connectors.json'), 'utf8')) as { configSetups: object };
+  assert.deepEqual(saved.configSetups, {});
+  f.flags = { configDenied: false };
+  assert.equal((await f.manager.start({ provider: 'slack' })).apps.find(app => app.provider === 'slack')?.account?.status, 'pending');
 });
 
 test('four actual OAuth lifecycles persist, verify ownership, and clean up without executing provider tools', async t => {
