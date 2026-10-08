@@ -121,13 +121,15 @@ for (const reducedMotion of ['no-preference', 'reduce'] as const) test(`testing 
   await expect(page.getByRole('button', { name: 'Beta', exact: true })).toBeVisible();
   assert.equal(writes.length, 4, 'Reloading a saved stage never retries creation or starts tests.');
 
-  // Reloading a source whose last Sandbox was deliberately removed quiets the invitation.
+  // Removing the last Sandbox restores the same full invitation, including after reload.
   pipeline = defaultPipeline(repoPath);
   environments = [];
   previouslyDeleted = true;
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Add testing stage', exact: true })).toBeInViewport({ ratio: 0.99 });
-  await expect(page.getByText('Agents test your app like real users in a production-like sandbox.', { exact: true })).toHaveCount(0);
+  await expect(setup).toBeInViewport({ ratio: 0.99 });
+  await expect(page.getByRole('heading', { name: 'Test your app', exact: true })).toBeVisible();
+  await expect(page.getByText('Agents test your app like real users in a production-like sandbox.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add testing stage', exact: true })).toHaveCount(0);
   await expect(page.locator('[aria-roledescription="stage"]')).toHaveCount(3);
   assert.equal(writes.length, 4);
   assert.deepEqual(errors, []);

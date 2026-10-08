@@ -512,7 +512,6 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, se
   const testingEntry = !pipeline.stages.some(stage => stage.kind === 'sandbox')
     ? pipeline.transitions.find(edge => pipeline.stages.some(stage => stage.id === edge.source && stage.kind === 'build') && pipeline.stages.some(stage => stage.id === edge.target && stage.kind === 'production'))
     : undefined;
-  const compactTestingEntry = stageRemovals.some(removal => removal.status === 'completed');
   const nodes = useMemo(() => {
     let x = 0;
     const context = { scan, source, pipeline, sha, latest, snapshot: activitySnapshot, arrivals, healthBeat, build, buildStatus, github, buildReadError, buildUnreachable, gates, production, moreDeployments: moreRecords, releases, releaseReadError, autopilot, selection, selectedStageId, busyStages: environmentBusy, busy, openDialog, toggleStage, addTest, createSandbox };
@@ -532,12 +531,12 @@ function PipelineCanvas({ scan, source, pipeline, busy, toggleStage, addTest, se
         const measured = stageSizes[TESTING_SETUP_ID];
         result.push({ id: TESTING_SETUP_ID, type: 'testing-setup', position: { x, y: 0 }, measured, draggable: false,
           ariaRole: 'group', ariaLabel: 'Set up integration testing', className: 'nopan', style: STAGE_STYLE,
-          data: { compact: compactTestingEntry, busy, onSetup: setupTesting } });
-        x += (measured?.width ?? (compactTestingEntry ? 200 : 280)) + STAGE_GAP;
+          data: { busy, onSetup: setupTesting } });
+        x += (measured?.width ?? 280) + STAGE_GAP;
       }
       return result;
     });
-  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, buildUnreachable, gates, production, moreRecords, releases, releaseReadError, autopilot, testingEntry, compactTestingEntry, setupTesting]);
+  }, [scan, source, sha, pipeline, stageSizes, busy, openDialog, toggleStage, addTest, selectedStageId, selection, latest, createSandbox, environmentBusy, activitySnapshot, arrivals, healthBeat, reuseStageData, build, buildStatus, github, buildReadError, buildUnreachable, gates, production, moreRecords, releases, releaseReadError, autopilot, testingEntry, setupTesting]);
   const displayedNodes = usePipelineLayout(nodes, TESTING_SETUP_ID);
   const layoutNodes = useRef(nodes);
   layoutNodes.current = nodes;
