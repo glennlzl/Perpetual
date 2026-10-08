@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
-import { ChevronDown, ExternalLink, LoaderCircle, LockKeyhole } from 'lucide-react';
+import { ChevronDown, ExternalLink, LoaderCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -41,10 +41,9 @@ export default function TwinServices({ repoPath, scannedAt, stageId, environment
   const current = view?.source === source ? view : null;
   if (!current || (!current.error && !current.services.length)) return null;
   const rows = twinServiceRows(current.services, environment);
-  const blocked = rows.filter(row => row.status === 'blocked').length;
   return <Collapsible defaultOpen={false} className="nodrag nopan min-w-0">
     <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-8 justify-start gap-2 px-1 text-xs [&[data-state=open]>svg]:rotate-180">
-      Services{!current.error && <Badge variant="secondary">{rows.length}</Badge>}{current.generated && <Badge variant="outline">Generated</Badge>}{blocked > 0 && <Badge variant="outline"><LockKeyhole aria-hidden="true" />{blocked}<span className="sr-only"> blocked</span></Badge>}<ChevronDown className="size-3.5 text-muted-foreground transition-transform" />
+      Services{!current.error && <Badge variant="secondary">{rows.length}</Badge>}{current.generated && <Badge variant="outline">Generated</Badge>}<ChevronDown className="size-3.5 text-muted-foreground transition-transform" />
     </Button></CollapsibleTrigger>
     {/* A failed read shows without expanding the list it replaces. */}
     {current.error && <div className="flex flex-wrap items-center gap-2 px-1"><p role="alert" className="min-w-0 flex-1 break-words text-xs text-destructive">{current.error}</p><Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setAttempt(value => value + 1)}>Try again</Button></div>}
