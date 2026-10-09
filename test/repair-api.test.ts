@@ -129,7 +129,7 @@ test('a person\'s Repair triages the failed head and, without an OpenRouter API 
   const settled = await f.until(f.ended);
   assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['needs-attention', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual([change(settled)?.steps[1].detail, change(settled)?.steps[2].detail], [['The build does not compile.'], ['Add an OpenRouter API key in Settings.']]);
-  assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
+  assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41', attempt: 1 }]);
   // A view observes the terminal state before the background job's final atomic save settles.
   // Shutdown joins that save, so the durable-state assertion does not race the writer.
   await f.close();
@@ -147,7 +147,7 @@ test('a failed head pushed after the scanned commit is repaired and named on Bui
   assert.deepEqual([refused.status, refused.body.error], [409, 'This run is not at the head of main.']);
   const settled = await f.until(f.ended);
   assert.deepEqual([build(settled)?.failed, change(settled)?.steps[0].detail, build(settled)?.changes.length], [{ sha: NEWER, runs: [shown('41')] }, [{ text: 'CI' }, ' failed at ', { text: 'ddddddd' }], 1]);
-  assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
+  assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41', attempt: 1 }]);
   assert.equal(JSON.parse(await readFile(join(f.dataDir, 'repairs', 'state.json'), 'utf8')).repairs[0].trigger, 'push');
 });
 

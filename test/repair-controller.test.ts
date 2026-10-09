@@ -198,8 +198,9 @@ test('a person\'s Repair goes from gh\'s failed jobs and log through triage, the
   const verifying = await c.until((_view, repair) => repair?.status === 'verifying-ci');
   assert.deepEqual([verifying.repair.category, verifying.repair.pullRequest, change(verifying.view)?.pullRequest], ['unknown', { number: 7, url: 'https://github.com/owner/app/pull/7', branch, draft: true }, { number: 7, url: 'https://github.com/owner/app/pull/7' }]);
   assert.deepEqual(change(verifying.view)?.steps.map(step => [step.name, step.status]), [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'done'], ['Verify', 'active'], ['Merge', 'pending']]);
-  const triage = c.github.calls.filter(args => args[0] === 'run' || args.at(-1) === 'repos/owner/app/actions/runs/2/jobs?per_page=100' && !args.includes('--include'));
-  assert.deepEqual(triage.map(args => args.at(-1)).sort(), ['--log-failed', 'repos/owner/app/actions/runs/2/jobs?per_page=100'], 'Triage reads the failed jobs and the failed-step log through gh.');
+  const triage = c.github.calls.filter(args => args[0] === 'run' || args.at(-1) === 'repos/owner/app/actions/runs/2/attempts/1/jobs?per_page=100' && !args.includes('--include'));
+  assert.deepEqual(triage.map(args => args.at(-1)).sort(), ['--log-failed', 'repos/owner/app/actions/runs/2/attempts/1/jobs?per_page=100'], 'Triage reads the same failed attempt’s jobs and failed-step log through gh.');
+  assert.deepEqual(triage.find(args => args[0] === 'run'), ['run', 'view', '2', '--repo', 'owner/app', '--attempt', '1', '--log-failed']);
   assert.deepEqual(c.github.pushes, [{ branch, lease: '', files: 'add.js' }]);
   const created = c.github.calls.find(args => args.includes('repos/owner/app/pulls') && args.includes('POST'))!;
   const field = (name: string) => created.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
