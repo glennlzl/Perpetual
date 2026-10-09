@@ -6,8 +6,11 @@ import { mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEnvironmentRuntime, environmentInputs } from '../src/environments/runtime.ts';
+import { MissingEnvironmentInputs } from '../src/environments/generation.ts';
 import { createTwinInputs } from '../src/twin/index.ts';
 import { createBrowserModelSettings } from '../src/browser/model.ts';
+import { authorStructuredConfig } from '../src/twin/config-author.ts';
+import { scriptedModel } from './fixtures/scripted-model.ts';
 import type { EnvironmentTwin } from '../src/environments/runtime.ts';
 import type { PreparedTwin, TwinRuntime } from '../src/twin/index.ts';
 import { services as fixtureServices } from './fixtures/twin/services.ts';
@@ -20,8 +23,8 @@ const only = (calls: Partial<EnvironmentTwin>) => calls as EnvironmentTwin;
 const STRIPE_KEY = 'sk_test_environment_fixture';
 const plan = { services: { mailpit: {}, stripe: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000, env: {} } }, fixtures: [] };
 const twinResult = {
-  status: 'blocked',
-  services: [{ id: 'mailpit', fidelity: 'actual', status: 'ready' }, { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey'] }],
+  status: 'ready',
+  services: [{ id: 'mailpit', fidelity: 'actual', status: 'ready' }, { id: 'stripe', fidelity: 'official-sandbox', status: 'ready' }],
   apps: [{ id: 'web', url: 'http://host.docker.internal:43100', directory: '.' }],
 } satisfies PreparedTwin;
 
@@ -49,7 +52,7 @@ async function setup(t: TestContext, twin: Partial<EnvironmentTwin> = {}) {
 }
 
 test('generation protects its first author observation with stored inputs', async t => {
-  const f = await setup(t), secret = `fixture-private-${'q'.repeat(350)}`, key = 'sk-or-v1-fixture-generation-observation';
+  const f = await setup(t), secret = `pk_test_fixture-private-${'q'.repeat(350)}`, key = 'sk-or-v1-fixture-generation-observation';
   const draft = JSON.stringify({ services: { payments: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000 } } });
   const manifest = JSON.stringify({ name: 'acme-app', packageManager: `npm@11 ${secret}`, scripts: { start: `echo ${secret}` } });
   await writeFile(join(f.repoPath, 'package.json'), manifest);
@@ -78,8 +81,49 @@ test('generation protects its first author observation with stored inputs', asyn
   assert.equal(await readFile(join(f.repoPath, 'package.json'), 'utf8'), manifest);
 });
 
+test('structured author receives option-bound input availability without credential values', async t => {
+  const f = await setup(t), settingsKey = 'sk-or-settings-private-fixture-7361';
+  const settings = await createBrowserModelSettings({ dataDir: f.dataDir });
+  await settings.saveOpenRouter({ apiKey: settingsKey, model: 'openai/gpt-6-luna' });
+  const draftConfig = { services: { llm: {}, stripe: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000, env: {} } } };
+  const draft = JSON.stringify(draftConfig), model = scriptedModel([
+    { text: JSON.stringify({ changes: [], blockers: [] }) }, { text: JSON.stringify({ changes: [], blockers: [] }) },
+  ]);
+  const runtimeInputs: Record<string, Record<string, string>>[] = [];
+  const runtime = createEnvironmentRuntime({
+    author: options => authorStructuredConfig(options, model),
+    twin: only({ async prepare({ inputs }) {
+      runtimeInputs.push(structuredClone(inputs ?? {}));
+      return { services: [], apps: [{ id: 'web', url: 'http://127.0.0.1:43000/' }] };
+    } }),
+    answers: async () => 200,
+  });
+  await assert.rejects(runtime.prepareEnvironment({ dataDir: f.dataDir, repoPath: f.repoPath, directory: f.directory,
+    environment: { id: 'environment-1', plan: draftConfig }, generate: { draft, model: { apiKey: 'sk-or-author-key-fixture', model: 'openai/gpt-6-luna' } },
+    onUpdate: async () => {}, cancelled: () => false }), /Stripe \(secretKey, publishableKey\)/);
+  assert.equal(runtimeInputs.length, 0, 'Missing required inputs stop before allocating a twin.');
+  const firstPrompt = JSON.stringify(model.doGenerateCalls[0]);
+  assert.match(firstPrompt, /llm: OPENAI_BASE_URL=set, OPENAI_API_KEY=set, OPENAI_MODEL=set/);
+  assert.match(firstPrompt, /stripe: secretKey=missing, publishableKey=missing/);
+  assert.match(firstPrompt, /redacted prompt does not mean an input is missing/);
+  assert.match(firstPrompt, /unknown does not mean missing/);
+  assert.ok(!firstPrompt.includes(settingsKey));
+  assert.ok(!firstPrompt.includes('sk-or-author-key-fixture'));
+  assert.ok(!firstPrompt.includes(STRIPE_KEY));
+
+  const appDraft = JSON.stringify({ ...draftConfig, services: { llm: { source: 'app' }, stripe: {} } });
+  const appDir = join(f.dataDir, 'environments', 'environment-2');
+  await assert.rejects(runtime.prepareEnvironment({ dataDir: f.dataDir, repoPath: f.repoPath, directory: appDir,
+    environment: { id: 'environment-2', plan: JSON.parse(appDraft) }, generate: { draft: appDraft, model: { apiKey: 'sk-or-author-key-fixture', model: 'openai/gpt-6-luna' } },
+    onUpdate: async () => {}, cancelled: () => false }), /LLM \(OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL\)/);
+  assert.equal(runtimeInputs.length, 0);
+  const appPrompt = JSON.stringify(model.doGenerateCalls[1]);
+  assert.match(appPrompt, /llm: OPENAI_BASE_URL=missing, OPENAI_API_KEY=missing, OPENAI_MODEL=missing/);
+  assert.ok(!appPrompt.includes(settingsKey));
+});
+
 test('author retries keep retired input values private and rebuild evidence when supplied values change', async t => {
-  const f = await setup(t), retired = 'fixture-retired-value-7310', replacement = `fixture-replacement-${'q'.repeat(350)}`;
+  const f = await setup(t), retired = 'pk_test_fixture-retired-value-7310', replacement = `pk_test_fixture-replacement-${'q'.repeat(350)}`;
   const draft = JSON.stringify({ services: { payments: {} }, apps: { web: { directory: '.', start: 'node app.mjs', port: 3000 } } });
   const source = `export const configured = ${JSON.stringify(retired)};\n`;
   await writeFile(join(f.repoPath, 'app.mjs'), source);
@@ -115,7 +159,7 @@ test('author retries keep retired input values private and rebuild evidence when
 
 test('preparation records ownership before the twin allocates and reports its services and apps', async t => {
   const f = await setup(t), updates: { step?: string; sandboxId?: string; snapshot?: { files: number } }[] = [];
-  await createTwinInputs({ dataDir: f.dataDir }).set('stripe', { secretKey: STRIPE_KEY });
+  await createTwinInputs({ dataDir: f.dataDir }).set('stripe', { secretKey: STRIPE_KEY, publishableKey: 'pk_test_environment_fixture' });
   const prepared = await f.runtime.prepareEnvironment({ dataDir: f.dataDir, environment: f.environment, repoPath: f.repoPath, directory: f.directory,
     onUpdate: async update => { updates.push(update); }, cancelled: () => false });
   const [[operation, input]] = f.calls;
@@ -127,10 +171,10 @@ test('preparation records ownership before the twin allocates and reports its se
   const preparing = updates.find(update => update.step === 'Preparing twin');
   assert.equal(preparing?.sandboxId, 'environment-1', 'Ownership is recorded before twin setup starts.');
   assert.equal(preparing?.snapshot?.files, 1);
-  assert.equal(prepared.status, 'ready', 'Blocked services leave the environment ready.');
+  assert.equal(prepared.status, 'ready');
   assert.deepEqual(prepared.services, [
     { id: 'mailpit', title: 'Mailpit', fidelity: 'actual', status: 'ready', missing: [] },
-    { id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['secretKey'] },
+    { id: 'stripe', title: 'Stripe', fidelity: 'official-sandbox', status: 'ready', missing: [] },
   ]);
   assert.deepEqual(prepared.apps, twinResult.apps);
   assert.ok(!JSON.stringify(prepared).includes(STRIPE_KEY));
@@ -139,8 +183,38 @@ test('preparation records ownership before the twin allocates and reports its se
 test('controller shutdown cancels preparation between twin steps', async t => {
   let stop = false;
   const f = await setup(t, { prepare: async input => { stop = true; await input.onStep?.('Starting twin'); throw new Error('Unreachable'); } });
+  await createTwinInputs({ dataDir: f.dataDir }).set('stripe', { secretKey: STRIPE_KEY, publishableKey: 'pk_test_environment_fixture' });
   await assert.rejects(f.runtime.prepareEnvironment({ dataDir: f.dataDir, environment: f.environment, repoPath: f.repoPath, directory: f.directory,
     onUpdate: async () => {}, cancelled: () => stop }), /cancelled/);
+});
+
+test('a runtime-reported blocked dependency cannot become a ready environment', async t => {
+  const f = await setup(t, { prepare: async () => ({ ...twinResult, services: [
+    { id: 'stripe', fidelity: 'official-sandbox', status: 'blocked', missing: ['upstream input'] },
+  ] }) });
+  await createTwinInputs({ dataDir: f.dataDir }).set('stripe', { secretKey: STRIPE_KEY, publishableKey: 'pk_test_environment_fixture' });
+  const updates: { services?: { status: string }[] }[] = [];
+  await assert.rejects(f.runtime.prepareEnvironment({ dataDir: f.dataDir, environment: f.environment, repoPath: f.repoPath, directory: f.directory,
+    onUpdate: async update => { updates.push(update); }, cancelled: () => false }), MissingEnvironmentInputs);
+  assert.ok(updates.some(update => update.services?.some(service => service.status === 'blocked')));
+});
+
+test('a failed pending-input checkpoint never triggers another paid author attempt', async t => {
+  const f = await setup(t), draft = JSON.stringify(plan);
+  let authors = 0;
+  const runtime = createEnvironmentRuntime({
+    author: () => { authors += 1; return { promise: Promise.resolve({ text: draft }), cancel() {} }; },
+    twin: only({ prepare: async () => { throw new Error('Missing inputs must stop before preparation.'); } }),
+  });
+  await assert.rejects(runtime.prepareEnvironment({ dataDir: f.dataDir, repoPath: f.repoPath, directory: f.directory,
+    environment: f.environment, generate: { draft, model: { apiKey: 'fixture-author-key', model: 'openai/gpt-6-luna' } },
+    onDraft: async () => { throw new Error('Storage is full.'); }, onUpdate: async () => {}, cancelled: () => false }), error => {
+    assert.ok(error instanceof MissingEnvironmentInputs);
+    assert.ok('draft' in error, 'The manager can still preserve the completed candidate when storage recovers.');
+    assert.ok('logs' in error && String(error.logs).includes('Storage is full.'));
+    return true;
+  });
+  assert.equal(authors, 1);
 });
 
 test('the llm service takes the App Settings model unless its source is the app', async t => {

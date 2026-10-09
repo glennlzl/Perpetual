@@ -96,15 +96,21 @@ export const APP_PORT = 3000;
 /** The size of a repository file readLocal reads by default. */
 export const FILE_BYTES = 1_048_576;
 /** A repository file's text, refused when it or a folder on its way is a link out of the root, or it is too large. */
-export async function readLocal(root: string, file: string, limit = FILE_BYTES) {
+export async function readLocal(root: string, file: string, limit = FILE_BYTES, { signal }: { signal?: AbortSignal } = {}) {
+  signal?.throwIfAborted();
   const target = join(root, repositoryPath(file, 'A repository file'));
   const actual = await realpath(target);
+  signal?.throwIfAborted();
   if (actual !== root && !actual.startsWith(root + sep)) throw new Error('Repository files cannot point outside the source.');
   const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
+    signal?.throwIfAborted();
     const stat = await handle.stat();
+    signal?.throwIfAborted();
     if (!stat.isFile() || stat.size > limit) throw new Error('Repository configuration is too large.');
-    return await handle.readFile('utf8');
+    const text = await handle.readFile('utf8');
+    signal?.throwIfAborted();
+    return text;
   } finally { await handle.close(); }
 }
 
@@ -119,14 +125,18 @@ const readManifest = (root: string, directory: string): Promise<Manifest | null>
  * Repository-relative files, without following links or entering skipped directories or folders that cannot be read,
  * such as a container's data owned by another user; `complete` is false when the walk's depth or entry limit left some out.
  */
-export async function repositoryWalk(root: string, limits: WalkLimits = WALK) {
+export async function repositoryWalk(root: string, limits: WalkLimits = WALK, { signal }: { signal?: AbortSignal } = {}) {
+  signal?.throwIfAborted();
   const files: string[] = [];
   let entries = 0, complete = true;
   async function walk(directory: string, depth: number) {
+    signal?.throwIfAborted();
     let found;
     try { found = await readdir(join(root, directory), { withFileTypes: true }); }
-    catch (error) { if (!directory) throw error; return; }
+    catch (error) { signal?.throwIfAborted(); if (!directory) throw error; return; }
+    signal?.throwIfAborted();
     for (const entry of found.sort((a, b) => a.name.localeCompare(b.name))) {
+      signal?.throwIfAborted();
       if (++entries > limits.entries) { complete = false; return; }
       const name = directory ? `${directory}/${entry.name}` : entry.name;
       if (entry.isFile()) files.push(name);
@@ -136,6 +146,7 @@ export async function repositoryWalk(root: string, limits: WalkLimits = WALK) {
     }
   }
   await walk('', 0);
+  signal?.throwIfAborted();
   return { files, complete };
 }
 
@@ -315,7 +326,7 @@ export async function snapshotSource(repoPath: string, destination: string) {
   await mkdir(target, { recursive: true, mode: 0o700 });
   if ((await lstat(target)).isSymbolicLink() || await realpath(target) !== target) throw new Error('The snapshot destination changed during creation.');
   let count = 0, bytes = 0;
-  const hash = createHash('sha256'), ignored = new Set(await ignoredPaths(root));
+  const hash = createHash('sha256').update('snapshot-v2\0'), ignored = new Set(await ignoredPaths(root));
   async function walk(directory: string) {
     const folder = join(root, directory);
     if ((await lstat(folder)).isSymbolicLink() || await realpath(folder) !== folder) throw new Error('Source directories changed during snapshot creation.');
@@ -331,7 +342,7 @@ export async function snapshotSource(repoPath: string, destination: string) {
         || (BUILD_OUTPUT.has(entry.name) && entry.isDirectory() && !directory.split(sep).includes('src'))
         || (PRIVATE_NAME.test(entry.name) && (!entry.isFile() || !SOURCE_MODULE.test(entry.name)))) continue;
       const original = join(root, name), output = join(target, name);
-      if (entry.isDirectory()) { await mkdir(output, { mode: 0o700 }); await walk(name); continue; }
+      if (entry.isDirectory()) { hash.update(JSON.stringify(['directory', path])); await mkdir(output, { mode: 0o700 }); await walk(name); continue; }
       if (!entry.isFile()) continue;
       if (await realpath(original) !== original) throw new Error('Source links changed during snapshot creation.');
       const handle = await open(original, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -350,7 +361,8 @@ export async function snapshotSource(repoPath: string, destination: string) {
         if ((await handle.stat()).size !== stat.size || await realpath(original) !== original) throw new Error('Source changed during snapshot creation. Retry the operation.');
         const content = config ? withoutCredentials(entry.name, buffer) : buffer;
         bytes -= buffer.length - content.length;
-        hash.update(relative(root, original)).update('\0').update(content).update('\0');
+        // Build identity includes the copied executable bit and empty directories, not only file text.
+        hash.update(JSON.stringify(['file', path, Boolean(stat.mode & 0o111), content.length])).update(content);
         const out = await open(output, 'wx', stat.mode & 0o111 ? 0o700 : 0o600);
         try { await out.writeFile(content); } finally { await out.close(); }
       } finally { await handle.close(); }

@@ -9,9 +9,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import aiPackage from 'ai/package.json' with { type: 'json' };
-import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, loopHarness, opencodeHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
+import { AUTHOR_HARNESSES, AUTHOR_LOOP, CANCELLED, FACTS, LOOP, UNWRITTEN, authorTwinConfig, authoringPrompt, inputAvailabilityContext, loopHarness, selectedAuthorHarness, twinInstructions } from '../src/twin/authoring.ts';
 import { CHANGE_APPROACH, CONTEXT_FULL, ERROR_MESSAGE_CHARS, FORCED_WRITE_STEP, LIMITS, PROVIDER_STOPPED, authorLoop, isMainModule, openrouterModel } from '../src/twin/author-loop.ts';
-import { OPENCODE } from '../src/agents/opencode.ts';
 import type { Harness } from '../src/agents/opencode.ts';
 import { evidenceText, repositoryFacts } from '../src/environments/evidence.ts';
 import { scriptedLoopHarness, scriptedModel } from './fixtures/scripted-model.ts';
@@ -139,11 +138,11 @@ test('the loopâ€™s process sends its requests through the proxy the controllerâ€
   assert.deepEqual(requests, ['CONNECT perpetual-proxy-probe.invalid:443 HTTP/1.1']);
 });
 
-test('PERPETUAL_TWIN_AUTHOR selects the loop, and OpenCode stays the default', () => {
-  assert.deepEqual(selectedAuthorHarness({}), { harness: opencodeHarness, name: OPENCODE });
+test('PERPETUAL_TWIN_AUTHOR defaults to bounded structured generation and retains explicit agent harnesses', () => {
+  assert.equal(selectedAuthorHarness({}), AUTHOR_HARNESSES.structured);
   assert.equal(selectedAuthorHarness({ PERPETUAL_TWIN_AUTHOR: 'opencode' }), AUTHOR_HARNESSES.opencode);
   assert.deepEqual(selectedAuthorHarness({ PERPETUAL_TWIN_AUTHOR: 'loop' }), { harness: loopHarness, name: LOOP });
-  assert.throws(() => selectedAuthorHarness({ PERPETUAL_TWIN_AUTHOR: 'shell' }), /^Error: PERPETUAL_TWIN_AUTHOR must be opencode or loop\.$/);
+  assert.throws(() => selectedAuthorHarness({ PERPETUAL_TWIN_AUTHOR: 'shell' }), /^Error: PERPETUAL_TWIN_AUTHOR must be structured, opencode or loop\.$/);
 });
 
 test('through the harness, an invalid write is refused within the attempt and a valid one is twin.json when the model is done', async t => {
@@ -156,7 +155,7 @@ test('through the harness, an invalid write is refused within the attempt and a 
   assert.equal(more.length, 0);
   assert.equal(first.model, MODEL, 'The harness passes the OpenRouter model id without its prefix.');
   // TWIN.md and EVIDENCE.md are the instructions, the attempt's prompt the user's message, and the tools the only capabilities.
-  assert.deepEqual(first.prompt.slice(0, 2), [{ role: 'system', content: `${twinInstructions(services)}\n\n${evidence}` }, { role: 'user', content: [{ type: 'text', text: authoringPrompt(false) }] }]);
+  assert.deepEqual(first.prompt.slice(0, 2), [{ role: 'system', content: `${twinInstructions(services)}\n\n${evidence}\n\n${inputAvailabilityContext()}` }, { role: 'user', content: [{ type: 'text', text: authoringPrompt(false) }] }]);
   assert.deepEqual(first.tools, ['list', 'read', 'grep', 'write_config', 'done']);
   assert.deepEqual(first.toolChoice, { type: 'auto' });
   assert.deepEqual(received(second), [{ ok: true, path: 'repo/package.json', lines: 1, content: `1\t${JSON.stringify({ name: 'fixture', scripts: { start: 'node app.mjs' } })}`, truncated: false }]);

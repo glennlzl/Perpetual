@@ -97,7 +97,10 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
   const { calls, steps, prepare, dir, source, dataDir } = await setup();
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const result = await prepare();
-  assert.deepEqual(steps, ['Setting up Database', 'Setting up Jobs', 'Setting up Payments', 'Setting up Mail', 'Loading source', 'Starting services', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Building web', 'Starting twin']);
+  assert.deepEqual(steps, ['Preparing source and services', 'Starting services', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Building web', 'Starting twin']);
+  const preparedState = JSON.parse(await readFile(join(dir, 'twin.json'), 'utf8'));
+  const setupIds = preparedState.services.map((record: { id: string }) => record.id);
+  assert.ok(setupIds.indexOf('database') < setupIds.indexOf('jobs'), 'A service waits for the provider named by its option placeholder.');
   assert.deepEqual(result, {
     status: 'ready',
     services: [
@@ -109,8 +112,18 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
 
   // Repository code runs from the twin's workspace volume, filled once from the snapshot. Without a repository, the
   // twin's package cache is its own, which Compose creates with that copy, so nothing is created before it.
-  const [listen, copy, up, sql, seed, build, all] = calls;
   assert.equal(calls.length, 7);
+  const findCompose = (predicate: (args: string[]) => boolean) => calls.find(call => compose(call) && predicate(compose(call)!));
+  const listen = calls.find(call => call.args.includes('--print-secret'))!;
+  const copy = findCompose(args => args.includes('--profile') && args.includes('source'))!;
+  const up = findCompose(args => args[0] === 'up' && args.length > 2)!;
+  const sql = calls.find(call => call.args.includes('postgres:17-alpine'))!;
+  const seed = calls.find(call => call.args.at(-1)?.endsWith('pnpm seed'))!;
+  const build = findCompose(args => args.includes('--profile') && args.includes('build-web'))!;
+  const all = findCompose(args => args[0] === 'up' && args.length === 2)!;
+  const indexOf = (call: typeof calls[number]) => calls.indexOf(call);
+  assert.ok(indexOf(copy) < indexOf(up) && indexOf(listen) < indexOf(up), 'Source preparation and all service setup finish before service containers start.');
+  assert.ok(indexOf(up) < indexOf(sql) && indexOf(sql) < indexOf(seed) && indexOf(seed) < indexOf(build) && indexOf(build) < indexOf(all), 'Services, fixtures, builds and app startup keep their required order.');
   assert.deepEqual(compose(build), BUILD_RUN);
   assert.equal(build.env, undefined, 'The build gets its app\'s variables from the twin\'s files, never the command line.');
   assert.deepEqual(compose(copy), SOURCE_RUN);
@@ -122,7 +135,9 @@ test('Prepare runs setup in placeholder order, then services, fixtures and the w
   assert.equal(listen.env?.PAYMENTS_KEY, KEY);
   assert.deepEqual(compose(up), ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail']);
   assert.deepEqual(sql.args.slice(-6), ['postgres:17-alpine', 'sh', '-c', 'exec psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$1"', 'fixture', '/workspace/seed/twin.sql']);
-  assert.match(sql.env!.DATABASE_URL, new RegExp(`^postgres://postgres:db-password-1@host\\.docker\\.internal:${PORT_BASE + 3}/postgres$`));
+  const databasePort = preparedState.ports['database.sql'];
+  assert.ok(Number.isInteger(databasePort) && databasePort >= PORT_BASE && databasePort !== BUSY);
+  assert.equal(sql.env!.DATABASE_URL, `postgres://postgres:db-password-1@host.docker.internal:${databasePort}/postgres`);
   assert.ok(sql.args.includes(`${source}:/workspace:ro`));
   assert.deepEqual(seed.args.slice(-4), [APP_IMAGE, 'sh', '-c', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed']);
   assert.deepEqual(Object.keys(seed.env!), ['COREPACK_HOME', 'npm_config_cache', 'npm_config_store_dir', 'XDG_CACHE_HOME', 'YARN_CACHE_FOLDER', 'BUN_INSTALL_CACHE_DIR', 'JOBS_API_URL', 'JOBS_PROJECT']);
@@ -146,8 +161,17 @@ test('A shared install runs once after services are ready, before fixtures and a
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   await prepare({ config: { ...config(), install: { directory: '.', command: 'npm ci' } } });
   assert.deepEqual(steps.slice(-6), ['Starting services', 'Installing dependencies', 'Loading fixture 1 of 2', 'Loading fixture 2 of 2', 'Building web', 'Starting twin']);
-  assert.deepEqual(calls.slice(1).map(call => compose(call) ?? call.args.at(-1)), [
-    SOURCE_RUN, ['up', '--wait', 'jobs-worker', 'payments-listener', 'database', 'mail'], INSTALL_RUN, '/workspace/seed/twin.sql', '(command -v corepack >/dev/null 2>&1 || npm install --global --force corepack@0.34.7) && corepack enable || exit $?; pnpm seed', BUILD_RUN, ['up', '--wait']]);
+  const sourceCopy = calls.find(call => compose(call)?.join('\0') === SOURCE_RUN.join('\0'))!;
+  const serviceStart = calls.find(call => compose(call)?.[0] === 'up' && compose(call)!.length > 2)!;
+  const installStep = calls.find(call => compose(call)?.join('\0') === INSTALL_RUN.join('\0'))!;
+  const sql = calls.find(call => call.args.includes('postgres:17-alpine'))!;
+  const seed = calls.find(call => call.args.at(-1)?.endsWith('pnpm seed'))!;
+  const build = calls.find(call => compose(call)?.join('\0') === BUILD_RUN.join('\0'))!;
+  const all = calls.find(call => compose(call)?.[0] === 'up' && compose(call)!.length === 2)!;
+  const indexOf = (call: typeof calls[number]) => calls.indexOf(call);
+  assert.ok(indexOf(sourceCopy) < indexOf(serviceStart) && indexOf(serviceStart) < indexOf(installStep), 'The source and services are ready before the shared install.');
+  assert.ok(indexOf(installStep) < indexOf(sql) && indexOf(sql) < indexOf(seed) && indexOf(seed) < indexOf(build) && indexOf(build) < indexOf(all), 'Install, fixtures, builds and app startup keep their required order.');
+  assert.equal(calls.length, 8);
   const install = calls.find(call => compose(call)?.includes('install'));
   assert.equal(install?.env, undefined, 'The install gets no twin variables.');
   assert.deepEqual(YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services.install.profiles, ['install']);
@@ -271,7 +295,7 @@ test('Each app\'s build runs once as a step of its own after the services start,
   await runtime.prepare({ dataDir, id: 'built', source, config: { services: { mail: {} }, apps }, onStep: step => steps.push(step) });
   // With no install, fixtures or accounts the services still start first, since a build may read them, as a page
   // rendered from the database while it builds does.
-  assert.deepEqual(steps, ['Setting up Mail', 'Loading source', 'Starting services', 'Building web', 'Building admin', 'Starting twin']);
+  assert.deepEqual(steps, ['Preparing source and services', 'Starting services', 'Building web', 'Building admin', 'Starting twin']);
   const run = (name: string) => ['--progress', 'quiet', '--profile', name, 'run', '--rm', '--no-TTY', name];
   assert.deepEqual(calls.map(call => compose(call) ?? call.args.at(-1)), [SOURCE_RUN, ['up', '--wait', 'mail'], run('build-web'), run('build-admin'), ['up', '--wait']]);
   const file = YAML.parse(await readFile(join(dataDir, 'environments', 'built', 'twin', 'compose.yaml'), 'utf8'));
@@ -512,11 +536,17 @@ test('The engine check runs one bounded docker version and says why Docker canno
   assert.equal(await engine(async () => ({ stdout: '\n' })).available(), 'Docker is not available. Its engine reported no version.');
 });
 
-test('Destroy takes Compose down with volumes, then tears services down in reverse setup order', async t => {
+test('Destroy takes Compose down with volumes, then tears services down in reverse recorded setup order', async t => {
   let failDown = false;
   const { runtime, calls, prepare, dataDir, dir } = await setup(args => { if (failDown && args.includes('down')) throw Object.assign(new Error('x'), { stderr: `busy ${KEY}` }); return {}; });
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  await prepare();
+  const linkedConfig = config();
+  linkedConfig.services.jobs.database = '{{payments.PAYMENTS_WEBHOOK_SECRET}}';
+  await prepare({ config: linkedConfig });
+  const recordedServices = JSON.parse(await readFile(join(dir, 'twin.json'), 'utf8')).services as { id: string }[];
+  assert.ok(recordedServices.findIndex(record => record.id === 'payments') < recordedServices.findIndex(record => record.id === 'jobs'), 'The consumer is recorded after its provider.');
+  const expectedTeardownOrder = recordedServices.slice().reverse().map(record => record.id).filter(id => id === 'payments' || id === 'jobs');
+  assert.deepEqual(expectedTeardownOrder, ['jobs', 'payments'], 'Reverse dependency cleanup removes the consumer before its provider.');
   calls.length = 0;
   failDown = true;
   await assert.rejects(runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } }), /Twin cleanup failed; its files are kept for another attempt\. Compose: busy \[redacted\]/);
@@ -526,9 +556,14 @@ test('Destroy takes Compose down with volumes, then tears services down in rever
   assert.deepEqual(await runtime.destroy({ dataDir, id: 'beta', inputs: { payments: { PAYMENTS_KEY: KEY } } }), { status: 'destroyed' });
   assert.deepEqual(compose(calls[0]), ['down', '--volumes', '--remove-orphans']);
   assert.equal(calls.length, 5);
-  assert.deepEqual(calls[1].args.slice(-2), ['payments/cli:1.0', 'logout']);
-  assert.deepEqual(calls[2].args.slice(-3, -1), ['jobs/cli:2.0', 'delete']);
-  assert.match(calls[2].args.at(-1)!, /^perpetual-beta-\d+$/);
+  const teardownCalls = calls.slice(1, 3);
+  const teardownOrder = teardownCalls.map(call => call.args.includes('logout') ? 'payments' : 'jobs');
+  assert.deepEqual(teardownOrder, expectedTeardownOrder, 'Cleanup reverses the actual recorded setup order, including dependent services.');
+  const paymentCleanup = teardownCalls.find(call => call.args.includes('logout'))!;
+  const jobsCleanup = teardownCalls.find(call => call.args.includes('delete'))!;
+  assert.deepEqual(paymentCleanup.args.slice(-2), ['payments/cli:1.0', 'logout']);
+  assert.deepEqual(jobsCleanup.args.slice(-3, -1), ['jobs/cli:2.0', 'delete']);
+  assert.match(jobsCleanup.args.at(-1)!, /^perpetual-beta-\d+$/);
   assert.deepEqual(calls[4].args, ['volume', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project=perpetual-beta']);
   await assert.rejects(access(dir));
 });
@@ -610,8 +645,11 @@ test('A service address is allocated before any setup, so a webhook can reach a 
   const input = { services: { jobs: { database: '{{payments.PAYMENTS_WEBHOOK_SECRET}}' }, payments: { webhook: '{{services.jobs.url.api}}/hook' }, database: {} },
     apps: { web: { start: 'node x', port: 3000, env: { JOBS: '{{services.jobs.url.api}}' } } } };
   await prepare({ config: input });
-  assert.deepEqual(steps.slice(0, 3), ['Setting up Payments', 'Setting up Jobs', 'Setting up Database']);
-  const port = JSON.parse(await readFile(join(dir, 'twin.json'), 'utf8')).ports['jobs.api'];
+  assert.deepEqual(steps, ['Preparing source and services', 'Starting twin']);
+  const state = JSON.parse(await readFile(join(dir, 'twin.json'), 'utf8'));
+  const setupIds = state.services.map((record: { id: string }) => record.id);
+  assert.ok(setupIds.indexOf('payments') < setupIds.indexOf('jobs'), 'The signing-secret provider finishes before the service that consumes it.');
+  const port = state.ports['jobs.api'];
   const file = YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')), dotenv = await readFile(join(dir, '.env'), 'utf8');
   assert.deepEqual(file.services['jobs-worker'].ports, [`127.0.0.1:${port}:8030`]);
   assert.deepEqual(file.services['payments-listener'].command, ['listen', '--forward-to', `http://host.docker.internal:${port}/hook`]);

@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
-export type GitRun = (file: string, args: string[], options: { timeout: number; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string; stderr: string }>;
+export type GitRun = (file: string, args: string[], options: { timeout: number; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string }>;
 
 /** The environment of a read-only git: no prompt, no lock file, the user's global config in effect (safe.directory included). */
 export const gitReadOnlyEnvironment = (): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, HOME: process.env.HOME, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
@@ -21,8 +21,9 @@ export const gitReadOnlyEnvironment = (): NodeJS.ProcessEnv => ({ PATH: process.
  * system monitor off. The environment is read at call time. Failures reject as execFile does;
  * each caller says what a failure means for it.
  */
-export function gitReadOnly(path: string, args: string[], { timeout = 10_000, maxBuffer = 4 * 1024 * 1024, run = exec as GitRun }: { timeout?: number; maxBuffer?: number; run?: GitRun } = {}) {
-  return run('git', ['-c', 'core.fsmonitor=false', '-C', path, ...args], { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env: gitReadOnlyEnvironment() });
+export function gitReadOnly(path: string, args: string[], { timeout = 10_000, maxBuffer = 4 * 1024 * 1024, run = exec as GitRun, signal }: { timeout?: number; maxBuffer?: number; run?: GitRun; signal?: AbortSignal } = {}) {
+  signal?.throwIfAborted();
+  return run('git', ['-c', 'core.fsmonitor=false', '-C', path, ...args], { timeout, maxBuffer, encoding: 'utf8', windowsHide: true, env: gitReadOnlyEnvironment(), ...(signal ? { signal } : {}) });
 }
 
 /** The environment of the docker CLI that runs a repair box: how to reach the user's engine and its config, and the shell basics, nothing else of the host's. */

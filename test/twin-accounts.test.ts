@@ -47,7 +47,7 @@ const compose = (args: unknown[]) => args[0] === 'compose' ? args.slice(args.ind
 test('A service creates its test accounts once its containers run, before fixtures and apps', async t => {
   const f = await setup(t);
   const result = await f.prepare(f.config([{ service: 'auth', command: 'pnpm seed' }]));
-  assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Loading fixture 1 of 1', 'Starting twin']);
+  assert.deepEqual(f.steps, ['Preparing source and services', 'Starting services', 'Creating test accounts', 'Loading fixture 1 of 1', 'Starting twin']);
   const [copy, up, accounts, , all] = f.calls.map(compose);
   assert.deepEqual(copy,['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source']);
   assert.deepEqual(up, ['up', '--wait', 'auth']);
@@ -65,7 +65,7 @@ test('A service creates its test accounts once its containers run, before fixtur
 test('Accounts come before the shared install, which comes before fixtures that need its dependencies', async t => {
   const f = await setup(t);
   await f.prepare({ ...f.config([{ service: 'auth', command: 'pnpm seed' }]), install: { directory: '.', command: 'npm ci' } });
-  assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Installing dependencies', 'Loading fixture 1 of 1', 'Starting twin']);
+  assert.deepEqual(f.steps, ['Preparing source and services', 'Starting services', 'Creating test accounts', 'Installing dependencies', 'Loading fixture 1 of 1', 'Starting twin']);
   const calls = f.calls.map(args => compose(args)[0] === 'accounts' ? 'accounts' : compose(args).includes('install') ? 'install' : String(args.at(-1)).endsWith('pnpm seed') ? 'fixture' : compose(args));
   assert.deepEqual(calls, [['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', 'install', 'fixture', ['up', '--wait']]);
 });
@@ -73,7 +73,7 @@ test('Accounts come before the shared install, which comes before fixtures that 
 test('Services start for their accounts even without fixtures or an install', async t => {
   const f = await setup(t);
   await f.prepare();
-  assert.deepEqual(f.steps, ['Setting up Auth', 'Loading source', 'Starting services', 'Creating test accounts', 'Starting twin']);
+  assert.deepEqual(f.steps, ['Preparing source and services', 'Starting services', 'Creating test accounts', 'Starting twin']);
   assert.deepEqual(f.calls.map(args => compose(args)[0] === 'accounts' ? 'accounts' : compose(args)), [['--progress', 'quiet', '--profile', 'source', 'run', '--rm', '--no-TTY', 'source'], ['up', '--wait', 'auth'], 'accounts', ['up', '--wait']]);
 });
 

@@ -166,13 +166,18 @@ function supabaseLike(text: string | null) {
  * metadata, git tracks nothing there, or git could not list them. Git only reads its index: its file system monitor,
  * which a repository's config may name, is switched off.
  */
-async function trackedFiles(directory: string): Promise<{ files: string[] } | { reason: string }> {
+async function trackedFiles(directory: string, signal?: AbortSignal): Promise<{ files: string[] } | { reason: string }> {
+  signal?.throwIfAborted();
   try {
-    const { stdout } = await gitReadOnly(directory, ['ls-files', '-z'], { timeout: TRACKED.timeoutMs, maxBuffer: TRACKED.bytes });
+    const { stdout } = await gitReadOnly(directory, ['ls-files', '-z'], { timeout: TRACKED.timeoutMs, maxBuffer: TRACKED.bytes, signal });
+    signal?.throwIfAborted();
     const files = stdout.split('\0').filter(Boolean);
     return files.length ? { files } : { reason: 'since git tracks no files in it' };
   } catch (error) {
-    if (!await lstat(join(directory, '.git')).then(() => true, () => false)) return { reason: 'which has no git metadata' };
+    signal?.throwIfAborted();
+    const metadata = await lstat(join(directory, '.git')).then(() => true, () => false);
+    signal?.throwIfAborted();
+    if (!metadata) return { reason: 'which has no git metadata' };
     const { code: status, killed } = error as { code?: unknown; killed?: boolean };
     const cause = status === 'ENOENT' ? 'git is not installed' : status === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? `its list is over ${size(TRACKED.bytes)}`
       : killed ? `it took over ${TRACKED.timeoutMs / 1000} seconds` : typeof status === 'number' ? `it exited with status ${status}` : 'it failed';
@@ -184,11 +189,16 @@ async function trackedFiles(directory: string): Promise<{ files: string[] } | { 
  * The files the evidence reads: those git tracks in `git` that the snapshot at `root` keeps, in git's order, or else a
  * walk of the snapshot and why. `tracked` is git's whole list, for files the snapshot leaves out.
  */
-async function repositoryFiles(root: string, git: string) {
-  const listed = await trackedFiles(git);
-  if ('reason' in listed) return { ...await repositoryWalk(root, EVIDENCE_WALK), tracked: null, reason: listed.reason };
+async function repositoryFiles(root: string, git: string, signal?: AbortSignal) {
+  const listed = await trackedFiles(git, signal);
+  signal?.throwIfAborted();
+  if ('reason' in listed) return { ...await repositoryWalk(root, EVIDENCE_WALK, { signal }), tracked: null, reason: listed.reason };
   const files: string[] = [], tracked = listed.files;
-  for (const file of tracked.slice(0, TRACKED.files)) if (snapshotKeeps(file) && await isFile(join(root, file))) files.push(file);
+  for (const file of tracked.slice(0, TRACKED.files)) {
+    signal?.throwIfAborted();
+    if (snapshotKeeps(file) && await isFile(join(root, file))) files.push(file);
+    signal?.throwIfAborted();
+  }
   return { files, complete: tracked.length <= TRACKED.files, tracked, reason: null };
 }
 
@@ -274,20 +284,30 @@ export interface RepositoryFacts {
  * there. `packages` are the scan's, `draft` the config generation starts from, whose apps' directories count as
  * packages too. `folder` is how the notes name the snapshot's folder to its reader. `secrets` are supplied values to
  * hide from quoted observations before formatting; semantic names, paths and positions still come from the source.
+ * A signal stops git, and stops scanning at the next filesystem or loop boundary without returning partial facts.
  */
-export async function repositoryFacts({ source, checkout, packages = [], draft = '', services = registry, folder: shown = 'repo/', secrets = [] }: {
-  source: string; checkout?: string; packages?: EvidencePackage[]; draft?: string; services?: TwinServices; folder?: string; secrets?: Iterable<unknown>;
+export async function repositoryFacts({ source, checkout, packages = [], draft = '', services = registry, folder: shown = 'repo/', secrets = [], signal }: {
+  source: string; checkout?: string; packages?: EvidencePackage[]; draft?: string; services?: TwinServices; folder?: string; secrets?: Iterable<unknown>; signal?: AbortSignal;
 }): Promise<RepositoryFacts> {
+  const check = () => signal?.throwIfAborted();
+  check();
   const hidden = hide(secrets), observe = (text: string) => redact(hidden(text));
   const quotes = quoted(observe), { code, word, at } = quotes;
-  const root = await realpath(source), origin = checkout ? await realpath(checkout) : null;
-  const { files, complete, tracked, reason } = await repositoryFiles(root, origin ?? root);
+  const root = await realpath(source);
+  check();
+  const origin = checkout ? await realpath(checkout) : null;
+  check();
+  const { files, complete, tracked, reason } = await repositoryFiles(root, origin ?? root, signal);
+  check();
   // A file too large or unreadable is left out, and the evidence says which.
   const tooLarge: string[] = [], unreadable: string[] = [];
   const reader = (base: string) => async (file: string, limit = FILE_BYTES) => {
-    try { return await readLocal(base, file, limit); }
+    check();
+    try { const text = await readLocal(base, file, limit, { signal }); check(); return text; }
     catch {
+      check();
       const actual = (await lstat(join(base, file)).catch(() => null))?.size ?? 0;
+      check();
       if (actual > limit) tooLarge.push(`${code(file)} (over ${size(limit)})`); else unreadable.push(code(file));
       return null;
     }
@@ -314,6 +334,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // Each folder's files, and every folder that holds one.
   const folders = new Map<string, string[]>(), ancestors = new Set<string>();
   for (const file of relevant) {
+    check();
     const folder = folders.get(posix.dirname(file)) ?? [];
     folder.push(file);
     folders.set(posix.dirname(file), folder);
@@ -323,6 +344,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // Supabase's, with a top-level project_id or a table only Supabase's has; any other config.toml, such as a site's, is not.
   const projects: string[] = [];
   for (const directory of sorted(relevant.filter(file => posix.basename(file) === 'config.toml' && !DOCS.test(file)).map(posix.dirname))) {
+    check();
     if (posix.basename(directory) === 'supabase') projects.push(directory);
     else if ((ancestors.has(under(directory, 'migrations')) || ancestors.has(under(directory, 'functions'))) && supabaseLike(await read(under(directory, 'config.toml'), SETUP_LIMITS.bytes))) projects.push(directory);
   }
@@ -330,6 +352,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // no function's, so a folder of tests alone, such as functions/tests/, is no function.
   const projectSet = new Set(projects), functions = new Map<string, string>(), projectFunctions = new Map<string, Set<string>>();
   for (const file of relevant) {
+    check();
     for (let folder = posix.dirname(file); folder !== '.'; folder = posix.dirname(folder)) {
       const parent = posix.dirname(folder), project = posix.dirname(parent);
       if (posix.basename(parent) !== 'functions' || !projectSet.has(project)) continue;
@@ -351,6 +374,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   const functionUses = new Map<string, VariableUse[]>(), urlLines: string[] = [];
   let omittedUrlLines = 0;
   for (const { file, role } of modules.slice(0, MODULES.files)) {
+    check();
     const text = await read(file, MODULES.bytes);
     if (text === null) continue;
     const found = variableReads(text), folder = functionOf(file);
@@ -389,6 +413,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
 
   const packageLines: string[] = [], outside = owned.get(null)?.reads ?? [], workspace: RepositoryFacts['packages'] = [];
   for (const directory of [...directories.keys()].sort()) {
+    check();
     const manifests = (folders.get(directory) ?? []).filter(file => MANIFEST(posix.basename(file)));
     const framework = directories.get(directory), { reads: own = [], imports = new Set<string>() } = owned.get(directory) ?? {};
     const member: RepositoryFacts['packages'][number] = { directory, dependencies: [] };
@@ -399,6 +424,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     if (locks.length) packageLines.push(`- Lockfiles: ${locks.map(code).join(', ')}`);
     const dependencies = new Set(imports);
     for (const manifest of manifests) {
+      check();
       const text = await read(manifest), name = posix.basename(manifest);
       if (text === null) continue;
       try {
@@ -433,8 +459,10 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
 
   // Setup files: each one's lines, and the names it declares or references, which scripts and setup use.
   const setupSection = async (pattern: RegExp, evidence: (name: string, text: string) => SetupEvidence, where: (file: string) => string = posix.basename) => {
+    check();
     const lines: string[] = [];
     for (const file of relevant.filter(path => pattern.test(where(path)))) {
+      check();
       const text = await read(file, SETUP_LIMITS.bytes);
       if (text === null) continue;
       let found: SetupEvidence;
@@ -454,9 +482,11 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // snapshot leaves out.
   const exampleLines: string[] = [], examples: Record<string, string> = {};
   if (origin) {
-    const readExample = reader(origin), walk = tracked ? { files: tracked, complete: true } : await repositoryWalk(origin, EVIDENCE_WALK);
+    const readExample = reader(origin), walk = tracked ? { files: tracked, complete: true } : await repositoryWalk(origin, EVIDENCE_WALK, { signal });
+    check();
     if (!walk.complete) notes.push(`The checkout's walk for example env files stopped at its limits (${WALK_LIMITS}); example env files beyond them are left out.`);
     for (const file of walk.files.filter(path => ENV_EXAMPLE.test(posix.basename(path)) && keptFolders(path))) {
+      check();
       const text = await readExample(file);
       if (text === null) continue;
       const names = sorted(envNames(text));
@@ -468,6 +498,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
 
   const projectLines: string[] = [], listedSql = new Set<string>();
   for (const project of projects) {
+    check();
     const config = under(project, 'config.toml');
     projectLines.push(`### ${code(project)}`, '', `- Config: ${code(config)}`);
     const text = await read(config, SETUP_LIMITS.bytes);
@@ -497,6 +528,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // A compose file is read as the setup files are, since its YAML parser is theirs.
   const composeLines: string[] = [];
   for (const file of relevant.filter(path => COMPOSE.test(posix.basename(path)))) {
+    check();
     const text = await read(file, SETUP_LIMITS.bytes);
     let names: string[] | null = null;
     try { if (text !== null) names = Object.keys(fields(fields(yamlValue(text))?.services) ?? {}); } catch { /* Not YAML. */ }
@@ -507,6 +539,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // Root docs first: the README, then setup guides wherever they are.
   const docs = relevant.filter(path => MARKDOWN.test(path) && ((!path.includes('/') && /^readme/i.test(path)) || SETUP_DOC.test(posix.basename(path))));
   for (const file of docs.sort((one, other) => Number(one.includes('/')) - Number(other.includes('/')) || one.localeCompare(other))) {
+    check();
     const text = await read(file);
     if (text === null) continue;
     const found = headings(observe(text)), limit = EVIDENCE_LIMITS.headings;
@@ -518,6 +551,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
   // Every name once, runtime names first: its first use in its first role, and the other roles it has.
   const named = new Map<string, Map<Role, VariableUse>>();
   for (const use of uses) {
+    check();
     const roles = named.get(use.name) ?? new Map<Role, VariableUse>();
     if (!roles.has(use.role)) roles.set(use.role, use);
     named.set(use.name, roles);
@@ -526,6 +560,7 @@ export async function repositoryFacts({ source, checkout, packages = [], draft =
     .sort((one, other) => ROLES.indexOf(one.roles[0].role) - ROLES.indexOf(other.roles[0].role) || byText(one.name, other.name))
     .map(({ name, roles: [first, ...others] }) => `- ${word(name)}: ${first.role}, ${at(first.file, first.line)}${others.length ? `; also ${others.map(use => use.role).join(', ')}` : ''}`);
 
+  check();
   if (tooLarge.length) notes.push(`Left out as too large to read: ${listed(sorted(tooLarge), EVIDENCE_LIMITS.noted)}.`);
   if (unreadable.length) notes.push(`Left out as unreadable: ${listed(sorted(unreadable), EVIDENCE_LIMITS.noted)}.`);
   return {

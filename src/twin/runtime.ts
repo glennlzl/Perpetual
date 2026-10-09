@@ -1,6 +1,6 @@
 import type { ExecFileException } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { access, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, posix, resolve } from 'node:path';
@@ -16,9 +16,11 @@ import { failureText, hide, openBlock, redact as redactSecrets } from '../redact
 import { diagnosticText } from '../environments/diagnostics.ts';
 import { superviseWorker } from '../browser/runtime.ts';
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
+import { createLocalBuildCache } from './local-build-cache.ts';
+import { localBuildKeys, type BuildImage, type BuildSource } from './local-build-identity.ts';
 
 // A twin is <dataDir>/environments/<id>/twin/{compose.yaml,.env,twin.json}: service setup in
-// placeholder order; once services are up, their test accounts, the shared install, fixtures and
+// independent setup and workspace preparation overlap; once services are up, their test accounts, the shared install, fixtures and
 // each app's build; then `docker compose up --wait` starts the apps and the services that run
 // repository code.
 
@@ -251,7 +253,7 @@ const overall = (containers: ContainerStatus[]): TwinHealth['status'] => !contai
 export function createTwinRuntime({ exec = execCommand, services = registry, isFree = portFree, portBase = PORT_BASE, appImage = APP_IMAGE, owner }: {
   exec?: Exec; services?: TwinServices; isFree?: IsFree; portBase?: number; appImage?: string; owner?: string;
 } = {}) {
-  const operations = new AsyncLocalStorage<{ signal?: AbortSignal; timeoutMs?: number; outputLimitBytes?: number; output?: (text: string) => void }>();
+  const operations = new AsyncLocalStorage<{ signal?: AbortSignal; timeoutMs?: number; outputLimitBytes?: number; output?: (text: string) => void; cancel?: (reason: unknown) => void }>();
   const setupLogs = new Map<string, string>();
   // Keep the current operation's values available to diagnostics and teardown even if saving
   // twin.json fails. These are redaction inputs, never a second account or ownership authority.
@@ -345,8 +347,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
    * the repository the twin builds, whose twins share one package cache; without one, as for a pull request head no
    * person has reviewed, the twin's cache is its own, empty and removed with it, so nothing it writes reaches a later twin.
    */
-  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, repository, onStep = () => {} }: {
-    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; repository?: string; onStep?: (step: string) => unknown; signal?: AbortSignal;
+  async function prepareTwin({ dataDir, id, config: input, source, inputs = {}, repository, buildSource, onStep = () => {} }: {
+    dataDir: string; id: string; config: unknown; source: string; inputs?: Record<string, InputValues>; repository?: string; buildSource?: BuildSource; onStep?: (step: string) => unknown; signal?: AbortSignal;
   }) {
     const config = validateTwinConfig(input, { services });
     const invalid = serviceOptionErrors(config, { services });
@@ -360,7 +362,8 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     diagnosticSecrets.set(twin.dir, secrets);
     const state: TwinState = { id, project: twin.project, owner: twin.owner, source, block: [], ports: {}, services: [], secrets: [] };
     const redact = (text: unknown) => redactor(secrets)(text);
-    const save = async (failure?: Error & { cleanupIncomplete?: true }) => {
+    const stateWrites = createSaveQueue();
+    const save = (failure?: Error & { cleanupIncomplete?: true }) => stateWrites.run(async () => {
       try {
         state.secrets = [...secrets];
         const content = `${JSON.stringify(state, null, 2)}\n`;
@@ -375,7 +378,7 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
         throw Object.assign(new Error(`${failure.message} Twin state could not be saved: ${redact((error as Error).message)}`, { cause: error }),
           failure.cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
       }
-    };
+    });
     const take = (key: string) => state.ports[key] ??= free.shift() ?? fail(`This twin needs more than ${PORT_BLOCK} host ports.`);
     // Service addresses are allocated before any setup, so a service may reference one whose setup needs its own variables.
     const addresses = [...placeholders(config.services, 'services'), ...placeholders(config.apps, APPS)].filter(ref => ref.addressOf !== undefined);
@@ -391,40 +394,170 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       await save();
     });
 
-    const resolved: Record<string, ResolvedService> = {};
-    for (const serviceId of setupOrder(config)) {
-      const definition = services[serviceId], values = inputs[serviceId] ?? {}, base = { id: serviceId, fidelity: definition.fidelity };
-      for (const item of definition.inputs ?? []) if (item.secret && typeof values[item.name] === 'string') secrets.add(values[item.name]);
-      const blocked = (service: string | undefined) => service !== undefined && resolved[service]?.status === 'blocked';
-      const declared = leaveOutBlocked(config.services[serviceId], blocked);
-      const upstream = placeholders(declared).filter(ref => blocked(ref.service)).flatMap(ref => (resolved[ref.service!] as ResolvedService & { status: 'blocked' }).missing);
-      const missing = [...new Set([...missingInputs(definition, values), ...upstream])];
-      if (missing.length) { resolved[serviceId] = { ...base, status: 'blocked', missing }; continue; }
-      await onStep(`Setting up ${definition.title}`);
-      const where = `services.${serviceId}`;
-      // An address has a port key; a service a placeholder names was set up first and, as this one is not blocked, is ready.
-      const options = resolvePlaceholders(declared, ref => ref.service === undefined ? addressUrl(ref, state.ports[addressKey(ref)])
-        : (resolved[ref.service] as Ready).env[ref.variable] ?? fail(`${where}: ${ref.service} does not provide ${ref.variable}.`), where);
-      const ctx = context(twin, { service: serviceId, options, inputs: values, outputs: {}, ports: state.ports, take: key => { own.add(key); return take(key); }, source, redact });
-      const record: ServiceRecord = { id: serviceId, options, outputs: {} };
-      state.services.push(record);
-      let failure: (Error & { cleanupIncomplete?: true }) | undefined;
+    // Copy the filtered source while independent service setup runs. The preliminary compose has
+    // every configured service marked blocked, so it contains no service containers or values;
+    // only its app/workspace and source-copy definitions are used. The final compose below is
+    // rewritten after ordered service setup has supplied the real bindings.
+    const earlyCompose = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage, cache: repository ? repositoryCache(repository) : undefined,
+      services: Object.keys(config.services).map(serviceId => ({ id: serviceId, fidelity: services[serviceId].fidelity, status: 'blocked', missing: [] })), ports: state.ports });
+    const earlyWorkspace = Boolean(earlyCompose.compose.services[SOURCE]);
+    await onStep(earlyWorkspace ? 'Preparing source and services' : 'Setting up services');
+    let preparationFailure: unknown;
+    const failPreparation = (error: unknown) => {
+      preparationFailure ??= error;
+      operations.getStore()?.cancel?.(error);
+    };
+    let earlyInstallHit = false;
+    let earlyPrepared: { store: ReturnType<typeof createLocalBuildCache>; image: BuildImage; installKey: string; volume: string } | undefined;
+    const helper = async (image: string, args: string[], mounts: string[]) => {
+      const name = `perpetual-build-copy-${randomUUID()}`;
       try {
-        await mkdir(ctx.dir, { recursive: true, mode: 0o700 });
-        await save();
-        ctx.outputs = record.outputs = { ...(definition.setup ? await definition.setup(ctx) : {}) };
-        secretValues(ctx.outputs).forEach(value => secrets.add(value));
-        const env = variables(definition.env(ctx), `${serviceId} env`);
-        const containers = definition.containers?.(ctx) ?? [];
-        for (const container of containers) for (const name of Object.keys(container.ports ?? {})) ctx.port(name);
-        [env, ...containers.map(container => container.env)].flatMap(secretValues).forEach(value => secrets.add(value));
-        resolved[serviceId] = { ...base, status: 'ready', env, containers };
+        return await docker(['run', '--rm', '--pull', 'never', '--name', name, '--network', 'none',
+          '--label', `${LABELS.owner}=${twin.owner}`, '--label', `${LABELS.environment}=${id}`,
+          ...mounts.flatMap(mount => ['--mount', mount]), image, ...args], { redact });
       } catch (error) {
-        failure = Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
-        throw failure;
-      } finally { await save(failure); }
-      for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
+        // Cancelling the Docker CLI does not stop its container. Join cleanup before falling back to a real build.
+        await operations.run({ timeoutMs: CLEANUP_TIMEOUT_MS }, async () => {
+          try {
+            const remaining = () => docker(['ps', '--all', '--quiet', '--filter', `name=^/${name}$`,
+              '--filter', `label=${LABELS.owner}=${twin.owner}`, '--filter', `label=${LABELS.environment}=${id}`], { redact });
+            if ((await remaining()).stdout.trim()) {
+              await docker(['rm', '--force', name], { redact });
+              if ((await remaining()).stdout.trim()) fail('Local build helper is still running.');
+            }
+          } catch (cleanup) {
+            throw Object.assign(new Error(`Local build helper cleanup failed: ${redact((cleanup as Error).message)}`), { cleanupIncomplete: true as const });
+          }
+        });
+        throw error;
+      }
+    };
+    const optionalCache = async <T>(work: () => Promise<T>, fallback: T): Promise<T> => {
+      try { return await work(); }
+      catch (error) {
+        if ((error as { cleanupIncomplete?: boolean; cacheProgressFailure?: boolean }).cleanupIncomplete
+          || (error as { cacheProgressFailure?: boolean }).cacheProgressFailure) throw error;
+        operations.getStore()?.signal?.throwIfAborted();
+        return fallback;
+      }
+    };
+    const cacheProgress = (action: string | (() => unknown)) => async () => {
+      try { await (typeof action === 'string' ? onStep(action) : action()); }
+      catch (cause) {
+        operations.getStore()?.signal?.throwIfAborted();
+        throw Object.assign(new Error('Could not save local build cache progress.', { cause }), { cacheProgressFailure: true as const });
+      }
+    };
+    let earlyPackageCache = false;
+    const earlySource = (async () => {
+      await writeStateFile(twin.env, formatEnv(earlyCompose.env), { removeTemporary: true });
+      await writeStateFile(twin.compose, YAML.stringify(earlyCompose.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
+      const cacheName = repository ? repositoryCache(repository) : undefined;
+      if (cacheName && (earlyCompose.compose.volumes?.[cacheName] || config.fixtures.some(fixture => fixture.command))) {
+        await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', cacheName], { redact });
+        earlyPackageCache = true;
+      }
+      if (earlyWorkspace) {
+        await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
+      }
+      // The install key depends on the exact source, lockfile and image, but not service variables.
+      // Restore it here while service setup is running. Full build reuse waits for final resolved env.
+      // Full-build eligible configs must try that archive before touching install output; a damaged
+      // build archive resets the workspace and then falls through to the install archive.
+      if (repository && buildSource && earlyWorkspace && config.install && (Object.keys(config.services).length || config.fixtures.length)) {
+        try {
+          const { stdout } = await docker(['image', 'inspect', '--format', '{{json .}}', nodeImage(config, appImage)], { redact });
+          const image = fields(JSON.parse(stdout) as unknown);
+          if (image && typeof image.Id === 'string' && typeof image.Os === 'string' && typeof image.Architecture === 'string') {
+            const keys = await localBuildKeys({ source: buildSource, config, sourceDirectory: source, env: {},
+              buildCommands: earlyCompose.builds.map(build => earlyCompose.compose.services[build.service].command),
+              image: { id: image.Id, os: image.Os, architecture: image.Architecture, ...(typeof image.Variant === 'string' ? { variant: image.Variant } : {}) } });
+            if (keys.install) {
+              for (const name of [SOURCE, INSTALL, ...earlyCompose.builds.map(build => build.service), ...Object.keys(config.apps)])
+                if (earlyCompose.compose.services[name]) earlyCompose.compose.services[name].image = image.Id;
+              await writeStateFile(twin.compose, YAML.stringify(earlyCompose.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
+              const store = createLocalBuildCache({ dataDir, owner: twin.owner, repository,
+                docker: args => docker(args, { redact }), cleanupDocker: args => operations.run({ timeoutMs: CLEANUP_TIMEOUT_MS }, () => docker(args, { redact })), helper });
+              earlyPrepared = { store, image: { id: image.Id, os: image.Os, architecture: image.Architecture,
+                ...(typeof image.Variant === 'string' ? { variant: image.Variant } : {}) }, installKey: keys.install, volume: `${twin.project}_${WORKSPACE_VOLUME}` };
+              const restored = await optionalCache(() => store.restore(keys.install!, 'install', earlyPrepared!.volume, earlyPrepared!.image.id), 'damaged');
+              earlyInstallHit = restored === 'hit';
+              if (restored === 'damaged') {
+                try {
+                  await helper(earlyPrepared.image.id, ['sh', '-c', 'find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'],
+                    [`type=volume,src=${earlyPrepared.volume},dst=/workspace`]);
+                  await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
+                } catch (error) {
+                  throw Object.assign(new Error((error as Error).message, { cause: error }), { cacheRecoveryFailure: true as const,
+                    ...((error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true as const } : {}) });
+                }
+              }
+            }
+          }
+        } catch (error) {
+          if ((error as { cleanupIncomplete?: boolean; cacheProgressFailure?: boolean; cacheRecoveryFailure?: boolean }).cleanupIncomplete
+            || (error as { cacheRecoveryFailure?: boolean }).cacheRecoveryFailure
+            || (error as { cacheProgressFailure?: boolean }).cacheProgressFailure) throw error;
+          operations.getStore()?.signal?.throwIfAborted();
+          earlyPrepared = undefined;
+        }
+      }
+    })();
+    // Consume rejection immediately so a service failure can join this operation without an
+    // unhandled rejection. It is joined on both success and failure before preparation unwinds.
+    const earlyOutcome = earlySource.then(() => null, error => { failPreparation(error); return error as Error; });
+    const resolved: Record<string, ResolvedService> = {};
+    const order = setupOrder(config);
+    const serviceTasks = new Map<string, Promise<void>>();
+    for (const serviceId of order) {
+      const dependencies = [...new Set(placeholders(config.services[serviceId]).flatMap(ref => ref.service ? [ref.service] : []))];
+      const task = Promise.all(dependencies.map(dependency => serviceTasks.get(dependency)!)).then(async () => {
+        const definition = services[serviceId], values = inputs[serviceId] ?? {}, base = { id: serviceId, fidelity: definition.fidelity };
+        for (const item of definition.inputs ?? []) if (item.secret && typeof values[item.name] === 'string') secrets.add(values[item.name]);
+        const blocked = (service: string | undefined) => service !== undefined && resolved[service]?.status === 'blocked';
+        const declared = leaveOutBlocked(config.services[serviceId], blocked);
+        const upstream = placeholders(declared).filter(ref => blocked(ref.service)).flatMap(ref => (resolved[ref.service!] as ResolvedService & { status: 'blocked' }).missing);
+        const missing = [...new Set([...missingInputs(definition, values), ...upstream])];
+        if (missing.length) { resolved[serviceId] = { ...base, status: 'blocked', missing }; return; }
+        const where = `services.${serviceId}`;
+        // An address has a port key; a service a placeholder names was set up first and, as this one is not blocked, is ready.
+        const options = resolvePlaceholders(declared, ref => ref.service === undefined ? addressUrl(ref, state.ports[addressKey(ref)])
+          : (resolved[ref.service] as Ready).env[ref.variable] ?? fail(`${where}: ${ref.service} does not provide ${ref.variable}.`), where);
+        const ctx = context(twin, { service: serviceId, options, inputs: values, outputs: {}, ports: state.ports, take: key => { own.add(key); return take(key); }, source, redact });
+        const record: ServiceRecord = { id: serviceId, options, outputs: {} };
+        state.services.push(record);
+        let failure: (Error & { cleanupIncomplete?: true }) | undefined;
+        try {
+          await mkdir(ctx.dir, { recursive: true, mode: 0o700 });
+          await save();
+          ctx.outputs = record.outputs = { ...(definition.setup ? await definition.setup(ctx) : {}) };
+          secretValues(ctx.outputs).forEach(value => secrets.add(value));
+          const env = variables(definition.env(ctx), `${serviceId} env`);
+          const containers = definition.containers?.(ctx) ?? [];
+          for (const container of containers) for (const name of Object.keys(container.ports ?? {})) ctx.port(name);
+          [env, ...containers.map(container => container.env)].flatMap(secretValues).forEach(value => secrets.add(value));
+          resolved[serviceId] = { ...base, status: 'ready', env, containers };
+        } catch (error) {
+          failure = Object.assign(new Error(`${definition.title}: ${redact((error as Error).message)}`), (error as { cleanupIncomplete?: true }).cleanupIncomplete ? { cleanupIncomplete: true as const } : {});
+          throw failure;
+        } finally { await save(failure); }
+        for (const ref of addresses) if (ref.addressOf === serviceId && !own.has(addressKey(ref))) fail(`${ref.where} references ${addressText(ref)}, but ${definition.title} has no port ${ref.port}.`);
+      }).catch(error => { failPreparation(error); throw error; });
+      serviceTasks.set(serviceId, task);
     }
+    const serviceOutcomes = await Promise.allSettled(serviceTasks.values());
+    const failedService = serviceOutcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    if (failedService) {
+      const sourceFailure = await earlyOutcome;
+      const failure = preparationFailure ?? failedService.reason;
+      const incomplete = serviceOutcomes.some(outcome => outcome.status === 'rejected' && (outcome.reason as { cleanupIncomplete?: boolean })?.cleanupIncomplete)
+        || Boolean((sourceFailure as { cleanupIncomplete?: boolean } | null)?.cleanupIncomplete);
+      if (incomplete && !(failure as { cleanupIncomplete?: boolean })?.cleanupIncomplete)
+        throw Object.assign(new Error((failure as Error)?.message ?? String(failure)), { cleanupIncomplete: true as const, cause: failure });
+      throw failure;
+    }
+    const earlyFailure = await earlyOutcome;
+    if (earlyFailure) throw earlyFailure;
 
     const cache = repository ? repositoryCache(repository) : undefined;
     const result = composeTwin({ project: twin.project, owner: twin.owner, environment: id, source, config, appImage, cache,
@@ -432,14 +565,58 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     await writeStateFile(twin.env, formatEnv(result.env), { removeTemporary: true });
     await writeStateFile(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
     await save();
-    // A repository's package cache outlives every twin; creating it again is a no-op. A twin's own is Compose's to create.
-    if (cache && (result.compose.volumes?.[cache] || config.fixtures.some(fixture => fixture.command))) await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', cache], { redact });
-    // Repository code runs from the twin's workspace volume, filled once from the snapshot before anything uses it.
+    // The early source copy used the same workspace volume; service setup has now supplied the
+    // real Compose bindings. A config without an app workspace retains its original behavior.
     const workspace = Boolean(result.compose.services[SOURCE]);
-    if (workspace) {
+    if (cache && !earlyPackageCache && (result.compose.volumes?.[cache] || config.fixtures.some(fixture => fixture.command)))
+      await docker(['volume', 'create', '--label', 'perpetual.shared=package-cache', cache], { redact });
+    if (workspace && !earlyWorkspace) {
       await onStep('Loading source');
       await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
     }
+    // Only outputs built here have source/config/platform provenance. Cache helpers see owned volumes only.
+    const prepared = repository && buildSource && workspace && config.install ? await optionalCache(async () => {
+      // Keep the exact image used by early install restore; tags can move while services are setting up.
+      const image = earlyPrepared?.image ?? await (async () => {
+        const { stdout } = await docker(['image', 'inspect', '--format', '{{json .}}', nodeImage(config, appImage)], { redact });
+        const value = fields(JSON.parse(stdout) as unknown);
+        return value && typeof value.Id === 'string' && typeof value.Os === 'string' && typeof value.Architecture === 'string'
+          ? { id: value.Id, os: value.Os, architecture: value.Architecture, ...(typeof value.Variant === 'string' ? { variant: value.Variant } : {}) } satisfies BuildImage
+          : undefined;
+      })();
+      if (!image) return undefined;
+      const keys = await localBuildKeys({ source: buildSource, config, sourceDirectory: source, env: result.env,
+        buildCommands: result.builds.map(build => result.compose.services[build.service].command),
+        image });
+      if (!keys.install && !keys.build) return undefined;
+      for (const name of [SOURCE, INSTALL, ...result.builds.map(build => build.service), ...Object.keys(config.apps)]) {
+        if (result.compose.services[name]) result.compose.services[name].image = image.id;
+      }
+      await writeStateFile(twin.compose, YAML.stringify(result.compose, { aliasDuplicateObjects: false }), { removeTemporary: true });
+      const store = earlyPrepared?.store ?? createLocalBuildCache({ dataDir, owner: twin.owner, repository, docker: args => docker(args, { redact }),
+        cleanupDocker: args => operations.run({ timeoutMs: CLEANUP_TIMEOUT_MS }, () => docker(args, { redact })), helper });
+      return { store, keys, image: image.id, volume: `${twin.project}_${WORKSPACE_VOLUME}` };
+    }, undefined) : undefined;
+    if (earlyInstallHit && (!prepared || prepared.keys.install !== earlyPrepared?.installKey))
+      fail('The restored install could not be matched to the final build configuration; refusing to continue.');
+    const restore = async (phase: 'install' | 'build', onRestore?: () => unknown) => {
+      const key = prepared?.keys[phase];
+      if (!prepared || !key) return false;
+      const publishRestore = onRestore ? cacheProgress(onRestore) : undefined;
+      const found = await optionalCache(() => prepared.store.restore(key, phase, prepared.volume, prepared.image, publishRestore), 'damaged' as const);
+      if (found === 'damaged') {
+        // An interrupted extraction can leave partial files. An ordinary miss has not touched the clean source.
+        await helper(prepared.image, ['sh', '-c', 'find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'],
+          [`type=volume,src=${prepared.volume},dst=/workspace`]);
+        await docker(composeArgs(twin, '--progress', 'quiet', '--profile', SOURCE, 'run', '--rm', '--no-TTY', SOURCE), { redact });
+      }
+      return found === 'hit';
+    };
+    const retain = async (phase: 'install' | 'build') => {
+      const key = prepared?.keys[phase];
+      if (prepared && key) await optionalCache(() => prepared.store.save(key, phase, prepared.volume, prepared.image), undefined);
+    };
+    const reusedBuild = await restore('build', () => onStep('Reusing local build'));
     // Service containers that run repository code, like apps, wait for the install; the others start first. One-shot
     // services, the install, the source copy and the builds, never start with them.
     const oneShots = new Set([INSTALL, SOURCE, ...result.builds.map(build => build.service)]);
@@ -472,9 +649,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
       } finally { await save(failure); }
     }
     // Command fixtures, such as seed scripts, run with the workspace dependencies the install provides.
-    if (config.install) {
-      await onStep('Installing dependencies');
-      await oneShot(twin, INSTALL, `Install "${config.install.command}" in ${config.install.directory}`, redact);
+    if (config.install && !reusedBuild) {
+      if (!earlyInstallHit && !await restore('install', () => onStep('Reusing local dependencies'))) {
+        await onStep('Installing dependencies');
+        await oneShot(twin, INSTALL, `Install "${config.install.command}" in ${config.install.directory}`, redact);
+        await retain('install');
+      }
     }
     // Command fixtures share the twin's package cache: the repository's, or the twin's own, which Compose made with the
     // source copy. A twin without a workspace has no cache of its own, so a fixture's container keeps one, removed with it.
@@ -485,10 +665,12 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
     }
     // Each app's build runs once, in config order, after the install and fixtures and before any app starts; its output
     // stays in the workspace the app starts from.
-    for (const build of result.builds) {
+    for (const build of reusedBuild ? [] : result.builds) {
       await onStep(`Building ${build.app}`);
       await oneShot(twin, build.service, `Build "${build.command}" of app ${build.app}`, redact);
     }
+    // Capture before starting apps: runtime writes and test data never enter a reusable build archive.
+    if (!reusedBuild && result.builds.length) await retain('build');
     if (names.length) {
       await onStep('Starting twin');
       await docker(composeArgs(twin, 'up', '--wait'), { redact });
@@ -501,7 +683,9 @@ export function createTwinRuntime({ exec = execCommand, services = registry, isF
   async function prepare(options: Parameters<typeof prepareTwin>[0]) {
     const twin = locate(options.dataDir, options.id);
     setupLogs.set(twin.dir, '');
-    return operations.run({ signal: options.signal, output: text => setupLogs.set(twin.dir, ((setupLogs.get(twin.dir) ?? '') + text).slice(-LOG_LIMIT)) }, async () => {
+    const cancellation = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, cancellation.signal]) : cancellation.signal;
+    return operations.run({ signal, cancel: reason => cancellation.abort(reason), output: text => setupLogs.set(twin.dir, ((setupLogs.get(twin.dir) ?? '') + text).slice(-LOG_LIMIT)) }, async () => {
       let failed = false;
       try { return await prepareTwin(options); }
       catch (error) { failed = true; throw error; }

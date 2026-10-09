@@ -311,6 +311,24 @@ test('source snapshot excludes credentials, caches, databases and links while pr
   assert.notEqual((await snapshotSource(repoPath, path.join(root, 'snapshot-3'))).hash, result.hash);
 });
 
+test('source snapshot identity changes when only an executable bit changes', async t => {
+  const { root, repoPath } = await fixture(t, { 'scripts/run.sh': '#!/bin/sh\nexit 0\n' });
+  const script = path.join(repoPath, 'scripts/run.sh');
+  await chmod(script, 0o644);
+  const before = await snapshotSource(repoPath, path.join(root, 'snapshot-before'));
+  await chmod(script, 0o755);
+  const after = await snapshotSource(repoPath, path.join(root, 'snapshot-after'));
+  assert.notEqual(after.hash, before.hash);
+});
+
+test('source snapshot identity changes when an empty directory is added', async t => {
+  const { root, repoPath } = await fixture(t, { 'app.js': 'application' });
+  const before = await snapshotSource(repoPath, path.join(root, 'snapshot-before'));
+  await mkdir(path.join(repoPath, 'empty'));
+  const after = await snapshotSource(repoPath, path.join(root, 'snapshot-after'));
+  assert.notEqual(after.hash, before.hash);
+});
+
 test('package manager configs are copied at every depth with their settings and without their credentials', async t => {
   const credentials = ['fixture-npm-token', 'Zml4dHVyZTpmaXh0dXJl', 'fixture-yarn-token', 'fixture-berry-token', 'fixture-password', 'owner@example.test'];
   const files = {
