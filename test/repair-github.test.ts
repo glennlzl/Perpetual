@@ -50,6 +50,16 @@ test('a failed run is read for the named repository through the signed-in CLI, w
   assert.ok(gh.calls.every(call => call.env.GH_HOST === 'github.com' && call.env.GH_PROMPT_DISABLED === '1' && !Object.keys(call.env).some(key => key.startsWith('GIT_'))));
 });
 
+test('a named run attempt reads that attempt\'s jobs and log through gh', async () => {
+  const gh = runner({ jobs: JOBS, log: LOG });
+  const result = await getGitHubFailure({ repository: 'owner/app', runId: '123', attempt: 2 }, { run: gh.run });
+  assert.equal(result.runId, '123');
+  assert.deepEqual(gh.calls.map(call => call.args), [
+    ['api', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', 'repos/owner/app/actions/runs/123/attempts/2/jobs?per_page=100'],
+    ['run', 'view', '123', '--repo', 'owner/app', '--attempt', '2', '--log-failed'],
+  ]);
+});
+
 test('status-code digits inside a longer number never classify a failure as configuration', () => {
   assert.equal(diagnoseFailure('Error: build failed after 14031 ms').category, 'unknown');
   assert.equal(diagnoseFailure('Error: HTTP 403 from the registry').category, 'configuration');
@@ -173,6 +183,9 @@ test('a run outside the connected repository shape, or without a numeric id, is 
   for (const input of [{ repository: 'owner', runId: '1' }, { repository: 'owner/..', runId: '1' }, { repository: 'owner/app', runId: '1; rm -rf /' }, { repository: 'owner/app', runId: null }, { repository: null, runId: '1' }]) {
     await assert.rejects(getGitHubFailure(input, { run: gh.run }), /Choose a GitHub workflow run from the connected repository/);
     await assert.rejects(rerunFailedJobs(input, { run: gh.run }), /Choose a GitHub workflow run from the connected repository/);
+  }
+  for (const attempt of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2', null, true]) {
+    await assert.rejects(getGitHubFailure({ repository: 'owner/app', runId: '1', attempt }, { run: gh.run }), /positive GitHub workflow attempt/);
   }
   assert.deepEqual(gh.calls, []);
 });

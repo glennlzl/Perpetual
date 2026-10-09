@@ -68,7 +68,7 @@ async function harness(t: TestContext, { dataDir, steps, connection = { login: '
   const current: RepairSource = { key: KEY, branch: 'main', repository: 'owner/app', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/' };
   // hold, while set, keeps failure reads waiting; onRuns runs, and is awaited, within each runs read.
   const github = { head: A, headError: null as Error | null, rerunError: null as Error | null, connection, unreachable: 0, runs: {} as Record<string, WorkflowRun[]>, logs: {} as Record<string, string>, hold: null as Promise<void> | null, onRuns: null as (() => unknown) | null, onRerun: null as (() => Promise<void>) | null };
-  const calls = { heads: [] as BranchHeadInput[], runs: [] as string[], failures: [] as string[], reruns: [] as string[], connections: 0 };
+  const calls = { heads: [] as BranchHeadInput[], runs: [] as string[], failures: [] as string[], failureAttempts: [] as (number | undefined)[], reruns: [] as string[], connections: 0 };
   const fake: RepairGitHub = {
     ...(credentials ? { credentials } : {}),
     async connection() {
@@ -83,8 +83,8 @@ async function harness(t: TestContext, { dataDir, steps, connection = { login: '
       return input.etag === etag ? { status: 304 } : { status: 200, sha: github.head, etag };
     },
     async runs({ sha }) { calls.runs.push(sha); await github.onRuns?.(); return { runs: structuredClone(github.runs[sha] ?? []) }; },
-    async failure({ runId }) {
-      calls.failures.push(runId);
+    async failure({ runId, attempt }) {
+      calls.failures.push(runId); calls.failureAttempts.push(attempt);
       if (github.hold) await github.hold;
       const log = github.logs[runId] ?? LOGS.build;
       return { runId, jobs: [{ id: `job-${runId}`, name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log, tail: log, diagnosis: diagnoseFailure(log), observedAt: now() };
@@ -2019,6 +2019,170 @@ test('a failed recovery preserves its history and permits only an explicit retry
   await h.manager.recover({ id, action: 'rerun' });
   assert.deepEqual(h.calls.reruns, ['2', '2']);
   assert.deepEqual(h.repair(B)?.recovery?.requests.map(request => request.attempt), [1, 2]);
+});
+
+test('a newer authorization recovery attempt is reclassified from its latest failure evidence', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' });
+
+  // The same workflow's new attempt has a different failure. GitHub's latest log now describes that attempt.
+  h.github.logs['2'] = LOGS.build;
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll();
+
+  const repair = h.repair(B)!;
+  assert.equal(repair.category, 'build', 'The incident must use the newer attempt’s classification.');
+  assert.equal((await h.saved()).repairs[0].failures?.at(-1)?.diagnosis.category, 'build', 'Stored evidence must describe the newer attempt.');
+  assert.equal(repair.recovery, undefined, 'A non-authorization failure must clear stale authorization recovery UI.');
+  const stored = (await h.saved()).repairs[0];
+  assert.equal(stored.id, id);
+  assert.equal(stored.runs[0].attempt, 2);
+  assert.equal(stored.recovery?.requests[0].status, 'observed', 'Keep the authorization receipt in private history.');
+  assert.equal(autopilotStages(h.manager.view(), 'build').build.changes[0].title, 'Fixing build');
+});
+
+test('a changed recovery failure uses the ordinary agent once with pinned evidence and retains receipts', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' });
+  h.github.logs['2'] = LOGS.build;
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll(); await h.poll();
+  assert.equal(a.contexts.length, 1);
+  const repair = a.contexts[0].repair;
+  assert.deepEqual([repair.id, repair.sha, repair.runs[0].attempt, repair.category], [id, B, 2, 'build']);
+  assert.equal(repair.failures?.[0].log, LOGS.build);
+  assert.deepEqual(h.calls.failureAttempts, [1, 2, 2], 'Observation and execution both pin the failed attempt.');
+  assert.equal(repair.recovery?.requests[0].status, 'observed');
+  assert.equal(h.manager.credentialContext(id), null, 'Old authorization must not remain a credential action.');
+  const change = autopilotStages(h.manager.view(), 'build').build.changes[0];
+  assert.equal(change.kind, 'fix');
+  assert.equal(change.steps.some(step => step.id === 'authorization'), false);
+  assert.deepEqual(h.calls.reruns, ['2']);
+});
+
+test('a newer recovery attempt still failing authorization refreshes evidence without repeating paid work or reads', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  await h.manager.recover({ id: h.repair(B)!.id, action: 'rerun' });
+  h.github.logs['2'] = 'Error: GITHUB_TOKEN is required';
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll(); await h.poll();
+  const repair = (await h.saved()).repairs[0];
+  assert.deepEqual([repair.category, repair.runs[0].attempt, h.repair(B)?.recovery?.status], ['configuration', 2, 'required']);
+  assert.equal(repair.failures?.[0].log, h.github.logs['2']);
+  assert.deepEqual([a.contexts.length, h.calls.reruns, h.calls.failureAttempts], [0, ['2'], [1, 2]]);
+});
+
+test('a network failure after authorization gets only the ordinary single network retry before repair', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  await h.manager.recover({ id: h.repair(B)!.id, action: 'rerun' });
+  h.github.logs['2'] = LOGS.availability;
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await h.poll(); await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category, h.calls.reruns, a.contexts.length], ['rerunning', 'availability', ['2', '2'], 0]);
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 3 })];
+  await h.poll(); await h.poll();
+  assert.deepEqual([a.contexts.length, a.contexts[0].repair.runs[0].attempt, h.calls.reruns], [1, 3, ['2', '2']]);
+});
+
+test('a recovery with another still-unauthorized workflow cannot send the new build failure to an agent', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration; h.github.logs['3'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure'), run('3', B, 'failure', { path: LINT })]); await h.manager.idle();
+  await h.manager.recover({ id: h.repair(B)!.id, action: 'rerun' });
+  h.github.logs['2'] = LOGS.build;
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 }), run('3', B, 'failure', { path: LINT, attempt: 2 })];
+  await h.poll();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category, a.contexts.length], ['needs-person', 'configuration', 0]);
+  assert.deepEqual((await h.saved()).repairs[0].failures?.map(failure => failure.diagnosis.category), ['build', 'configuration']);
+});
+
+test('a new recovery failure observed after restart waits in the paused queue until Resume', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' }); await h.manager.close();
+  const a = agent(), next = await harness(t, { dataDir: h.dataDir, steps: a.steps });
+  next.github.head = B; next.github.logs['2'] = LOGS.build;
+  next.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await next.poll(); await next.poll();
+  assert.deepEqual([next.repair(B)?.status, next.repair(B)?.category, next.repair(B)?.paused, a.contexts.length], ['queued', 'build', true, 0]);
+  await next.manager.resume(); await next.manager.idle();
+  assert.deepEqual([next.repair(B)?.id, next.repair(B)?.status, a.contexts.length, next.calls.reruns], [id, 'ready', 1, []]);
+});
+
+test('recovery never starts repair if its source, account, head or attempt changes while reading fresh evidence', async t => {
+  for (const changed of ['source', 'account', 'head', 'attempt', 'stop'] as const) {
+    const a = agent(), h = await harness(t, { steps: a.steps });
+    h.github.logs['2'] = LOGS.configuration;
+    await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+    const id = h.repair(B)!.id;
+    await h.manager.recover({ id, action: 'rerun' });
+    const hold = deferred(); h.github.hold = hold.promise;
+    h.github.logs['2'] = LOGS.build;
+    h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+    const poll = h.poll();
+    await until(() => h.calls.failures.length === 2);
+    if (changed === 'source') h.current.rootDirectory = '/other';
+    if (changed === 'account') h.github.connection = { login: 'another', repository: 'owner/app' };
+    if (changed === 'head') h.github.head = C;
+    if (changed === 'attempt') h.github.runs[B] = [run('2', B, null, { attempt: 3 })];
+    if (changed === 'stop') await h.manager.stop({ id });
+    hold.resolve(); await poll;
+    assert.equal(a.contexts.length, 0, changed);
+    assert.deepEqual(h.calls.reruns, ['2'], changed);
+    if (changed === 'stop') assert.equal(h.repair(B)?.status, 'cancelled');
+  }
+});
+
+test('a changed recovery failure waits behind cleanup before entering the agent', async t => {
+  let blocked = false;
+  const a = agent(undefined, { async recover() { if (blocked) throw new Error('Cleanup pending.'); }, async cleanup() { if (blocked) throw new Error('Cleanup pending.'); } });
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  await h.manager.recover({ id: h.repair(B)!.id, action: 'rerun' });
+  // Retain an independently owned resource whose cleanup has not succeeded.
+  const saved = await h.saved();
+  const old = { ...saved.repairs[0], id: 'old-cleanup', sha: A, recovery: undefined, category: 'build', status: 'failed' as const, cleanup: { status: 'pending' as const } };
+  saved.repairs.push(old);
+  await h.manager.close();
+  await writeFile(join(h.dataDir, 'repairs', 'state.json'), JSON.stringify(saved));
+  blocked = true;
+  const next = await harness(t, { dataDir: h.dataDir, steps: a.steps });
+  next.github.head = B; next.github.logs['2'] = LOGS.build;
+  next.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  await next.poll(); await next.manager.resume(); await next.manager.idle();
+  assert.equal(next.repair(B)?.status, 'queued');
+  assert.equal(a.contexts.length, 0);
+  blocked = false; await next.poll();
+  assert.equal(a.contexts.length, 1);
+});
+
+test('a failed freshness read leaves a newer recovery attempt available for a later poll', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  await h.manager.recover({ id: h.repair(B)!.id, action: 'rerun' });
+  h.github.logs['2'] = LOGS.build;
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })];
+  h.github.headError = new Error('GitHub is unavailable.');
+  await h.poll();
+  assert.equal(a.contexts.length, 0);
+  assert.equal((await h.saved()).repairs[0].runs[0].attempt, 1, 'A failed read must not mark the attempt classified.');
+  h.github.headError = null; await h.poll();
+  assert.equal(a.contexts.length, 1);
+  assert.equal(a.contexts[0].repair.runs[0].attempt, 2);
 });
 
 test('recovery refuses another source/account and never reruns an obsolete head', async t => {

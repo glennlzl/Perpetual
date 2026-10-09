@@ -39,6 +39,7 @@ export interface Repair {
   /** A queue restored after restart waits for a person's Resume. */
   paused?: true;
   runs: RepairRun[]; failures?: GitHubFailure[]; category?: string; reruns?: { id: string; attempt: number }[];
+  /** Authorization evidence and rerun receipts remain after the failure changes category. */
   recovery?: BuildRecovery;
   pullRequest?: RepairPullRequest; attempts?: RepairAttempt[]; diffHash?: string; ciRuns?: string[]; closeError?: string;
   /** The last commit Perpetual pushed to this commit's repair branch; a person's next Repair of the commit leases it. */
@@ -61,7 +62,7 @@ export interface RepairGitHub {
   connection(): Promise<{ login: string; repository: string } | null>;
   head(input: BranchHeadInput): Promise<BranchHead>;
   runs(input: { repository: string; sha: string; login: string }): Promise<{ runs: WorkflowRun[] }>;
-  failure(input: { repository: string; runId: string }): Promise<GitHubFailure>;
+  failure(input: { repository: string; runId: string; attempt?: number }): Promise<GitHubFailure>;
   rerun(input: { repository: string; runId: string }): Promise<void>;
   credentials?(input: CredentialInput): Promise<CredentialSnapshot>;
   workflow?(input: { repository: string; sha: string; path: string }): Promise<string>;
@@ -216,7 +217,7 @@ const scrubbed = (failure: GitHubFailure): GitHubFailure => ({ ...failure, log: 
 const brief = (failure: GitHubFailure): GitHubFailure => ({ ...failure, jobs: failure.jobs.slice(0, 5).map(job => ({ ...job, failedSteps: job.failedSteps.slice(0, 5) })), log: failure.log.slice(0, 2000), tail: failure.tail.slice(-2000) });
 const publicRepair = ({ id, branch, sha, status, reason, paused, cleanup, trigger, category, runs, pullRequest, attempts, holds, gates, pushed, verified, merged, createdAt, updatedAt, startedAt, completedAt, recovery }: Repair): PublicRepair => ({
   id, branch, sha, status, ...(paused ? { paused } : {}), ...(reason ? { reason: redact(reason) } : {}), trigger, ...(category ? { category } : {}), ...(merged ? { merged } : {}),
-  ...(recovery ? { recovery: structuredClone(recovery) } : category === 'configuration' && !pullRequest && !attempts?.length && status === 'needs-person' ? { recovery: { status: 'required' as const, runs: [], requests: [] } } : {}),
+  ...(recovery && category === 'configuration' ? { recovery: structuredClone(recovery) } : category === 'configuration' && !pullRequest && !attempts?.length && status === 'needs-person' ? { recovery: { status: 'required' as const, runs: [], requests: [] } } : {}),
   // A head verified before GitHub's update of the branch is not the pull request's head any more.
   ...(verified && verified === pushed ? { verified: true as const } : {}),
   ...(cleanup ? { cleanup: { status: cleanup.status, ...(cleanup.reason ? { reason: text(cleanup.reason) } : {}) } } : {}),
@@ -246,6 +247,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       || saved.passed !== undefined && !validPassed(saved.passed)) throw new Error('Unsupported repair state.');
     state = { version: 1, repairs: saved.repairs, ...(saved.autoMerge ? { autoMerge: saved.autoMerge } : {}), ...(saved.passed ? { passed: saved.passed } : {}) };
   }
+  const restored = new Set(state.repairs.map(repair => repair.id));
   // Work the controller stopped during is never resumed: a restart starts no paid work, and its pull request stays open.
   // One whose pull request merged before the restart is merged.
   const directories = (await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name);
@@ -511,22 +513,33 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const connected = async () => {
       const connection = await untilReachable(() => github.connection(), { signal, pollMs: unreachable.pollMs, waitMs: unreachable.waitMs });
       if (!live()) return false;
-      if (connection?.login === repair.login && connection.repository === repair.repository) return true;
+      if (connection?.login === repair.login && connection.repository === repair.repository) {
+        if (!repair.recovery) return true;
+        const head = await github.head({ repository: repair.repository, branch: repair.branch });
+        if (!live()) return false;
+        if (recoverySource(repair, managed()) && head.status === 200 && head.sha === repair.sha) return true;
+        await settle(repair, 'needs-person', 'The source or branch moved. Open its current failed build instead.');
+        return false;
+      }
       await settle(repair, 'needs-person', connection ? 'The GitHub connection changed. Start the repair again.' : 'Connect GitHub to repair builds.');
       return false;
     };
     try {
       if (!live() || !await connected()) return;
-      const failures = await Promise.all(repair.runs.map(run => github.failure({ repository: repair.repository, runId: run.id })));
+      const failures = await Promise.all(repair.runs.map(run => github.failure({ repository: repair.repository, runId: run.id, attempt: run.attempt })));
       if (!live()) return;
       const decision = triage(failures, Boolean(repair.reruns));
       Object.assign(repair, { failures: failures.slice(0, 20).map(scrubbed), category: decision.category });
       if (decision.next === 'needs-person') {
-        repair.recovery = await recoveryFor({ ...repair, failures }, github.workflow);
+        const recovery = await recoveryFor({ ...repair, failures }, github.workflow);
+        // Returning to an authorization failure must not erase earlier rerun receipts.
+        if (repair.recovery) recovery.requests = repair.recovery.requests;
+        repair.recovery = recovery;
         if (github.credentials) await credentialSnapshot(repair);
         if (!live()) return;
         return await settle(repair, 'needs-person', 'Authorization failed in GitHub Actions. Recovery continues automatically after credentials change.');
       }
+      if (repair.recovery && !await currentRecoveryFailure(repair, live)) return;
       if (decision.next === 'rerun') {
         await transition(repair, 'rerunning', { reruns: repair.runs.map(({ id, attempt }) => ({ id, attempt })) });
         for (const run of repair.runs) { if (!live() || !await connected()) return; await github.rerun({ repository: repair.repository, runId: run.id }); }
@@ -552,6 +565,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       if (steps.cleanup) { repair.cleanup = { status: 'pending' }; await persist(); }
       const directory = await workspace(repair.id);
       if (!live() || !await connected()) return;
+      if (repair.recovery && !await currentRecoveryFailure(repair, live)) return;
       await transition(repair, 'repairing');
       const outcome: unknown = await agent({ repair: structuredClone(repair), directory, report: progress => report(repair, signal, progress), autoMerge: () => autoMerge(repair.key), ...(spendable === undefined ? {} : { spendable }) }, signal);
       if (isRecord(outcome) && outcome.status === 'merged' && validSha(outcome.merged)) repair.merged = outcome.merged.toLowerCase();
@@ -736,9 +750,11 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
   // the pipeline left its branch or root directory, every attempt passing is flaky, and an attempt that was cancelled
   // or waits for approval needs a person.
   async function followRerun(repair: Repair, login: string) {
-    if (repair.recovery) {
+    if (repair.recovery && repair.category === 'configuration') {
       if (login !== repair.login || recoveryOperations.has(repair.id)) return;
-      return observeRecovery(repair);
+      recoveryOperations.add(repair.id);
+      try { return await observeRecovery(repair); }
+      finally { recoveryOperations.delete(repair.id); }
     }
     const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login });
     if (closed || repair.status !== 'rerunning') return;
@@ -750,6 +766,49 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     if (failed.length) { await transition(repair, 'triaging', { runs: failed.map(runOf) }); return begin(repair); }
     if (!other) return await settle(repair, 'flaky');
     await settle(repair, 'needs-person', `The rerun ended as ${String(other.conclusion ?? 'unknown').replaceAll('_', ' ')}.`);
+  }
+
+  // Authorization follow-ups may only act on the still-current failure. Ordinary FIFO repairs retain their
+  // older-commit semantics; these checks also cover a head, account or attempt changing while logs were read.
+  async function currentRecoveryFailure(repair: Repair, live: () => boolean, expected = repair.runs): Promise<boolean> {
+    const head = await github.head({ repository: repair.repository, branch: repair.branch });
+    const { runs } = await github.runs({ repository: repair.repository, sha: repair.sha, login: repair.login });
+    const account = await github.connection();
+    if (!live()) return false;
+    let reason: string | undefined;
+    if (!recoverySource(repair, managed())) reason = 'The active source changed. Open its current failed build instead.';
+    else if (account?.login !== repair.login || account.repository !== repair.repository) reason = 'The GitHub connection changed. Start the repair again.';
+    else if (head.status !== 200 || head.sha !== repair.sha) reason = 'The branch has moved. Open its current failed build instead.';
+    else {
+      const latest = latestBranchBuildRuns(runs, repair.sha, repair.branch), completed = completedRuns(latest, repair.branch);
+      if (!completed || latest.some(run => !passedRun(run) && !failedRun(run) && run.conclusion !== 'skipped')
+        || completed.failed.length !== expected.length
+        || expected.some(ref => !completed.failed.some(run => run.id === ref.id && run.attempt === ref.attempt && run.path === ref.path))) {
+        reason = 'The workflow changed while its failure was being read. Recheck the current build before repairing it.';
+      }
+    }
+    if (!reason) return true;
+    await settle(repair, 'needs-person', reason);
+    return false;
+  }
+
+  async function reclassifyRecovery(repair: Repair, failed: WorkflowRun[]) {
+    const live = () => !closed && (repair.status === 'rerunning' || repair.status === 'needs-person');
+    const failures = await Promise.all(failed.map(run => github.failure({ repository: repair.repository, runId: run.id, attempt: run.attempt })));
+    if (!live()) return;
+    // Keep the previous attempts until a complete fresh read succeeds, so a read failure can be retried.
+    const refs = failed.map(runOf);
+    if (!await currentRecoveryFailure(repair, live, refs)) return;
+    const decision = triage(failures, Boolean(repair.reruns));
+    Object.assign(repair, { runs: refs, failures: failures.slice(0, 20).map(scrubbed), category: decision.category });
+    if (decision.next === 'needs-person') {
+      return settle(repair, 'needs-person', 'Authorization failed in GitHub Actions. Recovery continues automatically after credentials change.');
+    }
+    // Reuse the same incident and normal bounded queue/agent path. Old recovery receipts stay private; Build
+    // presents the newly classified failure. A restarted controller may observe it but needs Resume to act.
+    if (restored.has(repair.id)) repair.paused = true;
+    delete repair.reason; delete repair.completedAt;
+    await transition(repair, 'queued');
   }
 
   // A connection is not evidence that CI recovered. Only a new execution of its original runs can clear it.
@@ -785,6 +844,12 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     const allPassed = observed.every((run, index) => passedRun(run) && run.attempt > recovery.runs[index].attempt);
     if (!allPassed) {
       recovery.status = 'required';
+      const latest = latestBranchBuildRuns(runs, repair.sha, repair.branch), completed = completedRuns(latest, repair.branch);
+      const changedFailure = observed.some(run => failedRun(run) && run.attempt > (repair.runs.find(ref => ref.id === run.id)?.attempt ?? 0)
+        && completed?.failed.some(current => current.id === run.id && current.attempt === run.attempt));
+      if (changedFailure && completed && latest.every(run => passedRun(run) || failedRun(run) || run.conclusion === 'skipped')) {
+        return reclassifyRecovery(repair, completed.failed);
+      }
       const attempted = recovery.requests.length > 0 || observed.some((run, index) => run.attempt > recovery.runs[index].attempt);
       return settle(repair, 'needs-person', attempted ? 'The workflow has not recovered. Review the latest failure before retrying.' : 'Waiting for workflow credentials. Recovery continues automatically after they change.');
     }
@@ -821,12 +886,13 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
     try {
       await connection();
       if (!repair.recovery) {
-        const failures = repair.failures?.length ? repair.failures : await Promise.all(repair.runs.map(run => github.failure({ repository: repair.repository, runId: run.id })));
+        const failures = repair.failures?.length ? repair.failures : await Promise.all(repair.runs.map(run => github.failure({ repository: repair.repository, runId: run.id, attempt: run.attempt })));
         await connection();
         repair.recovery = await recoveryFor({ ...repair, failures }, github.workflow);
         sameSource(); await persist();
       }
       await observeRecovery(repair); sameSource();
+      if (repair.category !== 'configuration') return view();
       if (action === 'recheck') {
         if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && github.credentials) await credentialSnapshot(repair);
         return view();
@@ -916,8 +982,9 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       let revision: string | null = null;
       try {
         await observeRecovery(repair);
-        if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && github.credentials) revision = await credentialSnapshot(repair);
+        if (repair.category === 'configuration' && repair.status === 'needs-person' && repair.recovery.status !== 'passed' && github.credentials) revision = await credentialSnapshot(repair);
       } finally { recoveryOperations.delete(repair.id); }
+      if (repair.category !== 'configuration') continue;
       if (repair.status === 'needs-person' && repair.recovery.status !== 'passed' && new Set(repair.recovery.requests.flatMap(request=>request.credentialRevision?[request.credentialRevision]:[])).size >= 3) {
         repair.recovery.automation={status:'unavailable',reason:'Three credential updates did not recover the workflow. Review its latest failure.'};await persist();continue;
       }
@@ -1099,7 +1166,7 @@ export async function createRepairManager({ dataDir, source, github, steps = {},
       guard();
       const repair = state.repairs.find(item => item.id === id);
       if (!repair) throw Object.assign(new Error('Repair not found.'), { statusCode: 404 });
-      if (repair.status !== 'queued' && !ACTIVE.includes(repair.status) && !(repair.recovery && repair.status === 'needs-person' && repair.recovery.status !== 'passed')) throw conflict('This repair is not running or queued.');
+      if (repair.status !== 'queued' && !ACTIVE.includes(repair.status) && !(repair.recovery && repair.category === 'configuration' && repair.status === 'needs-person' && repair.recovery.status !== 'passed')) throw conflict('This repair is not running or queued.');
       controllers.get(repair.id)?.controller.abort();
       await settle(repair, 'cancelled');
       return view();
