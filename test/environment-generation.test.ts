@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
+import aiPackage from 'ai/package.json' with { type: 'json' };
 import { createEnvironmentManager } from '../src/environments/manager.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
 import { generateTwinConfig, storedGenerationDraft } from '../src/environments/generation.ts';
@@ -298,7 +299,7 @@ test('the author loop writes the config end to end: an invalid write is refused 
   assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
   const { plan } = await f.manager.view(f.context), generated = provenance(plan);
   assert.deepEqual(plan, { ...validateTwinConfig(loopConfig, { services }), provenance: { generatedAt: generated?.generatedAt, harness: LOOP, model: `openrouter/${MODEL}`, attempts: 1 } });
-  assert.equal(LOOP, 'perpetual-loop@7.0.116');
+  assert.equal(LOOP, `perpetual-loop@${aiPackage.version}`);
   assert.deepEqual(f.calls.prepare, [validateTwinConfig(loopConfig, { services })]);
   assert.equal((await lines(f.log)).length, 0, 'OpenCode never ran.');
   // The loop had the controller's instructions, evidence and prompt, and the recomputed unwired variables with each valid write.

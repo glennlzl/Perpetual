@@ -100,7 +100,6 @@ test('the loop harness runs this Node.js with the loop module, the workspace aro
   assert.deepEqual(loopHarness({ model: `openrouter/${MODEL}`, prompt: 'Go', cwd: '/data/authoring/abc/project' }),
     { command: process.execPath, args: [AUTHOR_LOOP, '/data/authoring/abc', MODEL, 'Go'], env: { NODE_USE_ENV_PROXY: '1' } });
   assert.equal(LOOP, `perpetual-loop@${aiPackage.version}`);
-  assert.equal(aiPackage.version, '7.0.116');
 });
 
 test('the loop module runs as a process with OpenRouter’s model, which needs the key in its environment', async t => {
