@@ -17,7 +17,7 @@ import { workflowPath } from './recovery.ts';
 export interface FailedJob { id: string; name: string; conclusion: string | null; failedSteps: string[] }
 /** A run's failure: its jobs, the redacted error lines and tail of its failed-step log, and their rule-based diagnosis. */
 export interface GitHubFailure { runId: string; jobs: FailedJob[]; log: string; tail: string; diagnosis: FailureDiagnosis; observedAt: string }
-export interface RunInput { repository: unknown; runId: unknown }
+export interface RunInput { repository: unknown; runId: unknown; attempt?: unknown }
 type Options = { timeout: number; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: NodeJS.ProcessEnv; signal?: AbortSignal };
 /** An execFile-shaped command runner; tests supply one that records its arguments. */
 export type CommandRunner = (file: string, args: string[], options: Options) => Promise<{ stdout: string }>;
@@ -38,11 +38,14 @@ const PASSED_LINE = /^\s*(?:[✓✔√]\s|ok \d+ |--- PASS: |PASS\s)/;
 const PREFIX = /^[^\t\n]*\t[^\t\n]*\t/;
 const TIMESTAMP = /^\uFEFF?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?/;
 
-function target({ repository, runId }: RunInput) {
+function target({ repository, runId, attempt }: RunInput) {
   if (!isRepository(repository) || typeof runId !== 'string' && typeof runId !== 'number' || !RUN_ID.test(String(runId))) {
     throw new Error('Choose a GitHub workflow run from the connected repository.');
   }
-  return { repository, runId: String(runId) };
+  if (attempt !== undefined && (!Number.isSafeInteger(attempt) || (attempt as number) < 1)) {
+    throw new Error('Choose a positive GitHub workflow attempt.');
+  }
+  return { repository, runId: String(runId), ...(attempt === undefined ? {} : { attempt: attempt as number }) };
 }
 
 /** Fixed messages for HTTP statuses a call expects GitHub to refuse with, such as 409 for a merge whose head moved. */
@@ -67,11 +70,12 @@ async function gh(run: CommandRunner, args: string[], operation: string, denied:
 
 /** The failed run's jobs and redacted failed-step log, classified without a model. */
 export async function getGitHubFailure(input: RunInput, { run = exec, now = () => new Date().toISOString() }: { run?: CommandRunner; now?: () => string } = {}): Promise<GitHubFailure> {
-  const { repository, runId } = target(input);
+  const { repository, runId, attempt } = target(input);
   const denied = 'GitHub denied access to workflow runs. Check repository access and Actions permissions.';
+  const jobsEndpoint = `repos/${repository}/actions/runs/${runId}/${attempt === undefined ? '' : `attempts/${attempt}/`}jobs?per_page=100`;
   const [rawJobs, rawLog] = await Promise.all([
-    gh(run, ['api', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', `repos/${repository}/actions/runs/${runId}/jobs?per_page=100`], 'Reading the failed jobs', denied),
-    gh(run, ['run', 'view', runId, '--repo', repository, '--log-failed'], 'Reading the failed log', denied, 16 * 1024 * 1024),
+    gh(run, ['api', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', jobsEndpoint], 'Reading the failed jobs', denied),
+    gh(run, ['run', 'view', runId, '--repo', repository, ...(attempt === undefined ? [] : ['--attempt', String(attempt)]), '--log-failed'], 'Reading the failed log', denied, 16 * 1024 * 1024),
   ]);
   let listed: unknown;
   try { listed = JSON.parse(rawJobs); } catch { throw new Error('GitHub returned an unreadable job list.'); }
