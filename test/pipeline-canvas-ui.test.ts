@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createUiServer } from './fixtures/ui-server.ts';
 import { chromium, expect as playwrightExpect, type Request } from '@playwright/test';
 import { applyPipelineAction, defaultPipeline } from '../src/pipeline.ts';
+import { repairChange } from '../src/repair/view.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import type { StageRemoval } from '../contract/environment.ts';
 import type { ErrorReply } from '../contract/error.ts';
@@ -54,7 +55,8 @@ async function openApp(t: TestContext, handle: Handler) {
     await (await response).finished();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   };
-  return { page, posts, pageErrors, refresh, open: () => page.goto(`${origin}/build/`) };
+  const url = `${origin}/build/#pipeline`;
+  return { page, posts, pageErrors, refresh, open: () => page.url() === url ? page.reload() : page.goto(url) };
 }
 
 test('pausing a transition names the transition and leaves the stage status in its Badge', { timeout: 60000 }, async t => {
@@ -425,6 +427,7 @@ test('a refused Create environment is one canvas error that one Dismiss clears',
   await page.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
   const alert = page.locator('.canvas-alert');
   await expect(alert).toContainText(refusal);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await alert.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(alert).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
@@ -449,6 +452,7 @@ test('a twin an earlier checkout built stays on its Sandbox card as behind, and 
   await expect(page.getByRole('tooltip')).toHaveText('main · bbbbbbb → dev · aaaaaaa');
   await card.getByRole('button', { name: 'Create Beta environment', exact: true }).click();
   await expect.poll(() => posts.filter(item => item.path === '/api/environments/create').map(item => item.body)).toEqual([{ repoPath, stageId: beta }]);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   assert.deepEqual(pageErrors, []);
 });
 
@@ -475,13 +479,23 @@ test('a view that failed for one stage does not stand in for the next stage open
 test('the Source sheet shows the GitHub mark only for a repository with a GitHub remote', { timeout: 60000 }, async t => {
   let provider = 'Git';
   const { page, pageErrors, open } = await openApp(t, path => {
-    if (path === '/api/state') return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha }, nodes: [{ id: 'repository', label: 'app', kind: 'repository', provider }], delivery: { source: [], build: [], production: [] } } } };
+    if (path === '/api/state') {
+      const repository = { id: 'repository', label: 'app', kind: 'repository', provider };
+      const remote = provider === 'GitHub' ? 'git@github.com:acme/app.git' : 'git@gitlab.com:acme/app.git';
+      return { json: { ...pipelineState(defaultPipeline(repoPath)), scan: { repo: { path: repoPath, name: 'app', branch: 'main', sha, remote }, nodes: [repository], delivery: { source: [repository], build: [], production: [] } } } };
+    }
     if (path === '/api/github/connection') return { json: { available: true, authenticated: false, account: null, connected: false, source: null, localCheckout: null } };
   });
   for (const [scanned, mark] of [['Git', null], ['GitHub', 'GitHub']] as const) {
     provider = scanned;
     await open();
-    await page.getByRole('button', { name: 'Configure source', exact: true }).click();
+    const link = page.getByRole('link', { name: 'Open app on GitHub', exact: true });
+    if (mark) {
+      await expect(link).toHaveAttribute('href', 'https://github.com/acme/app');
+      await expect(link).toHaveAttribute('target', '_blank');
+      await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    } else await expect(link).toHaveCount(0);
+    await page.getByRole('button', { name: 'Configure app', exact: true }).click();
     const header = page.locator('.pipeline-inspector [data-slot="sheet-header"]');
     await expect(header.getByRole('heading', { name: 'app', exact: true })).toBeVisible();
     if (mark) await expect(header.locator('img')).toHaveAttribute('alt', mark);
@@ -640,5 +654,60 @@ test('a GitHub sign-in that ends without connecting reads Build, the recorded de
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect.poll(() => [reads.build - before.build, reads.deployments - before.deployments, reads.releases - before.releases]).toEqual([1, 1, 1]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('Build shows commit queue positions, cancels one item, and resumes a paused queue', { timeout: 60000 }, async t => {
+  const running: AutopilotChange = { id: 'active', stageId: 'build', kind: 'fix', title: 'Fixing build', status: 'running', sha, steps: [{ id: 'change', name: 'Change', status: 'active' }] };
+  const first: AutopilotChange = { id: 'queued-1', stageId: 'build', kind: 'fix', title: 'Build', status: 'queued', sha: 'b'.repeat(40), queuePosition: 1, steps: [] };
+  const second: AutopilotChange = { ...first, id: 'queued-2', sha: 'c'.repeat(40), queuePosition: 2 };
+  let changes = [running, first, second];
+  const view = (): AutopilotView => ({ repoPath, stages: { build: { mode: 'merge', changes } } });
+  const { page, posts, pageErrors, refresh, open } = await openApp(t, (path, request) => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { autopilot: view() }) };
+    if (path === '/api/autopilot/stop') changes = changes.filter(c => c.id !== request.postDataJSON().id);
+    if (path === '/api/autopilot/resume') changes = [{ ...first, status: 'running', title: 'Fixing build', paused: undefined, queuePosition: undefined, steps: [{ id: 'read', name: 'Read the failure', status: 'active' }] }];
+    if (path.startsWith('/api/autopilot')) return { json: view() };
+  });
+  await open();
+  const build = page.getByRole('group', { name: 'Build', exact: true });
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Fixing build · 2 queued', exact: true })).toBeVisible();
+  await expect(build.getByRole('button', { name: 'Build, Queued #1', exact: true })).toContainText('bbbbbbb');
+  await expect(build.getByRole('button', { name: 'Build, Queued #2', exact: true })).toContainText('ccccccc');
+  await page.screenshot({ path: '.perpetual/build-queue-verified.png', clip: { x: 345, y: 155, width: 340, height: 360 } });
+  await build.getByRole('button', { name: 'Build, Queued #2', exact: true }).click();
+  await build.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(build.getByRole('button', { name: 'Build, Queued #2', exact: true })).toHaveCount(0);
+  assert.deepEqual(posts.at(-1), { path: '/api/autopilot/stop', body: { repoPath, stageId: 'build', id: second.id } });
+  changes = [{ ...first, paused: true }];
+  await refresh('/api/autopilot', '/build/src/lib/pipeline-autopilot.ts', 'autopilotChanges');
+  await build.getByRole('button', { name: 'Build, Paused #1', exact: true }).click();
+  await build.getByRole('button', { name: 'Resume queue', exact: true }).click();
+  await expect(build.getByRole('button', { name: 'Fixing build, Running', exact: true })).toBeVisible();
+  await expect(build.getByText('Read the failure', { exact: false })).toBeVisible();
+  assert.deepEqual(posts.at(-1), { path: '/api/autopilot/resume', body: { repoPath, stageId: 'build' } });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a repair needing a person shows its reason even while its steps are collapsed', { timeout: 60000 }, async t => {
+  const reason = 'Credentials or permissions need attention. Check the provider settings.';
+  const change = repairChange({ id: 'held-repair', branch: 'main', sha, status: 'needs-person', trigger: 'push', category: 'configuration', reason, runs: [], createdAt: '2026-10-07T00:00:00Z', updatedAt: '2026-10-07T00:00:00Z' }, 'build');
+  const autopilot: AutopilotView = { repoPath, stages: { build: { mode: 'merge', changes: [change] } } };
+  const { page, pageErrors, open } = await openApp(t, path => {
+    if (path === '/api/state') return { json: pipelineState(defaultPipeline(repoPath), { autopilot }) };
+    if (path === '/api/autopilot') return { json: autopilot };
+  });
+  await open();
+  const build = page.getByRole('group', { name: 'Build', exact: true });
+  const row = build.getByRole('button', { name: 'Fixing build, Needs attention', exact: true });
+  await expect(build.getByRole('button', { name: 'Autopilot for Build: Needs attention', exact: true })).toBeVisible();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(build.getByText(reason, { exact: true })).toBeVisible();
+  await expect(build.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+  await row.click();
+  await expect(build.getByRole('list', { name: 'Fixing build steps', exact: true })).toBeVisible();
+  await expect(build.getByText('Credentials or permissions need a person. ' + reason, { exact: true })).toBeVisible();
+  await row.click();
+  await expect(build.getByText(reason, { exact: true })).toBeVisible();
   assert.deepEqual(pageErrors, []);
 });

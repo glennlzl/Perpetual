@@ -19,7 +19,7 @@ const source = (file: string) => readFile(new URL(`../client/src/${file}`, impor
 
 test('a repair under way is a running change whose steps follow the manager\'s status', () => {
   const triaging = repairChange(repair('triaging'), 'build');
-  assert.deepEqual([triaging.id, triaging.stageId, triaging.kind, triaging.title, triaging.status, triaging.startedAt, triaging.endedAt, triaging.reason], ['repair-triaging', 'build', 'fix', 'Fixing build', 'running', '2026-09-25T10:00:00.000Z', undefined, undefined]);
+  assert.deepEqual([triaging.id, triaging.stageId, triaging.kind, triaging.title, triaging.status, triaging.startedAt, triaging.endedAt, triaging.reason], ['repair-triaging', 'build', 'fix', 'Diagnosing build', 'running', '2026-09-25T10:00:00.000Z', undefined, undefined]);
   assert.deepEqual(marks(triaging), ['Read the failure: active', 'Diagnose: pending', 'Change: pending', 'Verify: pending', 'Merge: pending']);
   assert.deepEqual(triaging.steps[0].detail, [{ text: 'CI', href: RUN.url }, ' failed at ', { text: 'cb9292c' }]);
   const rerunning = repairChange(repair('rerunning', { category: 'availability' }), 'build');
@@ -61,9 +61,9 @@ test('a finished repair is merged, passed, under review or not merged, and says 
   const failedCi = repairChange(repair('failed', { attempts: [{ number: 4, model: 'm' }], pullRequest: { ...PULL, draft: true }, reason: 'The build was not fixed in 4 attempts.' }), 'build');
   assert.deepEqual([failedCi.status, marks(failedCi)[3]], ['not-merged', 'Verify: failed'], 'A draft that failed CI is not under review.');
   const person = repairChange(repair('needs-person', { category: 'configuration', reason: 'Credentials or permissions need attention.' }), 'build');
-  assert.deepEqual([person.status, marks(person)[1], person.steps[1].detail], ['not-merged', 'Diagnose: waiting', ['Credentials or permissions need a person.', ' ', 'Credentials or permissions need attention.']]);
+  assert.deepEqual([person.status, marks(person)[1], person.steps[1].detail], ['needs-attention', 'Diagnose: waiting', ['Credentials or permissions need a person.', ' ', 'Credentials or permissions need attention.']]);
   const unstarted = repairChange(repair('needs-person', { category: 'build', startedAt: '2026-09-25T10:00:30.000Z', reason: 'Add an OpenRouter API key in Settings.' }), 'build');
-  assert.deepEqual([unstarted.status, marks(unstarted)[2], unstarted.steps[2].detail], ['not-merged', 'Change: waiting', ['Add an OpenRouter API key in Settings.']], 'An agent that could not start is the Change step\'s wait.');
+  assert.deepEqual([unstarted.status, marks(unstarted)[2], unstarted.steps[2].detail], ['needs-attention', 'Change: waiting', ['Add an OpenRouter API key in Settings.']], 'An agent that could not start is the Change step\'s wait.');
   const interrupted = repairChange(repair('needs-person', { pullRequest: { ...PULL, draft: true }, reason: 'Interrupted by a controller restart.' }), 'build');
   assert.deepEqual([interrupted.status, marks(interrupted)[3]], ['needs-review', 'Verify: waiting'], 'An open pull request waits for a person.');
   const stopped = repairChange(repair('cancelled'), 'build');
@@ -120,9 +120,7 @@ test('Repair is a Button on the failed workflow row, Stop a Button on the change
   assert.match(card, /offer=\{repairOffer\(autopilot, workflow\.file, runs\?\.sha\)\}/);
   assert.doesNotMatch(card, /stopChange|<Square|repairs\.ts|Switch/, 'The card offers Repair alone; Stop is on the change.');
   const changes = await source('StageChanges.tsx');
-  assert.match(changes, /\{changeActive\(change\) && repoPath && <StopChange repoPath=\{repoPath\} change=\{change\} \/>\}/);
   assert.match(changes, /await stopChange\(api, \{ repoPath, stageId: change\.stageId, id: change\.id \}\);/);
-  assert.match(changes, /<Button type="button" variant="ghost" size="sm"[^>]*onClick=\{\(\) => void stop\(\)\}><Square \/>Stop<\/Button>/);
   assert.match(changes, /passed: CircleCheck/);
   const app = await source('App.tsx');
   assert.match(app, /<GitHubActionsCard repoPath=\{repoPath\} scannedAt=\{scannedAt\} scannedSha=\{sha\} runs=\{github\} readError=\{data\.buildReadError\} stageId=\{stage\.id\} autopilot=\{autopilot\} onConnect=\{data\.buildUnreachable \? undefined : \(\) => openDialog\(\{ type: 'source', connect: true \}\)\} \/>/);
@@ -142,4 +140,14 @@ test("cleanup is shown independently of a confirmed merge and preserves the mana
   const projected = autopilotView(view, { repoPath: '/work/app', stageId: 'build' });
   assert.deepEqual(projected.stages!.build.failed?.runs, []);
   assert.equal(projected.watchError, view.watchError, "A global cleanup reason is visible without copying another source's repair into this stage.");
+});
+
+test('queue records have no invented progress and render after active work in FIFO order', () => {
+  const waiting = repair('queued', { id: 'first', sha: OLDER, paused: true });
+  const later = repair('queued', { id: 'second', sha: HEAD });
+  const active = repair('repairing');
+  const stage = autopilotStages({ autoMerge: true, repairs: [later, waiting, active], head: { sha: HEAD, branch: 'main', failed: [RUN] } }, 'build').build;
+  assert.deepEqual(stage.changes.map(c => [c.id, c.queuePosition, c.paused]), [[active.id, undefined, undefined], ['first', 1, true], ['second', 2, undefined]]);
+  assert.deepEqual(stage.changes[1].steps, []);
+  assert.deepEqual(stage.failed?.runs, [], 'A queued head never offers a duplicate Repair.');
 });

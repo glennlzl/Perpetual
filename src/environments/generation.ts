@@ -6,7 +6,7 @@
 // attempt starts from and the failed containers' logs; an attempt that ran out of time is one of them. A person sees a
 // short error; the author's output goes to the logs.
 import { CONFIG } from '../twin/authoring.ts';
-import { serviceOptionErrors, validateTwinConfig } from '../twin/config.ts';
+import { plain, serviceOptionErrors, validateTwinConfig } from '../twin/config.ts';
 import { services as registry } from '../twin/registry.ts';
 import type { Authored } from '../twin/authoring.ts';
 import type { TwinConfig } from '../twin/config.ts';
@@ -27,7 +27,13 @@ export interface PlanProvenance { generatedAt: string; harness: string; model: s
  * A stage's draft: the last twin.json and why it failed, which the next generation starts from. Generation leaves one
  * when it fails, and so does a generated config that fails to build later.
  */
-export interface GenerationDraft { text: string; feedback: string }
+export interface GenerationDraft {
+  text: string; feedback: string;
+  /** A validated candidate waiting for credentials, not yet a verified saved plan. Retry prepares it without an author. */
+  pendingInputs?: PlanProvenance;
+  /** null records a structured author failure before any runtime failure; absent means a legacy draft. */
+  repair?: GenerationRepair | null;
+}
 /**
  * Where a config failed: it was refused before anything ran (valid), preparing its twin failed (build), a container did
  * not become healthy (healthy), an app did not answer on its address (answers), or no test account exists (account).
@@ -38,11 +44,36 @@ export type Stage = 'valid' | 'build' | 'healthy' | 'answers' | 'account';
  * person sees when it differs, and the failed containers' logs.
  */
 export interface StagedFailure { stage: Stage; heading: string; subject?: string; error: string; reason?: string; logs?: string }
+export type GenerationRepair = Pick<StagedFailure, 'stage' | 'subject'>;
+/** Invalid scope metadata must keep the draft blocked, never drop it and silently regenerate every field. */
+export function storedGenerationDraft(value: unknown): GenerationDraft | null {
+  if (!plain(value) || typeof value.text !== 'string' || typeof value.feedback !== 'string') return null;
+  const draft = { text: value.text, feedback: value.feedback };
+  if (Object.hasOwn(value, 'pendingInputs')) {
+    const pending = value.pendingInputs;
+    if (!plain(pending) || Object.keys(pending).some(key => !['generatedAt', 'harness', 'model', 'attempts'].includes(key))
+      || typeof pending.generatedAt !== 'string' || !Number.isFinite(Date.parse(pending.generatedAt))
+      || typeof pending.harness !== 'string' || !pending.harness.trim() || pending.harness.length > 200
+      || typeof pending.model !== 'string' || !pending.model.trim() || pending.model.length > 200
+      || !Number.isInteger(pending.attempts) || Number(pending.attempts) < 1 || Number(pending.attempts) > ATTEMPTS)
+      return { ...draft, repair: { stage: 'valid' } };
+    return { ...draft, pendingInputs: { generatedAt: pending.generatedAt, harness: pending.harness, model: pending.model, attempts: Number(pending.attempts) }, repair: null };
+  }
+  if (!Object.hasOwn(value, 'repair')) return draft;
+  if (value.repair === null) return { ...draft, repair: null };
+  const repair = value.repair;
+  if (!plain(repair) || Object.keys(repair).some(key => key !== 'stage' && key !== 'subject')
+    || typeof repair.stage !== 'string' || !['valid', 'build', 'healthy', 'answers', 'account'].includes(repair.stage)
+    || repair.subject !== undefined && (typeof repair.subject !== 'string' || !repair.subject.trim() || repair.subject.length > 4000)) return { ...draft, repair: { stage: 'valid' } };
+  return { ...draft, repair: { stage: repair.stage as Stage, ...(typeof repair.subject === 'string' ? { subject: repair.subject } : {}) } };
+}
 /** A failed attempt as a person sees it: where it failed and one redacted line on why. */
 export type AttemptOutcome = EnvironmentAttempt;
 /** Generation that failed: the environment fails with its message and keeps `logs`, and the stage keeps the draft. */
 export type GenerationFailure = Error & { draft: GenerationDraft; logs?: string };
 export const isGenerationFailure = (error: unknown): error is GenerationFailure => error instanceof Error && 'draft' in error;
+/** Supplying credentials is preparation work; an author cannot repair their absence. */
+export class MissingEnvironmentInputs extends Error {}
 
 /** The config twin.json holds, or why it is refused: not JSON, not a twin config, a service's options, or no app. */
 export function checkWritten(text: string, services: TwinServices = registry): { config: TwinConfig; error?: undefined } | { error: string; config?: undefined } {
@@ -86,13 +117,14 @@ export type Diagnosis = { stage: Stage; step: string; subject?: string; logs: st
 
 export interface GenerationSteps<Result> {
   draft: string; feedback?: string | null; services?: TwinServices;
+  initialRepair?: GenerationRepair | null; retainRepairScope?: boolean;
   /** Reports a step of the environment. */
   step(step: string): Promise<void>;
   /**
    * Runs the agent once: what it wrote, or why the attempt is refused. Rejects when it cannot run, and when cancelled,
    * with the end of its output in the error's `logs`.
    */
-  author(input: { draft: string; feedback: string | null; attempt: number }): Promise<Authored>;
+  author(input: { draft: string; feedback: string | null; attempt: number; repair?: Pick<StagedFailure, 'stage' | 'subject'> }): Promise<Authored>;
   /** Prepares the twin from a valid config, reporting its steps; rejects with its failure. */
   prepare(config: TwinConfig): Promise<Result>;
   /** Why a prepared twin does not count as ready, with the app that did not answer, or null when it does. */
@@ -123,8 +155,12 @@ export interface GenerationSteps<Result> {
  * when a preparation failed, ends the loop at once; running out of time does not. Its log, in `logs` of the result and
  * of each rejection, holds every attempt's output and each failed attempt's feedback, all redacted.
  */
-export async function generateTwinConfig<Result>({ draft, feedback = null, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, available = async () => null, hide, cancelled }: GenerationSteps<Result>) {
+export async function generateTwinConfig<Result>({ draft, feedback = null, initialRepair, retainRepairScope = false, services = registry, step, author, prepare, verify, diagnose, logs, unwired = () => [], failed = async () => {}, checkpoint = async () => {}, teardown, available = async () => null, hide, cancelled }: GenerationSteps<Result>) {
   let text = draft, notes = feedback;
+  // A feedback-bearing old draft has no trusted scope metadata. A structured author must refuse it rather than
+  // parsing untrusted Markdown into authority or treating a failed runtime as a new unconstrained generation.
+  let repair = initialRepair ?? (retainRepairScope && initialRepair === undefined && feedback?.trim() ? { stage: 'valid' as const } : undefined);
+  const savedDraft = (): GenerationDraft => ({ text, feedback: notes ?? '', ...(retainRepairScope ? { repair: repair ?? null } : {}) });
   const output: string[] = [];
   const record = (attempt: number, what: string, tail: unknown) => { if (typeof tail === 'string' && tail.trim()) output.push(`${writingStep(attempt)}: ${hide(what)}\n${hide(tail).trim()}`); };
   const withLogs = <Failure extends Error>(error: Failure) => output.length ? Object.assign(error, { logs: output.join('\n\n') }) : error;
@@ -134,7 +170,7 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
     if (unavailable) throw withLogs(new Error(unavailable));
     await step(writingStep(attempt));
     let written: Authored;
-    try { written = await author({ draft: text, feedback: notes, attempt }); }
+    try { written = await author({ draft: text, feedback: notes, attempt, repair }); }
     catch (error) {
       if (!(error instanceof Error)) throw error;
       record(attempt, error.message, 'logs' in error ? error.logs : null);
@@ -158,6 +194,7 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
           const { app, ...found } = problem;
           failure = { ...found, heading: 'the twin started, but does not count as ready', logs: await logs(app) };
         } catch (error) {
+          if (error instanceof MissingEnvironmentInputs) throw withLogs(error);
           if (cancelled() || error instanceof Error && 'cleanupIncomplete' in error && error.cleanupIncomplete === true) throw error instanceof Error ? withLogs(error) : error;
           // A preparation that failed while no twin can be built, as when Docker stopped, is not the config's to fix, whatever
           // its error names: generation ends with it rather than paying for another attempt, and leaves no draft of it.
@@ -168,12 +205,17 @@ export async function generateTwinConfig<Result>({ draft, feedback = null, servi
       }
     }
     // The unwired variables of the config the next attempt starts from.
-    notes = feedbackText({ title: attemptTitle(attempt), failure, unwired: unwired(text), hide });
-    if (written.error === undefined) await checkpoint({ text, feedback: notes });
+    const failedFeedback = feedbackText({ title: attemptTitle(attempt), failure, unwired: unwired(text), hide });
+    // A model refusal or deadline cannot erase the runtime error a scoped retry still has to fix.
+    if (!(retainRepairScope && repair && written.error !== undefined && notes)) notes = failedFeedback;
+    if (built && failure.stage !== 'valid') repair = { stage: failure.stage, ...(failure.subject ? { subject: hide(failure.subject) } : {}) };
+    else if (!retainRepairScope) repair = { stage: failure.stage, ...(failure.subject ? { subject: hide(failure.subject) } : {}) };
+    if (written.error === undefined) await checkpoint(savedDraft());
     const said = firstLine(summary(failure, hide));
     await failed({ attempt, stage: failure.stage, summary: said });
-    record(attempt, `Failed at ${failure.stage}.`, notes);
-    if (attempt === ATTEMPTS) throw withLogs(Object.assign(new Error(`Writing the twin config failed after ${ATTEMPTS} attempts: ${said}`), { draft: { text, feedback: notes } }));
+    record(attempt, `Failed at ${failure.stage}.`, failedFeedback);
+    if (written.terminal) throw withLogs(Object.assign(new Error(said), { draft: savedDraft() }));
+    if (attempt === ATTEMPTS) throw withLogs(Object.assign(new Error(`Writing the twin config failed after ${ATTEMPTS} attempts: ${said}`), { draft: savedDraft() }));
     if (built) await teardown(built);
   }
 }

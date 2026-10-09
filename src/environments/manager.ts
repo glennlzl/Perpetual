@@ -1,10 +1,11 @@
 import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { detectEnvironmentConfig } from './plans.ts';
 import { prepareEnvironment, environmentHealth, environmentLogs, destroySandbox } from './runtime.ts';
-import { AUTHORING, isGenerationFailure, type AttemptOutcome } from './generation.ts';
+import { AUTHORING, MissingEnvironmentInputs, isGenerationFailure, storedGenerationDraft, type AttemptOutcome } from './generation.ts';
 import { redact } from '../redaction.ts';
 import { diagnosticText, retainDiagnostics } from './diagnostics.ts';
 import { IN_PROGRESS, applicationOrigin, createEnvironmentUsage, holdsResources, isEnvironmentBusy, scopeId } from './usage.ts';
@@ -117,9 +118,6 @@ function configOf(plan: EnvironmentPlan): DetectedConfig | TwinConfig {
   const { provenance, ...config } = plan;
   return config;
 }
-/** Saved drafts are the controller's own; one of any other shape is left out. */
-const savedDraft = (value: unknown): value is GenerationDraft => value !== null && typeof value === 'object'
-  && typeof (value as Partial<GenerationDraft>).text === 'string' && typeof (value as Partial<GenerationDraft>).feedback === 'string';
 /** The App Settings model when it is an OpenRouter one, which the twin config author runs on; null without one. */
 async function appSettingsModel(dataDir: string): Promise<AuthoringModel | null> {
   const settings = await createBrowserModelSettings({ dataDir }), configuration = settings.configuration();
@@ -165,7 +163,10 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     const plans = Object.fromEntries(Object.entries(saved.plans as Record<string, EnvironmentPlan>).filter(([, plan]) => !legacyPlan(plan)));
     const detected = 'detected' in saved && saved.detected && typeof saved.detected === 'object' && !Array.isArray(saved.detected) ? Object.fromEntries(Object.entries(saved.detected).filter(([scope, key]) => Object.hasOwn(plans, scope) && typeof key === 'string')) as Record<string, string> : {};
     // A draft belongs to a detected stage, or to a generated config that failed since.
-    const drafts = 'drafts' in saved && saved.drafts && typeof saved.drafts === 'object' && !Array.isArray(saved.drafts) ? Object.fromEntries(Object.entries(saved.drafts).filter((entry): entry is [string, GenerationDraft] => (Object.hasOwn(detected, entry[0]) || isGenerated(plans[entry[0]])) && savedDraft(entry[1]))) : {};
+    const drafts = 'drafts' in saved && saved.drafts && typeof saved.drafts === 'object' && !Array.isArray(saved.drafts) ? Object.fromEntries(Object.entries(saved.drafts).flatMap(([scope, value]) => {
+      const draft = storedGenerationDraft(value);
+      return draft && (Object.hasOwn(detected, scope) || isGenerated(plans[scope])) ? [[scope, draft]] : [];
+    })) : {};
     // Records the controller saved; loadedEnvironment drops the fields of removed features.
     state = { version: 1, plans, detected, drafts, environments: (saved.environments as SavedEnvironment[]).map(loadedEnvironment) };
   }
@@ -289,6 +290,18 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
     const scope = scopeId(context), saved = state.plans[scope];
     return saved && !Object.hasOwn(state.detected, scope) ? saved : detectEnvironmentConfig(context.scan);
   }
+  // A new stage can build a verified sibling's config. The runtime checks the copied source hash as well: a matching
+  // commit alone says nothing about local edits. Existing records bound retention; this creates no new cache or guest.
+  function reusablePlans(context: Context): NonNullable<TwinGeneration['reusablePlans']> {
+    if (!context.scan.repo.sha) return [];
+    return state.environments.flatMap(item => {
+      const saved = state.plans[item.scope];
+      if (item.pipelineKey !== context.key || item.scope === scopeId(context) || item.repair || !item.readyAt || !item.snapshot?.hash
+        || item.sourceRevision !== context.scan.repo.sha || !item.plan || !isGenerated(saved) || Object.hasOwn(state.drafts, item.scope)
+        || !isDeepStrictEqual(item.plan, configOf(saved))) return [];
+      return [{ sourceHash: item.snapshot.hash, config: item.plan, provenance: saved.provenance }];
+    });
+  }
   function findEnvironment(context: StageRef, id: string, { idle = false } = {}) {
     const environment = state.environments.find(item => item.id === id && item.scope === scopeId(context));
     if (!environment) throw new Error('Environment not found in this stage.');
@@ -394,13 +407,17 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
         // establish runtime coverage, including when a gate or a restart reuses it.
         const selectionReviewed = state.plans[scope] === saved && !Object.hasOwn(state.detected, scope) && !generated;
         const packages = (context.scan.services ?? []).map(({ path, framework }) => ({ path, ...(framework ? { framework } : {}) }));
-        const model = owns && generate && (Object.hasOwn(state.detected, scope) || generated && Object.hasOwn(state.drafts, scope)) ? await authoringModel() : null;
+        // Only an explicit creation resumes an unverified candidate. A gate still uses the stage's saved plan.
+        const pending = owns && generate && state.drafts[scope]?.pendingInputs ? state.drafts[scope] : undefined;
+        const model = owns && generate && !pending && (Object.hasOwn(state.detected, scope) || generated && Object.hasOwn(state.drafts, scope)) ? await authoringModel() : null;
         // The agent starts from the stage's draft, else the detected plan, and may add the apps detection missed; it
         // builds each config it writes, so the environment holds one only once an attempt has one.
-        const generation: TwinGeneration | undefined = model ? { model, draft: state.drafts[scope]?.text ?? `${JSON.stringify(stored, null, 2)}\n`, feedback: state.drafts[scope]?.feedback ?? null, packages } : undefined;
-        const plan = generation ? undefined : validateTwinConfig(stored);
+        const generation: TwinGeneration | undefined = model ? { model, draft: state.drafts[scope]?.text ?? `${JSON.stringify(stored, null, 2)}\n`, feedback: state.drafts[scope]?.feedback ?? null, repair: state.drafts[scope]?.repair, packages,
+          ...(Object.hasOwn(state.detected, scope) && !Object.hasOwn(state.drafts, scope) ? { reusablePlans: structuredClone(reusablePlans(context)) } : {}) } : undefined;
+        const pendingConfig: unknown = pending ? JSON.parse(pending.text) : undefined;
+        const plan = generation ? undefined : validateTwinConfig(pending ? pendingConfig : stored);
         // A generated config built as it is, whose failure would become the stage's draft.
-        const builtGenerated: GeneratedPlan | undefined = owns && !generation && generated ? { packages } : undefined;
+        const builtGenerated: GeneratedPlan | undefined = pending ? { packages, pendingInputs: pending.pendingInputs } : owns && !generation && generated ? { packages } : undefined;
         // A person's saved config is theirs to fix. When detection found no app, an agent writes the config on a person's
         // Create with an OpenRouter model, which is what the person can do.
         if (plan && !Object.keys(plan.apps).length) throw new Error(selectionReviewed ? 'Add an app before creating this environment.'
@@ -471,7 +488,7 @@ export async function createEnvironmentManager<Context extends EnvironmentContex
             }
             // Its cleanup stays unfinished, as a browser run's does, until a person deletes the environment.
             if (uncertain) Object.assign(environment, { status: 'cleanup_failed', cleanupError: environment.cleanupError ?? UNCONFIRMED });
-            if (environment.status !== 'cleanup_failed') Object.assign(environment, { status: 'failed', step: stopping ? 'Stopped' : 'Failed' });
+            if (environment.status !== 'cleanup_failed') Object.assign(environment, { status: 'failed', step: stopping ? 'Stopped' : error instanceof MissingEnvironmentInputs ? 'Waiting for inputs' : 'Failed' });
           }
           // Report "ready" and release together, so the first action on a ready environment is not refused.
           // Environment state holds a twin's test accounts without passwords; the twin's own state keeps those.

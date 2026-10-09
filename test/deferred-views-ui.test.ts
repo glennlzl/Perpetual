@@ -51,14 +51,15 @@ test('unopened views load on demand without trapping navigation or losing drafts
   await t.test('Pipeline requests none of the three views until opened', async t => {
     const page = await newPage(); t.after(() => page.close());
     const requested = new Set<string>(); page.on('request', request => requested.add(new URL(request.url()).pathname));
-    await page.goto(app.url);
+    await page.goto(`${app.url}#pipeline`);
     await expect(page.getByRole('button', { name: 'Configure source', exact: true })).toBeVisible();
     for (const chunk of Object.values(chunks)) assert.equal(requested.has(chunk), false, chunk);
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'OpenRouter', exact: true })).toBeVisible();
     assert.equal(requested.has(chunks.AppSettings), true);
     assert.equal(requested.has(chunks.EnvironmentSettings), false);
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
+    await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     await expect(page.getByText('No commits found', { exact: true })).toBeVisible();
     assert.equal(requested.has(chunks.GitGraphPanel), true);
@@ -95,7 +96,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
     const page = await newPage(); t.after(() => page.close());
     const held = Promise.withResolvers<void>(); t.after(() => held.resolve());
     await page.route(`**${chunks.GitGraphPanel}`, async route => { await held.promise; await route.continue(); });
-    await page.goto(app.url);
+    await page.goto(`${app.url}#pipeline`);
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
     await expect(sheet.getByRole('status')).toHaveText('Loading…');
@@ -112,7 +113,7 @@ test('unopened views load on demand without trapping navigation or losing drafts
   await t.test('manual Fit view wins over a queued desktop resize frame', async t => {
     const page = await newPage(1600); t.after(() => page.close());
     await page.clock.install({ time: new Date('2025-01-01T00:00:00Z') });
-    await page.goto(app.url);
+    await page.goto(`${app.url}#pipeline`);
     await expect(page.getByRole('button', { name: 'Fit view', exact: true })).toBeVisible();
     await page.clock.pauseAt(new Date('2025-01-01T01:00:00Z'));
     await page.clock.runFor(200);
@@ -136,11 +137,12 @@ test('unopened views load on demand without trapping navigation or losing drafts
   await t.test('a failed view stays local and navigating away preserves the Settings draft', async t => {
     const page = await newPage(); t.after(() => page.close());
     await page.route(`**${chunks.GitGraphPanel}`, route => route.abort('failed'));
-    await page.goto(app.url);
+    await page.goto(`${app.url}#pipeline`);
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     const key = page.getByLabel('OpenRouter API Key', { exact: true });
     await key.fill('unsaved-ui-draft');
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
+    await page.getByRole('button', { name: 'Open pipeline', exact: true }).click();
     await page.getByRole('button', { name: 'Git graph', exact: true }).click();
     const sheet = page.getByRole('dialog', { name: 'Git graph', exact: true });
     await expect(sheet.getByRole('alert')).toHaveText('Could not load this view.');
@@ -159,8 +161,8 @@ test('unopened views load on demand without trapping navigation or losing drafts
     await expect(page.getByRole('alert')).toHaveText('Could not load this view.');
     // The mobile sidebar remains reachable outside the failed route.
     await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Configure source', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
+    await expect(page.getByRole('table', { name: 'Pipelines', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     failed = false;

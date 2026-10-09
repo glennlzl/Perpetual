@@ -29,12 +29,14 @@ test('the Badge reads the work under way, else the latest change, else the mode'
   assert.equal(autopilotBadge(stage('ask', change('c3', 'needs-review')))!.tone, 'blocked');
   assert.equal(autopilotBadge(stage('merge', change('c4', 'not-merged')))!.tone, 'failed');
   assert.equal(autopilotBadge(stage('merge', change('c5', 'passed', { title: 'Rerunning build' })))!.tone, 'passed', 'A failure that cleared without a change.');
+  const held = change('held', 'needs-attention');
+  assert.deepEqual(autopilotBadge(stage('merge', held)), { text: 'Needs attention', tone: 'blocked', change: held });
   const older = change('c6', 'not-merged', { sha: 'a'.repeat(40) });
   assert.deepEqual(autopilotBadge(stage('merge', older), 'b'.repeat(40)), { text: 'Autopilot', tone: 'idle', change: null }, 'An older commit\'s end no longer describes the stage.');
   assert.deepEqual(autopilotBadge(stage('merge', older), 'a'.repeat(40)), { text: 'Not merged', tone: 'failed', change: older }, 'The scanned commit\'s end does.');
   assert.deepEqual(autopilotBadge({ ...stage('merge', older), failed: { sha: 'a'.repeat(40), runs: [] } }, 'b'.repeat(40)), { text: 'Not merged', tone: 'failed', change: older }, 'So does the watched head\'s.');
   assert.deepEqual(autopilotBadge(stage('merge', change('c7', 'running', { sha: 'a'.repeat(40) })), 'b'.repeat(40))!.text, 'Updating dependencies', 'Work under way always names itself.');
-  assert.deepEqual(Object.values(CHANGE_LABELS), ['Running', 'Merged', 'Passed', 'Needs review', 'Not merged']);
+  assert.deepEqual(Object.values(CHANGE_LABELS), ['Queued', 'Running', 'Merged', 'Passed', 'Needs review', 'Needs attention', 'Not merged']);
   assert.deepEqual(MODE_LABELS, { merge: 'Autopilot', ask: 'Ask first' });
 });
 
@@ -90,4 +92,12 @@ test('the poller reads every 2 seconds while a change is under way, otherwise ev
   assert.equal(requests.length, 4, 'A refresh reads at once.');
   poller.stop();
   assert.equal(h.timers.queue.length, 0);
+});
+
+test('queued changes add a count without claiming that queued work is running', () => {
+  const waiting = change('q', 'queued'), running = change('r', 'running');
+  assert.equal(changeActive(waiting), false);
+  assert.equal(stageActive(stage('merge', waiting)), false);
+  assert.equal(autopilotBadge(stage('merge', running, waiting))?.text, `${running.title} · 1 queued`);
+  assert.equal(autopilotBadge(stage('merge', waiting))?.text, '1 queued');
 });

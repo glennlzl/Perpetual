@@ -25,9 +25,9 @@ const words = (status: string) => status.replaceAll('-', ' ');
 type Names = (stageId: string) => string;
 
 // running while the manager works; merged; passed when the failure cleared without a change; a fix that waits for a
-// person is under review, and one that ended without a fix, or whose pull request is closed, is not merged.
-const changeStatus = (repair: PublicRepair): ChangeStatus => ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' ? 'passed'
-  : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : 'not-merged';
+// person is under review with an open pull request, or needs attention without one. Other unsuccessful endings are not merged.
+const changeStatus = (repair: PublicRepair): ChangeStatus => repair.status === 'queued' ? 'queued' : ACTIVE.includes(repair.status) ? 'running' : repair.status === 'merged' ? 'merged' : repair.status === 'flaky' || repair.status === 'passed' ? 'passed'
+  : repair.status !== 'failed' && repair.pullRequest && !repair.pullRequest.closed ? 'needs-review' : repair.status === 'needs-person' ? 'needs-attention' : 'not-merged';
 
 // The step a repair is at: the ones before it are done, it is active or how the repair ended, the rest are pending. A
 // ready repair waits at Verify until the manager recorded its pull request's head verified, by CI and every journey
@@ -63,6 +63,8 @@ function details(repair: PublicRepair, names: Names): DetailPart[][] {
 }
 
 function steps(repair: PublicRepair, names: Names, reason: string | undefined): ChangeStep[] {
+  if (repair.status === 'queued') return [];
+  if (repair.status === 'passed') return [{ id: 'build', name: 'Build passed', status: 'done' }];
   const at = reached(repair), { status } = repair;
   const end: StepStatus = ACTIVE.includes(status) ? 'active' : status === 'merged' || status === 'flaky' ? 'done' : status === 'failed' ? 'failed' : 'waiting';
   const parts = details(repair, names);
@@ -81,10 +83,19 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
   const cleanupReason = repair.cleanup?.status === 'failed' ? `Cleanup incomplete: ${repair.cleanup.reason || 'Resource deletion could not be confirmed.'}` : repair.cleanup && !ACTIVE.includes(repair.status) ? 'Cleanup pending.' : undefined;
   const reason = [businessReason, cleanupReason].filter(Boolean).join(' ') || undefined;
   const progress = steps(repair, names, businessReason);
+  if (repair.recovery) {
+    const recovery = repair.recovery;
+    progress.splice(0, progress.length,
+      { id: 'failure', name: 'Read the failure', status: 'done', detail: repair.runs.flatMap((run, index) => [...(index ? [' · '] : []), chip(run.name || 'Workflow', run.url)]) },
+      { id: 'authorization', name: 'Check workflow authorization', status: recovery.status === 'passed' ? 'done' : 'waiting',
+        detail: recovery.runs.flatMap((run, index) => [...(index ? [' · '] : []), chip(run.name, run.url), ...(run.secrets.length ? [' references ', ...list(run.secrets.map(name => [chip(name)]))] : [' — credential source unverified']), ...(run.environment ? [' in ', chip(run.environment)] : [])]) },
+      { id: 'verify', name: 'Verify original workflows', status: repair.status === 'passed' ? 'done' : repair.status === 'rerunning' ? 'active' : 'waiting', ...(reason ? { detail: [reason] } : {}) });
+  }
   if (repair.cleanup && (!ACTIVE.includes(repair.status) || repair.cleanup.status === 'failed')) progress.push({ id: 'cleanup', name: 'Clean up', status: repair.cleanup.status === 'failed' ? 'waiting' : 'active',
     ...(repair.cleanup.reason ? { detail: [repair.cleanup.reason] } : {}) });
   return {
-    id: repair.id, stageId, kind: rerun ? 'rerun' : 'fix', title: rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha,
+    id: repair.id, stageId, kind: repair.recovery ? 'recovery' : rerun ? 'rerun' : 'fix', title: repair.recovery ? repair.status === 'passed' ? 'Build recovered' : repair.status === 'rerunning' ? 'Verifying recovery' : 'Waiting for access' : repair.status === 'queued' || repair.status === 'passed' ? 'Build' : repair.status === 'triaging' ? 'Diagnosing build' : rerun ? 'Rerunning build' : 'Fixing build', status: changeStatus(repair), steps: progress, sha: repair.sha, ...(repair.paused ? { paused: true } : {}),
+    ...(repair.recovery ? { recovery: repair.recovery } : {}),
     ...(repair.pullRequest ? { pullRequest: { number: repair.pullRequest.number, url: repair.pullRequest.url } } : {}), ...(reason ? { reason } : {}),
     startedAt: repair.createdAt, ...(repair.completedAt ? { endedAt: repair.completedAt } : {}),
   };
@@ -98,8 +109,12 @@ export function repairChange(repair: PublicRepair, stageId: string, names: Names
 export function autopilotStages(view: RepairView, stageId: string | null, names: Names = id => id): Record<string, StageAutopilot> {
   if (!stageId || view.autoMerge === undefined) return {};
   const { head } = view, current = head && view.repairs.find(repair => repair.sha === head.sha);
-  const runs = head && (!current || retryable(current)) ? head.failed : [];
-  return { [stageId]: { mode: view.autoMerge ? 'merge' : 'ask', changes: view.repairs.map(repair => repairChange(repair, stageId, names)), ...(head ? { failed: { sha: head.sha, runs } } : {}) } };
+  const waitingForAccess = current?.recovery && current.status === 'needs-person' && current.recovery.status !== 'passed';
+  const runs = head && !waitingForAccess && (!current || retryable(current)) ? head.failed : [];
+  const queued = view.repairs.filter(repair => repair.status === 'queued').reverse();
+  const ordered = [...view.repairs.filter(repair => ACTIVE.includes(repair.status)), ...queued, ...view.repairs.filter(repair => repair.status !== 'queued' && !ACTIVE.includes(repair.status))];
+  const changes = ordered.map(repair => ({ ...repairChange(repair, stageId, names), ...(repair.status === 'queued' ? { queuePosition: queued.indexOf(repair) + 1 } : {}) }));
+  return { [stageId]: { mode: view.autoMerge ? 'merge' : 'ask', changes, ...(head ? { failed: { sha: head.sha, runs } } : {}) } };
 }
 
 /** GET /api/autopilot, and the state's autopilot field. */

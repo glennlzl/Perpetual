@@ -17,3 +17,5 @@ An architecture decision record (ADR) notes one decision that is hard to reverse
 - [0003: A person reviews fixed POST reads before discovery and control admit them](0003-review-fixed-post-reads.md) (accepted)
 
 - [0004: Review application callback aliases independently of published ports](0004-review-application-callbacks.md) (accepted)
+
+- [0005: Production branch is explicit and independent of browsing](0005-production-branch-is-independent-of-browsing.md) (accepted)

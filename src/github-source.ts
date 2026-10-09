@@ -1,4 +1,4 @@
-import { GITHUB_MESSAGES, SHA, githubEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isRepository, parseGitHubResponse, runGitHub, unanswered, type GitHubFailureKind } from './github-cli.ts';
+import { GITHUB_MESSAGES, SHA, githubEnvironment, githubGitEnvironment, githubFailureKind, githubGetArgs, hasNextPage, isBranchName, isRepository, parseGitHubResponse, runGitHub, unanswered, type GitHubFailureKind } from './github-cli.ts';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -58,12 +58,13 @@ function commandFailure(error: ExecFileException | GitHubSourceError, executable
   return failure(`${operation} failed. Check your network connection and GitHub CLI account, then try again.`);
 }
 
-async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string) {
+async function command(executable: string, args: string[], operation: string, timeout = API_TIMEOUT, cwd?: string, authenticate = false) {
   try {
     if (executable === 'gh') return await runGitHub(args, { timeout, maxBuffer: MAX_OUTPUT, env: commandEnvironment() });
+    const env = authenticate ? await githubGitEnvironment({ env: commandEnvironment() }).catch(error => { throw commandFailure(error, 'gh', 'Reading GitHub credentials'); }) : commandEnvironment();
     return await exec(executable, args, {
       timeout, maxBuffer: MAX_OUTPUT, encoding: 'utf8', windowsHide: true,
-      env: commandEnvironment(), ...(cwd ? { cwd } : {}),
+      env, ...(cwd ? { cwd } : {}),
     });
   } catch (error) { throw commandFailure(error as ExecFileException, executable, operation); }
 }
@@ -86,9 +87,7 @@ function repositoryName(value: unknown) {
 }
 
 function branchName(value: unknown) {
-  if (typeof value !== 'string' || !value || value.length > 1024 || value.startsWith('-') || value === '@' || value.endsWith('.')
-    || /[\s\u0000-\u001f\u007f~^:?*\[\\]/u.test(value) || value.includes('..') || value.includes('@{')
-    || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) {
+  if (!isBranchName(value)) {
     throw new GitHubSourceError('Choose a valid Git branch name from the repository.');
   }
   return value;
@@ -205,7 +204,7 @@ async function scanDirectory(checkoutPath: string, rootDirectory: string) {
   return canonical;
 }
 
-/** Git arguments for a managed clone: no hooks or monitor, credentials only from gh's helper, no file or ext transport. */
+/** Git arguments for a managed clone: no hooks or monitor, only the existing CLI credential, no file or ext transport. */
 export function gitArgs(args: string[]) {
   return [
     '-c', `core.hooksPath=${NULL_FILE}`, '-c', 'core.fsmonitor=false',
@@ -293,7 +292,7 @@ export async function ensureGitHubHistory({ source, dataDir, refresh = false }: 
       '--no-auto-maintenance', '--no-write-fetch-head', '--filter=blob:none',
       ...(shallow ? ['--unshallow'] : []), '--',
       `https://github.com/${checkout.repository}.git`, '+refs/heads/*:refs/remotes/origin/*',
-    ]), 'Syncing GitHub history', 120_000, key);
+    ]), 'Syncing GitHub history', 120_000, key, true);
     const result: HistorySync = { syncedAt: new Date().toISOString(), source: 'github' };
     historySyncs.set(key, result);
     return result;
@@ -319,7 +318,7 @@ export async function updateGitHubSource({ source, dataDir, sha }: { source?: Ma
       'fetch', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--no-write-fetch-head',
       // A full history stays full; a depth-one copy fetches only this commit.
       ...(checkout.shallow ? ['--depth', '1'] : []), '--', `https://github.com/${checkout.repository}.git`, sha,
-    ]), 'Fetching the commit', 120_000, checkoutPath);
+    ]), 'Fetching the commit', 120_000, checkoutPath, true);
     // No checkout hook; global filters and templates are disabled for this operation.
     await command('git', gitArgs(['reset', '--hard', sha]), 'Updating the source files', 60_000, checkoutPath);
     // The graph follows the fetched branch tip, which this fetch by commit does not advance: the next read syncs again.
@@ -352,7 +351,7 @@ export async function cloneGitHubSourceCommit({ source, dataDir, sha, directory,
     // so the local transport is allowed for this command alone, and its upload-pack serves a commit behind its tips.
     const copied = await command('git', gitArgs(['-c', 'protocol.file.allow=always', ...fetch, '--upload-pack=git -c uploadpack.allowAnySHA1InWant=true upload-pack', '--', checkoutPath, sha]),
       'Copying the managed source', 120_000, directory).then(() => true, () => false);
-    if (!copied) await command('git', gitArgs([...fetch, '--', `https://github.com/${checkout.repository}.git`, sha]), 'Fetching the commit', 120_000, directory);
+    if (!copied) await command('git', gitArgs([...fetch, '--', `https://github.com/${checkout.repository}.git`, sha]), 'Fetching the commit', 120_000, directory, true);
     await command('git', gitArgs(['checkout', '--force', '--quiet', '-B', local, sha]), 'Checking out the commit', 60_000, directory);
     const { stdout } = await command('git', gitArgs(['rev-parse', '--verify', 'HEAD']), 'Reading the copy commit', API_TIMEOUT, directory);
     if (stdout.trim().toLowerCase() !== sha.toLowerCase()) throw new GitHubSourceError('The copy did not check out this commit. Try again.');
@@ -375,7 +374,7 @@ export async function prepareGitHubSource({ repository, branch, rootDirectory = 
     await command('git', gitArgs([
       'clone', '--depth', '1', '--single-branch', '--no-tags', '--no-checkout',
       '--template=', '--branch', selectedBranch, '--', `https://github.com/${selected}.git`, checkoutPath,
-    ]), 'Cloning the selected GitHub branch', 120_000);
+    ]), 'Cloning the selected GitHub branch', 120_000, undefined, true);
     await chmod(checkoutPath, 0o700);
     const { stdout: checkedOutBranch } = await command('git', gitArgs(['symbolic-ref', '--short', 'HEAD']), 'Reading the checkout branch', API_TIMEOUT, checkoutPath);
     if (checkedOutBranch.trim() !== selectedBranch) throw new GitHubSourceError('The selected branch changed while connecting. Refresh the branch list and reconnect.');

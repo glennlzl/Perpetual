@@ -40,7 +40,7 @@ const QUERY_VALUE = new RegExp(`([?&](?:${SECRET_NAMES})=)[^&\\s"'<>]+`, 'gi');
 const AUTHORIZATION_HEADER = /((?:^[ \t>]*|["'])Authorization[ \t]*:[ \t]*)[^\s"'][^\r\n"']*/gim;
 const AUTHORIZATION = /((?:Authorization\s*[:=]|\(\s*["']Authorization["']\s*,|\[\s*["']Authorization["']\s*\]\s*=)\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|`[^`\r\n]*`|(?:[\w-]+[ \t]+)?[^\s"',;)}]+(?:[,;)}]+[^\s"',;)}]+)*)/gi;
 // A JWT starts where a run of name characters starts, as a name does, so a long run is read once, not once per hyphen.
-const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|(?<!-)eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
+const TOKEN_SHAPE = /\b(?:gh[pousr]_\w+|github_pat_\w+|vc[arp]_[A-Za-z0-9_-]{16,}|glpat-[\w-]{20,}|sk-[\w-]{10,}|(?:sk|rk)_(?:live|test)_[\w-]+|rkcs_test_[\w-]+|whsec_[\w-]+|sbp_[\w-]+|sb_secret_[\w-]+|xox[abeoprs]-[\w-]{10,}|npm_[A-Za-z0-9]{36}|AIza[\w-]{30,}|A(?:KI|SI)A[A-Z0-9]{16}|(?<!-)eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g;
 // Start once per possible scheme, rather than rescanning every suffix of a long ordinary word. Any leading
 // non-letter scheme characters stay in the preserved group, so embedded forms such as 1https:// keep their text.
 // User info, a user or a password alone too, ends at the last @ before the path. The user ends at ? or #, so an @ in a

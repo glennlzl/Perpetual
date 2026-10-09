@@ -82,6 +82,7 @@ test('a managed clone moves to a commit in place, one git operation at a time wi
   const bin = join(dir, 'bin');
   await mkdir(bin);
   await writeFile(join(bin, 'git'), '#!/bin/sh\nfor arg do\n  if [ "$arg" = fetch ]; then echo start >> "$PERPETUAL_TEST_FETCHES"; sleep 0.2; echo end >> "$PERPETUAL_TEST_FETCHES"; exit 0; fi\ndone\nexec "$PERPETUAL_TEST_GIT" "$@"\n');
+  await writeFile(join(bin, 'gh'), `#!${process.execPath}\nif (process.argv[2] !== 'auth' || process.argv[3] !== 'token') process.exit(1);\nprocess.stdout.write('fixture-token\\n');\n`, { mode: 0o755 });
   await chmod(join(bin, 'git'), 0o755);
   const saved = { PATH: process.env.PATH };
   Object.assign(process.env, { PATH: `${bin}:${process.env.PATH}`, PERPETUAL_TEST_FETCHES: log, PERPETUAL_TEST_GIT: realGit });

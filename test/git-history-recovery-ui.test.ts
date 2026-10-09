@@ -7,32 +7,37 @@ import { chromium, expect } from '@playwright/test';
 import { startServer } from '../src/server.ts';
 import { defaultPipeline } from '../src/pipeline.ts';
 
-test('Git history recovery and pagination respect the user’s current focus', { timeout: 60000 }, async t => {
+test('Git history recovery and automatic pagination preserve rows, scroll and focus', { timeout: 60000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-history-recovery-'));
   const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'state') });
   const browser = await chromium.launch({ headless: true });
   t.after(async () => { await browser.close(); await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const commits = ['a', 'b'].map((char, index) => ({ hash: char.repeat(40), message: `Example commit ${index + 1}`, author: { name: 'Example author' }, date: '2026-01-01T00:00:00Z', parents: index ? [] : ['b'.repeat(40)] }));
+  const hash = (index: number) => index.toString(16).padStart(40, '0');
+  const commits = Array.from({ length: 101 }, (_, index) => ({ hash: hash(index + 1), message: `Example commit ${index + 1}`, author: { name: 'Example author' }, date: '2026-01-01T00:00:00Z', parents: index < 100 ? [hash(index + 2)] : [] }));
   const errors: string[] = [];
   async function open(failed = false) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     page.setDefaultTimeout(5000); page.on('pageerror', error => errors.push(error.message));
     let held: ReturnType<typeof Promise.withResolvers<void>> | null = null;
     let started: ReturnType<typeof Promise.withResolvers<void>> | null = null;
+    let pageRequests = 0;
     await page.route('**/api/**', async route => {
       const url = new URL(route.request().url()); let reply: unknown = {};
-      if (url.pathname === '/api/state') reply = { defaultRepo: '/acme/app', scan: { repo: { path: '/acme/app', name: 'app', branch: 'main', sha: commits[0].hash }, delivery: { source: [], build: [], production: [] } }, pipeline: defaultPipeline('/acme/app'), environments: [], providers: [] };
+      if (url.pathname === '/api/state') reply = { defaultRepo: '/acme/app', scan: { repo: { path: '/acme/app', name: 'app', branch: 'preview', sha: commits[0].hash }, delivery: { source: [], build: [], production: [] } }, pipeline: defaultPipeline('/acme/app'), environments: [], providers: [] };
       if (url.pathname === '/api/git-history') {
+        const more = url.searchParams.has('cursor');
+        if (more) { pageRequests++; assert.equal(url.searchParams.get('cursor'), 'next-page'); }
         started?.resolve(); if (held) await held.promise;
         if (failed) { await route.fulfill({ status: 503, json: { error: 'Could not read history. Try again.' } }); return; }
-        const more = Number(url.searchParams.get('limit')) > 100;
-        reply = { commits: more ? commits : [commits[0]], hasMore: !more, branch: 'main', repository: 'acme/app', source: 'local' };
+        reply = { commits: more ? commits.slice(100) : commits.slice(0, 100), hasMore: !more, nextCursor: more ? null : 'next-page', branch: 'preview', repository: 'acme/app', source: 'local' };
       }
       await route.fulfill({ json: reply });
     });
-    await page.goto(app.url); await page.getByRole('button', { name: 'Git graph', exact: true }).click();
-    return { page, retry: page.getByRole('button', { name: 'Retry', exact: true }), more: page.getByRole('button', { name: 'Load more', exact: true }), closeButton: page.getByRole('button', { name: 'Close Git graph', exact: true }), entries: page.locator('[data-slot="commit-entry"]'),
-      fail: () => { failed = true; }, recover: () => { failed = false; },
+    await page.goto(`${app.url}#pipeline`); await page.getByRole('button', { name: 'Git graph', exact: true }).click();
+    const body = page.getByLabel('Commit history', { exact: true });
+    return { page, body, retry: page.getByRole('button', { name: 'Retry', exact: true }), closeButton: page.getByRole('button', { name: 'Close Git graph', exact: true }), entries: page.locator('[data-slot="commit-entry"]'),
+      fail: () => { failed = true; }, recover: () => { failed = false; }, pageRequests: () => pageRequests,
+      scrollToEnd: () => body.evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop; }),
       hold() { held = Promise.withResolvers<void>(); started = Promise.withResolvers<void>(); return started.promise; },
       release() { held?.resolve(); held = null; }, close: async () => { held?.resolve(); await page.close(); },
     };
@@ -42,22 +47,41 @@ test('Git history recovery and pagination respect the user’s current focus', {
     const started = f.hold(); await f.retry.press('Enter'); await started;
     await expect(f.retry).toBeFocused(); await expect(f.retry).toHaveAttribute('aria-busy', 'true');
     f.release(); await expect(f.page.getByRole('dialog', { name: 'Git graph', exact: true }).getByRole('alert')).toHaveText('Could not read history. Try again.');
+    await expect(f.retry).toHaveAttribute('aria-busy', 'false');
     await expect(f.retry).toBeFocused(); f.recover(); await f.retry.press('Enter');
     await expect(f.entries.first()).toBeFocused();
   });
-  await t.test('Load more resumes on the first new commit when it still owns focus', async t => {
-    const f = await open(); t.after(f.close); await expect(f.more).toBeVisible();
-    await f.more.press('Enter'); await expect(f.entries).toHaveCount(2); await expect(f.entries.nth(1)).toBeFocused();
+  await t.test('scrolling appends the next page in place without a second branch selector or footer', async t => {
+    const f = await open(); t.after(f.close); await expect(f.entries).toHaveCount(100);
+    await expect(f.page.getByLabel('History branch: preview', { exact: true })).toHaveText('preview');
+    await expect(f.page.getByRole('combobox', { name: 'History branches' })).toHaveCount(0);
+    await expect(f.page.getByRole('button', { name: 'Load more', exact: true })).toHaveCount(0);
+    const dialog = f.page.getByRole('dialog', { name: 'Git graph', exact: true });
+    await expect(dialog.getByText('acme/app', { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText(/history · \d+ commits/)).toHaveCount(0);
+    const started = f.hold();
+    await f.entries.nth(99).focus();
+    const before = await f.scrollToEnd(); await started;
+    await expect(f.entries).toHaveCount(100);
+    f.release(); await expect(f.entries).toHaveCount(101);
+    assert.equal(await f.body.evaluate(element => element.scrollTop), before);
+    await expect(f.entries.nth(99)).toBeFocused();
+    assert.equal(f.pageRequests(), 1);
   });
   await t.test('a late page does not take focus from Close', async t => {
-    const f = await open(); t.after(f.close); await expect(f.more).toBeVisible();
-    const started = f.hold(); await f.more.press('Enter'); await started;
-    await f.closeButton.focus(); f.release(); await expect(f.entries).toHaveCount(2); await expect(f.closeButton).toBeFocused();
+    const f = await open(); t.after(f.close); await expect(f.entries).toHaveCount(100);
+    const started = f.hold(); await f.scrollToEnd(); await started;
+    await f.closeButton.focus(); f.release(); await expect(f.entries).toHaveCount(101); await expect(f.closeButton).toBeFocused();
   });
-  await t.test('failed pagination moves to Retry and keeps the pending page on recovery', async t => {
-    const f = await open(); t.after(f.close); await expect(f.more).toBeVisible();
-    f.fail(); await f.more.press('Enter'); await expect(f.retry).toBeFocused();
-    f.recover(); await f.retry.press('Enter'); await expect(f.entries).toHaveCount(2); await expect(f.entries.nth(1)).toBeFocused();
+  await t.test('failed pagination retains the graph and waits for an explicit retry', async t => {
+    const f = await open(); t.after(f.close); await expect(f.entries).toHaveCount(100);
+    f.fail(); await f.scrollToEnd(); await expect(f.retry).toBeVisible();
+    await expect(f.entries).toHaveCount(100);
+    await f.body.evaluate(element => { element.scrollTop = 0; });
+    await f.scrollToEnd(); await expect(f.retry).toBeVisible();
+    assert.equal(f.pageRequests(), 1, 'Scrolling must not loop on a failed page.');
+    f.recover(); await f.retry.press('Enter'); await expect(f.entries).toHaveCount(101); await expect(f.entries.nth(100)).toBeFocused();
+    assert.equal(f.pageRequests(), 2);
   });
   assert.deepEqual(errors, []);
 });

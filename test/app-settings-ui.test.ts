@@ -47,7 +47,7 @@ test('Settings save completion survives leaving and reopening the page', { timeo
     await page.getByRole('option', { name: 'Model A', exact: true }).click();
     await page.getByRole('button', { name: 'Save changes', exact: true }).click();
     await expect.poll(() => submitted.length).toBe(1);
-    await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
     await expect(selection).toHaveCount(0);
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(selection).toContainText('Model A');

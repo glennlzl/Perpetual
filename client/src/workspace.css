@@ -101,7 +101,6 @@
 [data-variant="destructive"]:is(button, [role="button"]):hover { background: #991b1b; }
 [data-slot="alert-dialog-header"] { justify-items: start; padding-right: 0; }
 [data-slot="alert-dialog-description"] { text-align: left; }
-.git-graph-toolbar { padding: 20px 24px; border-bottom: 1px solid var(--workspace-divider); }
 .git-graph-inspector .inspector-body { padding-top: 16px; }
 .journey-card [data-slot="checkbox"], .generate-replace-list [data-slot="checkbox"] { position: relative; width: 18px; height: 18px; }
 .journey-card [data-slot="checkbox"]::after, .generate-replace-list [data-slot="checkbox"]::after { content: ""; position: absolute; inset: -7px; }
@@ -133,7 +132,6 @@
 :is([data-slot="dialog-content"], [data-slot="alert-dialog-content"], .git-graph-inspector) { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 :is([data-slot="dialog-content"], [data-slot="alert-dialog-content"]) ::selection { background: var(--foreground); color: var(--background); }
 @media (max-width: 640px) {
-  .git-graph-toolbar { padding: 16px; }
   .case-editor-body { padding: 20px; }
   .case-editor-error { padding-inline: 20px; }
   .case-editor > [data-slot="dialog-header"] { padding: 20px 52px 20px 20px; }

@@ -5,4 +5,6 @@ export interface GitHistory {
   refCount: number; localBranchCount: number; remoteBranchCount: number;
   shallow: boolean; hasMore: boolean; limit: number; scope: string; readAt: string;
   source: 'local' | 'github'; syncedAt?: string;
+  /** Current-branch continuation anchored to its first page's tip; null at the end. */
+  nextCursor?: string | null;
 }

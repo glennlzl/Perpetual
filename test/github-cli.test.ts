@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
-import { GITHUB_MESSAGES, githubEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, githubUnreachable, hasNextPage, isRepository, isUnreachable, notModified, parseGitHubResponse, runGitHub, unanswered, untilReachable, type GitHubFailureKind } from '../src/github-cli.ts';
+import { GITHUB_MESSAGES, githubEnvironment, githubGitEnvironment, githubFailureKind, githubGetArgs, githubHttpStatus, githubUnreachable, hasNextPage, isRepository, isUnreachable, notModified, parseGitHubResponse, runGitHub, unanswered, untilReachable, type GitHubFailureKind } from '../src/github-cli.ts';
 
 test('gh runs with its own configuration and none of the inherited git or debug settings', () => {
   const saved = { ...process.env };
@@ -23,6 +23,20 @@ test('gh runs with its own configuration and none of the inherited git or debug 
 test('a repository is owner/name, never a path', () => {
   assert.deepEqual(['acme/app', 'acme/app.js', 'a-b/c_d.e', 'mona_acme/dotfiles'].map(isRepository), [true, true, true, true], 'An Enterprise Managed User owns repositories as handle_shortcode.');
   assert.deepEqual(['acme', 'acme/', '/app', 'acme/.', 'acme/..', 'owner/repo/../../user', 'acme/app/x', '_acme/app', 42, null].map(isRepository), [false, false, false, false, false, false, false, false, false, false]);
+});
+
+test('Git network credentials stay in its environment, only apply to GitHub HTTPS and never follow a redirect', async () => {
+  const original = githubEnvironment(), calls: string[][] = [];
+  const env = await githubGitEnvironment({ env: original, run: async (file, args, options) => {
+    assert.equal(file, 'gh'); assert.equal(options.env, original); calls.push(args);
+    return { stdout: 'fixture-token\n' };
+  } });
+  assert.deepEqual(calls, [['auth', 'token', '--hostname', 'github.com']]);
+  assert.equal(env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraHeader');
+  assert.equal(env.GIT_CONFIG_VALUE_0, `Authorization: Basic ${Buffer.from('x-access-token:fixture-token').toString('base64')}`);
+  assert.deepEqual([env.GIT_CONFIG_KEY_1, env.GIT_CONFIG_VALUE_1], ['http.followRedirects', 'false']);
+  assert.equal(original.GIT_CONFIG_COUNT, undefined, 'The host environment is not changed.');
+  for (const stdout of ['', 'fixture-token\nextra-line']) await assert.rejects(githubGitEnvironment({ run: async () => ({ stdout }) }), /gh auth login/);
 });
 
 test('a gh api reply parses to its status, tag, headers and body, and a 304 comes back bare', () => {

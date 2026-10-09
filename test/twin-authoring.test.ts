@@ -5,7 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { authorTwinConfig } from '../src/twin/authoring.ts';
+import { authorTwinConfig, inputAvailabilityContext } from '../src/twin/authoring.ts';
 import type { AuthoringOptions } from '../src/twin/authoring.ts';
 import { evidenceText, repositoryFacts } from '../src/environments/evidence.ts';
 import { REDACTED } from '../src/redaction.ts';
@@ -66,7 +66,7 @@ test('the author reads EVIDENCE.md as the controller formatted it, credential-na
     return rewriteDraft;
   } }).promise;
   assert.equal(result.text, draft);
-  assert.equal(observed, evidence);
+  assert.equal(observed, `${evidence}\n\n${inputAvailabilityContext()}`);
 });
 
 test('a short supplied value, such as a local model server placeholder key, is not a secret to the author', async t => {

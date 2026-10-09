@@ -1,6 +1,8 @@
 // Public GitHub source, connection and evidence replies. Private CLI output and credentials never join these types.
 
 export interface GitHubAccount { login: string; name: string | null }
+/** POST /api/source/github: creation confirms branch as the Production branch and initial source; ordinary saves only change the viewed source. */
+export interface GitHubSourceSelection { repository: string; branch: string; rootDirectory: string; createPipeline?: boolean }
 /**
  * A verified CLI account is present exactly when the session is authenticated. An unreachable session is one GitHub did
  * not answer for now, which says nothing about the account; its message names why.

@@ -46,7 +46,7 @@ test('a gate commit refresh preserves a pending optimistic stage collapse in Chr
     }
     await route.fulfill({ json: result });
   });
-  await page.goto(server.url);
+  await page.goto(`${server.url}#pipeline`);
   await expect(page.getByRole('button', { name: 'Collapse Build', exact: true })).toBeVisible();
   // The gate learns about the next commit and starts a source read. The user collapses Build before it returns.
   const before = stateRequests; holdState = true; gateSha = nextSha;
@@ -69,7 +69,8 @@ test('rapid collapses stay interactive, isolate a failed save and can be retried
   const server = await createUiServer(t, { configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
   await server.listen();
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
-  const page = await browser.newPage(), repoPath = '/acme/app', first = Promise.withResolvers<void>();
+  // Keep both controls in view across the full-width testing invitation; this exercises concurrent saves, not canvas panning.
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } }), repoPath = '/acme/app', first = Promise.withResolvers<void>();
   t.after(() => first.resolve());
   let pipeline = defaultPipeline(repoPath), writes = 0;
   await page.route('**/api/**', async route => {
@@ -84,7 +85,7 @@ test('rapid collapses stay interactive, isolate a failed save and can be retried
     await route.fulfill({ json: result, status });
   });
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  await page.goto(`${origin}/build/`);
+  await page.goto(`${origin}/build/#pipeline`);
   await page.getByRole('button', { name: 'Collapse Build', exact: true }).click();
   await page.getByRole('button', { name: 'Collapse Production', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Expand Build', exact: true })).toBeVisible();
@@ -138,7 +139,7 @@ test('a global repair cleanup failure is visible without changing Build or impor
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   };
   const origin = `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`;
-  await page.goto(`${origin}/build/`);
+  await page.goto(`${origin}/build/#pipeline`);
   const alert = page.getByRole('alert');
   const buildCard = page.getByRole('group', { name: 'Build', exact: true });
   await expect(buildCard.getByText('Failedbbbbbbb', { exact: true })).toBeVisible();

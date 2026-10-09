@@ -192,15 +192,20 @@ test('a pull request where the workflow that failed did not run waits for a pers
   assert.deepEqual([h.repair()?.reason, h.repair()?.pullRequest?.draft, h.records.ready, merges], ['The failed workflow CI did not run for the pull request.', true, [], 0]);
 });
 
-test('a newer head supersedes the repair waiting for CI at once and removes its box; its pull request closes with a comment once a newer head passes', async t => {
-  const h = await harness(t, { scripts: [FIX], ci: (_push, sha) => [run('101', sha, null, { event: 'pull_request' })] });
+test('a newer head queues without interrupting CI; the completed repair is retired only after the newer head passes', async t => {
+  let ciPassed = false;
+  const h = await harness(t, { scripts: [FIX], ci: (_push, sha) => [run('101', sha, ciPassed ? 'success' : null, { event: 'pull_request' })] });
   await h.fail();
   await until(() => h.repair()?.status === 'verifying-ci' && h.boxes.created.length);
   h.github.head = C;
   h.github.runs[C] = [run('3', C, null)];
   await h.manager.check();
+  assert.equal(h.repair()?.status, 'verifying-ci');
+  assert.equal(h.boxes.created[0].removed(), false);
+  assert.equal(h.manager.view().repairs.find(item => item.sha === C)?.status, 'queued');
+  ciPassed = true;
+  await until(() => h.repair()?.status === 'ready');
   await h.manager.idle();
-  assert.deepEqual([h.repair()?.status, h.repair()?.reason], ['superseded', `Superseded by ${C.slice(0, 7)}.`]);
   assert.equal(h.boxes.created[0].removed(), true);
   assert.deepEqual([h.records.closed, h.records.comments], [[], []], 'The pull request may hold a valid fix, so it stays open.');
   h.github.runs[C] = [run('3', C, 'success')];

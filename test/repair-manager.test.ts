@@ -61,15 +61,16 @@ function agent(behaviour: (context: RepairContext, signal: AbortSignal) => Promi
 // Injected source and GitHub record what the manager read; nothing reaches the network, a model or Docker. While
 // `unreachable` is above zero, a connection read finds GitHub unreachable.
 // clock: the milliseconds after 10:00 its clock starts at, such as a later start of the same controller.
-async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' }, clock = 0, outage }: { dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null; clock?: number; outage?: RepairManagerOptions['outage'] } = {}) {
+async function harness(t: TestContext, { dataDir, steps, connection = { login: 'developer', repository: 'owner/app' }, clock = 0, outage, credentials }: { credentials?: RepairGitHub['credentials']; dataDir?: string; steps?: RepairSteps; connection?: { login: string; repository: string } | null; clock?: number; outage?: RepairManagerOptions['outage'] } = {}) {
   const dir = dataDir ?? await mkdtemp(join(tmpdir(), 'perpetual-repair-'));
   let tick = clock;
   const now = () => new Date(Date.UTC(2026, 8, 25, 10, 0, 0, tick++)).toISOString();
   const current: RepairSource = { key: KEY, branch: 'main', repository: 'owner/app', checkoutPath: '/data/sources/github-1/app', rootDirectory: '/' };
   // hold, while set, keeps failure reads waiting; onRuns runs, and is awaited, within each runs read.
-  const github = { head: A, headError: null as Error | null, rerunError: null as Error | null, connection, unreachable: 0, runs: {} as Record<string, WorkflowRun[]>, logs: {} as Record<string, string>, hold: null as Promise<void> | null, onRuns: null as (() => unknown) | null };
+  const github = { head: A, headError: null as Error | null, rerunError: null as Error | null, connection, unreachable: 0, runs: {} as Record<string, WorkflowRun[]>, logs: {} as Record<string, string>, hold: null as Promise<void> | null, onRuns: null as (() => unknown) | null, onRerun: null as (() => Promise<void>) | null };
   const calls = { heads: [] as BranchHeadInput[], runs: [] as string[], failures: [] as string[], reruns: [] as string[], connections: 0 };
   const fake: RepairGitHub = {
+    ...(credentials ? { credentials } : {}),
     async connection() {
       calls.connections++;
       if (github.unreachable > 0) { github.unreachable -= 1; throw githubUnreachable(TIMED_OUT); }
@@ -88,7 +89,7 @@ async function harness(t: TestContext, { dataDir, steps, connection = { login: '
       const log = github.logs[runId] ?? LOGS.build;
       return { runId, jobs: [{ id: `job-${runId}`, name: 'test', conclusion: 'failure', failedSteps: ['Typecheck'] }], log, tail: log, diagnosis: diagnoseFailure(log), observedAt: now() };
     },
-    async rerun({ runId }) { calls.reruns.push(runId); if (github.rerunError) throw github.rerunError; },
+    async rerun({ runId }) { calls.reruns.push(runId); await github.onRerun?.(); if (github.rerunError) throw github.rerunError; },
   };
   const manager = await createRepairManager({ dataDir: dir, source: () => current, github: fake, steps, now, outage });
   t.after(async () => { await manager.close(); await rm(dir, { recursive: true, force: true }); });
@@ -157,8 +158,21 @@ test('configuration failures need a person with the reason, and never rerun or r
   await h.manager.idle();
   const repair = h.repair(B)!;
   assert.deepEqual([repair.status, repair.category], ['needs-person', 'configuration']);
-  assert.match(repair.reason ?? '', /Credentials or permissions need attention/);
+  assert.match(repair.reason ?? '', /Authorization failed in GitHub Actions/);
   assert.deepEqual([a.contexts.length, h.calls.reruns], [0, []]);
+});
+
+test('an HTTP client authorization refusal stops before any paid repair and reaches Build as actionable', async t => {
+  const a = agent();
+  const h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = 'Error: ExampleCloud GET /v6/deployments?projectId=project&limit=20: Not authorized';
+  await h.failHead([run('2', B, 'failure')]);
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.category, a.contexts.length, h.calls.reruns], ['needs-person', 'configuration', 0, []]);
+  const change = autopilotStages(h.manager.view(), 'build').build.changes[0];
+  assert.equal(change.status, 'needs-attention');
+  assert.match(change.reason ?? '', /Authorization failed in GitHub Actions/);
+  assert.equal(change.steps.find(step => step.id === 'authorization')?.status, 'waiting');
 });
 
 test('an availability failure reruns its failed jobs once, and a passing rerun is flaky, never silently green', async t => {
@@ -348,27 +362,71 @@ test('an agent step that throws or returns no result needs a person, and its err
   assert.deepEqual([empty.repair(B)?.status, empty.repair(B)?.reason], ['needs-person', 'The repair ended without a result.']);
 });
 
-test('a new head supersedes active work at once, aborting the agent step, and keeps its pull request open until a newer head passes', async t => {
+test('new observed heads queue FIFO without aborting active work, and duplicate polls keep one record', async t => {
+  const release = deferred(), order: string[] = [];
   let stopped = false;
-  const closed: string[] = [];
-  const a = agent(async (context, signal) => { await context.report({ pullRequest: PULL }); await aborted(signal); stopped = true; return { status: 'failed' }; }, { async close(repair) { closed.push(repair.pullRequest!.url); } });
+  const a = agent(async (context, signal) => {
+    order.push(context.repair.sha);
+    if (context.repair.sha === B) { await release.promise; stopped = signal.aborted; }
+    return { status: 'ready' };
+  });
+  const h = await harness(t, { steps: a.steps });
+  t.after(release.resolve);
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => a.contexts.length === 1);
+  await h.failHead([run('3', C, null)], C);
+  await h.failHead([run('4', D, 'failure')], D);
+  await h.manager.check();
+  assert.equal(h.repair(B)?.status, 'repairing');
+  assert.deepEqual([h.repair(C)?.status, h.repair(D)?.status], ['queued', 'queued']);
+  assert.equal(h.manager.view().repairs.length, 3);
+  assert.deepEqual(autopilotStages(h.manager.view(), 'build').build.changes.map(c => [c.sha, c.status, c.queuePosition]), [[B, 'running', undefined], [C, 'queued', 1], [D, 'queued', 2]]);
+  assert.equal((await h.saved()).repairs.filter(r => r.status === 'queued').length, 2);
+  release.resolve();
+  await h.manager.idle();
+  assert.deepEqual(order, [B], 'Pending CI owns the next slot, even after the head moves again.');
+  h.github.runs[C] = [run('3', C, 'failure')];
+  await h.poll();
+  assert.deepEqual(order, [B, C, D]);
+  assert.equal(stopped, false);
+});
+
+test('queued builds re-read their own CI and passing or cancelled builds never start a repair agent', async t => {
+  const release = deferred(), a = agent(async context => { if (context.repair.sha === B) await release.promise; return { status: 'ready' }; });
+  const h = await harness(t, { steps: a.steps });
+  t.after(release.resolve);
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => a.contexts.length === 1);
+  await h.failHead([run('3', C, 'failure')], C);
+  await h.failHead([run('4', D, null)], D);
+  await h.failHead([run('6', E, 'success')], E);
+  assert.equal(h.repair(E)?.status, 'queued', 'Even a build already passed on GitHub keeps its observed queue order.');
+  h.github.runs[C] = [run('5', C, 'success')];
+  h.github.runs[D] = [run('4', D, 'cancelled')];
+  release.resolve();
+  await h.manager.idle();
+  assert.deepEqual([h.repair(C)?.status, h.repair(D)?.status, a.contexts.length], ['passed', 'needs-person', 1]);
+  assert.equal(h.repair(E)?.status, 'passed');
+});
+
+test('queued work survives restart paused, cancels individually, and resumes only on a person request', async t => {
+  const a = agent(async (_context, signal) => { await aborted(signal); return { status: 'failed' }; });
   const h = await harness(t, { steps: a.steps });
   await h.failHead([run('2', B, 'failure')]);
-  await until(() => h.repair(B)?.pullRequest);
-  h.github.head = C;
-  h.github.runs[C] = [run('3', C, null)];
-  await h.manager.check();
-  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason], ['superseded', `Superseded by ${C.slice(0, 7)}.`]);
-  await h.manager.idle();
-  assert.equal(stopped, true);
-  assert.deepEqual(closed, [], 'Its pull request may hold a valid fix, so it stays open.');
-  assert.equal(h.repair(B)?.status, 'superseded', 'The aborted step returns no verdict.');
-  await assert.rejects(a.contexts[0].report({ status: 'verifying-ci' }), (error: HttpError) => error.statusCode === 409);
-  h.github.runs[C] = [run('3', C, 'success')];
-  await h.poll();
-  await h.poll();
-  assert.deepEqual([h.repair(B)?.status, closed], ['superseded', [PULL.url]], 'A newer head that passes closes it, once.');
-  assert.equal((await h.saved()).repairs[0].pullRequest?.closed, true);
+  await until(() => a.contexts.length === 1);
+  await h.failHead([run('3', C, 'failure')], C);
+  await h.failHead([run('4', D, 'failure')], D);
+  await h.manager.close();
+  const next = agent(), restored = await harness(t, { dataDir: h.dataDir, steps: next.steps });
+  restored.github.head = D;
+  restored.github.runs[C] = h.github.runs[C]; restored.github.runs[D] = h.github.runs[D];
+  await restored.poll();
+  assert.deepEqual([restored.repair(B)?.status, restored.repair(C)?.status, restored.repair(C)?.paused, next.contexts.length], ['needs-person', 'queued', true, 0]);
+  await restored.manager.stop({ id: restored.repair(C)!.id });
+  await restored.poll();
+  assert.equal(next.contexts.length, 0);
+  await restored.manager.resume(); await restored.manager.idle();
+  assert.deepEqual([restored.repair(C)?.status, next.contexts.map(c => c.repair.sha)], ['cancelled', [D]]);
 });
 
 test('a newer repair\'s own pull request closes an older unverified one\'s at once, and a verified fix\'s only once the newer fix is verified too', async t => {
@@ -378,7 +436,7 @@ test('a newer repair\'s own pull request closes an older unverified one\'s at on
   const a = agent(async (context, signal) => {
     const number = numbers[context.repair.sha], pullRequest = { number, url: `https://github.com/owner/app/pull/${number}`, branch: `perpetual/repair/${context.repair.sha.slice(0, 7)}`, draft: true };
     await context.report({ status: 'verifying-ci', pullRequest });
-    if (number === 7) await aborted(signal);
+    if (number === 7) return { status: 'failed' };
     if (!passes) return { status: 'failed', reason: 'The build was not fixed in 4 attempts.' };
     await context.report({ pullRequest: { ...pullRequest, draft: false } });
     return { status: 'ready' };
@@ -389,8 +447,7 @@ test('a newer repair\'s own pull request closes an older unverified one\'s at on
   h.github.head = C;
   h.github.runs[C] = [run('3', C, 'failure')];
   await h.poll();
-  assert.equal(h.repair(B)?.status, 'superseded');
-  await h.poll(); // the head's repair starts once the aborted step has settled
+  await h.poll(); // The prior repair ended; its unverified pull request can now be retired.
   assert.deepEqual([h.repair(C)?.status, h.repair(C)?.pullRequest?.draft, closed], ['ready', false, [7]], 'The superseded repair\'s pull request closes once the newer one opens.');
   assert.equal(h.repair(B)?.reason, `Superseded by ${C.slice(0, 7)}.`);
   passes = false;
@@ -541,8 +598,8 @@ test('one repair runs at a time: another source\'s failed head waits until the a
   h.github.head = C;
   h.github.runs[C] = [run('3', C, 'failure')];
   await h.manager.check();
-  assert.deepEqual(h.manager.view().repairs, [], 'The other source waits.');
-  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409 && error.message === 'Another repair is running.');
+  assert.equal(h.manager.view().repairs[0]?.status, 'queued', 'The other source waits visibly.');
+  await assert.rejects(h.manager.repair({ runId: '3' }), (error: HttpError) => error.statusCode === 409 && error.message === 'This commit already has a repair.');
   release.resolve();
   await h.manager.idle();
   await h.poll();
@@ -688,7 +745,7 @@ test('Stop cancels an active repair and aborts its work; a finished or unknown r
   assert.equal((await h.manager.stop({ id })).repairs[0].status, 'cancelled');
   await h.manager.idle();
   assert.deepEqual([stopped, h.repair(B)?.status], [true, 'cancelled']);
-  await assert.rejects(h.manager.stop({ id }), (error: HttpError) => error.statusCode === 409 && error.message === 'This repair is not running.');
+  await assert.rejects(h.manager.stop({ id }), (error: HttpError) => error.statusCode === 409 && error.message === 'This repair is not running or queued.');
   await assert.rejects(h.manager.stop({ id: 'missing' }), (error: HttpError) => error.statusCode === 404);
 });
 
@@ -746,7 +803,7 @@ test('a repair of the same failure that ended ready ends a run of failed repairs
   assert.equal(a.contexts.length, 5, 'Only D and E failed since the fix at C, so F\'s repair starts the agent.');
 });
 
-test('a repair a newer head superseded, or one the agent never tried, neither counts toward the breaker nor ends its run', async t => {
+test('a repair a person stopped, or one the agent never tried, neither counts toward the breaker nor ends its run', async t => {
   let started = 0, unavailable: string | null = null;
   const a = agent(async (context, signal) => {
     started += 1;
@@ -756,16 +813,18 @@ test('a repair a newer head superseded, or one the agent never tried, neither co
   }, { unavailable: () => unavailable });
   const h = await harness(t, { steps: a.steps }), [F, G] = ['f', '1'].map(digit => digit.repeat(40));
   await failHeads(h, [[B, [run('2', B, 'failure')]]]);
-  // C's attempt failed, then D superseded it while it worked.
+  // C's attempt failed, then a person stopped it while it worked.
   await h.failHead([run('3', C, 'failure')], C);
   await until(() => h.repair(C)?.attempts?.length);
+  await h.manager.stop({ id: h.repair(C)!.id });
+  await h.manager.idle();
   await failHeads(h, [[D, [run('4', D, 'failure')]]]);
   // E needs a person before the agent starts.
   unavailable = 'Add an OpenRouter API key in Settings.';
   await failHeads(h, [[E, [run('5', E, 'failure')]]]);
   unavailable = null;
   await failHeads(h, [[F, [run('6', F, 'failure')]]]);
-  assert.deepEqual([B, C, D, E, F].map(sha => h.repair(sha)?.status), ['failed', 'superseded', 'failed', 'needs-person', 'failed']);
+  assert.deepEqual([B, C, D, E, F].map(sha => h.repair(sha)?.status), ['failed', 'cancelled', 'failed', 'needs-person', 'failed']);
   assert.equal(a.contexts.length, 4);
   await failHeads(h, [[G, [run('7', G, 'failure')]]]);
   assert.deepEqual([h.repair(G)?.status, h.repair(G)?.reason, a.contexts.length], ['needs-person', HELD, 4], 'B, D and F failed in a row.');
@@ -995,40 +1054,28 @@ test('a rerun that ends cancelled, waiting for approval, stale or skipped needs 
   }
 });
 
-test('Stop and supersede hold the one-at-a-time lock until the aborted agent step has settled', async t => {
+test('Stop holds the queue until the aborted agent and resource cleanup both finish', async t => {
+  const unwind = deferred(), cleanup = deferred();
   let running = 0, most = 0;
-  const unwinds: (() => void)[] = [];
-  // Each step waits for its abort, then for the test to let it finish unwinding.
-  const a = agent(async (_context, signal) => {
+  const a = agent(async (context, signal) => {
     running++; most = Math.max(most, running);
-    try { await aborted(signal); const unwind = deferred(); unwinds.push(unwind.resolve); await unwind.promise; return { status: 'failed' }; } finally { running--; }
-  });
-  const finish = async () => { await until(() => unwinds.length); unwinds.shift()!(); await h.manager.idle(); };
+    try { if (context.repair.sha === B) { await aborted(signal); await unwind.promise; } return { status: 'ready' }; }
+    finally { running--; }
+  }, { async cleanup({ repair }) { if (repair.sha === B) await cleanup.promise; } });
   const h = await harness(t, { steps: a.steps });
-  h.github.runs[A] = [run('1', A, 'failure')];
-  await h.poll();
-  await h.manager.repair({ runId: '1' });
-  await until(() => h.repair(A)?.status === 'repairing');
-  await h.manager.stop({ id: h.repair(A)!.id });
-  await assert.rejects(h.manager.repair({ runId: '1' }), (error: HttpError) => error.statusCode === 409 && error.message === 'The previous repair is still ending. Try again.');
-  h.github.head = B;
-  h.github.runs[B] = [run('2', B, 'failure')];
+  t.after(() => { unwind.resolve(); cleanup.resolve(); });
+  await h.failHead([run('2', B, 'failure')]);
+  await until(() => a.contexts.length === 1);
+  await h.failHead([run('3', C, 'failure')], C);
+  await h.manager.stop({ id: h.repair(B)!.id });
   await h.manager.check();
-  assert.equal(h.repair(B), undefined, 'A new head waits while the stopped step unwinds.');
-  await finish();
+  assert.equal(h.repair(C)?.status, 'queued');
+  unwind.resolve();
+  await until(() => running === 0);
   await h.manager.check();
-  await until(() => h.repair(B)?.status === 'repairing');
-  h.github.head = C;
-  h.github.runs[C] = [run('3', C, 'failure')];
-  await h.manager.check();
-  assert.deepEqual([h.repair(B)?.status, h.repair(C)], ['superseded', undefined], 'The newest head waits for the superseded step.');
-  await finish();
-  await h.manager.check();
-  // The status is set before it is saved and the step starts; wait for the step itself.
-  await until(() => h.repair(C)?.status === 'repairing' && a.contexts.length === 3);
-  assert.deepEqual([most, a.contexts.length], [1, 3]);
-  await h.manager.stop({ id: h.repair(C)!.id });
-  await finish();
+  assert.equal(a.contexts.length, 1, 'Cleanup still owns the slot.');
+  cleanup.resolve(); await h.manager.idle();
+  assert.deepEqual([most, a.contexts.map(c => c.repair.sha)], [1, [B, C]]);
 });
 
 test('a pull request the agent step reports while it unwinds is recorded and stays open, until a newer repair opens its own', async t => {
@@ -1045,8 +1092,10 @@ test('a pull request the agent step reports while it unwinds is recorded and sta
   await until(() => h.repair(B)?.status === 'repairing');
   h.github.head = C;
   h.github.runs[C] = [run('3', C, null)];
-  await h.poll();
-  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.pullRequest], ['superseded', { number: 7, url: 'https://github.com/owner/app/pull/7' }]);
+  await h.manager.check();
+  await h.manager.stop({ id: h.repair(B)!.id });
+  await h.manager.idle();
+  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.pullRequest], ['cancelled', { number: 7, url: 'https://github.com/owner/app/pull/7' }]);
   assert.deepEqual(closed, [], 'It may hold a valid fix.');
   h.github.runs[C] = [run('3', C, 'failure')];
   await h.manager.check();
@@ -1341,26 +1390,25 @@ test('a ready repair shows its head verified only while that head, as Perpetual 
   assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason], ['needs-person', 'Invalid repair progress.']);
 });
 
-test('a new head never supersedes a fix verifying its gates at once; a newer head that passes retires it and closes its pull request', async t => {
+test('a newer passing head does not interrupt active gate verification or close its pull request', async t => {
+  const release = deferred(), closed: number[] = [];
   let stopped = false;
-  const closed: number[] = [];
   const a = agent(async (context, signal) => {
-    await context.report({ status: 'verifying-ci', pullRequest: { ...PULL, draft: false } });
-    await context.report({ status: 'verifying-gates' });
-    await aborted(signal);
-    stopped = true;
+    await context.report({ status: 'verifying-gates', pullRequest: { ...PULL, draft: false } });
+    await release.promise; stopped = signal.aborted;
     return { status: 'ready' };
   }, { async close(repair) { closed.push(repair.pullRequest!.number); } });
   const h = await harness(t, { steps: a.steps });
+  t.after(release.resolve);
   await h.failHead([run('2', B, 'failure')]);
   await until(() => h.repair(B)?.status === 'verifying-gates');
-  h.github.head = C;
-  h.github.runs[C] = [run('3', C, 'failure')];
-  await h.manager.check();
-  assert.deepEqual([h.repair(B)?.status, stopped, h.repair(C)], ['verifying-gates', false, undefined], 'Its merge step verifies the moved target branch; a newer failure waits.');
+  await h.failHead([run('3', C, 'failure')], C);
   h.github.runs[C] = [run('3', C, 'success')];
-  await h.poll();
-  assert.deepEqual([h.repair(B)?.status, h.repair(B)?.reason, stopped, closed], ['superseded', `Superseded by ${C.slice(0, 7)}.`, true, [7]]);
+  await h.manager.check();
+  assert.deepEqual([h.repair(B)?.status, h.repair(C)?.status, stopped, closed], ['verifying-gates', 'queued', false, []]);
+  release.resolve(); await h.manager.idle();
+  assert.equal(stopped, false);
+  assert.equal(h.repair(C)?.status, 'passed');
 });
 
 test('a merge reported while a stopped repair unwinds makes it merged, and a restart keeps a recorded merge', async t => {
@@ -1550,10 +1598,9 @@ test('loop guard: a person\'s merge of a pull request whose repair was verifying
     h.github.head = C;
     h.github.runs[C] = [run('3', C, 'failure')];
     await h.manager.check();
-    assert.deepEqual([h.repair(B)?.status, h.repair(C), reads], ['verifying-gates', undefined, []], 'The merge step owns its pull request, and a newer failure waits.');
+    assert.deepEqual([h.repair(B)?.status, h.repair(C)?.status, reads], ['verifying-gates', 'queued', []], 'The merge step owns its pull request, and a newer failure waits.');
     if (end === 'ready') release.resolve(); else await h.manager.stop({ id: h.repair(B)!.id });
     await h.manager.idle();
-    assert.equal(h.repair(B)?.status, end);
     await h.poll();
     assert.deepEqual([h.repair(B)?.status, h.repair(B)?.merged, reads], ['merged', C, [7]], 'Its pull request is read at the head once the repair ended.');
     assert.deepEqual([h.repair(C)?.status, h.repair(C)?.reason, a.contexts.length], ['needs-person', 'The merge of repair #7 failed again.', 1]);
@@ -1792,6 +1839,9 @@ test('while the startup sweep fails, triage and reruns go ahead, and a failure t
   assert.deepEqual([h.repair(C)?.status, h.calls.reruns], ['rerunning', ['3']], 'Nor does a rerun.');
   await h.failHead([run('4', D, 'failure')], D);
   await h.manager.idle();
+  assert.equal(h.repair(D)?.status, 'queued', 'A rerun keeps the next commit queued.');
+  h.github.runs[C] = [run('3', C, 'success', { attempt: 2 })];
+  await h.poll();
   assert.deepEqual([h.repair(D)?.status, h.repair(D)?.reason, h.repair(D)?.cleanup, a.contexts.length], ['needs-person', 'Repair cleanup must finish before another repair can start. Docker unavailable', undefined, 0], 'No agent starts before the sweep.');
   failed = false;
   await h.poll();
@@ -1866,4 +1916,243 @@ test('successful restart cleanup clears its own error even while GitHub is disco
     assert.equal(h.manager.view().watchError, undefined, 'A confirmed recovery clears the error it owns.');
     assert.equal(a.contexts.length, 0, 'Recovery never resumes authoring.');
   });
+});
+
+test('authorization recovery rechecks without writes, reruns the exact original job on request, and waits for its new attempt', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'recheck' });
+  assert.deepEqual(h.calls.reruns, []);
+  assert.equal(h.repair(B)?.recovery?.status, 'required');
+  await h.manager.recover({ id, action: 'rerun' });
+  assert.deepEqual(h.calls.reruns, ['2']);
+  assert.equal(h.repair(B)?.status, 'rerunning');
+  await assert.rejects(h.manager.recover({ id, action: 'rerun' }), /busy/);
+  await h.poll();
+  assert.equal(h.repair(B)?.status, 'rerunning', 'The old failed attempt cannot decide the rerun.');
+  h.github.runs[B] = [run('2', B, null, { attempt: 2 })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'rerunning');
+  h.github.runs[B] = [run('2', B, 'success', { attempt: 2 })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'passed');
+  assert.equal(h.repair(B)?.recovery?.status, 'passed');
+  assert.equal((await h.saved()).repairs[0].recovery?.requests[0].status, 'observed');
+  assert.equal(a.contexts.length, 0, 'Recovery never starts paid code repair.');
+  assert.equal(autopilotStages(h.manager.view(), 'build').build.changes[0].title, 'Build recovered');
+});
+
+test('uncertain rerun replies survive restart and are never resent, while Recheck can observe the eventual result', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  h.github.rerunError = new Error('The request timed out.');
+  await h.manager.recover({ id, action: 'rerun' });
+  assert.equal(h.repair(B)?.recovery?.status, 'unconfirmed');
+  await assert.rejects(h.manager.recover({ id, action: 'rerun' }), /unconfirmed/);
+  assert.deepEqual(h.calls.reruns, ['2']);
+  await h.manager.close();
+  const next = await harness(t, { dataDir: h.dataDir });
+  next.github.head = B; next.github.runs[B] = [run('2', B, 'failure')];
+  await next.poll();
+  assert.deepEqual(next.calls.reruns, []);
+  await assert.rejects(next.manager.recover({ id, action: 'rerun' }), /unconfirmed/);
+  next.github.runs[B] = [run('2', B, 'success', { attempt: 2 })];
+  await next.manager.recover({ id, action: 'recheck' });
+  assert.equal(next.repair(B)?.status, 'passed');
+  assert.deepEqual(next.calls.reruns, []);
+});
+
+test('accepted recovery interrupted by restart requires a read, never another automatic rerun', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' }); await h.manager.close();
+  const next = await harness(t, { dataDir: h.dataDir });
+  next.github.head = B; next.github.runs[B] = [run('2', B, null, { attempt: 2 })];
+  assert.equal(next.repair(B)?.status, 'needs-person');
+  await next.manager.recover({ id, action: 'recheck' });
+  assert.equal(next.repair(B)?.status, 'rerunning');
+  assert.equal(next.repair(B)?.completedAt, undefined, 'A resumed verification has not finished.');
+  next.github.runs[B] = [run('2', B, 'success', { attempt: 2 })]; await next.poll();
+  assert.equal(next.repair(B)?.status, 'passed');
+  assert.deepEqual(next.calls.reruns, []);
+});
+
+test('recovery does not borrow a pass from a different SHA, run, branch, event or the same attempt', async t => {
+  for (const replacement of [run('2', C, 'success', { attempt: 2 }), run('3', B, 'success', { attempt: 2 }), run('2', B, 'success', { attempt: 2, branch: 'other' }), run('2', B, 'success', { attempt: 2, event: 'pull_request' }), run('2', B, 'success')]) {
+    const h = await harness(t);
+    h.github.logs['2'] = LOGS.configuration;
+    await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+    const id = h.repair(B)!.id;
+    h.github.runs[B] = [replacement];
+    await h.manager.recover({ id, action: 'recheck' });
+    assert.equal(h.repair(B)?.status, 'needs-person');
+    assert.deepEqual(h.calls.reruns, []);
+  }
+});
+
+test('the original authorization job passing does not hide another failing workflow or start an agent', async t => {
+  const a = agent(), h = await harness(t, { steps: a.steps });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure'), run('3', B, 'failure', { path: LINT })]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' });
+  assert.deepEqual(h.calls.reruns, ['2'], 'Only the authorization workflow is replayed.');
+  h.github.runs[B] = [run('2', B, 'success', { attempt: 2 }), run('3', B, 'failure', { path: LINT })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'needs-person');
+  assert.match(h.repair(B)?.reason ?? '', /another workflow/);
+  assert.equal(a.contexts.length, 0);
+});
+
+test('a failed recovery preserves its history and permits only an explicit retry', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  await h.manager.recover({ id, action: 'rerun' });
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'needs-person');
+  assert.deepEqual(h.calls.reruns, ['2']);
+  await h.manager.recover({ id, action: 'rerun' });
+  assert.deepEqual(h.calls.reruns, ['2', '2']);
+  assert.deepEqual(h.repair(B)?.recovery?.requests.map(request => request.attempt), [1, 2]);
+});
+
+test('recovery refuses another source/account and never reruns an obsolete head', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  h.github.connection = { login: 'other', repository: 'owner/app' };
+  await assert.rejects(h.manager.recover({ id, action: 'recheck' }), /account/);
+  h.github.connection = { login: 'developer', repository: 'owner/app' };
+  h.current.key = 'another-project';
+  await assert.rejects(h.manager.recover({ id, action: 'rerun' }), /source changed/);
+  h.current.key = KEY; h.github.head = C;
+  await assert.rejects(h.manager.recover({ id, action: 'rerun' }), /branch has moved/);
+  assert.deepEqual(h.calls.reruns, []);
+});
+
+test('Stop during an accepted recovery request preserves the receipt and cannot mark a later pass recovered', async t => {
+  const h = await harness(t), hold = deferred(), entered = deferred();
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  h.github.onRerun = async () => { entered.resolve(); await hold.promise; };
+  const recovery = h.manager.recover({ id, action: 'rerun' });
+  await entered.promise;
+  await h.manager.stop({ id });
+  hold.resolve();
+  await assert.rejects(recovery, /stopped/);
+  assert.equal(h.repair(B)?.status, 'cancelled');
+  assert.equal(h.repair(B)?.recovery?.requests[0].status, 'accepted');
+  h.github.runs[B] = [run('2', B, 'success', { attempt: 2 })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'cancelled');
+  assert.deepEqual(h.calls.reruns, ['2']);
+});
+
+test('recovery refuses a changed account during its read and emits no writes', async t => {
+  const h = await harness(t);
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  const id = h.repair(B)!.id;
+  h.github.onRuns = () => { h.github.connection = { login: 'other', repository: 'owner/app' }; };
+  await assert.rejects(h.manager.recover({ id, action: 'rerun' }), /account/);
+  assert.deepEqual(h.calls.reruns, []);
+});
+
+
+test('authorization recovery automatically retries once per changed credential revision and verifies without a UI action', async t => {
+  let revision = 'a'.repeat(64);
+  const a = agent(), h = await harness(t, { steps: a.steps, credentials: async () => ({ revision }) });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  assert.equal(h.repair(B)?.recovery?.credentialRevision, revision);
+  await h.poll(); await h.poll();
+  assert.deepEqual(h.calls.reruns, [], 'Unchanged authorization never causes a blind retry.');
+  revision = 'b'.repeat(64); await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2']);
+  assert.equal(h.repair(B)?.status, 'rerunning');
+  assert.equal(h.repair(B)?.recovery?.requests[0].credentialRevision, revision);
+  await h.poll(); assert.deepEqual(h.calls.reruns, ['2']);
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })]; await h.poll(); await h.poll();
+  assert.equal(h.repair(B)?.status, 'needs-person');
+  assert.deepEqual(h.calls.reruns, ['2'], 'A second failure waits for another real credential change.');
+  revision = 'c'.repeat(64); await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2', '2']);
+  h.github.runs[B] = [run('2', B, 'success', { attempt: 3 })]; await h.poll();
+  assert.equal(h.repair(B)?.status, 'passed');
+  assert.equal(a.contexts.length, 0);
+});
+
+test('credential metadata denial waits without retries and automatically recovers observation', async t => {
+  let denied = false, revision = 'a'.repeat(64);
+  const h = await harness(t, { credentials: async () => denied ? { reason: 'Permission unavailable.' } : { revision } });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  denied = true; revision = 'b'.repeat(64); await h.poll();
+  assert.equal(h.repair(B)?.recovery?.automation?.status, 'unavailable');
+  assert.deepEqual(h.calls.reruns, []);
+  denied = false; await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2']);
+});
+
+test('autonomous recovery survives restart, never repeats an uncertain request and follows a new attempt without Recheck', async t => {
+  let revision = 'a'.repeat(64);
+  const credentials = async () => ({ revision });
+  const h = await harness(t, { credentials });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  revision = 'b'.repeat(64); h.github.rerunError = new Error('Timed out.'); await h.poll();
+  assert.equal(h.repair(B)?.recovery?.status, 'unconfirmed');
+  await h.manager.close();
+  const next = await harness(t, { dataDir: h.dataDir, credentials });
+  next.github.head = B; next.github.runs[B] = [run('2', B, 'failure')];
+  await next.poll(); revision = 'c'.repeat(64); await next.poll();
+  assert.deepEqual(next.calls.reruns, [], 'Even a newer credential cannot replay an unresolved external request.');
+  next.github.runs[B] = [run('2', B, 'success', { attempt: 2 })]; await next.poll();
+  assert.equal(next.repair(B)?.status, 'passed');
+});
+
+test('autonomous recovery respects Stop, the connected account and an advanced branch', async t => {
+  for (const block of ['stop', 'account', 'head', 'source'] as const) {
+    let revision = 'a'.repeat(64);
+    const h = await harness(t, { credentials: async () => ({ revision }) });
+    h.github.logs['2'] = LOGS.configuration;
+    await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+    const id = h.repair(B)!.id;
+    if (block === 'stop') await h.manager.stop({ id });
+    if (block === 'account') h.github.connection = { login: 'another', repository: 'owner/app' };
+    if (block === 'head') h.github.head = C;
+    if (block === 'source') h.current.rootDirectory = '/other';
+    revision = 'b'.repeat(64); await h.poll();
+    assert.deepEqual(h.calls.reruns, [], block);
+  }
+});
+
+test('a retry record and its older history cannot autonomously rerun the same workflow twice', async t => {
+  let revision = 'a'.repeat(64);
+  const h = await harness(t, { credentials: async () => ({ revision }) });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle();
+  await h.manager.repair({ runId: '2' }); await h.manager.idle();
+  assert.equal(h.manager.view().repairs.length, 2);
+  revision = 'b'.repeat(64); await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2']);
+  h.github.runs[B] = [run('2', B, 'failure', { attempt: 2 })]; await h.poll(); await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2']);
+});
+
+
+test('creating a previously absent credential wakes recovery once without a manual retry', async t => {
+  let ready = false;
+  const h = await harness(t, { credentials: async () => ({ revision: (ready ? 'b' : 'a').repeat(64), ready, ...(!ready ? { reason: 'Missing credential.' } : {}) }) });
+  h.github.logs['2'] = LOGS.configuration;
+  await h.failHead([run('2', B, 'failure')]); await h.manager.idle(); await h.poll();
+  assert.deepEqual(h.calls.reruns, []);
+  ready = true; await h.poll();
+  assert.deepEqual(h.calls.reruns, ['2']);
 });

@@ -1,18 +1,20 @@
 import { Fragment, useState } from 'react';
-import { ChevronDown, Circle, CircleCheck, CircleX, ExternalLink, Eye, LoaderCircle, Sparkles, Square, TriangleAlert, type LucideIcon } from 'lucide-react';
+import { ChevronDown, Circle, CircleCheck, CircleX, ExternalLink, Eye, LoaderCircle, Sparkles, Square, Play, Clock3, TriangleAlert, type LucideIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Spinner } from '@/components/ui/spinner';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import type { CredentialAuthorizationReply } from '../../contract/build-recovery';
 import { api } from '@/lib/api';
-import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
+import { CHANGE_LABELS, MODES, MODE_CHOICES, STEP_LABELS, autopilotBadge, autopilotChanges, changeActive, isAutopilotMode, saveAutopilotMode, stopChange, resumeQueue, type AutopilotChange, type AutopilotTone, type DetailPart, type StageAutopilot, type StepStatus } from '@/lib/pipeline-autopilot.ts';
 import { useRememberedOpen } from '@/lib/remembered-open';
 import type { PipelineStage } from '@/lib/pipeline-nodes.ts';
 import { StepItem, StepList } from './StepList';
 
 const STEP_MARKS: Record<Exclude<StepStatus, 'active'>, LucideIcon> = { pending: Circle, done: CircleCheck, failed: CircleX, waiting: Eye };
-const CHANGE_MARKS: Record<string, LucideIcon> = { merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'not-merged': CircleX };
+const CHANGE_MARKS: Record<string, LucideIcon> = { queued: Clock3, merged: CircleCheck, passed: CircleCheck, 'needs-review': Eye, 'needs-attention': TriangleAlert, 'not-merged': CircleX };
 const BADGE_MARKS: Record<AutopilotTone, LucideIcon> = { idle: Sparkles, working: LoaderCircle, passed: CircleCheck, blocked: Eye, failed: CircleX };
 const BADGE_VARIANTS: Record<AutopilotTone, 'destructive' | 'outline' | 'secondary'> = { idle: 'outline', working: 'secondary', passed: 'secondary', blocked: 'secondary', failed: 'destructive' };
 // A fact links only to an https address the controller supplied.
@@ -44,39 +46,82 @@ function Detail({ parts }: { parts: DetailPart[] }) {
 function StopChange({ repoPath, change }: { repoPath: string; change: AutopilotChange }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  async function stop() {
+  async function stop(resume = false) {
     setPending(true); setError('');
-    try { await stopChange(api, { repoPath, stageId: change.stageId, id: change.id }); }
+    try { if (resume) await resumeQueue(api, { repoPath, stageId: change.stageId }); else await stopChange(api, { repoPath, stageId: change.stageId, id: change.id }); }
     catch (failure) { setError((failure as Error).message); }
     finally { setPending(false); }
   }
   return <div className="flex min-w-0 flex-wrap items-center gap-1 px-1 pt-1">
-    <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop()}><Square />Stop</Button>
+    <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop()}><Square />{change.status === 'queued' ? 'Cancel' : 'Stop'}</Button>
+    {change.paused && change.queuePosition === 1 && <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void stop(true)}><Play />Resume queue</Button>}
     {error && <p role="alert" className="basis-full break-words text-xs text-destructive">{error}</p>}
+  </div>;
+}
+
+function RecoveryActions({ change, repoPath }: { change: AutopilotChange; repoPath: string }) {
+  const recovery = change.recovery!;
+  const credential = recovery.credential;
+  const [open, setOpen] = useState(false), [pending, setPending] = useState(false), [error, setError] = useState('');
+  async function connect() {
+    setPending(true); setError('');
+    try {
+      const result = await api<CredentialAuthorizationReply>('/api/autopilot/connect-vercel', { repoPath, stageId: change.stageId, id: change.id });
+      const url = new URL(result.url);
+      if (url.origin !== 'https://vercel.com' || !/^\/integrations\/[a-z0-9][a-z0-9-]{0,31}\/new$/.test(url.pathname)) throw new Error('The authorization link is invalid.');
+      window.location.assign(url.href);
+    } catch (failure) { setError((failure as Error).message); setPending(false); }
+  }
+  const finished = change.status === 'passed' || change.status === 'not-merged';
+  async function disconnect() {
+    setPending(true); setError('');
+    try { await api('/api/autopilot/disconnect-vercel', { repoPath, stageId: change.stageId, id: change.id }); autopilotChanges.notify(); }
+    catch (failure) { setError((failure as Error).message); }
+    finally { setPending(false); }
+  }
+  const settings = [...new Set(recovery.runs.filter(run => run.binding === 'references').map(run => run.settingsUrl))];
+  return <div className="flex min-w-0 flex-wrap items-center gap-1 px-1 pt-1">
+    {!finished && credential?.canConnect && <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => setOpen(true)}>{credential.status === 'reconnect' || credential.status === 'held' ? 'Reconnect Vercel' : 'Connect Vercel'}</Button>}
+    {!finished && (!credential || credential.status === 'unavailable') && settings.filter(href => link(href)).map(href => <Button key={href} asChild variant="ghost" size="sm" className="h-6 px-2 text-xs"><a href={href} target="_blank" rel="noreferrer"><ExternalLink />Update credentials</a></Button>)}
+    {!finished && !settings.length && recovery.runs[0] && <Button asChild variant="ghost" size="sm" className="h-6 px-2 text-xs"><a href={link(recovery.runs[0].url)} target="_blank" rel="noreferrer"><ExternalLink />Open failed run</a></Button>}
+    {!finished && (credential?.reason ? <p className="basis-full break-words text-xs text-muted-foreground">{credential.reason}</p> : recovery.automation && <p className="basis-full break-words text-xs text-muted-foreground">{credential?.status === 'not-connected' ? 'Connect once to enable automatic recovery.' : recovery.automation.status === 'watching' ? 'Recovery continues automatically.' : recovery.automation.reason}</p>)}
+    {credential?.canDisconnect && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={pending} onClick={() => void disconnect()}>Stop managing access</Button>}
+    {!open && error && <p role="alert" className="basis-full text-xs text-destructive">{error}</p>}
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Connect Vercel</DialogTitle><DialogDescription>Allow Perpetual to maintain this Vercel connection, update the workflow credential in GitHub, and resume failed jobs automatically.</DialogDescription></DialogHeader>
+        <dl className="space-y-2 text-sm">{credential?.destination && <div className="flex justify-between gap-4"><dt>Repository</dt><dd>{credential.destination.repository}</dd></div>}{recovery.runs.filter(run => run.vercelSecret).map(run => <div key={run.id} className="flex justify-between gap-4"><dt>{run.name}</dt><dd className="font-mono">{run.vercelSecret}{run.environment ? ` · ${run.environment}` : ''}</dd></div>)}</dl>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        <DialogFooter><Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>Cancel</Button><Button onClick={() => void connect()} disabled={pending}>{pending ? 'Connecting…' : 'Authorize recovery'}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>;
 }
 
 // A change on the stage rail: its title and end, and its steps beneath. A change
 // under way starts expanded; a viewer's choice is kept for the page session.
 export function ChangeRow({ change, repoPath }: { change: AutopilotChange; repoPath?: string }) {
-  const [open, setOpen] = useRememberedOpen(`${repoPath}\n${change.stageId}\n${change.id}`, changeActive(change));
-  const state = CHANGE_LABELS[change.status];
+  const [open, setOpen] = useRememberedOpen(`${repoPath}\n${change.stageId}\n${change.id}\n${change.status === 'queued' ? 'queued' : 'started'}`, changeActive(change));
+  const state = change.status === 'queued' ? `${change.paused ? 'Paused' : 'Queued'}${change.queuePosition ? ` #${change.queuePosition}` : ''}` : CHANGE_LABELS[change.status];
   return <Collapsible open={open} onOpenChange={setOpen} className="nodrag nopan min-w-0">
     <CollapsibleTrigger asChild>
       <Button type="button" variant="ghost" size="sm" className="h-auto min-h-6 min-w-0 w-full items-start justify-between gap-2 whitespace-normal px-1 py-0.5 text-left leading-5 [&[data-state=open]>svg]:rotate-180" aria-label={`${change.title}, ${state}`} title={change.reason || undefined}>
-        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{change.title}</span>
-        <span className="shrink-0 text-xs font-normal text-muted-foreground">{state}</span>
+        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{change.title}{change.sha && <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">{change.sha.slice(0, 7)}</span>}</span>
+        <Badge variant="outline" className="shrink-0 text-xs font-normal">{state}</Badge>
         <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform" />
       </Button>
     </CollapsibleTrigger>
+    {!open && change.status === 'needs-attention' && change.reason && <Detail parts={[change.reason]} />}
+    {change.recovery && repoPath && change.status !== 'passed' && change.status !== 'not-merged' && <RecoveryActions change={change} repoPath={repoPath} />}
     <CollapsibleContent className="pt-1">
+      {change.recovery?.credential?.canDisconnect && repoPath && (change.status === 'passed' || change.status === 'not-merged') && <RecoveryActions change={change} repoPath={repoPath} />}
       <StepList label={`${change.title} steps`}>
         {change.steps.map(step => <StepItem key={step.id} compact icon={<StepMark status={step.status} />}>
           <p className={`min-w-0 px-1 text-xs font-medium leading-6 [overflow-wrap:anywhere] ${step.status === 'pending' ? 'text-muted-foreground' : 'text-foreground'}`}>{step.name}<span className="sr-only">, {STEP_LABELS[step.status]}</span></p>
           {step.status !== 'pending' && step.detail?.length ? <Detail parts={step.detail} /> : null}
         </StepItem>)}
       </StepList>
-      {changeActive(change) && repoPath && <StopChange repoPath={repoPath} change={change} />}
+      {(changeActive(change) || change.status === 'queued' || change.recovery && change.status === 'needs-attention' && change.recovery.status !== 'passed') && repoPath && <StopChange repoPath={repoPath} change={change} />}
     </CollapsibleContent>
   </Collapsible>;
 }

@@ -106,15 +106,17 @@ test('the escalation model is saved beside the model, kept across saves that omi
   assert.equal(JSON.stringify(restored.view()).includes('private-fixture'),false);
 });
 
-test('the escalation model defaults to a strong model the catalog has, else the Settings model',async t=>{
+test('catalog defaults to Luna for Settings and escalation without substituting another model',async t=>{
   const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
   // The public catalog as OpenRouter lists it; no request leaves the test.
   const catalog=(ids:string[])=>{globalThis.fetch=(async()=>new Response(JSON.stringify({data:ids.map(id=>({id,name:`Vendor: ${id}`,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))}),{status:200})) as typeof fetch;};
   catalog(['openai/gpt-6-luna','openai/gpt-5.4-mini','anthropic/claude-sonnet-4.6','openai/gpt-6']);
-  assert.deepEqual((({defaultModel,defaultEscalationModel})=>[defaultModel,defaultEscalationModel])(await createOpenRouterModelCatalog().view()),['openai/gpt-6-luna','openai/gpt-6']);
+  assert.deepEqual((({defaultModel,defaultEscalationModel})=>[defaultModel,defaultEscalationModel])(await createOpenRouterModelCatalog().view()),['openai/gpt-6-luna','openai/gpt-6-luna']);
   assert.equal((await createOpenRouterModelCatalog().view(undefined,'anthropic/claude-sonnet-4.6')).defaultEscalationModel,'anthropic/claude-sonnet-4.6','A saved escalation model stays selected.');
+  await assert.rejects(createOpenRouterModelCatalog().view(undefined,'anthropic/not-listed'),/escalation model anthropic\/not-listed is unavailable/i,'A missing saved escalation model is not replaced.');
+  await assert.rejects(createOpenRouterModelCatalog().view('qwen/not-listed'),/model qwen\/not-listed is unavailable/i,'A missing saved Settings model is not replaced.');
   catalog(['openai/gpt-5.4-mini','qwen/qwen3']);
-  assert.equal((await createOpenRouterModelCatalog().view('qwen/qwen3')).defaultEscalationModel,'qwen/qwen3','Without a strong model, repairs escalate to the Settings model.');
+  await assert.rejects(createOpenRouterModelCatalog().view(),/model openai\/gpt-6-luna is unavailable/i,'A missing default fails clearly instead of selecting the first catalog model.');
 });
 
 
@@ -123,9 +125,10 @@ test('draft effort uses cached catalog capabilities and never guesses support fr
   t.mock.method(globalThis,'fetch',async(_url:unknown,options:RequestInit)=>{
     calls++;assert.equal(new Headers(options.headers).has('Authorization'),false);
     return Response.json({data:[
+      ['openai/gpt-6-luna',{}],
       ['low',{supported_efforts:['high','medium','low']}],['high',{supported_efforts:['high']}],
       ['any',{supported_efforts:null}],['missing',{}],['malformed',{supported_efforts:'low'}],
-    ].map(([name,reasoning])=>({id:`vendor/${name}`,name,reasoning,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))});
+    ].map(([name,reasoning])=>({id:name==='openai/gpt-6-luna'?name:`vendor/${name}`,name,reasoning,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}))});
   });
   const catalog=createOpenRouterModelCatalog();
   await catalog.view();
@@ -142,17 +145,17 @@ test('a failed catalog refresh serves the last catalog and its efforts, without 
   const model=(id:string,extra:Record<string,unknown>={})=>({id,name:id,architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools'],...extra});
   t.mock.method(globalThis,'fetch',async()=>{
     calls++;if(!available)throw new Error('Catalog unavailable');
-    return Response.json({data:[model('vendor/kept',{reasoning:{supported_efforts:['low','medium']}}),model('vendor/retiring',{expiration_date:'2026-10-01T00:30:00Z'})]});
+    return Response.json({data:[model('openai/gpt-6-luna'),model('vendor/kept',{reasoning:{supported_efforts:['low','medium']}}),model('vendor/retiring',{expiration_date:'2026-10-01T00:30:00Z'})]});
   });
   const catalog=createOpenRouterModelCatalog(),listed=async()=>(await catalog.view()).models.map(item=>item.id);
-  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring']);
+  assert.deepEqual(await listed(),['openai/gpt-6-luna','vendor/kept','vendor/retiring']);
   available=false;t.mock.timers.tick(10*60*1000);
-  assert.deepEqual(await listed(),['vendor/kept','vendor/retiring'],'Settings can still be saved.');
+  assert.deepEqual(await listed(),['openai/gpt-6-luna','vendor/kept','vendor/retiring'],'Settings can still be saved.');
   assert.equal(calls,2);
   t.mock.timers.tick(30*1000);await listed();
   assert.equal(calls,2,'A failed refresh is tried again a minute later, not on every read.');
   t.mock.timers.tick(25*60*1000);
-  assert.deepEqual(await listed(),['vendor/kept'],'A model that expired meanwhile is no longer offered.');
+  assert.deepEqual(await listed(),['openai/gpt-6-luna','vendor/kept'],'A model that expired meanwhile is no longer offered.');
   assert.deepEqual([await catalog.generationReasoning('vendor/kept'),await catalog.draftReasoning('vendor/kept')],[{effort:'medium'},{effort:'low',exclude:true}]);
   await assert.rejects(createOpenRouterModelCatalog().view(),/Could not load OpenRouter models/,'Without an earlier catalog nothing is served.');
 });

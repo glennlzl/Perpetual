@@ -124,3 +124,15 @@ test('disposing the workspace discards unsent clicks and ignores an in-flight fa
   assert.equal(requests.length, 1);
   assert.equal(workspace.getSnapshot(), before);
 });
+
+test('source polling observes a disconnect and a deleted pipeline, pruning drafts and refusing its old stage', async () => {
+  const drafts: string[][] = [];
+  const definition = { repoPath: '/acme/app', stages: [{ id: 'source', name: 'Source', kind: 'source', collapsed: false }, { id: 'build', name: 'Build', kind: 'build', collapsed: false }, { id: 'production', name: 'Production', kind: 'production', collapsed: false }], transitions: [] };
+  const removed = { id: 'removal', status: 'completed' as const, createdAt: '2026-10-06T12:00:00Z', updatedAt: '2026-10-06T12:01:00Z' };
+  const workspace = createTestWorkspace({ pollInterval: 0, pruneDrafts(_path, ids) { drafts.push([...ids]); }, controller: async () => ({ scan: { repo: { path: '/acme/app', branch: 'main' } }, pipeline: null, pipelineId: null, githubConnection: null, pipelineRemoval: removed }) });
+  workspace.activate({ path: '/acme/app', branch: 'main' }, { pipeline: definition, browserTests: {}, githubConnection: { login: 'developer', connectedAt: '2026-10-06T12:00:00Z' } });
+  const stage = workspace.stage('build'); assert.equal(stage.isCurrent(), true);
+  await workspace.refreshSource();
+  assert.equal(workspace.getSnapshot().pipeline, null); assert.equal(workspace.getSnapshot().githubConnection, null); assert.equal(workspace.getSnapshot().pipelineRemoval?.status, 'completed');
+  assert.deepEqual(drafts.at(-1), []); assert.equal(stage.isCurrent(), false); workspace.dispose();
+});

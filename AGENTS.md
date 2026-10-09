@@ -1,3 +1,8 @@
+# Model policy
+
+- Use GPT-6 Luna (`openai/gpt-6-luna` on OpenRouter) for every real model call made for this workspace, including benchmarks, configuration and journey authoring, build repairs, retries and escalation. Keep both the primary and escalation settings on Luna. If it is unavailable, stop and report the blocker; do not substitute another model.
+- When selecting a model for a Codex subagent, use `gpt-6-luna`. This policy remains in force until the user explicitly changes it.
+
 # UI preferences
 
 Read `docs/pipeline-ui.md` before changing the Pipeline canvas, stage cards, Build and Production, the branch selector or the Git graph.
@@ -23,7 +28,7 @@ Read `docs/pipeline-ui.md` before changing the Pipeline canvas, stage cards, Bui
 - The environment inspector has exactly two tabs, Integration tests and Runs, and no environment settings page or header gear. Build it from shadcn Sheet, Tabs, Item, Collapsible, Button and Badge primitives, without explanatory subtitles.
 - Sandbox stage settings only rename the stage. The stage card footer holds the single delete entry: deletion is confirmed, and the stage's owned sandboxes are cleaned up before the stage is removed.
 - Model and API key configuration lives on the app-wide Settings page, reached from the main sidebar and independent of repository or stage selection. Target URL editing stays beside the application link, and the optional test focus stays with Generate.
-- App Settings is OpenRouter-only: label the credential OpenRouter API Key, link to API key creation, and offer a native shadcn model Select backed by the actual eligible OpenRouter catalog, with a default preselected, and a second Select for the Escalation model build repairs escalate to, with a strong model the catalog lists preselected. Expose no model ID text input, provider endpoint or Advanced section, and keep a simple layout without nested cards.
+- App Settings is OpenRouter-only: label the credential OpenRouter API Key, link to API key creation, and offer a native shadcn model Select backed by the actual eligible OpenRouter catalog, with a default preselected, and a second Select for the Escalation model build repairs escalate to, with the same model preselected. Expose no model ID text input, provider endpoint or Advanced section, and keep a simple layout without nested cards.
 - Branch relationships use the actual `@jalco/commit-graph` community registry component inside the existing non-modal right-hand shadcn Sheet. Show real repository commits and parent hashes, never sample data or inferred ancestry; keep provenance and label local or shallow history. Custom branch cards, PR arrows and a centered modal do not replace it.
 - A managed GitHub source copy loads complete commit ancestry and remote branch refs before showing the Git graph; a depth-one source scan is not graph history. The graph defaults to the selected branch's history. Never fetch into or change the user's original checkout to repair a managed copy.
 - An unconnected pipeline shows Connect your GitHub with one Connect GitHub button bearing the GitHub mark, which opens the Connect GitHub dialog directly. There is no Configure repository entry.

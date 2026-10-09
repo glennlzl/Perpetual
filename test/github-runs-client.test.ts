@@ -228,7 +228,6 @@ test('stage dialogs share one compact pattern and read-only drawers close from t
   assert.doesNotMatch(form, />\{type === 'service' \? 'Close'/);
   const graph = await clientSource('GitGraphPanel.tsx');
   assert.doesNotMatch(graph, />Close<\/Button>/);
-  assert.match(graph, /\{history && <SheetFooter/);
 });
 
 test('non-modal sheets let Tab leave at their edges instead of looping', async () => {
@@ -369,8 +368,6 @@ test('the commit list is one tab stop with arrow-key row navigation', async () =
   assert.doesNotMatch(move, /Enter|" "/, 'Enter and Space stay with the row button.');
   const css = await clientSource('components/commit-graph.css');
   assert.match(css, /\[data-slot="commit-entry"\]:focus-visible \{\n  outline: 2px solid var\(--muted-foreground\);\n  outline-offset: -2px;/, 'The inset focus ring stays.');
-  const panel = await clientSource('GitGraphPanel.tsx');
-  assert.match(panel, /focusAfterLoad\.current = history\.commits\.length; setLimit/, 'Load more resumes focus on the first new commit.');
 });
 
 test('a preview alias deploying another branch carries the Test settings mismatch mark', async () => {

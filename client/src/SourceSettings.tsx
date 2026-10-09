@@ -16,14 +16,15 @@ import { initialBranch, readsLocalCheckout, rootDirectoryError, sourceChange } f
 import { BranchName, BranchOptions } from './BranchSwitcher';
 import GitHubConnectDialog from './GitHubConnectDialog';
 import type { Scan } from './App';
-import type { GitHubSource, GitHubConnection, GitHubRepositoryChoice, GitHubRepositoryPage, GitHubBranch, GitHubBranchPage } from '../../contract/github.ts';
+import type { GitHubSource, GitHubSourceSelection, GitHubConnection, GitHubRepositoryChoice, GitHubRepositoryPage, GitHubBranch, GitHubBranchPage } from '../../contract/github.ts';
+import { githubConnectionChanges } from '@/lib/github-connection-changes';
 
 /** A GitHub source choice as POST /api/source/github takes it. */
-export type SourceSelection = { repository: string; branch: string; rootDirectory: string };
+export type SourceSelection = GitHubSourceSelection;
 export type SourceState = { canSave: boolean; loading: boolean; connection: GitHubConnection | null; repository?: string; branch?: string; rootDirectory?: string };
 export type SourceSettingsHandle = { save(): Promise<unknown> };
 type SourceSettingsProps = {
-  scan: Scan | null; busy?: boolean; autoConnect?: boolean;
+  scan: Scan | null; busy?: boolean; autoConnect?: boolean; creating?: boolean;
   onSourceSave?: (selection: SourceSelection) => Promise<unknown>;
   onBusyChange?: (busy: boolean) => void;
   onStateChange?: (state: SourceState) => void;
@@ -93,7 +94,7 @@ function SourceReadError({ error, label, disabled, onRetry, focusTarget }: {
   </div>;
 }
 
-const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(function SourceSettings({ scan, busy = false, autoConnect = false, onSourceSave, onBusyChange, onStateChange }, ref) {
+const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(function SourceSettings({ scan, busy = false, autoConnect = false, creating = false, onSourceSave, onBusyChange, onStateChange }, ref) {
   const active = useRef(true);
   const connectionRequest = useRef(0);
   const repositoryRequest = useRef(0);
@@ -130,16 +131,18 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
   const unreachable = Boolean(connection?.unreachable);
   const loading = connectionLoading || Boolean(connectionAction) || repositoriesLoading || branchesLoading;
   const source = connection?.source || null;
-  const local = Boolean(connection && scanRepo) && readsLocalCheckout(source, scanRepo!.path);
+  const local = !creating && Boolean(connection && scanRepo) && readsLocalCheckout(source, scanRepo!.path);
   // From a local checkout, its own branch on GitHub is a change: saving moves the canvas to the GitHub copy.
   const { changed, onGitHub } = sourceChange({ current: source, local, repository, branch, rootDirectory, branches: branches.map(item => item.name) });
   const branchMissing = connected && Boolean(repository && branch) && !branchesLoading && !branchesError && !onGitHub;
-  const canSave = connected && Boolean(repository && branch) && !loading && !branchesError && !rootError && changed && onGitHub;
+  const canSave = connected && Boolean(repository && branch) && !loading && !branchesError && !rootError && (creating || changed) && onGitHub;
 
   function applyConnection(result: GitHubConnection, restoreSelection = false) {
     setConnection(result);
+    if (result.connected) setConnectOpen(false);
+    else if (creating && restoreSelection && !result.unreachable) setConnectOpen(true);
     savedSource.current = result.source || null;
-    if (restoreSelection && result.source) {
+    if (!creating && restoreSelection && result.source) {
       setRepository(result.source.repository || '');
       setBranch(result.source.branch || '');
       setRootDirectory(result.source.rootDirectory || '/');
@@ -182,7 +185,10 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
     onBusyChange?.(true);
     try {
       const result = await api<GitHubConnection>(`/api/github/${action}`, {});
-      if (active.current && request === connectionRequest.current) applyConnection(result, action === 'connect');
+      if (active.current && request === connectionRequest.current) {
+        applyConnection(result, action === 'connect');
+        githubConnectionChanges.notify(action);
+      }
       return result;
     } catch (failure) {
       if (active.current && request === connectionRequest.current) setConnectionError(messageOf(failure));
@@ -223,7 +229,7 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
 
   async function loadBranches(target: string, page: number = 1, append = false) {
     const request = ++branchRequest.current;
-    const preferred = savedSource.current?.repository === target ? savedSource.current.branch || '' : '';
+    const preferred = !creating && savedSource.current?.repository === target ? savedSource.current.branch || '' : '';
     const setError = append ? setMoreBranchesError : setBranchesError;
     setBranchesLoading(true);
     setError('');
@@ -264,18 +270,18 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
       if (loading || branchesError) throw new Error('Wait for the branch list to load before saving.');
       if (!onGitHub) throw new Error(missingBranch);
       if (rootError) throw new Error(rootError);
-      if (!changed) throw new Error('No source changes to save.');
+      if (!creating && !changed) throw new Error('No source changes to save.');
       if (typeof onSourceSave !== 'function') throw new Error('GitHub source saving is unavailable. Reload the page.');
-      return onSourceSave({ repository, branch, rootDirectory: rootDirectory.trim() || '/' });
+      return onSourceSave({ repository, branch, rootDirectory: rootDirectory.trim() || '/', ...(creating ? { createPipeline: true } : {}) });
     },
-  }), [connected, repository, branch, rootDirectory, rootError, loading, branchesError, onGitHub, changed, onSourceSave]);
+  }), [connected, repository, branch, rootDirectory, rootError, loading, branchesError, onGitHub, changed, onSourceSave, creating]);
 
   const disableFields = busy || !connected || connectionLoading || Boolean(connectionAction);
   const showLocal = local && (!repository || repository === source?.repository);
   // Without a GitHub source, show what the canvas scanned; it is not a selectable GitHub value.
-  const scanned = !source && !repository && scanRepo ? { repository: scanRepo.name, branch: scanRepo.branch || '' } : null;
+  const scanned = !creating && !source && !repository && scanRepo ? { repository: scanRepo.name, branch: scanRepo.branch || '' } : null;
   // The saved or scanned branch stays listed even when GitHub lacks it, so it can be chosen again.
-  const savedBranch = source?.repository === repository ? source.branch || '' : '';
+  const savedBranch = !creating && source?.repository === repository ? source.branch || '' : '';
   const savedLocalOnly = local && Boolean(savedBranch) && !branchesLoading && !branchesError && !branches.some(item => item.name === savedBranch);
   const { pinned: pinnedRepositories, owners } = repositoryGroups(repositories, [source?.repository, repository], connection?.account?.login || '');
   const repositoryItem = (item: Pick<GitHubRepositoryChoice, 'fullName'> & Partial<Pick<GitHubRepositoryChoice, 'private'>>, label: string) => <SelectItem key={item.fullName} value={item.fullName} textValue={item.fullName} title={item.fullName}><span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{label}</span>{item.private && <LockKeyhole aria-label="Private repository" className="size-3.5" />}</SelectItem>;
@@ -350,9 +356,9 @@ const SourceSettings = forwardRef<SourceSettingsHandle, SourceSettingsProps>(fun
 
     <Section>
       <div className="grid gap-2">
-        <Label htmlFor="source-branch">Branch</Label>
+        <Label htmlFor="source-branch">{creating ? 'Production branch' : 'Branch'}</Label>
         <Select value={branch} disabled={disableFields || !repository || branchesLoading && !branches.length} onValueChange={value => { if (value) setBranch(value); }}>
-          <SelectTrigger ref={branchTrigger} id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
+          <SelectTrigger ref={branchTrigger} id="source-branch" className={`min-w-0 w-full${scanned?.branch ? ' data-[placeholder]:text-foreground' : ''}`} title={branch || scanned?.branch || undefined} aria-describedby={branchMissing ? 'source-branch-missing' : undefined}><GitBranch className="size-4" /><span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={scanned?.branch ? <BranchName name={scanned.branch} /> : branchesLoading ? 'Loading branches…' : creating ? 'Select production branch' : 'Select branch'}>{branch ? <BranchName name={branch} /> : undefined}</SelectValue></span></SelectTrigger>
           <SelectContent position="popper" align="start" collisionPadding={16} className={selectListClass}>
             <BranchOptions names={[savedBranch, ...branches.map(item => item.name)]} pinned={[branch, savedBranch, defaultBranch]} defaultBranch={defaultBranch} localBranch={savedLocalOnly ? savedBranch : ''} labelClassName="min-w-0 whitespace-normal [overflow-wrap:anywhere]" />
           </SelectContent>

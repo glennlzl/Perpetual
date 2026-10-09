@@ -29,7 +29,7 @@ Guardrails:
    - A stage without reviewed journeys needs release, so it never auto-merges.
 3. **Exact head.**
    - The merge names the verified sha (`--match-head-commit`; as built, the REST merge's equivalent `sha`, amended 2026-09-25).
-   - A moved base is verified again. A new push therefore does not supersede a repair whose gates or merge are under way until that push passes (amended 2026-09-25).
+   - A moved base is verified again. New observed commits queue behind the active repair instead of superseding it, including during gate verification; exact-head and moved-base checks still apply before merge (amended 2026-10-07).
 4. **Bounded.**
    - Four attempts, escalating the model after two, under a cost cap.
    - A repair Perpetual opens by itself goes to a person, without the agent, after three repairs of the same failure failed in a row or once the pipeline's repairs cost a fixed daily cap, which also bounds what it spends; a person's Repair may still start it (amended 2026-10-05).
@@ -40,7 +40,7 @@ Guardrails:
 
 - An auto-merged repair can trigger the user's own deployment workflows. The journey gate itself still never deploys.
 - Repairs cost one or more twin rebuilds per PR head. Gates remain one at a time.
-- Credential and permission failures never become code changes. They wait for a person.
+- Credential and permission failures never become code changes. A separately authorized host capability may renew and synchronize an explicitly bound CI credential, then verify the original workflow; new or expanded access still needs its owner (amended 2026-10-07, user-approved autonomous recovery). See [Managed CI credentials](../managed-credentials.md).
 - A repository without a Sandbox stage merges repairs on CI alone.
 - GitHub's merge guards only the head, so the target branch can still move in the moment between Perpetual's last read of it and the merge. Such a merge is named in the repair's reason, and the target branch's push gate judges it (amended 2026-09-25).
 - The same bar will apply to every change Autopilot makes; the design and the order to build the rest in are in [Autopilot](../architecture/autopilot.md).

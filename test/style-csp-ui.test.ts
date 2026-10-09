@@ -53,12 +53,21 @@ test('dialogs and model Selects apply authorized runtime CSS after loading and r
     assert.deepEqual(await page.evaluate(() => (window as unknown as ObservedWindow).styleViolations), []);
     await page.keyboard.press('Escape');
   }
-  // Runtime CSS working must not mean that unrelated inline CSS is allowed.
+  // Preview annotation styles intentionally work without the runtime nonce.
   await page.evaluate(() => {
-    const unauthorized = document.createElement('style');
-    unauthorized.textContent = 'body { --unauthorized-style: applied; }';
-    document.head.appendChild(unauthorized);
+    const preview = document.createElement('style');
+    preview.textContent = 'body { --preview-style: applied; }';
+    document.head.appendChild(preview);
   });
-  await expect.poll(() => page.evaluate(() => (window as unknown as ObservedWindow).styleViolations)).toEqual(['style-src-elem']);
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).getPropertyValue('--unauthorized-style')), '');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.body).getPropertyValue('--preview-style')), 'applied');
+  assert.deepEqual(await page.evaluate(() => (window as unknown as ObservedWindow).styleViolations), []);
+  // Allowing those blocks must not permit style attributes in the built app.
+  const attributeStyle = await page.evaluate(() => {
+    const probe = document.createElement('div');
+    document.body.appendChild(probe);
+    probe.setAttribute('style', '--unauthorized-style: applied;');
+    return getComputedStyle(probe).getPropertyValue('--unauthorized-style');
+  });
+  await expect.poll(() => page.evaluate(() => (window as unknown as ObservedWindow).styleViolations)).toEqual(['style-src-attr']);
+  assert.equal(attributeStyle, '');
 });

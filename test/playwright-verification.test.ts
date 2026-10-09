@@ -518,7 +518,7 @@ test('a person saving tests while an attempt ends never fails the verification',
 
 test('the app-wide model settings wait for a verification, so saving them as it records its start or an attempt never fails it',async t=>{
   // The public OpenRouter catalog the saved model is checked against.
-  t.mock.method(globalThis,'fetch',async()=>Response.json({data:[{id:'openai/gpt-5.4-mini',name:'GPT-5.4 Mini',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]}));
+  t.mock.method(globalThis,'fetch',async()=>Response.json({data:[{id:'openai/gpt-6-luna',name:'GPT-6 Luna',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']},{id:'openai/gpt-5.4-mini',name:'GPT-5.4 Mini',architecture:{input_modalities:['text','image'],output_modalities:['text']},supported_parameters:['tools']}]}));
   const f=await setup(t),settings={model:'openai/gpt-5.4-mini',apiKey:`sk-or-v1-${'a'.repeat(64)}`},accepted:string[]=[];
   // A person saves Settings, which belongs to no stage; a save the verification lets in is noted with when it came.
   const save=(moment:string)=>f.manager.saveModelSettings(settings).then(()=>{accepted.push(moment);},(error:{statusCode?:number})=>{if(error.statusCode!==409)throw error;});

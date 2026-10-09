@@ -7,9 +7,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
+import aiPackage from 'ai/package.json' with { type: 'json' };
 import { createEnvironmentManager } from '../src/environments/manager.ts';
 import { createEnvironmentRuntime } from '../src/environments/runtime.ts';
-import { generateTwinConfig } from '../src/environments/generation.ts';
+import { generateTwinConfig, storedGenerationDraft } from '../src/environments/generation.ts';
 import { createBrowserModelSettings } from '../src/browser/model.ts';
 import { detectEnvironmentConfig } from '../src/environments/plans.ts';
 import { AUTHOR_HARNESSES, AUTHOR_PERMISSION, LOOP, OUT_OF_TIME, TIME_LIMIT_MS, UNWRITTEN, authorTwinConfig, authoringPrompt, opencodeHarness, twinInstructions } from '../src/twin/authoring.ts';
@@ -67,7 +68,7 @@ const attempt = (number: number) => `Attempt ${number} of 4`;
  * `loop` runs the author loop's harness with a scripted model instead of the fake OpenCode: its steps are the model's,
  * and each call the model receives is logged to `loopLog`.
  */
-async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop, settings, secret = SECRET }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[]; settings?: { escalationModel?: string }; secret?: string } = {}) {
+async function fixture(t: TestContext, { script = [], model = true, timeoutMs, loop, settings, secret = SECRET, extraServices = {} }: { script?: AuthorAction[]; model?: boolean; timeoutMs?: number; loop?: ScriptedStep[]; settings?: { escalationModel?: string }; secret?: string; extraServices?: TwinServices } = {}) {
   const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'perpetual-generation-')));
   const repo = join(dataDir, 'repo'), home = join(dataDir, 'home'), scriptFile = join(dataDir, 'script.json'), log = join(dataDir, 'author.jsonl');
   const loopScript = join(dataDir, 'loop.json'), loopLog = join(dataDir, 'loop.jsonl');
@@ -78,6 +79,7 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
   await writeFile(scriptFile, JSON.stringify(script));
   // Every app URL the fake twin reports reaches this server through the twin host name.
   const answer = { status: 200 };
+  let secretValue = secret, modelAvailable = model, modelLookups = 0;
   const server = http.createServer((_request, response) => { response.writeHead(answer.status); response.end('fixture'); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -88,16 +90,17 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     containers: [{ name: 'database', state: 'running', health: 'healthy' }, { name: 'web', state: 'exited', health: null, exitCode: 1 }] as { name: string; state: string; health: string | null; exitCode?: number }[] };
   // repositories: the repository each twin was prepared for, whose package cache it shares; none for a cache of its own.
   const calls = { prepare: [] as TwinConfig[], repositories: [] as (string | undefined)[], destroy: 0, engine: 0, logs: [] as { service?: string; tail?: number }[] };
+  const runtimeServices = { ...services, ...extraServices };
   const twin: EnvironmentTwin = {
     async prepare({ config, repository, onStep = () => {} }) {
-      const plan = validateTwinConfig(config, { services: { ...registry, ...services } });
+      const plan = validateTwinConfig(config, { services: { ...registry, ...runtimeServices } });
       calls.prepare.push(plan);
       calls.repositories.push(repository);
       for (const step of twinState.steps) await onStep(step);
       const failure = twinState.fail(calls.prepare.length);
       if (failure) throw new Error(failure);
       const users = plan.services.auth?.users;
-      return { services: Object.keys(plan.services).map(id => ({ id, fidelity: registry[id]?.fidelity ?? services[id].fidelity, status: 'ready' as const })),
+      return { services: Object.keys(plan.services).map(id => ({ id, fidelity: registry[id]?.fidelity ?? runtimeServices[id].fidelity, status: 'ready' as const })),
         apps: Object.keys(plan.apps).map(id => ({ id, url: `http://host.docker.internal:${port}/` })),
         accounts: Array.isArray(users) && users.length ? [{ id: 'owner', label: 'owner', username: 'owner@example.test' }] : [] };
     },
@@ -107,18 +110,21 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     async available() { calls.engine += 1; return twinState.engine; },
   };
   // OpenCode is the fake in place of its command; the loop keeps its own, with the scripted model's fixture as its module.
-  const runtime = createEnvironmentRuntime({ services, twin, inputs: async () => ({ payments: { PAYMENTS_KEY: secret } }),
+  const runtime = createEnvironmentRuntime({ services: runtimeServices, twin, inputs: async () => ({ payments: { PAYMENTS_KEY: secretValue }, stripe: { secretKey: secretValue, publishableKey: 'pk_test_fixture_publishable_7310' } }),
     authorHarness: loop ? { name: LOOP, harness: scriptedLoopHarness(loopScript, loopLog) } : AUTHOR_HARNESSES.opencode,
     author: options => authorTwinConfig({ ...options, env: { PATH: process.env.PATH, HOME: home }, timeoutMs, cleanupGraceMs: 1000,
       ...(loop ? {} : { harness: ({ model: requested, prompt }: { model: string; prompt: string }) => ({ command: process.execPath, args: [fake, scriptFile, log, prompt, requested] }) }) }) });
   if (settings) await (await createBrowserModelSettings({ dataDir, env: {} })).saveOpenRouter({ apiKey: KEY, model: MODEL, ...settings });
-  const start = () => createEnvironmentManager({ dataDir, runtime, ...(settings ? {} : { authoringModel: async () => model ? { apiKey: KEY, model: MODEL } : null }) });
+  const start = () => createEnvironmentManager({ dataDir, runtime, ...(settings ? {} : { authoringModel: async () => { modelLookups += 1; return modelAvailable ? { apiKey: KEY, model: MODEL } : null; } }) });
   const managers: EnvironmentManager[] = [await start()];
   t.after(async () => { for (const manager of managers) await manager.close(); server.closeAllConnections(); server.close(); await rm(dataDir, { recursive: true, force: true }); });
   const context = { key: 'local:fixture', stageId: 'beta', scan: { repo: { path: repo, sha: 'a'.repeat(40), branch: 'main' }, scannedAt: '1', services: [{ id: 'web', path: '.', framework: 'express' }] } };
   const saved = async () => JSON.parse(await readFile(join(dataDir, 'environments', 'state.json'), 'utf8'));
   return {
     dataDir, repo, log, loopLog, calls, answer, twinState, context, saved, port,
+    get modelLookups() { return modelLookups; },
+    setModelAvailable: (value: boolean) => { modelAvailable = value; },
+    setSecret: (value: string) => { secretValue = value; },
     get manager() { return managers.at(-1)!; },
     /** Restarts the controller, running `stopped` while none runs. */
     async restart(stopped?: () => Promise<unknown>) { await managers.at(-1)!.close(); await stopped?.(); managers.push(await start()); },
@@ -129,6 +135,155 @@ async function fixture(t: TestContext, { script = [], model = true, timeoutMs, l
     },
   };
 }
+
+test('another Sandbox at the same source reuses a verified config without paying for another author', async t => {
+  const plain = { services: {}, apps: { web: app } };
+  const f = await fixture(t, { script: [{ write: plain }, { write: plain }] });
+  const beta = await f.create();
+  assert.equal(beta.status, 'ready');
+  const original = (await f.manager.view(f.context)).plan;
+  await f.restart();
+  const gamma = { ...f.context, stageId: 'gamma' };
+  const { environment } = await f.manager.create(gamma, { generate: true });
+  const result = await f.manager.awaitIdle(environment.id);
+  assert.equal(result.status, 'ready');
+  assert.equal((await lines(f.log)).length, 1, 'The identical source needs one configuration author across stages and restarts.');
+  assert.equal(f.calls.prepare.length, 2, 'Each stage still prepares and verifies its own application environment.');
+  assert.notEqual(result.id, beta.id);
+  assert.deepEqual((await f.manager.view(gamma)).plan, original);
+});
+
+test('missing required inputs retain an unverified candidate and explicit retries reuse it without authoring', async t => {
+  const candidate = { services: { stripe: {} }, apps: { web: { ...app, env: { STRIPE_SECRET_KEY: '{{stripe.STRIPE_SECRET_KEY}}' } } } };
+  const f = await fixture(t, { script: [{ write: candidate }], secret: '', extraServices: { stripe: registry.stripe } });
+  const first = await f.create();
+  assert.equal(first.status, 'failed');
+  assert.match(first.error ?? '', /Add the missing test inputs and retry: Stripe \(secretKey\)/);
+  assert.deepEqual(first.services.map(({ id, status, missing }) => ({ id, status, missing })), [
+    { id: 'stripe', status: 'blocked', missing: ['secretKey'] },
+  ]);
+  assert.equal(f.calls.prepare.length, 0, 'Missing credentials are checked before calling twin.prepare.');
+  assert.equal((await lines(f.log)).length, 1);
+  assert.equal(f.modelLookups, 1);
+  let state = await f.saved();
+  const scope = Object.keys(state.detected)[0], pending = state.drafts[scope];
+  assert.deepEqual(JSON.parse(pending.text), validateTwinConfig(candidate));
+  assert.equal(pending.pendingInputs.attempts, 1);
+  assert.equal(pending.pendingInputs.model, `openrouter/${MODEL}`);
+  assert.deepEqual((await f.manager.view(f.context)).plan, detected, 'The candidate is not yet a verified stage plan.');
+
+  // A repeated explicit retry remains blocked, does not look up a model, and keeps exactly the candidate.
+  f.setModelAvailable(false);
+  const second = await f.create();
+  assert.equal(second.status, 'failed');
+  assert.match(second.error ?? '', /secretKey/);
+  assert.equal(f.calls.prepare.length, 0);
+  assert.equal(f.modelLookups, 1);
+  assert.equal((await lines(f.log)).length, 1);
+  assert.deepEqual((await f.saved()).drafts[scope], pending);
+
+  // Restarting has no authoring side effect. A later explicit create with a valid input prepares the same config.
+  await f.restart();
+  assert.equal(f.modelLookups, 1);
+  assert.equal((await lines(f.log)).length, 1);
+  f.setSecret('sk_test_valid_fixture_7310');
+  const ready = await f.create();
+  assert.equal(ready.status, 'ready', ready.error ?? '');
+  assert.deepEqual(f.calls.prepare, [validateTwinConfig(candidate)]);
+  assert.equal(f.modelLookups, 1, 'A pending candidate retry does not request a model, even when unavailable.');
+  assert.equal((await lines(f.log)).length, 1, 'The candidate was authored once total.');
+  state = await f.saved();
+  assert.deepEqual(state.drafts, {});
+  assert.deepEqual((await f.manager.view(f.context)).plan, {
+    ...validateTwinConfig(candidate), provenance: pending.pendingInputs,
+  });
+});
+
+test('a build failure after pending-input recovery replaces pending metadata with ordinary scoped feedback', async t => {
+  const candidate = { services: { stripe: {} }, apps: { web: { ...app, env: { STRIPE_SECRET_KEY: '{{stripe.STRIPE_SECRET_KEY}}' } } } };
+  const f = await fixture(t, { script: [{ write: candidate }], secret: '', extraServices: { stripe: registry.stripe } });
+  assert.equal((await f.create()).status, 'failed');
+  const scope = Object.keys((await f.saved()).drafts)[0];
+  f.setSecret('sk_test_valid_fixture_7310');
+  f.twinState.steps = ['Starting twin'];
+  f.twinState.fail = () => 'Container perpetual-web Error\ncontainer web exited (1)';
+  const failed = await f.create();
+  assert.equal(failed.status, 'failed');
+  const draft = (await f.saved()).drafts[scope];
+  assert.equal(Object.hasOwn(draft, 'pendingInputs'), false);
+  assert.match(draft.feedback, /- Stage: `build`/);
+  assert.match(draft.feedback, /- App `web` in `\.`: build `npm install`, start `npm run start`/);
+  assert.deepEqual(JSON.parse(draft.text), validateTwinConfig(candidate));
+  assert.equal((await lines(f.log)).length, 1, 'Recovering a pending candidate did not author again.');
+});
+
+test('malformed pending-input provenance is refused as trusted retry metadata', () => {
+  const draft = storedGenerationDraft({ text: JSON.stringify(detected), feedback: 'waiting', pendingInputs: { model: 'arbitrary' } });
+  assert.deepEqual(draft, { text: JSON.stringify(detected), feedback: 'waiting', repair: { stage: 'valid' } });
+});
+
+test('verified config reuse requires the same project, commit and actual source files', async t => {
+  const plain = { services: {}, apps: { web: app } };
+  for (const changed of ['project', 'commit', 'source'] as const) await t.test(changed, async t => {
+    const f = await fixture(t, { script: [{ write: plain }, { write: plain }] });
+    assert.equal((await f.create()).status, 'ready');
+    const next = structuredClone({ ...f.context, stageId: 'gamma' });
+    if (changed === 'project') next.key = 'local:other';
+    if (changed === 'commit') next.scan.repo.sha = 'b'.repeat(40);
+    if (changed === 'source') await writeFile(join(f.repo, 'app.mjs'), `${APP_SOURCE}\n// Uncommitted change\n`);
+    const { environment } = await f.manager.create(next, { generate: true });
+    assert.equal((await f.manager.awaitIdle(environment.id)).status, 'ready');
+    assert.equal((await lines(f.log)).length, 2, 'A different input must not borrow another verified configuration.');
+  });
+});
+
+test('a reused config still needs readiness and a failure keeps the destination stage draft', async t => {
+  const plain = { services: {}, apps: { web: app } };
+  const f = await fixture(t, { script: [{ write: plain }, { write: plain }] });
+  assert.equal((await f.create()).status, 'ready');
+  const original = (await f.manager.view(f.context)).plan;
+  const gamma = { ...f.context, stageId: 'gamma' };
+  f.answer.status = 500;
+  const { environment } = await f.manager.create(gamma, { generate: true });
+  assert.equal((await f.manager.awaitIdle(environment.id)).status, 'failed');
+  assert.equal((await lines(f.log)).length, 1, 'A cache hit does not start an unrequested rewrite after readiness fails.');
+  assert.equal(provenance((await f.manager.view(gamma)).plan), undefined, 'Only a ready environment saves the reused plan.');
+  assert.deepEqual((await f.manager.view(f.context)).plan, original, 'A failed sibling does not change the donor.');
+  assert.equal(Object.keys((await f.saved()).drafts).length, 1);
+  f.answer.status = 200;
+  const retry = await f.manager.create(gamma, { generate: true });
+  assert.equal((await f.manager.awaitIdle(retry.environment.id)).status, 'ready');
+  const authors = await lines(f.log);
+  assert.equal(authors.length, 2, 'The destination draft prevents repeatedly borrowing the same failing plan.');
+  assert.ok(authors[1].feedback);
+});
+
+test('verified config reuse preserves explicit stage configuration and refuses conflicting sibling configs', async t => {
+  const plain = { services: {}, apps: { web: app } };
+  const different = { services: {}, apps: { web: { ...app, env: { MODE: 'different' } } } };
+  const f = await fixture(t, { script: [{ write: plain }, { write: different }, { write: plain }] });
+  assert.equal((await f.create()).status, 'ready');
+  // A manually configured stage keeps its configuration, including its reviewed application selection.
+  const manual = { ...f.context, stageId: 'manual' };
+  await f.manager.savePlan(manual, different);
+  const saved = await f.manager.create(manual, { generate: true });
+  assert.equal((await f.manager.awaitIdle(saved.environment.id)).status, 'ready');
+  assert.deepEqual(f.calls.prepare.at(-1), validateTwinConfig(different));
+  assert.equal((await lines(f.log)).length, 1);
+  // Regenerate Beta after a real configuration failure while Gamma retains the earlier verified configuration.
+  const gamma = { ...f.context, stageId: 'gamma' };
+  const first = await f.manager.create(gamma, { generate: true });
+  assert.equal((await f.manager.awaitIdle(first.environment.id)).status, 'ready');
+  f.answer.status = 500;
+  const failure = await f.manager.create(f.context);
+  assert.equal((await f.manager.awaitIdle(failure.environment.id)).status, 'failed');
+  f.answer.status = 200;
+  assert.equal((await f.create()).status, 'ready');
+  const alpha = { ...f.context, stageId: 'alpha' };
+  const last = await f.manager.create(alpha, { generate: true });
+  assert.equal((await f.manager.awaitIdle(last.environment.id)).status, 'ready');
+  assert.equal((await lines(f.log)).length, 3, 'Different verified configs are ambiguous; neither is chosen silently.');
+});
 
 test('the default author is OpenCode running the twin-author agent', () => {
   assert.deepEqual(opencodeHarness({ model: `openrouter/${MODEL}`, prompt: 'Go', cwd: '/workspace/project' }), { command: 'npx', args: ['-y', 'opencode-ai@1.18.32', 'run', '--agent', 'twin-author', '--model', `openrouter/${MODEL}`, 'Go'] });
@@ -144,7 +299,7 @@ test('the author loop writes the config end to end: an invalid write is refused 
   assert.deepEqual(ready.timings?.map(item => item.step), ['Copying source', 'Checking application runtimes', 'Writing twin config (attempt 1 of 4)', 'Preparing twin', 'Setting up Database', 'Starting twin', 'Checking apps']);
   const { plan } = await f.manager.view(f.context), generated = provenance(plan);
   assert.deepEqual(plan, { ...validateTwinConfig(loopConfig, { services }), provenance: { generatedAt: generated?.generatedAt, harness: LOOP, model: `openrouter/${MODEL}`, attempts: 1 } });
-  assert.equal(LOOP, 'perpetual-loop@7.0.116');
+  assert.equal(LOOP, `perpetual-loop@${aiPackage.version}`);
   assert.deepEqual(f.calls.prepare, [validateTwinConfig(loopConfig, { services })]);
   assert.equal((await lines(f.log)).length, 0, 'OpenCode never ran.');
   // The loop had the controller's instructions, evidence and prompt, and the recomputed unwired variables with each valid write.
@@ -199,6 +354,7 @@ test('a config that builds a ready twin on its first attempt becomes the stage p
   // The evidence describes the scanned package and the snapshot's code.
   assert.match(call.evidence, /^# Repository evidence\n[\s\S]*\n## Apps and packages\n\n### `\.` \(express\)\n\n- Manifests: `package\.json`\n- Scripts:\n {2}- `start`: `node app\.mjs`\n/);
   assert.match(call.evidence, /\n- Variables its runtime code reads, by folder:\n {2}- `\.`: FIXTURE_PORT\n/);
+  assert.match(call.evidence, /## Required service input availability[\s\S]*unknown does not mean missing[\s\S]*No controller availability facts are available/);
   assert.equal(call.repo, await readFile(join(f.repo, 'package.json'), 'utf8'));
   assert.deepEqual(call.modes, { instructions: 0o444, evidence: 0o444, opencode: 0o444, repo: 0o444, git: 0o444, config: 0o600 });
   assert.deepEqual(call.opencode, { permission: AUTHOR_PERMISSION, snapshot: false, lsp: false, formatter: false, instructions: ['TWIN.md', 'EVIDENCE.md'], provider: { openrouter: { models: { [MODEL]: {} } } },

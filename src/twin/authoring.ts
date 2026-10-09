@@ -1,4 +1,4 @@
-// An agent writes a twin config. Its harness, OpenCode (src/agents/opencode.ts) by default or Perpetual's own loop
+// An agent writes a twin config. Its explicit exploration harness is OpenCode (src/agents/opencode.ts) or Perpetual's own loop
 // (./author-loop.ts), runs once in a private workspace that holds the environment's source snapshot, the current draft
 // as twin.json, the previous attempt's feedback, EVIDENCE.md (the controller's digest of the repository with the draft's
 // unwired variables first, src/environments/evidence.ts) and TWIN.md: the config format, the rules, the tools' limits and
@@ -22,6 +22,7 @@ import { services as registry } from './registry.ts';
 import type { WorkerJob } from '../browser/runtime.ts';
 import type { TwinServices } from './registry.ts';
 import type { WorkFacts } from '../environments/evidence.ts';
+import type { ConfigAuthoringTiming } from '../../contract/environment.ts';
 
 export const AUTHOR_AGENT = 'twin-author';
 /**
@@ -64,7 +65,7 @@ export const UNWRITTEN = {
   reason: `The author ended without writing ${CONFIG}.`,
 };
 
-/** The default harness: OpenCode runs the author agent once in the workspace. */
+/** The explicit OpenCode harness runs the author agent once in the workspace. */
 export const opencodeHarness: Harness = opencodeRun(AUTHOR_AGENT);
 /** The author loop's module, which this Node.js runs as its own process. */
 export const AUTHOR_LOOP = fileURLToPath(new URL('./author-loop.ts', import.meta.url));
@@ -77,14 +78,15 @@ export const LOOP = `perpetual-loop@${aiPackage.version}`;
  * fetch reads them only with NODE_USE_ENV_PROXY.
  */
 export const loopHarness: Harness = ({ model, prompt, cwd }) => ({ command: process.execPath, args: [AUTHOR_LOOP, dirname(cwd), model.replace(/^openrouter\//, ''), prompt], env: { NODE_USE_ENV_PROXY: '1' } });
-/** A harness that runs the author, and the name a generated config's provenance records for it. */
-export interface AuthorHarness { harness: Harness; name: string }
-export const AUTHOR_HARNESSES = { opencode: { harness: opencodeHarness, name: OPENCODE }, loop: { harness: loopHarness, name: LOOP } } satisfies Record<string, AuthorHarness>;
-/** The harness PERPETUAL_TWIN_AUTHOR selects: `opencode`, the default, or `loop`. */
+/** A bounded in-process author or an explicitly selected agent harness, with its recorded provenance. */
+export interface AuthorHarness { harness?: Harness; name: string; structured?: true }
+export const AUTHOR_HARNESSES = { structured: { name: 'perpetual-config@1', structured: true }, opencode: { harness: opencodeHarness, name: OPENCODE }, loop: { harness: loopHarness, name: LOOP } } satisfies Record<string, AuthorHarness>;
+/** Bounded structured decisions by default; full agent exploration is explicitly selected. */
 export function selectedAuthorHarness(env: NodeJS.ProcessEnv = process.env): AuthorHarness {
-  const name = env.PERPETUAL_TWIN_AUTHOR?.trim() || 'opencode';
+  const name = env.PERPETUAL_TWIN_AUTHOR?.trim() || 'structured';
+  if (name === 'structured') return AUTHOR_HARNESSES.structured;
   if (name === 'opencode' || name === 'loop') return AUTHOR_HARNESSES[name];
-  throw new Error('PERPETUAL_TWIN_AUTHOR must be opencode or loop.');
+  throw new Error('PERPETUAL_TWIN_AUTHOR must be structured, opencode or loop.');
 }
 
 /**
@@ -272,9 +274,22 @@ ${serviceCatalog(services)}
  * reason a person sees when it differs. `timedOut` says the attempt ran out of time, and `logs`, only after a run that
  * did, is the end of the author's output.
  */
-export type Authored = ({ text: string; error?: undefined; reason?: undefined } | { error: string; reason?: string; text?: undefined }) & { timedOut?: true; logs?: string };
+export type Authored = ({ text: string; error?: undefined; reason?: undefined } | { error: string; reason?: string; text?: undefined }) & { timedOut?: true; logs?: string; terminal?: true; timings?: ConfigAuthoringTiming[] };
 /** Why the author could not run to completion: a short sentence, the end of its output in `logs`. */
 export type AuthorFailure = Error & { logs?: string; cleanupIncomplete?: true };
+/** Value-free required input facts for one exact service option set in the current draft. */
+export type RequiredInputAvailability = {
+  service: string;
+  inputs: Array<{ name: string; availability: 'set' | 'missing' }>;
+};
+/** Safe instructions and facts shared by the structured and exploration authors. */
+export function inputAvailabilityContext(availability?: readonly RequiredInputAvailability[]) {
+  const facts = availability?.length
+    ? availability.map(service => `- ${service.service}: ${service.inputs.length
+      ? service.inputs.map(input => `${input.name}=${input.availability}`).join(', ') : 'no required inputs declared'}`).join('\n')
+    : '- No controller availability facts are available.';
+  return `## Required service input availability\nThe controller checks required inputs with the service registry and current stored values. These facts contain no credential values. A redacted prompt does not mean an input is missing. Facts apply only to the listed service with its current draft options unchanged. If facts are absent, the service is unlisted, or you change that service's options, availability is unknown; unknown does not mean missing. Missing declared required inputs block controller preparation: retain the dependency and write valid placeholder wiring rather than returning a blocker or removing it. Do not infer that a call-site variable is required solely because it appears in source; describe uncertainty only when it affects a concrete config choice and keep it scoped. The controller rechecks inputs before running the twin.\n${facts}`;
+}
 export type AuthoringOptions = {
   /** A private, empty folder the caller owns and removes. */
   workspace: string;
@@ -287,6 +302,9 @@ export type AuthoringOptions = {
   /** The repository's facts, which facts.json keeps beside the project, so the loop can recompute unwired variables. */
   facts?: WorkFacts;
   feedback?: string | null;
+  repair?: { stage: string; subject?: string };
+  /** Safe, option-bound availability facts. Omitted facts mean availability is unknown. */
+  requiredInputAvailability?: readonly RequiredInputAvailability[];
   /** Supplied secrets stay in this process and are removed from the author's observations. */
   secrets?: Iterable<unknown>;
   apiKey: string; model: string; harness?: Harness; services?: TwinServices;
@@ -363,7 +381,7 @@ const authorFailure = (failure: RunFailure): AuthorFailure => Object.assign(new 
  * environment, and a failure's output is redacted of it. It rejects with an AuthorFailure when the agent cannot start,
  * stops, is cancelled, or its processes could not be confirmed stopped.
  */
-export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
+export function authorTwinConfig({ workspace, source, draft, evidence, facts, feedback, apiKey, secrets = [], model, harness = opencodeHarness, services = registry, requiredInputAvailability, env = process.env, timeoutMs = TIME_LIMIT_MS, cleanupGraceMs = 15000 }: AuthoringOptions): WorkerJob<Authored> {
   const abort = new AbortController();
   const supplied = hiddenFromAuthor([apiKey, ...secrets]);
   const hidden = hideValues(supplied, { preserveLines: true }), observation = (text: string) => redact(hidden(text));
@@ -384,7 +402,7 @@ export function authorTwinConfig({ workspace, source, draft, evidence, facts, fe
     await redactSource(join(project, REPO), observation);
     await writeFile(join(project, INSTRUCTIONS), observation(twinInstructions(services)));
     // The evidence quotes values it observed one by one: its own `NAME: file:line` lines are not credential assignments.
-    await writeFile(join(project, EVIDENCE), redact(hidden(evidence), { names: false }));
+    await writeFile(join(project, EVIDENCE), `${redact(hidden(evidence), { names: false })}\n\n${inputAvailabilityContext(requiredInputAvailability)}`);
     if (feedback) await writeFile(join(project, FEEDBACK), observation(feedback));
     await writeFile(join(project, 'opencode.json'), `${JSON.stringify(authorConfig(model), null, 2)}\n`);
     await writeFile(join(project, CONFIG), draft, { mode: 0o600 });

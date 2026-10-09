@@ -194,7 +194,7 @@ test('a person\'s Repair goes from gh\'s failed jobs and log through triage, the
   const offered = await c.until(view => view.stages?.build?.failed?.runs.length);
   assert.deepEqual(offered.view.stages?.build, { mode: 'merge', changes: [], failed: { sha: c.sha, runs: [{ id: '2', name: 'CI', path: '.github/workflows/ci.yml', url: 'https://github.com/owner/app/actions/runs/2' }] } }, 'The head\'s failed run, read through gh, is offered on Build.');
   const started = await c.post('/api/autopilot/repair', { repoPath: c.scanPath, stageId: 'build', runId: '2' });
-  assert.deepEqual([started.status, change(started.body)?.status, change(started.body)?.title, (await c.saved()).trigger], [202, 'running', 'Fixing build', 'person']);
+  assert.deepEqual([started.status, change(started.body)?.status, change(started.body)?.title, (await c.saved()).trigger], [202, 'running', 'Diagnosing build', 'person']);
   const verifying = await c.until((_view, repair) => repair?.status === 'verifying-ci');
   assert.deepEqual([verifying.repair.category, verifying.repair.pullRequest, change(verifying.view)?.pullRequest], ['unknown', { number: 7, url: 'https://github.com/owner/app/pull/7', branch, draft: true }, { number: 7, url: 'https://github.com/owner/app/pull/7' }]);
   assert.deepEqual(change(verifying.view)?.steps.map(step => [step.name, step.status]), [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'done'], ['Verify', 'active'], ['Merge', 'pending']]);

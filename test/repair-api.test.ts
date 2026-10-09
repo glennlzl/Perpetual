@@ -12,6 +12,7 @@ import type { WorkflowRun } from '../src/github-runs.ts';
 import type { RunInput } from '../src/repair/github.ts';
 import type { AutopilotChange, AutopilotView } from '../contract/autopilot.ts';
 import { defaultPipeline } from '../src/pipeline.ts';
+import type { ServerOptions } from '../src/server.ts';
 import type { Repair } from '../src/repair/manager.ts';
 
 const SHA = 'cb9292c4b1f6a0d3e2c1b0a9f8e7d6c5b4a39281', NEWER = 'd'.repeat(40);
@@ -37,6 +38,7 @@ function github() {
     },
     async head(input: BranchHeadInput) { calls.heads.push(input); const etag = `"${branch.head.slice(0, 7)}"`; return input.etag === etag ? { status: 304 as const } : { status: 200 as const, sha: branch.head, etag }; },
     async status() {},
+    async recoveryWorkflow() { return ''; },
     async failure(input: RunInput) {
       calls.failures.push(input);
       const log = logs[String(input.runId)] ?? "src/app.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.";
@@ -49,8 +51,10 @@ function github() {
 const MODEL = { apiKey: 'sk-or-v1-0123456789abcdef', model: 'openai/gpt-6-luna', baseUrl: 'https://openrouter.ai/api/v1' };
 
 // before() sets GitHub up as the controller will first read it.
-async function start(t: TestContext, { connection = { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {}, beforeStart = async () => {} }: { connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void; beforeStart?: (dataDir: string, repoPath: string) => Promise<void> } = {}) {
+async function start(t: TestContext, { connection = { login: 'developer', connectedAt: '2026-09-25T09:00:00.000Z' }, managed = true, model = {} as Record<string, string>, docker = 'Start Docker to repair builds.' as string | null, before = () => {}, beforeStart = async () => {}, credentials }: { credentials?: ServerOptions['credentials']; connection?: { login: string; connectedAt: string } | null; managed?: boolean; model?: Record<string, string>; docker?: string | null; before?: (seams: ReturnType<typeof github>) => void; beforeStart?: (dataDir: string, repoPath: string) => Promise<void> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'perpetual-repair-api-')), dataDir = join(dir, 'data');
+  let close = async () => {};
+  t.after(async () => { await close(); await rm(dir, { recursive: true, force: true }); });
   await mkdir(dataDir);
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/owner/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: '2026-09-25T10:00:00.000Z' };
   const source = { scanPath: dir, checkoutPath: dir, repository: 'owner/app', branch: 'main', rootDirectory: '/', sha: SHA, connectedAccount: 'developer', savedAt: '2026-09-25T09:00:00.000Z' };
@@ -62,8 +66,8 @@ async function start(t: TestContext, { connection = { login: 'developer', connec
   await beforeStart(dataDir, dir);
   // The repair box answers from a fixture: no Docker runs, and no repair reaches a model.
   const boxes = { async available() { return docker; }, async create(): Promise<never> { throw new Error('unused'); }, async removeLeftovers() {}, async remove() {} };
-  const app = await startServer({ port: 0, repo: dir, dataDir, github: seams, repair: { boxes } });
-  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const app = await startServer({ port: 0, repo: dir, dataDir, github: seams, repair: { boxes }, credentials });
+  close = () => app.close();
   const { token } = await (await fetch(`${app.url}/api/session`)).json();
   const post = async (path: string, input: unknown): Promise<{ status: number; body: AutopilotResponse }> => {
     const response = await fetch(`${app.url}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Perpetual-Token': token }, body: JSON.stringify(input) });
@@ -79,7 +83,7 @@ async function start(t: TestContext, { connection = { login: 'developer', connec
   const ended = (view: AutopilotResponse) => change(view) && change(view)!.status !== 'running' ? change(view) : null;
   // The start reads the head once, a baseline.
   for (let attempt = 0; managed && connection && !seams.calls.heads.length && attempt < 400; attempt++) await new Promise(done => setTimeout(done, 5));
-  return { dir, dataDir, post, get, view, repair, until, ended, seams, close: () => app.close() };
+  return { dir, dataDir, url: app.url, post, get, view, repair, until, ended, seams, close: () => app.close() };
 }
 
 test('the Autopilot view names the active source, carries Build alone, starts empty at the baseline head, and refuses another source', async t => {
@@ -120,10 +124,10 @@ test('a person\'s Repair triages the failed head and, without an OpenRouter API 
   f.seams.commits[SHA] = [run('41', 'failure')];
   const started = await f.repair('41');
   assert.equal(started.status, 202);
-  assert.deepEqual([change(started.body)?.status, change(started.body)?.title, change(started.body)?.kind, marks(change(started.body))], ['running', 'Fixing build', 'fix', [['Read the failure', 'active'], ['Diagnose', 'pending'], ['Change', 'pending'], ['Verify', 'pending'], ['Merge', 'pending']]]);
+  assert.deepEqual([change(started.body)?.status, change(started.body)?.title, change(started.body)?.kind, marks(change(started.body))], ['running', 'Diagnosing build', 'fix', [['Read the failure', 'active'], ['Diagnose', 'pending'], ['Change', 'pending'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual(change(started.body)?.steps[0].detail, [{ text: 'CI' }, ' failed at ', { text: 'cb9292c' }]);
   const settled = await f.until(f.ended);
-  assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['not-merged', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
+  assert.deepEqual([change(settled)?.status, change(settled)?.reason, marks(change(settled))], ['needs-attention', 'Add an OpenRouter API key in Settings.', [['Read the failure', 'done'], ['Diagnose', 'done'], ['Change', 'waiting'], ['Verify', 'pending'], ['Merge', 'pending']]]);
   assert.deepEqual([change(settled)?.steps[1].detail, change(settled)?.steps[2].detail], [['The build does not compile.'], ['Add an OpenRouter API key in Settings.']]);
   assert.deepEqual(f.seams.calls.failures, [{ repository: 'owner/app', runId: '41' }]);
   // A view observes the terminal state before the background job's final atomic save settles.
@@ -183,7 +187,7 @@ test('an availability failure reruns its failed jobs once as Rerunning build, an
   const stopped = await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: change(rerunning)!.id });
   assert.deepEqual([stopped.status, change(stopped.body)?.status, change(stopped.body)?.reason, change(stopped.body)?.steps[1].status], [200, 'not-merged', 'Stopped.', 'waiting']);
   const again = await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: change(rerunning)!.id });
-  assert.deepEqual([again.status, again.body.error], [409, 'This repair is not running.']);
+  assert.deepEqual([again.status, again.body.error], [409, 'This repair is not running or queued.']);
   assert.equal((await f.post('/api/autopilot/stop', { repoPath: f.dir, stageId: 'build', id: 'missing' })).status, 404);
 });
 
@@ -230,4 +234,107 @@ test('the failed-run endpoint reads as the connected account, for its repository
   const refused = await disconnected.get('/api/providers/github/runs/123/failure');
   assert.deepEqual([refused.status, refused.body.error], [400, 'Connect your GitHub account to read workflow runs.']);
   assert.deepEqual(disconnected.seams.calls.failures, []);
+});
+
+test('a restored queue is visible and Resume is scoped to the active Build stage', async t => {
+  const f = await start(t, { async beforeStart(dataDir) {
+    await mkdir(join(dataDir, 'repairs'));
+    const time = '2026-09-25T10:00:00.000Z';
+    await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'queued-test', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'developer', checkoutPath: '/data/app', rootDirectory: '/', trigger: 'push', status: 'queued', runs: [], createdAt: time, updatedAt: time }] }));
+  } });
+  const queued = change(await f.view());
+  assert.deepEqual([queued?.status, queued?.paused, queued?.queuePosition], ['queued', true, 1]);
+  f.seams.commits[SHA] = [run('41', 'failure')];
+  const wrong = await f.post('/api/autopilot/resume', { repoPath: f.dir, stageId: 'production' });
+  assert.equal(wrong.status, 400);
+  const other = await f.post('/api/autopilot/resume', { repoPath: '/other', stageId: 'build' });
+  assert.equal(other.status, 409);
+  const resumed = await f.post('/api/autopilot/resume', { repoPath: f.dir, stageId: 'build' });
+  assert.equal(resumed.status, 200);
+  const result = change(await f.until(v => change(v)?.status === 'needs-attention'));
+  assert.equal(result?.reason, 'Add an OpenRouter API key in Settings.');
+  assert.equal(result?.paused, undefined);
+});
+
+test('authorization recovery is scoped to the active Build and follows actual rerun attempts through HTTP', async t => {
+  const f = await start(t, { before(seams) { seams.commits[SHA] = [run('41', 'failure')]; seams.logs['41'] = 'Error: CLOUD_TOKEN is required'; } });
+  await f.repair('41');
+  const blocked = await f.until(view => f.ended(view));
+  const id = change(blocked)!.id;
+  assert.equal(change(blocked)?.title, 'Waiting for access');
+  const recover = (action: string, extra: Record<string, unknown> = {}) => f.post('/api/autopilot/recover', { repoPath: f.dir, stageId: 'build', id, action, ...extra });
+  assert.equal((await recover('recheck', { repoPath: '/another/project' })).status, 409);
+  assert.equal((await recover('recheck', { stageId: 'production' })).status, 400);
+  assert.equal((await recover('write-secret')).status, 400);
+  const read = await recover('recheck');
+  assert.equal(read.status, 200);
+  assert.deepEqual(f.seams.calls.reruns, []);
+  const retry = await recover('rerun');
+  assert.equal(retry.status, 200);
+  assert.equal(change(retry.body)?.title, 'Verifying recovery');
+  assert.deepEqual(f.seams.calls.reruns, [{ repository: 'owner/app', runId: '41' }]);
+  f.seams.commits[SHA] = [{ ...run('41', 'success'), attempt: 2 }];
+  const passed = await recover('recheck');
+  assert.equal(change(passed.body)?.status, 'passed');
+  assert.equal(change(passed.body)?.title, 'Build recovered');
+  assert.equal(change(passed.body)?.pullRequest, undefined);
+});
+
+test('one consent callback synchronizes the exact CI credential and starts original-run verification without UI polling', async t => {
+  let writes = 0, exchanges = 0, revision = 'a'.repeat(64);
+  const access = 'vca_' + 'x'.repeat(30);
+  const time = '2026-10-07T00:00:00.000Z';
+  const recoveryRun = { id: '41', attempt: 1, name: 'Preview', url: 'https://github.com/owner/app/actions/runs/41', workflow: '.github/workflows/ci.yml', observedAt: time, secrets: ['DEPLOY_ACCESS'], vercelSecret: 'DEPLOY_ACCESS', environment: null, binding: 'references', settingsUrl: 'https://github.com/owner/app/settings/secrets/actions' };
+  const f = await start(t, {
+    credentials: { clientId: 'oac_app', provider: {
+      url: ({ state }) => `https://vercel.com/integrations/acme-recovery/new?state=${state}`,
+      exchange: async () => { exchanges++; return { access, installation: { id: 'icfg_one', userId: 'user_one', teamId: null } }; },
+      refresh: async () => { throw new Error('A long-lived installation does not refresh.'); },
+      identity: async () => ({ id: 'icfg_one', name: 'Developer' }),
+    }, write: async (destination, value) => {
+      assert.deepEqual(destination, { repository: 'owner/app', name: 'DEPLOY_ACCESS', environment: null });
+      assert.equal(value, access); writes++; revision = 'b'.repeat(64);
+    } },
+    before(seams) {
+      seams.commits[SHA] = [run('41', 'failure')];
+      Object.assign(seams, { recoveryCredentials: async () => ({ revision, bindings: [{ runId: '41', name: 'DEPLOY_ACCESS', environment: null, scope: 'repository', updatedAt: writes ? '2026-10-07T00:01:00Z' : time }] }) });
+    },
+    async beforeStart(dataDir, repoPath) {
+      await mkdir(join(dataDir, 'repairs'));
+      await writeFile(join(dataDir, 'repairs', 'state.json'), JSON.stringify({ version: 1, repairs: [{ id: 'access-test', key: 'github:owner/app:/', repository: 'owner/app', branch: 'main', sha: SHA, login: 'developer', checkoutPath: repoPath, rootDirectory: '/', trigger: 'push', status: 'needs-person', category: 'configuration', runs: [{ ...shown('41'), attempt: 1 }], createdAt: time, updatedAt: time, recovery: { status: 'required', credentialRevision: revision, runs: [recoveryRun], requests: [] } }] }));
+    },
+  });
+  const input = { repoPath: f.dir, stageId: 'build', id: 'access-test' };
+  const unauthenticated = await globalThis.fetch(`${f.url}/api/autopilot/connect-vercel`, { method: 'POST', body: JSON.stringify(input) });
+  assert.equal(unauthenticated.status, 401); assert.equal(writes, 0);
+  const wrong = await f.post('/api/autopilot/connect-vercel', { ...input, repoPath: '/another/project' }); assert.equal(wrong.status, 409);
+  // Startup observes saved authorization recoveries in the background. Wait for that exact
+  // operation to release its per-repair lock before exercising the explicit consent route.
+  let checked = false;
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const response = await f.post('/api/autopilot/recover', { ...input, action: 'recheck' });
+    if (response.status === 200) { checked = true; break; }
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error, 'Recovery is already being checked.');
+    await new Promise(done => setTimeout(done, 10));
+  }
+  assert.equal(checked, true, 'Startup authorization observation should finish before explicit consent starts.');
+  const connected = await f.post('/api/autopilot/connect-vercel', input);
+  assert.equal(connected.status, 200, JSON.stringify(connected.body));
+  const consent = new URL((connected.body as unknown as { url: string }).url);
+  const callback = `${f.url}/authorization/vercel/callback?${new URLSearchParams({ state: consent.searchParams.get('state')!, code: 'issuer-code' })}`;
+  const invalid = await globalThis.fetch(callback.replace(consent.searchParams.get('state')!, 'wrong-state'), { redirect: 'manual', headers: { 'Sec-Fetch-Site': 'cross-site' } });
+  assert.equal(invalid.status, 303); assert.equal(writes, 0);
+  await globalThis.fetch(callback + '&state=duplicate', { redirect: 'manual' }); assert.equal(writes, 0);
+  const completed = await globalThis.fetch(callback, { redirect: 'manual', headers: { 'Sec-Fetch-Site': 'cross-site' } });
+  assert.equal(completed.status, 303); assert.equal(completed.headers.get('location'), '/#pipeline');
+  assert.equal(completed.headers.get('referrer-policy'), 'no-referrer'); assert.equal(writes, 1);
+  await f.until(() => f.seams.calls.reruns.length === 1);
+  assert.deepEqual(f.seams.calls.reruns, [{ repository: 'owner/app', runId: '41' }]);
+  const view = await f.view(); assert.equal(change(view)?.title, 'Verifying recovery');
+  assert.equal(JSON.stringify(view).includes(access), false);
+  await globalThis.fetch(callback, { redirect: 'manual' }); assert.equal(exchanges, 1); assert.equal(writes, 1);
+  const csrf = await globalThis.fetch(`${f.url}/api/autopilot`, { headers: { 'Sec-Fetch-Site': 'cross-site' } }); assert.equal(csrf.status, 403);
+  assert.equal((await f.post('/api/autopilot/disconnect-vercel', input)).status, 200);
+  assert.equal((await readFile(join(f.dataDir, 'credentials', 'state.json'), 'utf8')).includes(access), false);
 });

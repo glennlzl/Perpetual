@@ -52,8 +52,34 @@ test('GitHub connection returns keyboard focus to its source controls', { timeou
   assert.equal(connected, true);
   await page.reload();
   await page.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole('button', { name: 'Continue as acme', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Disconnect', exact: true, includeHidden: true })).toBeVisible();
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole('combobox', { name: 'Repository', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Disconnect', exact: true })).toBeFocused();
+});
+
+test('an already connected account goes straight to repository and branch selection', { timeout: 15000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'perpetual-connected-source-ui-'));
+  const app = await startServer({ port: 0, repo: dir, dataDir: join(dir, 'state') });
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => { await browser.close(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const page = await browser.newPage();
+  const writes: string[] = [];
+  await page.route('**/api/github/**', async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (request.method() === 'POST') writes.push(path);
+    const reply = path === '/api/github/repositories' ? { repositories: [{ fullName: 'acme/app' }] }
+      : path === '/api/github/branches' ? { branches: [{ name: 'main' }], defaultBranch: 'main' }
+      : { authenticated: true, connected: true, account: { login: 'acme' }, source: null };
+    await route.fulfill({ json: reply });
+  });
+  await page.goto(app.launchUrl);
+  await page.getByRole('button', { name: 'Connect GitHub', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Disconnect', exact: true, includeHidden: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Connect GitHub', exact: true })).toBeHidden();
+  const repository = page.getByRole('combobox', { name: 'Repository', exact: true });
+  await expect(repository).toBeEnabled();
+  await repository.click();
+  await page.getByRole('option', { name: 'acme/app', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Branch', exact: true })).toHaveText('main');
+  assert.deepEqual(writes, [], 'A verified connection requires no second sign-in or connect request.');
 });

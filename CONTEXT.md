@@ -2,7 +2,13 @@
 
 ## Language
 
-**Pipeline** — The connected stages through which a project's source, delivery and business verification progress.
+**Connector** — An app-wide authorized account for an external service, independent of a Project or Pipeline. A saved sign-in attempt is pending until the service verifies its account; a repository address alone is no account authorization.
+
+**Project** — A configured repository and source root whose delivery and business verification Perpetual manages. A Project initially owns one Pipeline and remains when that Pipeline is removed.
+
+**Pipeline** — A Project's connected stages through which its source, delivery and business verification progress. Disconnecting GitHub retains the Pipeline; removing it cleans up its owned environments and test workspace.
+
+**Production branch** — A Pipeline's explicitly chosen GitHub branch from which Perpetual may request a Release. It is saved independently of the branch being viewed and never inferred from a repository default or a branch name. Its current commit still needs Build and every Sandbox journey gate to permit deployment.
 
 **Stage** — A named point in a pipeline, such as Source, Build, Beta or Production. A stage's environment readiness and test results are separate states.
 
@@ -57,6 +63,8 @@
 **Journey gate** — The decision whether one commit may leave one Sandbox stage: the stage's twin is rebuilt at that commit and its reviewed, selected journeys run their approved journey code; a journey without it needs review. A failed journey fails the gate; any other incomplete result needs a person's release. A passed or released gate moves the commit to the next Sandbox stage, and Production is Ready only for a commit every Sandbox gate passed or released. A gate reports a GitHub commit status; it never deploys. A _repair gate_ judges a repair's pull request head the same way, over a checkout Perpetual owns: it never moves the source, promotes, supersedes a target-branch gate or makes Production Ready.
 
 **Repair** — An agent's fix for one failed build of the target branch, delivered as a pull request. It merges itself only when CI and every Sandbox journey gate passed at its exact head, no change rule held it for a person and the Build stage's Autopilot mode is `Autopilot` rather than `Ask first`; credential and permission failures never become repairs. A repair's merge that fails again needs a person, never another automatic repair. Avoid calling a rerun that passed a repair: it is recorded as flaky.
+
+**Build queue** — Commits waiting for Build to finish its current change, in the order Perpetual observed them. New commits keep their place without interrupting active work; a waiting commit is checked before a repair starts.
 
 **Repair box** — The Docker container that is a repair agent's whole workspace: a copy of the failing commit, where every agent tool runs. It has no host mount, Docker socket or credential, and no route to the host: it reaches public addresses only through its egress proxy. Only the host copy it came from pushes, and only the repair branch.
 

@@ -1,16 +1,18 @@
+import { createHash } from 'node:crypto';
 import { mkdir, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTwinInputs, createTwinRuntime, services as registry } from '../twin/index.ts';
 import { createBrowserModelSettings } from '../browser/model.ts';
 import { destroySandbox as destroyGuest } from '../sandbox/cua-local.ts';
 import { privateWorkspace } from '../agents/opencode.ts';
-import { authorTwinConfig, hiddenFromAuthor, selectedAuthorHarness, type AuthorHarness } from '../twin/authoring.ts';
+import { authorTwinConfig, hiddenFromAuthor, selectedAuthorHarness, type AuthorHarness, type RequiredInputAvailability } from '../twin/authoring.ts';
+import { authorStructuredConfig, CONFIG_BUDGET_MS } from '../twin/config-author.ts';
 import { HOST, LOOPBACK } from '../twin/compose.ts';
 import { redactor } from '../twin/runtime.ts';
 import { failureText, redact } from '../redaction.ts';
 import { diagnosticText } from './diagnostics.ts';
 import { ID } from '../twin/config.ts';
-import { AUTHORING, LOG_LINES, checkWritten, feedbackText, generateTwinConfig, type AttemptOutcome } from './generation.ts';
+import { AUTHORING, LOG_LINES, MissingEnvironmentInputs, checkWritten, feedbackText, generateTwinConfig, type AttemptOutcome } from './generation.ts';
 import { evidenceText, repositoryFacts, unwiredSummary } from './evidence.ts';
 import { snapshotSource } from './plans.ts';
 import { requireSupportedApplications } from './applications.ts';
@@ -21,10 +23,35 @@ import type { JsonObject, TwinConfig } from '../twin/config.ts';
 import type { TwinRuntime, TwinServices } from '../twin/index.ts';
 import type { ContainerStatus } from '../twin/runtime.ts';
 import type { InputValues } from '../twin/registry.ts';
+import { missingInputs } from '../twin/inputs.ts';
 import type { ServiceSummary } from '../twin/compose.ts';
 
 const MODEL_SERVICE = 'llm';
 const SETTINGS_SOURCE = 'settings';
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** Derive facts only from the draft's declared options and the stored inputs read for those options. */
+function requiredInputAvailability(draft: string, services: TwinServices, inputs: Record<string, InputValues>): RequiredInputAvailability[] | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(draft); } catch { return undefined; }
+  if (!record(parsed) || !record(parsed.services)) return undefined;
+  const facts: RequiredInputAvailability[] = [];
+  for (const [id, options] of Object.entries(parsed.services)) {
+    const definition = services[id];
+    if (!definition || !record(options)) continue;
+    const required = (definition.inputs ?? []).filter(input => !input.optional);
+    facts.push({ service: id,
+      inputs: required.map(input => ({ name: input.name, availability: missingInputs(definition, inputs[id] ?? {}).includes(input.name) ? 'missing' : 'set' })) });
+  }
+  return facts;
+}
+function serviceOptionsInDraft(draft: string): Record<string, JsonObject> | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(draft); } catch { return undefined; }
+  if (!record(parsed)) return undefined;
+  const declared = parsed.services === undefined ? {} : parsed.services;
+  if (!record(declared) || Object.values(declared).some(options => !record(options))) return undefined;
+  return declared as Record<string, JsonObject>;
+}
 /** The llm service takes App Settings' model unless its `source` option names the app's own values. */
 export const fromAppSettings = (id: string, options: { source?: unknown } | null | undefined) => id === MODEL_SERVICE && (options?.source ?? SETTINGS_SOURCE) === SETTINGS_SOURCE;
 
@@ -78,7 +105,7 @@ export interface PreparedEnvironment {
 /** A health check: `final` says the twin will not recover by itself. */
 export interface EnvironmentHealth { status: 'ready' | 'starting' | 'failed'; error?: string; final?: boolean }
 /** An environment as its runtime reads it: the twin validates the plan. A repair gate's names its repair. */
-type Environment = Pick<EnvironmentRecord, 'id' | 'sandboxId'> & Partial<Pick<EnvironmentRecord, 'pipelineKey' | 'repair'>> & { plan?: { services?: Record<string, JsonObject> } };
+type Environment = Pick<EnvironmentRecord, 'id' | 'sandboxId'> & Partial<Pick<EnvironmentRecord, 'pipelineKey' | 'repair' | 'sourceRevision'>> & { plan?: { services?: Record<string, JsonObject> } };
 type TwinCall = { dataDir: string; id: string };
 /** What environments call on their twin runtime (../twin/runtime.ts). */
 export interface EnvironmentTwin {
@@ -95,12 +122,16 @@ export interface AuthoringModel { apiKey: string; model: string; escalationModel
  * Creation writes the twin config first: from the stage's draft, or the detected plan, and the feedback it failed with.
  * `packages` are the scan's, which the repository's evidence describes.
  */
-export interface TwinGeneration { model: AuthoringModel; draft: string; feedback?: string | null; packages?: EvidencePackage[] }
+export interface TwinGeneration {
+  model: AuthoringModel; draft: string; feedback?: string | null; repair?: GenerationDraft['repair']; packages?: EvidencePackage[];
+  /** Verified sibling-stage configs, reusable only for the identical copied source. */
+  reusablePlans?: { sourceHash: string; config: TwinConfig; provenance: PlanProvenance }[];
+}
 /**
  * Creation from a saved config an agent wrote: when preparing its twin fails, the failure carries the config and staged
  * feedback as the stage's next draft. `packages` are the scan's.
  */
-export interface GeneratedPlan { packages?: EvidencePackage[] }
+export interface GeneratedPlan { packages?: EvidencePackage[]; pendingInputs?: PlanProvenance }
 
 // The controller reaches an app where the twin publishes it, on the host's loopback.
 const APP_TIMEOUT_MS = 20000;
@@ -116,15 +147,16 @@ const CANCEL_POLL_MS = 250;
 
 // An environment's sandbox is its Compose twin, named by the environment's id. A different
 // sandbox id is a Cua guest created before twins; it can only be deleted.
-export function createEnvironmentRuntime({ services = registry, twin = createTwinRuntime({ services }), inputs = environmentInputs, destroyCuaGuest = destroyGuest, author = authorTwinConfig, authorHarness = selectedAuthorHarness(), answers = appStatus }: {
+export function createEnvironmentRuntime({ services = registry, twin = createTwinRuntime({ services }), inputs = environmentInputs, destroyCuaGuest = destroyGuest, author, authorHarness = selectedAuthorHarness(), answers = appStatus }: {
   services?: TwinServices; twin?: EnvironmentTwin; inputs?: typeof environmentInputs;
   destroyCuaGuest?: (options: { dataDir: string; id?: string }) => Promise<unknown>;
   /** One attempt of the twin config author; tests supply a harness. */
   author?: typeof authorTwinConfig;
-  /** What runs the author: OpenCode, or the loop when PERPETUAL_TWIN_AUTHOR=loop. */
+  /** Bounded structured generation by default, or an explicitly selected agent harness. */
   authorHarness?: AuthorHarness;
   answers?: (url: string, signal?: AbortSignal) => Promise<number>;
 } = {}) {
+  const runAuthor = author ?? (authorHarness.structured ? authorStructuredConfig : authorTwinConfig);
   const twinInputs = (dataDir: string, config: Environment['plan']) => inputs({ dataDir, config, services });
   const secretInputs = (values: Record<string, InputValues>) => Object.entries(values)
     .flatMap(([id, entries]) => (services[id]?.inputs ?? []).filter(input => input.secret).map(input => entries[input.name])).filter((value): value is string => Boolean(value));
@@ -209,6 +241,19 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     const source = join(directory, 'source');
     const snapshot = await snapshotSource(repoPath, source);
     check();
+    // Reuse only an unambiguous, still-valid config for this actual source. A new stage gets fresh services, data and
+    // readiness checks; no running twin or test outcome is shared. Its own saved config or pending draft is never here.
+    const candidates = generate?.reusablePlans?.filter(plan => plan.sourceHash === snapshot.hash) ?? [];
+    const matching = candidates[0];
+    const reusable = matching && candidates.every(plan => JSON.stringify(plan.config) === JSON.stringify(matching.config))
+      ? checkWritten(JSON.stringify(matching.config), services) : undefined;
+    const reused = matching && reusable?.config ? { ...matching, config: reusable.config } : undefined;
+    if (reused) {
+      environment = { ...environment, plan: reused.config };
+      generated = { packages: generate?.packages };
+      generate = undefined;
+      await onUpdate({ plan: reused.config });
+    }
     if (!selectionReviewed) {
       await onUpdate(next('Checking application runtimes'));
       await requireSupportedApplications(source);
@@ -219,19 +264,52 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     let values: Record<string, InputValues> = {};
     const knownSecrets = new Set<string>();
     let facts: RepositoryFacts | undefined;
+    let inputsFingerprint: string | undefined;
     const readInputs = async (config: Environment['plan']) => {
       const next = await twinInputs(dataDir, config);
       // Replacing inputs never makes an earlier value safe to disclose. New values invalidate already-clipped evidence.
       for (const value of secretInputs(next)) if (!knownSecrets.has(value)) { knownSecrets.add(value); facts = undefined; }
+      const fingerprint = createHash('sha256').update(JSON.stringify(next)).digest('hex');
+      if (inputsFingerprint !== undefined && fingerprint !== inputsFingerprint) facts = undefined;
+      inputsFingerprint = fingerprint;
       return next;
     };
     // The twins of a pipeline's repository share its package cache. A repair gate's twin builds a pull request head no
     // person has reviewed, so its cache is its own, removed with it: nothing it writes reaches a later twin.
     const repository = environment.repair === undefined ? environment.pipelineKey : undefined;
-    const prepareTwin = async (config: Environment['plan']) => {
+    const prepareTwin = async (config: TwinConfig, provenance?: PlanProvenance) => {
       values = await readInputs(config);
       check();
-      return twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, repository, signal, onStep: async step => { check(); await onUpdate(next(step)); } });
+      const block = async (blocked: EnvironmentService[]) => {
+        if (!blocked.length) return;
+        const message = `Add the missing test inputs and retry: ${blocked.map(item => `${item.title} (${item.missing.join(', ') || 'unavailable inputs'})`).join('; ')}.`;
+        const error = new MissingEnvironmentInputs(message);
+        let draft: GenerationDraft | undefined;
+        if (provenance) {
+          draft = { text: `${JSON.stringify(config, null, 2)}\n`, feedback: message, repair: null, pendingInputs: provenance };
+          Object.assign(error, { draft });
+        }
+        try {
+          if (draft) await onDraft?.(draft);
+          await onUpdate({ services: blocked, ...next('Waiting for inputs') });
+        } catch (storage) {
+          // A persistence failure cannot turn absent credentials into a paid configuration repair.
+          Object.assign(error, { logs: `Input-blocked progress could not be saved: ${failureText(redactor(knownSecrets)(String(storage)), 600)}` });
+        }
+        throw error;
+      };
+      // Check declared required inputs before any service setup, image pull or application build. Values never leave here.
+      await block(Object.keys(config.services).flatMap(id => {
+        const definition = services[id], missing = missingInputs(definition, values[id] ?? {});
+        return missing.length ? [{ id, title: definition.title, fidelity: definition.fidelity, status: 'blocked' as const, missing }] : [];
+      }));
+      const result = await twin.prepare({ dataDir, id: environment.id, config, source, inputs: values, repository,
+        ...(repository && environment.sourceRevision ? { buildSource: { revision: environment.sourceRevision, hash: snapshot.hash } } : {}),
+        signal, onStep: async step => { check(); await onUpdate(next(step)); } });
+      // A runtime can discover an upstream blocker too; a responding app must not hide it.
+      await block(result.services.filter(item => item.status === 'blocked').map(item => ({ id: item.id, title: services[item.id]?.title ?? item.id,
+        fidelity: item.fidelity, status: 'blocked', missing: item.missing ?? [] })));
+      return result;
     };
     const ready = (result: Awaited<ReturnType<EnvironmentTwin['prepare']>>): PreparedEnvironment => ({ status: 'ready', ...next('Ready'), readyAt: new Date().toISOString(), apps: result.apps,
       services: result.services.map(({ id, fidelity, status, missing = [] }) => ({ id, title: services[id]?.title ?? id, fidelity, status, missing })),
@@ -249,7 +327,8 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       const secrets = hiddenFromAuthor(knownSecrets);
       const facts = await repositoryFacts({ source, checkout: repoPath, packages, draft: text, services, secrets }).catch(() => null);
       const hide = (value: string) => redact(redactor(secrets)(value));
-      return { text, feedback: feedbackText({ title: 'The saved twin config', failure, unwired: facts ? unwiredSummary(facts, text) : [], hide }) };
+      return { text, feedback: feedbackText({ title: 'The saved twin config', failure, unwired: facts ? unwiredSummary(facts, text) : [], hide }),
+        ...(authorHarness.structured ? { repair: { stage: failure.stage, ...(failure.subject ? { subject: hide(failure.subject) } : {}) } } : {}) };
     }
     if (!generate) {
       // A saved config is checked as a generation's attempt is before it is built: one its services refuse is never built,
@@ -263,11 +342,11 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       }
       await onUpdate({ ...owned, ...next('Preparing twin') });
       let result: Awaited<ReturnType<typeof prepareTwin>>;
-      try { result = await prepareTwin(environment.plan); }
+      try { result = await prepareTwin(checked.config, reused?.provenance ?? generated?.pendingInputs); }
       catch (error) {
         // A generated config that fails to build leaves itself and its failure as the stage's next draft, when the failure
         // names a part of it.
-        if (!generated || cancelled() || !(error instanceof Error)) throw error;
+        if (error instanceof MissingEnvironmentInputs || !generated || cancelled() || !(error instanceof Error)) throw error;
         const draft = await failedDraft(error, generated);
         throw draft ? Object.assign(error, { draft }) : error;
       }
@@ -275,7 +354,7 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       // service can create them, a test account exists. A gate's twin that is not ready gives no verdict.
       check(); await onUpdate(next('Checking apps'));
       const problem = await verify(checked.config, result, signal);
-      if (problem === null) return ready(result);
+      if (problem === null) return { ...ready(result), ...(reused || generated?.pendingInputs ? { plan: checked.config, generated: reused?.provenance ?? generated!.pendingInputs } : {}) };
       const error = new Error(problem.error);
       if (!generated || cancelled()) throw error;
       const { app, ...found } = problem;
@@ -288,6 +367,9 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
     // Facts come from the execution snapshot, cached until supplied secrets change; example names come from the checkout.
     // Each attempt's evidence leads with the unwired variables of the twin.json it starts from.
     let authoredModel = model.model;
+    let authoredAttempt = 0;
+    let authoringMs = 0;
+    const configTimings: NonNullable<EnvironmentRecord['configTimings']> = [];
     let evidence = '';
     const attempts: AttemptOutcome[] = [];
     // The twin's logs hide every value seen; what the author reads, its evidence and feedback included, leaves a placeholder
@@ -298,20 +380,63 @@ export function createEnvironmentRuntime({ services = registry, twin = createTwi
       values = await readInputs(environment.plan);
       check();
       const outcome = await generateTwinConfig({
-        draft: generate.draft, feedback: generate.feedback, services, cancelled,
+        draft: generate.draft, feedback: generate.feedback, initialRepair: generate.repair, retainRepairScope: authorHarness.structured === true, services, cancelled,
         step: async step => { check(); await onUpdate({ ...owned, ...next(step) }); },
-        async author({ draft, feedback, attempt }) {
-          facts ??= await repositoryFacts({ source, checkout: repoPath, packages: generate.packages, draft: generate.draft, services, secrets: authorSecrets() });
-          check();
-          const evidence = evidenceText(facts, draft), workspace = await privateWorkspace(workspaces);
-          authoredModel = attempt > 2 ? model.escalationModel || model.model : model.model;
-          const job = author({ workspace: workspace.path, source, draft, evidence, facts, feedback, apiKey: model.apiKey, secrets: authorSecrets(), model: authoredModel, harness: authorHarness.harness, services });
-          // Controller shutdown cancels the agent as it would a twin between steps.
-          const watch = setInterval(() => { if (cancelled()) job.cancel(); }, CANCEL_POLL_MS);
-          try { return await job.promise; } finally { clearInterval(watch); await workspace.remove(); }
+        async author({ draft, feedback, attempt, repair }) {
+          authoredAttempt = attempt;
+          const started = performance.now();
+          const remaining = () => Math.max(0, CONFIG_BUDGET_MS - authoringMs - (performance.now() - started));
+          const stopped = new AbortController();
+          const budget = authorHarness.structured ? AbortSignal.timeout(Math.ceil(remaining())) : undefined;
+          const authorSignal = AbortSignal.any([stopped.signal, ...(signal ? [signal] : []), ...(budget ? [budget] : [])]);
+          let workspace: Awaited<ReturnType<typeof privateWorkspace>> | undefined;
+          let job: ReturnType<typeof runAuthor> | undefined;
+          const watch = setInterval(() => { if (cancelled()) { stopped.abort(); job?.cancel(); } }, CANCEL_POLL_MS);
+          try {
+            authorSignal.throwIfAborted();
+            const declaredServices = serviceOptionsInDraft(draft);
+            let inputAvailability: RequiredInputAvailability[] | undefined;
+            if (declaredServices) {
+              values = await readInputs({ services: declaredServices });
+              inputAvailability = requiredInputAvailability(draft, services, values);
+            }
+            const evidenceStarted = performance.now();
+            try {
+              facts ??= await repositoryFacts({ source, checkout: repoPath, packages: generate.packages, draft: generate.draft, services, secrets: authorSecrets(), signal: authorSignal });
+            } finally {
+              configTimings.push({ attempt, phase: 'evidence', ms: performance.now() - evidenceStarted,
+                outcome: budget?.aborted ? 'timed-out' : authorSignal.aborted ? 'cancelled' : facts ? 'completed' : 'failed' });
+            }
+            await onUpdate({ configTimings: [...configTimings] });
+            check(); authorSignal.throwIfAborted();
+            const evidence = evidenceText(facts, draft);
+            workspace = await privateWorkspace(workspaces);
+            check(); authorSignal.throwIfAborted();
+            authoredModel = attempt > 2 ? model.escalationModel || model.model : model.model;
+            job = runAuthor({ workspace: workspace.path, source, draft, evidence, facts, feedback, repair, apiKey: model.apiKey, secrets: authorSecrets(), model: authoredModel, harness: authorHarness.harness, services,
+              ...(inputAvailability === undefined ? {} : { requiredInputAvailability: inputAvailability }),
+              ...(authorHarness.structured ? { timeoutMs: remaining() } : {}) });
+            const result = await job.promise;
+            configTimings.push(...(result.timings ?? []).map(timing => ({ ...timing, attempt })));
+            // Stop preserves the last completed draft; a cancelled model response is not a failed configuration.
+            check();
+            return result;
+          } catch (error) {
+            if (authorHarness.structured) check();
+            if (budget?.aborted) return { error: 'Sandbox configuration exceeded its 30-second budget. Retry or use an explicit agent author for deeper investigation.', terminal: true, timedOut: true };
+            throw error;
+          } finally {
+            clearInterval(watch);
+            const cleanup = performance.now();
+            await workspace?.remove();
+            configTimings.push({ attempt, phase: 'cleanup', ms: performance.now() - cleanup });
+            authoringMs += performance.now() - started;
+            await onUpdate({ configTimings: [...configTimings] });
+          }
         },
         // The environment keeps the config it is building, so its cleanup sees the same services.
-        prepare: async config => { check(); await onUpdate({ plan: config, ...next('Preparing twin') }); return prepareTwin(config); },
+        prepare: async config => { check(); await onUpdate({ plan: config, ...next('Preparing twin') }); return prepareTwin(config,
+          { generatedAt: new Date().toISOString(), harness: authorHarness.name, model: `openrouter/${authoredModel}`, attempts: authoredAttempt }); },
         verify: async (config, result) => { check(); await onUpdate(next('Checking apps')); return verify(config, result, signal); },
         diagnose: (config, error) => diagnose({ dataDir, id: environment.id, config, step: current.step, error }),
         logs: app => failureLogs(dataDir, environment.id, app),

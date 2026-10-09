@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { dirname, resolve, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanRepository, createPreviewPlan, DISCOVERY_VERSION, repositoryPath } from './scanner.ts';
@@ -20,11 +20,13 @@ import { readGitHistory } from './git-history.ts';
 import { createGitHubAuthManager } from './github-auth.ts';
 import { createGitHubRunsReader, latestBranchBuildRuns } from './github-runs.ts';
 import { createGitHubDeploymentsReader } from './github-deployments.ts';
+import { createConnectorManager } from './connectors/manager.ts';
 import { createEnvironmentManager } from './environments/manager.ts';
 import { createBrowserManager, type BrowserManagerOptions } from './browser/manager.ts';
 import { sendVideo } from './browser/video-file.ts';
 import {holdsResources, createEnvironmentUsage } from './environments/usage.ts';
 import { createStageRemovalManager } from './environments/stage-removal.ts';
+import { createPipelineRemovalManager, type PipelineRemovalManager } from './pipeline-removal.ts';
 import { acquireControllerOwnership } from './controller-ownership.ts';
 import { BROWSER_HEADER, SECRET_HEADER, launchSecret } from './launch-secret.ts';
 import { environmentInputs, fromAppSettings } from './environments/runtime.ts';
@@ -42,8 +44,12 @@ import type { BuildReply, GitHubConnection, GitHubSource as PublicGitHubSource }
 import type { PipelineStateReply, SourceReply } from '../contract/pipeline.ts';
 import type { GitHistory } from '../contract/git-history.ts';
 import type { TwinService, TwinServiceInputView, TwinInputsReply, TwinServicesReply } from '../contract/twin.ts';
+import { readRecoveryCredentials } from './repair/credentials.ts';
+import { createCredentialManager } from './authorization/manager.ts';
+import { createVercelIntegration } from './authorization/vercel.ts';
+import type { CredentialAuthorizationReply } from '../contract/build-recovery.ts';
 import { createRepairManager, type Repair } from './repair/manager.ts';
-import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs } from './repair/github.ts';
+import { createRepairPullRequests, getGitHubFailure, rerunFailedJobs, readRecoveryWorkflow } from './repair/github.ts';
 import { createRepairAgent, type CI, type ModelFactory, type RepairAgentGitHub } from './repair/agent.ts';
 import { createRepairMerge, type MERGE, type MergeGitHub } from './repair/merge.ts';
 import { createRepairBoxes, type RepairBoxes } from './repair/box.ts';
@@ -67,19 +73,24 @@ export type GitHubConnectionRecord = NonNullable<PipelineStateReply['githubConne
 /** state.json (schema 1). Saved pipelines are normalized again on every read. */
 export interface ControllerState {
   scan: Scan | null; pipelines: Record<string, Pipeline>;
+  removedPipelines?: string[];
   source?: GitHubSource | null; githubConnection?: GitHubConnectionRecord | null;
   /** Retired repair reports, HTTP checks and provider observations: removed on load, so the next save omits them. */
   runs?: unknown; checks?: unknown; providers?: unknown;
 }
 export interface ServerOptions {
   port?: number; repo?: string; dataDir?: string; publicDir?: string;
+  /** Tests replace the account connector transport; no external authorization runs for them. */
+  connectors?: { transport?: typeof fetch; consumerTransport?: typeof fetch };
   /**
    * Tests supply the sign-in manager, runs and deployments readers, branch head, commit status, failed-run reader, rerun
    * and the managed source copy's move to a commit; no CLI is spawned for them.
    */
-  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; build?: typeof readBuild; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; update?: typeof updateGitHubSource };
+  github?: { auth?: GitHubAuthManager; runs?: GitHubRunsReader; deployments?: GitHubDeploymentsReader; head?: typeof readBranchHead; build?: typeof readBuild; status?: typeof postCommitStatus; failure?: typeof getGitHubFailure; rerun?: typeof rerunFailedJobs; recoveryWorkflow?: typeof readRecoveryWorkflow; recoveryCredentials?: typeof readRecoveryCredentials; update?: typeof updateGitHubSource };
   /** Tests supply a shorter branch head poll. */
   gate?: { pollInterval?: number };
+  /** Provider grants and CI writes are replaceable in controller acceptance tests. */
+  credentials?: Pick<Parameters<typeof createCredentialManager>[0], 'clientId' | 'provider' | 'write' | 'clock'>;
   /** Deployment writes and observations; tests provide an adapter without calling GitHub. */
   releases?: { github?: ReleaseGitHub };
   /** Tests supply provisioning's docker and git email; no container runs for them. */
@@ -191,7 +202,7 @@ export async function startServer(options: ServerOptions={}): Promise<Controller
   }
 }
 
-async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
+async function createController({port=4317,repo=process.cwd(),dataDir,github={},gate={},twin={},repair={},credentials:credentialOptions={},releases:releaseOptions={},environments:runtimes={},browser:journeys={},connectors:connectorOptions={},publicDir=defaultPublicDir}: ServerOptions & {dataDir: string},onCleanup: (dispose: () => unknown) => void): Promise<Controller> {
   let publicFiles={...staticFiles,...await assetFiles(publicDir)},assetScans=0,appliedAssetScan=0;
   // A rebuild replaces hashed asset names while the server runs; rescan instead of requiring a restart.
   // Each miss scans after it arrives, and an older scan finishing late never replaces a newer listing.
@@ -209,6 +220,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     }
   }catch{throw new Error(INVALID_STATE);}
   if(!state.pipelines || typeof state.pipelines!=='object' || Array.isArray(state.pipelines))state.pipelines={};
+  if(state.removedPipelines!==undefined&&(!Array.isArray(state.removedPipelines)||state.removedPipelines.some(key=>typeof key!=='string'||!key||key.length>4096)))throw new Error(INVALID_STATE);
   // Retired repair reports, HTTP checks and their stage drafts; the next save omits them. Provider observations, once
   // read as whichever account the CLI held, are dropped too: GitHub is read only as the connected account.
   delete state.runs;delete state.checks;delete state.providers;
@@ -219,6 +231,9 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // `github` lets tests supply the sign-in manager, runs reader, branch head and commit status; no CLI is spawned for them.
   const githubAuth=github.auth??createGitHubAuthManager(),githubRuns=github.runs??createGitHubRunsReader(),githubDeployments=github.deployments??createGitHubDeploymentsReader();
   onCleanup(()=>githubAuth.dispose());
+  let listeningPort: number | undefined;
+  const connectors=await createConnectorManager({dataDir,...connectorOptions,callbackUrl:()=>`http://127.0.0.1:${listeningPort}/connectors/oauth/callback`});
+  onCleanup(()=>connectors.close());
   const usage=createEnvironmentUsage();let environments: Awaited<ReturnType<typeof createEnvironmentManager<StageContext>>> | undefined;
   onCleanup(()=>usage.stopAdmissions());
   const browser=await createBrowserManager({dataDir,usage,...journeys,resolveEnvironment:url=>environments?.resolveTarget(url),onEnvironmentUncertain:(id,error)=>environments!.markUsageUncertain(id,error)});
@@ -231,19 +246,24 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   onCleanup(()=>environments.close());
   const saves=createSaveQueue();
   let tickTask: Promise<void> | null=null,sourceBusy=false,closed=false,closing: Promise<void> | undefined;
+  let pipelineRemoval: PipelineRemovalManager | undefined;
   // A fresh checkout must not reset stage definitions for the same repository/root.
   const sourceKey=(source: {repository: string; rootDirectory: string})=>`github:${source.repository.toLowerCase()}:${source.rootDirectory}`;
   // Every caller has a scanned repository, so a key always exists.
-  const pipelineKey=(current: ControllerState)=>current.source?.scanPath===current.scan?.repo?.path
+  const projectKey=(current: ControllerState)=>current.source?.scanPath===current.scan?.repo?.path
     ? sourceKey(current.source!) : current.scan?.repo?.path as string;
+  const pipelineKey=(current: ControllerState)=>current.pipelines[projectKey(current)]?.id??projectKey(current);
+  const hasPipeline=(current: ControllerState)=>Boolean(current.scan)&&!current.removedPipelines?.includes(projectKey(current));
+  const pipelineAvailable=()=>hasPipeline(state)&&!pipelineRemoval?.blocks(projectKey(state));
   function currentPipeline(current: ControllerState) {
     const repoPath=current.scan?.repo?.path;
     if(!repoPath)throw new Error('Scan a repository first.');
-    return normalizedPipeline({... (current.pipelines[pipelineKey(current)] ?? defaultPipeline(repoPath)),repoPath});
+    if(!hasPipeline(current))throw Object.assign(new Error('Create a pipeline for this project first.'),{statusCode:409});
+    return normalizedPipeline({... (current.pipelines[projectKey(current)] ?? defaultPipeline(repoPath)),repoPath});
   }
   // A repair gate's twin is built from its pull request checkout, never the scanned source, so only its pipeline and stage count.
   function isPreparationSourceCurrent(context: {key: string; stageId: string; repair?: string; scan: {repo: Pick<ScanRepo, 'path'> & Partial<Pick<ScanRepo, 'sha' | 'branch'>>}}) {
-    return !closed&&!sourceBusy&&pipelineKey(state)===context.key
+    return !closed&&!sourceBusy&&pipelineAvailable()&&pipelineKey(state)===context.key
       &&(context.repair!==undefined||state.scan?.repo.path===context.scan.repo.path&&state.scan?.repo.sha===context.scan.repo.sha&&state.scan?.repo.branch===context.scan.repo.branch)
       &&currentPipeline(state).stages.some(stage=>stage.id===context.stageId&&stage.kind==='sandbox');
   }
@@ -255,9 +275,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // The refusal while a source change saves is marked in its reply, so a page's poll keeps what it last read.
   const busy=():HttpError=>Object.assign(conflict(SOURCE_BUSY),{sourceBusy:true as const});
   function requireNoPendingSignIn(){if(githubAuth.isPending())throw conflict('Finish or cancel GitHub sign-in first.');}
-  function requireSourceIdle() {
+  function requireSourceIdle({allowRemoval=false}: {allowRemoval?:boolean}={}) {
     if(sourceBusy)throw busy();
     requireNoPendingSignIn();
+    if(!allowRemoval&&state.scan&&pipelineRemoval?.blocks(projectKey(state)))throw conflict('Pipeline deletion is in progress. Retry its deletion if cleanup failed.');
   }
   function requireSourceChangeIdle(){
     requireSourceIdle();
@@ -370,13 +391,13 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // The watcher moves a managed source whose pipeline has no Sandbox stage to its branch head, never during a stage's
   // removal or another source change: it tries again at its next poll.
   async function followHead({key,branch,sha}: SourceHead) {
-    if(!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch||state.scan.repo.sha===sha||currentPipeline(state).stages.some(stage=>stage.kind==='sandbox'))return;
+    if(!pipelineAvailable()||!state.scan||pipelineKey(state)!==key||(state.scan.repo.branch||null)!==branch||state.scan.repo.sha===sha||currentPipeline(state).stages.some(stage=>stage.kind==='sandbox'))return;
     if(removals.summaries(key).some(item=>item.status==='queued'||item.status==='removing'))throw conflict('A stage is being removed.');
     await moveSource(sha);
   }
   const gates=await createGateManager({dataDir,pollInterval:gate.pollInterval,follow:followHead,
     source(){
-      if(!state.scan)return null;
+      if(!state.scan||!pipelineAvailable())return null;
       const managed=state.source?.scanPath===state.scan.repo.path;
       return {key:pipelineKey(state),branch:state.scan.repo.branch||null,sha:state.scan.repo.sha||null,repository:managed?state.source!.repository:null,stages:currentPipeline(state).stages.map(({id,name,kind})=>({id,name,kind}))};
     },
@@ -410,12 +431,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   // A deployment is a separate, explicitly requested operation. Gate readiness alone never starts one.
   const releases=await createReleaseManager({dataDir,...releaseOptions,async getEvidence():Promise<ReleaseEvidence>{
     const scan=state.scan,source=state.source;
-    if(!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    if(!pipelineAvailable()||!scan||!source||source.scanPath!==scan.repo.path||!scan.repo.sha||!source.branch||sourceBusy||closed)return {source:null,ready:false,gates:[]};
     const connection=await connectedAccount();
-    if(!connection||state.scan!==scan||state.source!==source||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    if(!connection||state.scan!==scan||state.source!==source||!pipelineAvailable()||sourceBusy||closed)return {source:null,ready:false,gates:[]};
+    const productionBranch=currentPipeline(state).productionBranch;
+    const branchReason=!productionBranch?'Choose a Production branch in Pipelines before deploying.'
+      :source.branch!==productionBranch||scan.repo.branch!==productionBranch?`Switch to the Production branch (${productionBranch}) before deploying.`:undefined;
     const evidence=gates.releaseEvidence(scan.repo.sha);
     return {source:{key:pipelineKey(state),repository:source.repository,branch:source.branch,sha:scan.repo.sha,login:connection.login},
-      ready:Boolean(evidence),reason:evidence?undefined:'Every Sandbox gate must pass or be explicitly released and reported for this commit.',
+      ready:!branchReason&&Boolean(evidence),reason:branchReason??(evidence?undefined:'Every Sandbox gate must pass or be explicitly released and reported for this commit.'),
       gates:evidence?.stages.map(stage=>({id:stage.gateId,stageId:stage.id,sha:evidence.sha,context:stage.context,status:stage.status,updatedAt:stage.updatedAt,
         ...(stage.releasedBy?{releasedBy:stage.releasedBy,releasedAt:stage.releasedAt}:{})}))??[]};
   }});
@@ -445,9 +469,22 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     models:repairModels,boxes:repairBoxes,host:repairHost,model:repair.model,deployFiles,ci:repair.ci,merge:repairMerge,
     github:{connection:connectedAccount,runs:input=>githubRuns.read(input),failure:input=>(github.failure??getGitHubFailure)(input),pullRequests:repair.pullRequests??createRepairPullRequests()},
   });
+  const vercelClientId=credentialOptions.clientId??process.env.PERPETUAL_VERCEL_CLIENT_ID,vercelSecret=process.env.PERPETUAL_VERCEL_CLIENT_SECRET,vercelSlug=process.env.PERPETUAL_VERCEL_INTEGRATION_SLUG;
+  const credentials=await createCredentialManager({dataDir,clientId:vercelClientId,
+    provider:credentialOptions.provider??(vercelClientId&&vercelSecret&&vercelSlug?createVercelIntegration({id:vercelClientId,secret:vercelSecret,slug:vercelSlug}):undefined),
+    write:credentialOptions.write,clock:credentialOptions.clock,
+    async authority(){
+      if(!state.source||!pipelineAvailable())return null;
+      const account=await connectedAccount();
+      return account&&account.repository===state.source.repository?{key:pipelineKey(state),...account}:null;
+    },
+    metadata:github.recoveryCredentials??readRecoveryCredentials,
+  });
+  const credentialTimer=setInterval(()=>{void credentials.check().catch(()=>{});},60_000);credentialTimer.unref();
+  onCleanup(async()=>{clearInterval(credentialTimer);await credentials.close();});
   const repairs=await createRepairManager({dataDir,
     source(){
-      if(!state.scan)return null;
+      if(!state.scan||!pipelineAvailable())return null;
       const managed=state.source?.scanPath===state.scan.repo.path?state.source:null;
       return {key:pipelineKey(state),branch:state.scan.repo.branch||null,repository:managed?.repository??null,checkoutPath:managed?.checkoutPath??null,rootDirectory:managed?.rootDirectory??null};
     },
@@ -457,6 +494,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       runs:input=>githubRuns.read(input),
       failure:input=>(github.failure??getGitHubFailure)(input),
       rerun:input=>(github.rerun??rerunFailedJobs)(input),
+      workflow:github.recoveryWorkflow??readRecoveryWorkflow,
+      credentials:github.recoveryCredentials??readRecoveryCredentials,
     },
     steps:{
       async unavailable(){return await repairModels()?repairBoxes.available():'Add an OpenRouter API key in Settings.';},
@@ -465,20 +504,56 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   });
   onCleanup(()=>repairs.close());
   // Autopilot as the pipeline reads it: the Build stage carries the repairs, and its mode is the pipeline's auto-merge switch.
-  const buildStage=()=>state.scan?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
-  const autopilotView=(scan: Scan)=>autopilotOf(repairs.view(),{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
+  const buildStage=()=>hasPipeline(state)?currentPipeline(state).stages.find(stage=>stage.kind==='build')??null:null;
+  const autopilotView=(scan: Scan)=>{
+    const view=repairs.view();
+    for(const repair of view.repairs){const context=repairs.credentialContext(repair.id);if(repair.recovery&&context)repair.recovery.credential=credentials.view(context);}
+    return autopilotOf(view,{repoPath:scan.repo.path,stageId:buildStage()?.id??null,stages:currentPipeline(state).stages});
+  };
   function autopilotStage(stageId: unknown){const build=buildStage();if(!build||build.id!==stageId)throw new Error('Autopilot is available for Build.');return build;}
   const removals=await createStageRemovalManager({dataDir,usage,environments,browser,removeStage:context=>save(current=>{
     // Deletion belongs to the confirmed source, even after the user changes
     // repositories or closes the browser. A prior final commit is idempotent.
-    const existing=current.pipelines[context.key];
+    const entry=Object.entries(current.pipelines).find(([key,pipeline])=>(pipeline.id??key)===context.key);
+    const existing=entry?.[1];
     if(!existing||!existing.stages.some(stage=>stage.id===context.stageId))return {result:null};
     if(browser.isActive(context)||environments.summaries(context.key).some(item=>item.stageId===context.stageId&&holdsResources(item)))throw new Error('Stage cleanup is not complete.');
     const pipeline=applyPipelineAction(existing,{action:'remove-stage',stageId:context.stageId});
-    const pipelines={...current.pipelines,[context.key]:pipeline};
+    const pipelines={...current.pipelines,[entry![0]]:pipeline};
     return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
   })});
   onCleanup(()=>removals.close());
+  pipelineRemoval=await createPipelineRemovalManager({dataDir,
+    guard(scope){
+      requireSourceIdle({allowRemoval:true});
+      if(browser.hasPendingInput())throw conflict('Finish adding this test before deleting the pipeline.');
+      if(Object.values(gates.view().stages).some(item=>['rebuilding','running'].includes(item.status)))throw conflict('Wait for the journey gate to finish before deleting the pipeline.');
+      if(repairs.hasWork(scope.key))throw conflict('Stop the Build change and finish its cleanup before deleting the pipeline.');
+      if(releases.hasWork(scope.key))throw conflict('Resolve or abandon the deployment request before deleting the pipeline.');
+      for(const stageId of scope.stageIds) {
+        if(browser.isActive({key:scope.key,stageId}))throw conflict('Stop the browser run before deleting the pipeline.');
+        if(!pipelineRemoval?.blocks(scope.project))usage.assertAvailable({key:scope.key,stageId});
+      }
+    },
+    async cleanStage(scope,stageId){
+      await removals.start({key:scope.key,stageId});
+      const result=await removals.awaitIdle({key:scope.key,stageId});
+      if(result.removal?.status!=='completed')throw new Error(result.removal?.error||'Sandbox cleanup did not finish. Retry deleting the pipeline.');
+    },
+    async removePipeline(scope){
+      if(environments.summaries(scope.key).some(holdsResources))throw new Error('A sandbox still belongs to this pipeline. Retry its deletion.');
+      await save(current=>{
+        const existing=current.pipelines[scope.project];
+        if(existing&&(existing.id??scope.project)!==scope.key)throw conflict('The pipeline changed. Reload the Pipelines table.');
+        if(existing?.stages.some(stage=>stage.kind==='sandbox'))throw new Error('Sandbox stage cleanup is not complete. Retry deleting the pipeline.');
+        const pipelines={...current.pipelines};delete pipelines[scope.project];
+        const removedPipelines=[...new Set([...(current.removedPipelines??[]),scope.project])];
+        return {state:{...current,pipelines,removedPipelines},commit(){state.pipelines=pipelines;state.removedPipelines=removedPipelines;}};
+      });
+    },
+  });
+  onCleanup(()=>pipelineRemoval!.close());
+  pipelineRemoval.resume();
   // A paused recording stream would otherwise hold shutdown open.
   const videoStreams=new Set<ServerResponse>();
   const reply=(res: ServerResponse,status: number,data: unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
@@ -496,7 +571,6 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     return input as RequestInput;
   }
   // The port it listens on, kept: a closing server has no address, and its last replies still check the Host they name.
-  let listeningPort: number | undefined;
   const server=createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
@@ -505,10 +579,23 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const actualPort=listeningPort;
     const hosts=[`127.0.0.1:${actualPort}`,`localhost:${actualPort}`];
+    // Only the OAuth callback accepts a cross-site top-level navigation. Its persisted state and PKCE verifier
+    // bind one explicit sign-in; every other route keeps the launch-session and same-origin checks below.
+    const callbackTarget=URL.parse(req.url??'','http://localhost');
+    if(req.method==='GET'&&req.headers.host===`127.0.0.1:${actualPort}`&&callbackTarget?.pathname==='/connectors/oauth/callback') {
+      res.setHeader('Referrer-Policy','no-referrer');
+      if(closed)return reply(res,503,{error:'The controller is shutting down.'});
+      try {
+        if(['code','state','error'].some(name=>callbackTarget.searchParams.getAll(name).length>1))throw new Error('Invalid sign-in callback.');
+        const redirect=await connectors.complete(Object.fromEntries(callbackTarget.searchParams));
+        res.writeHead(302,{Location:redirect??'/#connectors'});return res.end();
+      } catch { res.writeHead(400,{'Content-Type':'text/plain; charset=utf-8'});return res.end('Sign-in could not finish. Return to Perpetual and connect again.'); }
+    }
     const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
+    const authorizationCallback=req.method==='GET'&&req.headers.host===`127.0.0.1:${actualPort}`&&URL.parse(req.url??'','http://localhost')?.pathname==='/authorization/vercel/callback';
     // A browser names where a request comes from: the page itself, or a person's own visit. Another site on this host,
     // such as a twin's app on another port, is same-site, not same-origin.
-    if(!hosts.includes(req.headers.host!) || (origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none')return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
+    if(!hosts.includes(req.headers.host!) || !authorizationCallback&&((origin&&!hosts.some(h=>origin===`http://${h}`)) || site!==undefined&&site!=='same-origin'&&site!=='none'))return reply(res,403,{error:'This local control room accepts same-origin requests only.'});
     // The path the routes below read, so the checks here hold for the route a request reaches.
     const target=URL.parse(req.url??'','http://localhost');
     if(!target)return reply(res,400,{error:'Invalid URL.'});
@@ -523,6 +610,15 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
     // A connection still open at shutdown, such as a polling page's, ends with this reply.
     if(closed){res.shouldKeepAlive=false;return reply(res,503,{error:'The controller is shutting down.'});}
     try {
+      if(authorizationCallback){
+        res.setHeader('Referrer-Policy','no-referrer');
+        try {
+          if(['state','code','error'].some(name=>requestUrl.searchParams.getAll(name).length>1))throw new Error('Invalid authorization callback.');
+          await credentials.complete({state:requestUrl.searchParams.get('state')??'',code:requestUrl.searchParams.get('code')??'',callback:`http://127.0.0.1:${actualPort}/authorization/vercel/callback`});
+          void repairs.check().catch(()=>{});
+        } catch { /* The private connection record carries the safe failure; URL codes never enter a response. */ }
+        res.writeHead(303,{Location:'/#pipeline'});return res.end();
+      }
       if(req.method==='GET'&&!publicFiles[path]&&/^\/(build\/)?assets\//.test(path))await refreshAssets();
       if(req.method==='GET'&&publicFiles[path]) {
         const [file,type]=publicFiles[path];
@@ -540,6 +636,12 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/favicon.ico'){res.writeHead(204);return res.end();}
       if(req.method==='GET'&&path==='/api/session')return reply(res,200,{token});
+      if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,requestUrl.searchParams.get('cached')==='1'?connectors.snapshot():await connectors.read());
+      if(req.method==='POST'&&path==='/api/connectors/setup')return reply(res,200,await connectors.setup(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/browser')return reply(res,200,await connectors.useBrowser());
+      if(req.method==='POST'&&path==='/api/connectors/options')return reply(res,200,await connectors.options(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/start')return reply(res,200,await connectors.start(await body(req,4096)));
+      if(req.method==='POST'&&path==='/api/connectors/remove')return reply(res,200,await connectors.remove(await body(req,4096)));
       if(req.method==='GET'&&path==='/api/settings/model')return reply(res,200,await browser.viewModel());
       if(req.method==='GET'&&path==='/api/settings/models')return reply(res,200,await browser.listModels());
       if(req.method==='POST'&&path==='/api/settings/model')return reply(res,200,await browser.saveModelSettings(await body(req,16384)));
@@ -566,7 +668,24 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           return {services,generated:'provenance' in plan} satisfies TwinServicesReply;
         }));
       }
-      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:state.scan?currentPipeline(state):null,environments:state.scan?environments.summaries(pipelineKey(state)):[],stageRemovals:state.scan?removals.summaries(pipelineKey(state)):[],browserTests:state.scan?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:state.scan?autopilotView(state.scan):null,defaultRepo:repo} satisfies PipelineStateReply);
+      if(req.method==='GET'&&path==='/api/state')return reply(res,200,{...state,scan:withDeliveryGraph(state.scan)??null,pipeline:hasPipeline(state)?currentPipeline(state):null,environments:hasPipeline(state)?environments.summaries(pipelineKey(state)):[],stageRemovals:hasPipeline(state)?removals.summaries(pipelineKey(state)):[],browserTests:hasPipeline(state)?Object.fromEntries(currentPipeline(state).stages.filter(stage=>stage.kind==='sandbox').map(stage=>[stage.id,browser.summary({key:pipelineKey(state),stageId:stage.id})])):{},autopilot:hasPipeline(state)?autopilotView(state.scan!):null,pipelineRemoval:state.scan?pipelineRemoval!.view(projectKey(state)):null,pipelineId:hasPipeline(state)?pipelineKey(state):null,defaultRepo:repo} satisfies PipelineStateReply);
+      if(req.method==='POST'&&path==='/api/pipeline/remove') {
+        const input=await body(req);requireSourceIdle({allowRemoval:true});activeScan(input.repoPath);
+        const project=projectKey(state),key=pipelineKey(state),pipeline=hasPipeline(state)?currentPipeline(state):null;
+        if(input.pipelineId!==key)throw conflict('The pipeline changed. Reload the Pipelines table.');
+        const stageIds=[...new Set([...(pipeline?.stages.filter(stage=>stage.kind==='sandbox').map(stage=>stage.id)??[]),...environments.summaries(key).map(item=>item.stageId).filter((id):id is string=>Boolean(id))])];
+        return reply(res,202,{removal:await pipelineRemoval!.start({project,key,stageIds})});
+      }
+      if(req.method==='POST'&&path==='/api/pipeline/create') {
+        const input=await body(req);requireSourceChangeIdle();activeScan(input.repoPath);
+        const pipeline=await save(current=>{
+          if(hasPipeline(current))throw conflict('This project already has a pipeline.');
+          const key=projectKey(current),pipeline={...defaultPipeline(current.scan!.repo.path),id:`pipeline:${randomUUID()}`};
+          const pipelines={...current.pipelines,[key]:pipeline},removedPipelines=(current.removedPipelines??[]).filter(item=>item!==key);
+          return {state:{...current,pipelines,removedPipelines},commit(){state.pipelines=pipelines;state.removedPipelines=removedPipelines;},result:pipeline};
+        });
+        return reply(res,200,{pipeline});
+      }
       if(path==='/api/stages/remove'||path==='/api/stages/removal'){
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         // Admitted once the body has arrived, so a source change that began meanwhile is seen.
@@ -616,15 +735,30 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         }
         return reply(res,404,{error:'Gate operation not found.'});
       }
+      if(req.method==='POST'&&path==='/api/autopilot/connect-vercel'){
+        const input=await body(req);requireSourceIdle();activeScan(input.repoPath);autopilotStage(input.stageId);
+        await repairs.recover({id:input.id,action:'recheck'});
+        const repair=repairs.view().repairs.find(item=>item.id===input.id&&item.status==='needs-person'&&item.recovery),context=repairs.credentialContext(input.id);
+        if(!repair?.recovery||!context)throw conflict('This recovery is no longer waiting for authorization.');
+        const url=await credentials.begin(context,`http://127.0.0.1:${actualPort}/authorization/vercel/callback`);
+        return reply(res,200,{url} satisfies CredentialAuthorizationReply);
+      }
       if(path==='/api/autopilot'||path.startsWith('/api/autopilot/')) {
         // GET reads the view; a mode, a person's Repair of a failed run at the watched head, and Stop are posted for the Build stage.
         const operation=path.slice('/api/autopilot'.length);
-        if(!['','/mode','/repair','/stop'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
+        if(!['','/mode','/repair','/stop','/resume','/recover','/disconnect-vercel'].includes(operation)||(req.method==='GET')!==(operation==='')||!['GET','POST'].includes(req.method??''))return reply(res,404,{error:'Autopilot operation not found.'});
         const input=req.method==='GET'?Object.fromEntries(requestUrl.searchParams):await body(req);
         return reply(res,operation==='/repair'?202:200,await withActiveScan(input.repoPath,async scan=>{
           if(operation==='/mode'){autopilotStage(input.stageId);await repairs.setAutoMerge({enabled:autopilotMode(input.mode)==='merge'});}
           if(operation==='/repair'){autopilotStage(input.stageId);await repairs.repair({runId:input.runId});}
-          if(operation==='/stop'){autopilotStage(input.stageId);await repairs.stop({id:input.id});}
+          if(operation==='/resume'){autopilotStage(input.stageId);await repairs.resume();}
+          if(operation==='/recover'){autopilotStage(input.stageId);await repairs.recover({id:input.id,action:input.action});}
+          if(operation==='/stop'||operation==='/disconnect-vercel'){
+            autopilotStage(input.stageId);
+            const context=repairs.credentialContext(input.id);
+            if(context)await credentials.disable(context);
+            if(operation==='/stop')await repairs.stop({id:input.id});
+          }
           return autopilotView(scan);
         }));
       }
@@ -739,6 +873,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/source/github') {
         return await withSourceHeld(requireSourceChangeIdle,async()=>{
           const connection=await requireGitHub(),input=await body(req);
+          if(input.createPipeline!==undefined&&typeof input.createPipeline!=='boolean')throw new Error('Pipeline creation must be explicitly selected.');
           const prepared=await prepareGitHubSource({repository:input.repository,branch:input.branch,rootDirectory:input.rootDirectory,dataDir});
           // A copy whose scan or save fails is never saved, so nothing refers to it: it goes, as a failed clone does.
           const discard=async(error: unknown): Promise<never>=>{await discardGitHubSource(prepared).catch(()=>{});throw error;};
@@ -753,12 +888,17 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
               pipelines[legacyKey] ??= current.pipelines[current.scan!.repo.path];
             }
             // A root saved as it was typed, before roots were saved as the checkout spells them, keeps its pipeline.
-            const saved=pipelines[key]??pipelines[sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)})];
-            const pipeline=normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
-            pipelines[key]=pipeline;
-            return {state:{...current,scan,source,pipelines},
-              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;},
-              result:{scan,source,pipeline} satisfies SourceReply};
+            const typedKey=sourceKey({repository:source.repository,rootDirectory:sourceRoot(input.rootDirectory)});
+            const saved=pipelines[key]??pipelines[typedKey];
+            const removed=current.removedPipelines?.some(item=>item===key||item===typedKey);
+            if(input.createPipeline&&saved&&!removed)throw conflict('This project already has a pipeline. Choose another repository or root directory.');
+            const pipeline=input.createPipeline?{...defaultPipeline(scan.repo.path),id:`pipeline:${randomUUID()}`,productionBranch:prepared.branch}
+              :removed?null:normalizedPipeline({... (saved ?? defaultPipeline(scan.repo.path)),repoPath:scan.repo.path});
+            const removedPipelines=input.createPipeline?(current.removedPipelines??[]).filter(item=>item!==key&&item!==typedKey):current.removedPipelines;
+            if(pipeline)pipelines[key]=pipeline;
+            return {state:{...current,scan,source,pipelines,removedPipelines},
+              commit(){state.scan=scan;state.source=source;state.pipelines=pipelines;state.removedPipelines=removedPipelines;},
+              result:{scan,source,pipeline,pipelineId:pipeline?.id??(pipeline?key:null)} satisfies SourceReply};
           }).catch(discard);
           return reply(res,200,result);
         });
@@ -771,7 +911,8 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
         });
       }
       if(req.method==='GET'&&path==='/api/pipeline') {
-        return reply(res,200,{pipeline:currentPipeline(state)});
+        if(!state.scan)throw new Error('Scan a repository first.');
+        return reply(res,200,{pipeline:hasPipeline(state)?currentPipeline(state):null});
       }
       if(req.method==='GET'&&path==='/api/git-history') {
         requireSourceIdle();
@@ -785,6 +926,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
           const history=await readGitHistory(scan,{
             scope:requestUrl.searchParams.get('scope')??'all',
             limit:Number(requestUrl.searchParams.get('limit')??100),
+            cursor:requestUrl.searchParams.get('cursor'),
             ...(sync ? {currentRef:`refs/remotes/origin/${source!.branch}`} : {}),
           });
           return {...history,...sync} satisfies GitHistory;
@@ -805,22 +947,43 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       if(req.method==='POST'&&path==='/api/pipeline/action') {
         const input=await body(req);
         requireSourceIdle();
-        const pipeline=await save(current=>{
+        function edit(current: ControllerState) {
           const repoPath=current.scan?.repo?.path;
           if(!repoPath || input?.repoPath!==repoPath) {
             const error: HttpError=new Error('The active repository changed. Reload its pipeline before editing.');
             error.statusCode=409;throw error;
           }
           if(input.action==='remove-stage')throw new Error('Use confirmed stage deletion to remove this stage and its sandbox.');
+          if(currentPipeline(current).id&&input.pipelineId!==pipelineKey(current))throw conflict('The pipeline changed. Reload the Pipelines table.');
           // Only a stage ID can be in use; any other value names no stage and the action rejects it.
           for(const stageId of [input.stageId,input.afterStageId,input.sourceStageId,input.targetStageId].filter((id): id is string=>typeof id==='string'&&Boolean(id)))usage.assertAvailable({key:pipelineKey(current),stageId});
           const pipeline=applyPipelineAction(currentPipeline(current),input);
           if(input.action==='set-github-workflow' && input.workflowFile!==null && !current.scan!.workflows?.some(workflow=>workflow.file===input.workflowFile)) {
             throw new Error('The selected GitHub Actions workflow is no longer available. Reload the pipeline.');
           }
-          const pipelines={...current.pipelines,[pipelineKey(current)]:pipeline};
+          return pipeline;
+        }
+        const commitEdit=(current: ControllerState)=>{
+          const pipeline=edit(current);
+          const pipelines={...current.pipelines,[projectKey(current)]:pipeline};
           return {state:{...current,pipelines},commit(){state.pipelines=pipelines;},result:pipeline};
+        };
+        if(input.action==='set-production-branch')return await withSourceHeld(requireSourceIdle,async()=>{
+          const scan=activeScan(input.repoPath),source=state.source,candidate=edit(state),key=pipelineKey(state);
+          if(!source||source.scanPath!==scan.repo.path)throw conflict('Connect a GitHub repository before choosing a Production branch.');
+          if(releases.hasWork(key))throw conflict('Resolve the current deployment before changing the Production branch.');
+          if(state.githubConnection===null)throw new Error('Connect your GitHub account before choosing a Production branch.');
+          await requireGitHub(await githubRuns.session());
+          const head=await (github.head??readBranchHead)({repository:source.repository,branch:candidate.productionBranch!,etag:null});
+          if(head.status!==200)throw conflict('Could not verify the Production branch. Reload its branches and try again.');
+          const pipeline=await save(current=>{
+            if(closed||current.scan!==scan||current.source!==source||pipelineKey(current)!==key)throw conflict(SOURCE_CHANGED);
+            if(releases.hasWork(key))throw conflict('Resolve the current deployment before changing the Production branch.');
+            return commitEdit(current);
+          });
+          return reply(res,200,{pipeline});
         });
+        const pipeline=await save(current=>{requireSourceIdle();return commitEdit(current);});
         return reply(res,200,{pipeline});
       }
       // A current-commit GitHub read as the connected account: an explicit Disconnect refuses before any
@@ -895,10 +1058,10 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
   repairs.start();
   const url=`http://127.0.0.1:${listeningPort}`;
   return {url,launchUrl:launch.link(url),server,close(){
-    if(closing)return closing;closed=true;clearInterval(timer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
+    if(closing)return closing;closed=true;clearInterval(timer);clearInterval(credentialTimer);githubAuth.dispose();usage.stopAdmissions();gateStop.abort();
     for(const res of videoStreams)res.destroy();
     const stopped=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    const draining=[releases.close(),gates.close(),repairs.close(),removals.close(),environments.close(),browser.close(),tickTask];
+    const draining=[credentials.close(),releases.close(),gates.close(),repairs.close(),pipelineRemoval!.close(),removals.close(),environments.close(),browser.close(),connectors.close(),tickTask];
     // Once the work the requests waited on drains, the connections their replies left open are closed too, and a request
     // still unfinished a moment later, such as one whose body never arrives, is cut off.
     closing=(async()=>{

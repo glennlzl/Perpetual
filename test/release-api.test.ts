@@ -14,7 +14,7 @@ test('release API scopes requests to the current managed repository and requires
   const source = { repository: 'acme/app', branch: 'main', rootDirectory: '/', scanPath: dir, checkoutPath: dir, sha: SHA, connectedAccount: 'tester', savedAt: time };
   const scan = { discoveryVersion: DISCOVERY_VERSION, repo: { path: dir, name: 'app', sha: SHA, branch: 'main', remote: 'https://github.com/acme/app.git' }, nodes: [], edges: [], services: [], workflows: [], warnings: [], scannedAt: time };
   const stages = [{ id: 'source', name: 'Source', kind: 'source' }, { id: 'build', name: 'Build', kind: 'build' }, { id: 'beta', name: 'Beta', kind: 'sandbox' }, { id: 'production', name: 'Production', kind: 'production' }].map(stage => ({ ...stage, collapsed: false }));
-  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, source, providers: [], pipelines: { 'github:acme/app:/': { repoPath: dir, stages } }, githubConnection: { login: 'tester', connectedAt: time } } }));
+  await writeFile(join(dataDir, 'state.json'), JSON.stringify({ schema: 1, state: { scan, source, providers: [], pipelines: { 'github:acme/app:/': { repoPath: dir, stages, productionBranch: 'main' } }, githubConnection: { login: 'tester', connectedAt: time } } }));
   const app = await startServer({ port: 0, repo: dir, dataDir, github: {
     auth: { isPending: () => false, dispose() {}, start() { throw new Error('unused'); }, status() { throw new Error('unused'); }, cancel() { throw new Error('unused'); } },
     runs: { async session() { return { available: true, authenticated: true as const, account: { login: 'tester', name: null } }; }, async read(input) { return { repository: String(input.repository), sha: String(input.sha), runs: [] }; } },
@@ -68,5 +68,5 @@ test('GitHub unreachable answers the release with why, never as a missing source
   assert.deepEqual(await view(), { status: 502, body: { error: timedOut } });
   reachable = true;
   const answered = await view();
-  assert.deepEqual([answered.status, answered.body.sha, answered.body.blockedReason], [200, SHA, 'Every Sandbox gate must pass or be explicitly released and reported for this commit.']);
+  assert.deepEqual([answered.status, answered.body.sha, answered.body.blockedReason], [200, SHA, 'Choose a Production branch in Pipelines before deploying.']);
 });

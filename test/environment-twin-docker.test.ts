@@ -50,7 +50,7 @@ test('a Beta environment runs its app and Mailpit as a Compose twin, then remove
     onUpdate: async update => { Object.assign(environment, update); if (update.step) steps.push(update.step); } });
   assert.equal(ready.status, 'ready');
   assert.deepEqual(ready.services, [{ id: 'mailpit', title: 'Mailpit', fidelity: 'actual', status: 'ready', missing: [] }]);
-  assert.deepEqual(steps, ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Setting up Mailpit', 'Loading source', 'Starting twin', 'Checking apps']);
+  assert.deepEqual(steps, ['Copying source', 'Checking application runtimes', 'Preparing twin', 'Preparing source and services', 'Starting twin', 'Checking apps']);
   const url = new URL(ready.apps[0].url);
   assert.equal(url.hostname, '127.0.0.1');
   const reply = await (await fetch(new URL('/journey', url))).json();

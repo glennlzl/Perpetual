@@ -72,7 +72,7 @@ test('Settings read and save recovery preserve the draft and keyboard position',
     await f.key.focus(); f.release(); await expect(f.modelSelect).toBeEnabled(); await expect(f.key).toBeFocused();
     const leaving = await open('catalog'); t.after(leaving.close); await expect(leaving.retry).toBeVisible();
     const pending = leaving.hold(); leaving.succeed(); await leaving.retry.press('Enter'); await pending;
-    const pipeline = leaving.page.getByRole('button', { name: 'Pipeline', exact: true });
+    const pipeline = leaving.page.getByRole('button', { name: 'Project', exact: true });
     await pipeline.click(); const response = leaving.page.waitForResponse(r => new URL(r.url()).pathname === '/api/settings/models');
     leaving.release(); await response; await expect(pipeline).toBeFocused();
   });

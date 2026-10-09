@@ -30,6 +30,15 @@ export async function readStateFile(file: string, options: { limit: number; inva
   return text === undefined ? undefined : JSON.parse(text) as unknown;
 }
 
+/** Remove a retired state file only after its replacement has been saved. Never follow links. */
+export async function removeStateFile(file: string, invalid: string): Promise<void> {
+  try {
+    const entry = await lstat(file);
+    if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(invalid);
+    await rm(file);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+}
+
 /**
  * Writes `content` to `file` (mode 0600) through a private temporary file beside it and one rename, so a reader sees the
  * old file or the new one. A failed save removes its temporary file, so failures never pile files up, unless a caller
