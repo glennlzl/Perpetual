@@ -323,7 +323,10 @@ test('A Stripe webhook targets the Supabase functions URL while the functions ge
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const result = await prepare(KEYS);
   assert.equal(result.status, 'ready');
-  assert.deepEqual(steps.slice(0, 2), ['Setting up Stripe', 'Setting up Supabase']);
+  assert.deepEqual(steps.slice(0, 2), ['Setting up services', 'Starting services']);
+  const stripeSetup = calls.findIndex(({ args }) => args.includes('--print-secret'));
+  const functionsSetup = calls.findIndex(({ file, args }) => file === process.execPath && args.includes('start'));
+  assert.ok(stripeSetup >= 0 && functionsSetup > stripeSetup, 'Functions wait for the webhook signing secret even when independent services prepare concurrently.');
   const api = Number(section(await readFile(toml, 'utf8'), 'api').match(/^port = (\d+)$/m)![1]);
   const listen = YAML.parse(await readFile(join(dir, 'compose.yaml'), 'utf8')).services['stripe-listen'];
   assert.equal(listen.command.at(-1), `http://${HOST}:${api}/functions/v1/stripe-webhook`);

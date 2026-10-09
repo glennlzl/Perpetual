@@ -308,8 +308,19 @@ test('one consent callback synchronizes the exact CI credential and starts origi
   const unauthenticated = await globalThis.fetch(`${f.url}/api/autopilot/connect-vercel`, { method: 'POST', body: JSON.stringify(input) });
   assert.equal(unauthenticated.status, 401); assert.equal(writes, 0);
   const wrong = await f.post('/api/autopilot/connect-vercel', { ...input, repoPath: '/another/project' }); assert.equal(wrong.status, 409);
+  // Startup observes saved authorization recoveries in the background. Wait for that exact
+  // operation to release its per-repair lock before exercising the explicit consent route.
+  let checked = false;
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const response = await f.post('/api/autopilot/recover', { ...input, action: 'recheck' });
+    if (response.status === 200) { checked = true; break; }
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error, 'Recovery is already being checked.');
+    await new Promise(done => setTimeout(done, 10));
+  }
+  assert.equal(checked, true, 'Startup authorization observation should finish before explicit consent starts.');
   const connected = await f.post('/api/autopilot/connect-vercel', input);
-  assert.equal(connected.status, 200);
+  assert.equal(connected.status, 200, JSON.stringify(connected.body));
   const consent = new URL((connected.body as unknown as { url: string }).url);
   const callback = `${f.url}/authorization/vercel/callback?${new URLSearchParams({ state: consent.searchParams.get('state')!, code: 'issuer-code' })}`;
   const invalid = await globalThis.fetch(callback.replace(consent.searchParams.get('state')!, 'wrong-state'), { redirect: 'manual', headers: { 'Sec-Fetch-Site': 'cross-site' } });
