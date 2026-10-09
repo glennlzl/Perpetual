@@ -4,7 +4,8 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { redact } from '../redaction.ts';
 import { authUrl, ComposioError, createComposio, identifier, object } from './composio.ts';
 import { createConsumerConnections } from './consumer.ts';
-import type { ConnectorAccount, ConnectorOptionsReply, ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
+import { createConnectorObservations } from './observations.ts';
+import type { ConnectorOptionsReply, ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
 
 const APPS = [{ provider: 'slack', name: 'Slack' }, { provider: 'linear', name: 'Linear' }, { provider: 'gmail', name: 'Gmail' }, { provider: 'jira', name: 'Jira' }] as const;
 const INVALID = 'Cannot load saved connectors. Keep connectors.json and restore a valid snapshot.';
@@ -51,15 +52,21 @@ export async function createConnectorManager({ dataDir, transport, callbackUrl, 
   let state: State = saved === undefined ? { schema: 1, userId: `perpetual-${randomUUID()}`, accounts: {}, configSetups: {} } : load(saved);
   const queue = createSaveQueue(), vendor = createComposio({ transport });
   const consumer = callbackUrl ? await createConsumerConnections({ dataDir, callbackUrl, transport: consumerTransport }) : undefined;
-  const observations = new Map<ConnectorProvider, ConnectorAccount>();
+  const observations = createConnectorObservations();
   let closed = false;
-  const serialize = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new Error('The controller is stopping.'); return work(); });
+  let revision = 0, readTask: { revision: number; promise: Promise<ConnectorsReply> } | undefined;
+  const enqueue = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new Error('The controller is stopping.'); return work(); });
+  const serialize = <T>(work: () => Promise<T>) => { revision++; return enqueue(work); };
   async function save(next: State) { await writeStateFile(file, JSON.stringify(next)); state = next; }
   function key() { if (!state.apiKey) throw new Error('Set up Composio to connect this app.'); return state.apiKey; }
   const method = () => state.method ?? (consumer ? 'browser' : 'project');
+  function snapshot(browserAccounts = consumer?.snapshot()): ConnectorsReply {
+    if (closed) throw new Error('The controller is stopping.');
+    return { configured: Boolean(state.apiKey), method: method(), apps: APPS.map(app => ({ ...app, account: state.accounts[app.provider] ? { ...observations.snapshot(app.provider, state.accounts[app.provider]!.alias), method: 'project' as const } : browserAccounts?.[app.provider] ?? null })) };
+  }
   async function view(): Promise<ConnectorsReply> {
     const browserAccounts = await consumer?.read();
-    return { configured: Boolean(state.apiKey), method: method(), apps: APPS.map(app => ({ ...app, account: state.accounts[app.provider] ? { ...(observations.get(app.provider) ?? { status: 'unverified' as const }), method: 'project' as const } : browserAccounts?.[app.provider] ?? null })) };
+    return snapshot(browserAccounts);
   }
   function owned(raw: unknown, provider: ConnectorProvider, record: Record) {
     const account = object(raw);
@@ -86,8 +93,8 @@ export async function createConnectorManager({ dataDir, transport, callbackUrl, 
   }
   async function refresh(provider: ConnectorProvider) {
     const record = state.accounts[provider]; if (!record) return;
-    try { observations.set(provider, await inspect(provider, record)); }
-    catch (error) { observations.set(provider, { status: 'unverified', error: error instanceof ComposioError && error.status === 404 ? 'The connection was removed from Composio. Disconnect it here, then sign in again.' : redact(error instanceof Error ? error.message : 'Could not verify the connection.', { secrets: [state.apiKey] }) }); }
+    try { observations.remember(provider, record.alias, await inspect(provider, record)); }
+    catch (error) { observations.remember(provider, record.alias, { status: 'unverified', error: error instanceof ComposioError && error.status === 404 ? 'The connection was removed from Composio. Disconnect it here, then sign in again.' : redact(error instanceof Error ? error.message : 'Could not verify the connection.', { secrets: [state.apiKey] }) }); }
   }
   async function clearConfigSetup(provider: ConnectorProvider) {
     const configSetups = { ...state.configSetups }; delete configSetups[provider];
@@ -127,7 +134,15 @@ export async function createConnectorManager({ dataDir, transport, callbackUrl, 
     }
   }
   return {
-    read: () => serialize(async () => { for (const app of APPS) await refresh(app.provider); return view(); }),
+    snapshot,
+    read: () => {
+      if (!readTask || readTask.revision !== revision) {
+        const task = { revision, promise: enqueue(async () => { for (const app of APPS) await refresh(app.provider); return view(); }) };
+        readTask = task;
+        void task.promise.finally(() => { if (readTask === task) readTask = undefined; }).catch(() => {});
+      }
+      return readTask.promise.then(reply => structuredClone(reply));
+    },
     setup: (input: unknown) => serialize(async () => {
       const apiKey = keyOf(object(input).apiKey);
       if (apiKey.startsWith('ck_')) throw new Error('This is a Composio Connect key. Get a project API key in Platform → your project → API Keys.');
@@ -172,14 +187,14 @@ export async function createConnectorManager({ dataDir, transport, callbackUrl, 
       // Cancellation cannot silently delete an account whose sign-in just finished.
       try {
         const observed = await inspect(provider, record);
-        observations.set(provider, observed);
+        observations.remember(provider, record.alias, observed);
         if (data.cancel === true && observed.status === 'connected') throw new Error('Sign-in completed. Use Disconnect to remove this account.');
         await vendor.remove(key(), state.accounts[provider]!.id!);
       } catch (error) {
         if (!(error instanceof ComposioError && error.status === 404)) throw error;
       }
       const accounts = { ...state.accounts }; delete accounts[provider];
-      await save({ ...state, accounts }); observations.delete(provider); return view();
+      await save({ ...state, accounts }); observations.remove(provider); return view();
     }),
     useBrowser: () => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); await save({ ...state, method: 'browser' }); return view(); }),
     complete: (input: unknown) => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); return consumer.complete(input); }),

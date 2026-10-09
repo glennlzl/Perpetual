@@ -4,6 +4,10 @@ Connectors is app-wide, independent of repository and pipeline selection. The pa
 
 GitHub uses the existing verified CLI account and browser sign-in. Connecting or disconnecting updates the shared GitHub connection while preserving projects, pipelines and run evidence. CLI tokens never reach the page; an unreachable account remains Unverified.
 
+The first connected-app list reads local bindings and the GitHub account before displaying rows, with GitHub first. It does not wait for Composio: remote verification follows quietly. The controller keeps observations in memory for 30 seconds, tied to each binding; unobserved or stale accounts show Checking until a fresh result arrives. Restart discards observations while retaining private bindings and credentials. A snapshot never authorizes a connection operation.
+
+Focus and visibility checks run quietly; only an explicit Refresh shows loading on that app. Concurrent verification reads share one request in both the page and controller; reads requested after a connection mutation wait for that mutation. A pending sign-in is checked every five seconds while the page is visible; Unverified and Sign-in required accounts need explicit recovery and do not start a polling loop.
+
 ## Browser sign-in
 
 Slack, Linear, Gmail and Jira default to browser authorization through the [Composio consumer MCP](https://docs.composio.dev/docs/composio-connect). Click Connect app, then Connect beside an app. Perpetual opens Composio sign-in directly; users do not create a Platform project, copy its key or configure OAuth. Composio login and the application's consent remain human actions. A single existing active account is reused; multiple active accounts require an explicit account choice.

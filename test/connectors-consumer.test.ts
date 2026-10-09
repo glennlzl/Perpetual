@@ -5,6 +5,106 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConsumerConnections } from '../src/connectors/consumer.ts';
 import { consumerFixture } from './fixtures/consumer-oauth.ts';
+import { createConnectorManager } from '../src/connectors/manager.ts';
+
+test('concurrent account verification shares one read but a queued removal supersedes it', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-connector-shared-')), f = consumerFixture();
+  const barrier = () => {
+    let release!: () => void, receive!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { receive = resolve; });
+    return { held, started, release, receive };
+  };
+  let gate: ReturnType<typeof barrier> | undefined;
+  const manager = await createConnectorManager({ dataDir, callbackUrl: () => 'http://127.0.0.1:4317/connectors/oauth/callback', consumerTransport: async (input, init) => {
+    const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : {};
+    if (gate && body.method === 'tools/call' && body.params?.arguments?.toolkits?.[0]?.action === 'list') { gate.receive(); await gate.held; }
+    return f.transport(input, init);
+  } });
+  t.after(async () => { gate?.release(); await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const signIn = new URL((await manager.start({ provider: 'gmail' })).apps.find(app => app.provider === 'gmail')!.account!.redirectUrl!);
+  await manager.complete({ code: 'fixture-code', state: signIn.searchParams.get('state') });
+  const lists = () => f.calls.filter(call => (call.args?.toolkits as { action?: string }[] | undefined)?.[0]?.action === 'list').length;
+  const before = lists(); gate = barrier();
+  const first = manager.read(); await gate.started;
+  const second = manager.read(); gate.release(); await Promise.all([first, second]);
+  assert.equal(lists(), before + 1, 'Concurrent pages must not queue duplicate remote verification');
+  gate = barrier(); const older = manager.read(); await gate.started;
+  const removal = manager.remove({ provider: 'gmail' });
+  const afterRemoval = manager.read(); gate.release();
+  await older; await removal;
+  assert.equal((await afterRemoval).apps.find(app => app.provider === 'gmail')!.account, null, 'Reads requested after a mutation must observe that mutation');
+});
+
+test('HTTP connector snapshots do not wait for held remote verification', async t => {
+  const { startServer, fetch: controllerFetch } = await import('./fixtures/controller.ts');
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-connector-snapshot-')), f = consumerFixture();
+  let hold = false, release!: () => void, received!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { received = resolve; });
+  const transport: typeof fetch = async (input, init) => {
+    const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : {};
+    if (hold && body.method === 'tools/call' && body.params?.arguments?.toolkits?.[0]?.action === 'list') { received(); await held; }
+    return f.transport(input, init);
+  };
+  const app = await startServer({ port: 0, dataDir, connectors: { consumerTransport: transport } });
+  const reads: Promise<Response>[] = [];
+  t.after(async () => { release(); await Promise.allSettled(reads); await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const { token } = await (await controllerFetch(app.url + '/api/session')).json() as { token: string };
+  const start = await controllerFetch(app.url + '/api/connectors/start', { method: 'POST', headers: { 'X-Perpetual-Token': token, 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'gmail' }) });
+  const signIn = new URL((await start.json()).apps.find((app: { provider: string }) => app.provider === 'gmail').account.redirectUrl);
+  await controllerFetch(app.url + '/connectors/oauth/callback?code=fixture-code&state=' + signIn.searchParams.get('state'), { redirect: 'manual' });
+  hold = true;
+  reads.push(controllerFetch(app.url + '/api/connectors')); await started;
+  const cached = controllerFetch(app.url + '/api/connectors?cached=1'); reads.push(cached);
+  const response = await Promise.race([cached, new Promise<undefined>(resolve => setTimeout(resolve, 250))]);
+  assert.ok(response, 'Initial local account state must return without waiting for vendor verification');
+  assert.equal(response.status, 200);
+  const snapshot = await response.json();
+  assert.equal(snapshot.apps.find((app: { provider: string }) => app.provider === 'gmail').account.checking, true);
+  assert.ok(!JSON.stringify(snapshot).includes('private_fixture_bearer'));
+  release(); await reads[0];
+  const verified = await (await controllerFetch(app.url + '/api/connectors?cached=1')).json();
+  assert.equal(verified.apps.find((app: { provider: string }) => app.provider === 'gmail').account.status, 'pending');
+});
+
+test('browser snapshots retain bindings without claiming stale or restarted authorization', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-consumer-cache-')), f = consumerFixture();
+  const options = { dataDir, callbackUrl: () => 'http://127.0.0.1:4317/connectors/oauth/callback', transport: f.transport };
+  let manager = await createConsumerConnections(options);
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const signIn = new URL((await manager.start('gmail'))!);
+  await manager.complete({ code: 'fixture-code', state: signIn.searchParams.get('state') });
+  f.accounts[0].status = 'ACTIVE'; await manager.read();
+  assert.equal(manager.snapshot().gmail?.status, 'connected');
+  assert.equal(manager.snapshot().gmail?.checking, undefined);
+  const now = Date.now(); t.mock.method(Date, 'now', () => now + 30_000);
+  const before = f.calls.length;
+  assert.equal(manager.snapshot().gmail?.checking, true);
+  assert.equal(f.calls.length, before, 'Snapshots must never perform remote checks');
+  await manager.close(); manager = await createConsumerConnections(options);
+  assert.equal(manager.snapshot().gmail?.checking, true);
+  assert.equal(manager.snapshot().gmail?.status, 'unverified');
+  f.accounts[0].status = 'FAILED';
+  assert.equal((await manager.read()).gmail?.status, 'needs-auth');
+  assert.equal(manager.snapshot().gmail?.checking, undefined);
+  await manager.remove('gmail');
+  assert.deepEqual(manager.snapshot(), {});
+  await manager.start('gmail');
+  assert.equal(manager.snapshot().gmail?.checking, true, 'A new binding cannot reuse the previous account observation');
+});
+
+test('a snapshot cannot keep Connected after another operation discovers revoked authorization', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-consumer-revoked-')), f = consumerFixture();
+  const manager = await createConsumerConnections({ dataDir, callbackUrl: () => 'http://127.0.0.1:4317/connectors/oauth/callback', transport: f.transport });
+  t.after(async () => { await manager.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const signIn = new URL((await manager.start('gmail'))!);
+  await manager.complete({ code: 'fixture-code', state: signIn.searchParams.get('state') });
+  f.accounts[0].status = 'ACTIVE'; await manager.read();
+  assert.equal(manager.snapshot().gmail?.status, 'connected');
+  f.flags = { expired: true }; await assert.rejects(manager.options('gmail'), /Sign in again/);
+  assert.notEqual(manager.snapshot().gmail?.status, 'connected');
+});
 
 test('consumer authorization and account binding survive restart; reads cannot add accounts and disconnect stays local', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'perpetual-consumer-')), f = consumerFixture();

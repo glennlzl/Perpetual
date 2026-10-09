@@ -636,7 +636,7 @@ async function createController({port=4317,repo=process.cwd(),dataDir,github={},
       }
       if(req.method==='GET'&&path==='/favicon.ico'){res.writeHead(204);return res.end();}
       if(req.method==='GET'&&path==='/api/session')return reply(res,200,{token});
-      if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,await connectors.read());
+      if(req.method==='GET'&&path==='/api/connectors')return reply(res,200,requestUrl.searchParams.get('cached')==='1'?connectors.snapshot():await connectors.read());
       if(req.method==='POST'&&path==='/api/connectors/setup')return reply(res,200,await connectors.setup(await body(req,4096)));
       if(req.method==='POST'&&path==='/api/connectors/browser')return reply(res,200,await connectors.useBrowser());
       if(req.method==='POST'&&path==='/api/connectors/options')return reply(res,200,await connectors.options(await body(req,4096)));

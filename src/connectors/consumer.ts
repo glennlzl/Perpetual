@@ -8,6 +8,7 @@ import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from
 import { redact } from '../redaction.ts';
 import { authUrl, identifier, object } from './composio.ts';
 import { CONSUMER_MCP, consumerFetch, createBrowserAuth, type BrowserAuthOptions } from './browser-auth.ts';
+import { createConnectorObservations } from './observations.ts';
 import type { ConnectorAccount, ConnectorAuthConfig, ConnectorProvider } from '../../contract/connectors.ts';
 
 const INVALID = 'Cannot load saved browser connections. Keep browser-connections.json and restore a valid snapshot.';
@@ -44,6 +45,7 @@ export async function createConsumerConnections(options: BrowserAuthOptions) {
     }
   }
   const authorization = await createBrowserAuth(options), queue = createSaveQueue(), vendorFetch = consumerFetch(options.transport);
+  const observations = createConnectorObservations();
   let closed = false;
   const run = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new ConnectionError('The controller is stopping.'); return work(); });
   async function save(next: State) { await writeStateFile(file, JSON.stringify(next)); state = next; }
@@ -107,7 +109,19 @@ export async function createConsumerConnections(options: BrowserAuthOptions) {
     await save({ ...state, accounts: { ...state.accounts, [provider]: { id, ...(redirectUrl ? { redirectUrl } : {}) } } });
     if (addedStatus !== 'active' && !redirectUrl) throw new ConnectionError('Composio did not return a sign-in link. Disconnect and try again.');
   }
+  function snapshot(): Partial<Record<ConnectorProvider, ConnectorAccount>> {
+    const accounts: Partial<Record<ConnectorProvider, ConnectorAccount>> = {}, pending = authorization.pending();
+    if (pending) accounts[pending.provider] = { method: 'browser', status: 'pending', ...(pending.redirectUrl ? { redirectUrl: pending.redirectUrl } : {}) };
+    for (const provider of PROVIDERS as ConnectorProvider[]) {
+      const binding = state.accounts[provider];
+      if (binding && pending?.provider !== provider) accounts[provider] = authorization.authorized()
+        ? { ...observations.snapshot(provider, binding.id ?? 'initiating'), method: 'browser' }
+        : { method: 'browser', status: 'unverified', error: 'Sign in again to verify this connection.' };
+    }
+    return accounts;
+  }
   return {
+    snapshot,
     owns: (provider: ConnectorProvider) => Boolean(state.accounts[provider]) || authorization.pending()?.provider === provider,
     read: () => run(async () => {
       const accounts: Partial<Record<ConnectorProvider, ConnectorAccount>> = {}, pending = authorization.pending();
@@ -120,6 +134,7 @@ export async function createConsumerConnections(options: BrowserAuthOptions) {
           if (!account) throw new ConnectionError('This connection was removed from Composio. Disconnect it here to reconnect.');
           accounts[provider] = { method: 'browser', status: account.status === 'ACTIVE' ? 'connected' : ['INITIATED', 'INITIALIZING'].includes(account.status) ? 'pending' : 'needs-auth', ...(account.status !== 'ACTIVE' && binding.redirectUrl ? { redirectUrl: binding.redirectUrl } : {}) };
         } catch (error) { accounts[provider] = { method: 'browser', status: 'unverified', error: error instanceof ConnectionError ? error.message : 'Could not verify the connection. Sign in again or try Refresh.' }; }
+        observations.remember(provider, binding.id ?? 'initiating', accounts[provider]!);
       }
       return accounts;
     }),
