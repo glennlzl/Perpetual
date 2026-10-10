@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LoaderCircle, MoreHorizontal, Plus, Plug, RefreshCw, Search, Unplug } from 'lucide-react';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Check, LoaderCircle, MoreHorizontal, Plus, Plug, Search, Unplug } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -10,12 +9,14 @@ import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from 
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
+import { githubSnapshot } from '@/lib/connector-snapshots';
 import { githubConnectionChanges } from '@/lib/github-connection-changes';
 import { buildChanges } from '@/lib/pipeline-github';
 import { deploymentChanges } from '@/lib/pipeline-deployments';
 import { releaseChanges } from '@/lib/production-release';
 import { restoreFocus } from '@/lib/journey-focus';
 import GitHubConnectDialog from './GitHubConnectDialog';
+import DisconnectConnectorDialog from './DisconnectConnectorDialog';
 import { AccountConnectorDialogs, AccountConnectorRow, AppMark, matchesApp, useAccountConnectors } from './AccountConnectors';
 import type { GitHubConnection } from '../../contract/github.ts';
 
@@ -37,9 +38,10 @@ function SearchConnectors({ value, onChange, label }: { value: string; onChange:
 // Account management is app-wide; it neither selects a repository nor creates a pipeline.
 export default function Connectors({ connectionRevision }: { connectionRevision: string }) {
   const accounts = useAccountConnectors();
-  const [connection, setConnection] = useState<GitHubConnection | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [connection, setConnection] = useState<GitHubConnection | null>(() => githubSnapshot.read(connectionRevision));
+  const [loading, setLoading] = useState(() => !githubSnapshot.read(connectionRevision));
   const [refreshing, setRefreshing] = useState(false);
+  const [verified, setVerified] = useState(false);
   const [action, setAction] = useState<'connect' | 'disconnect' | null>(null);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
@@ -48,30 +50,43 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
   const [connectOpen, setConnectOpen] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const active = useRef(true), request = useRef(0), changing = useRef(false);
-  const readTask = useRef<{ id: number; promise: Promise<void> } | null>(null);
+  const readTask = useRef<{ id: number; manual: boolean; promise: Promise<void> } | null>(null);
   const addButton = useRef<HTMLButtonElement>(null), menuButton = useRef<HTMLButtonElement>(null);
 
   const readConnection = useCallback(async (manual = false, changed = false) => {
     if (changing.current) return;
     // Account changes supersede a read started before the change; focus and manual reads can share it.
-    if (changed) request.current++;
-    if (manual) setRefreshing(true);
-    if (readTask.current?.id === request.current) return readTask.current.promise;
-    const id = ++request.current;
+    if (changed) { request.current++; setVerified(false); setRefreshing(false); }
+    if (manual) { setRefreshing(true); setVerified(false); }
+    if (readTask.current?.id === request.current) {
+      if (manual) readTask.current.manual = true;
+      return readTask.current.promise;
+    }
+    const id = ++request.current, generation = githubSnapshot.generation();
     const promise = (async () => {
       try {
         const next = await api<GitHubConnection>('/api/github/connection');
-        if (active.current && request.current === id) { setConnection(next); setError(''); }
+        if (active.current && request.current === id) {
+          githubSnapshot.write(next, connectionRevision, generation); setConnection(next); setError('');
+          if (readTask.current?.id === id && readTask.current.manual) setVerified(next.connected && next.authenticated && !next.unreachable);
+          else if (!next.connected || !next.authenticated || next.unreachable) setVerified(false);
+        }
       } catch (failure) {
-        if (active.current && request.current === id) setError(messageOf(failure));
+        if (active.current && request.current === id) { githubSnapshot.clear(); setError(messageOf(failure)); setVerified(false); }
       } finally {
         if (readTask.current?.id === id) readTask.current = null;
         if (active.current && request.current === id) { setLoading(false); setRefreshing(false); }
       }
     })();
-    readTask.current = { id, promise };
+    readTask.current = { id, manual, promise };
     return promise;
-  }, []);
+  }, [connectionRevision]);
+
+  useEffect(() => {
+    if (!verified) return;
+    const timer = window.setTimeout(() => setVerified(false), 5000);
+    return () => clearTimeout(timer);
+  }, [verified]);
 
   useEffect(() => {
     active.current = true;
@@ -91,6 +106,8 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
     if (changing.current || loading) throw new Error('Wait for GitHub to finish checking.');
     changing.current = true;
     request.current++;
+    setVerified(false);
+    githubSnapshot.clear();
     setAction(nextAction);
     setError('');
     try {
@@ -128,7 +145,7 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
     <div className="mx-auto w-full max-w-5xl">
       <div className="mb-6 flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Connectors</h1>
-        <div className="flex items-center gap-2"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="size-8" aria-label="Connection settings" disabled={accounts.busy}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void accounts.useBrowser()}>Use browser sign-in</DropdownMenuItem><DropdownMenuItem onSelect={accounts.resetSetup}>Project API Key…</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Button ref={addButton} size="sm" disabled={busy || accounts.busy} onClick={openPicker}><Plus />Connect app</Button></div>
+        <Button ref={addButton} size="sm" disabled={busy || accounts.busy} onClick={openPicker}><Plus />Connect app</Button>
       </div>
       <h2 className="mb-4 text-sm font-medium">Connected apps</h2>
       <SearchConnectors label="Search connected apps" value={query} onChange={setQuery} />
@@ -138,14 +155,15 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
             {githubMatches && <><Item role="listitem" className="flex-nowrap gap-3 p-4">
               <ItemMedia><GitHubMark /></ItemMedia>
               <ItemContent className="min-w-0">
-                <ItemTitle>GitHub<Badge variant="outline">{unavailable ? 'Unverified' : 'Connected'}</Badge></ItemTitle>
+                <ItemTitle>GitHub<Badge variant="outline" aria-live="polite">{refreshing && <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />}{refreshing ? 'Checking' : unavailable ? 'Unverified' : 'Connected'}</Badge></ItemTitle>
                 {account && <span className="truncate text-sm text-muted-foreground">{account}</span>}
               </ItemContent>
               <ItemActions>
-                <Button size="sm" variant="outline" aria-label="Refresh GitHub" disabled={busy} onClick={() => void readConnection(true)}>{refreshing ? <LoaderCircle className="motion-safe:animate-spin" /> : <RefreshCw />}Refresh</Button>
+                {verified && !refreshing && !unavailable && <span role="status" className="flex items-center gap-1.5 text-sm text-[var(--success)]"><Check className="size-4" aria-hidden="true" />Connection verified</span>}
+                {unavailable && <Button size="sm" variant="outline" disabled={busy} onClick={() => void readConnection(true)}>{refreshing && <LoaderCircle className="motion-safe:animate-spin" />}Try again</Button>}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild><Button ref={menuButton} size="icon" variant="outline" className="size-8" disabled={busy} aria-label="GitHub actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end"><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectOpen(true)}><Unplug />Disconnect</DropdownMenuItem></DropdownMenuContent>
+                  <DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void readConnection(true)}>Check connection</DropdownMenuItem><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectOpen(true)}><Unplug />Disconnect</DropdownMenuItem></DropdownMenuContent>
                 </DropdownMenu>
               </ItemActions>
             </Item>
@@ -159,30 +177,24 @@ export default function Connectors({ connectionRevision }: { connectionRevision:
                 <Button size="sm" disabled={busy} onClick={openPicker}><Plus />Connect app</Button>
               </div>}
       </div>
-      {connectionError && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{connectionError}</p><Button variant="outline" size="sm" disabled={busy} onClick={() => void readConnection(true)}>Try again</Button></div>}
+      {connectionError && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{connectionError}</p>{!listed && <Button variant="outline" size="sm" disabled={busy} onClick={() => void readConnection(true)}>Try again</Button>}</div>}
       {accounts.error && <div className="mt-4 flex items-start justify-between gap-4"><p className="text-sm text-destructive [overflow-wrap:anywhere]" role="alert">{accounts.error}</p><Button variant="outline" size="sm" disabled={accounts.busy || accounts.reading} onClick={() => void accounts.refresh()}>Try again</Button></div>}
     </div>
     <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
-      <DialogContent className="sm:max-w-xl" aria-describedby={undefined} onCloseAutoFocus={event => { event.preventDefault(); if (!connectOpen && !accounts.setupOpen && !accounts.authApp) restoreFocus([addButton.current]); }}>
+      <DialogContent className="sm:max-w-xl" aria-describedby={undefined} onCloseAutoFocus={event => { event.preventDefault(); if (!connectOpen && !accounts.authApp) restoreFocus([addButton.current]); }}>
         <DialogHeader><DialogTitle>Available apps</DialogTitle></DialogHeader>
         <SearchConnectors label="Search available apps" value={pickerQuery} onChange={setPickerQuery} />
         {!connected && !unavailable && matches(pickerQuery) ? <Item className="flex-nowrap gap-3 px-2 py-3">
           <ItemMedia><GitHubMark /></ItemMedia><ItemContent><ItemTitle>GitHub</ItemTitle></ItemContent>
-          <ItemActions><Button variant="outline" size="sm" disabled={busy} onClick={() => { setPickerOpen(false); setConnectOpen(true); }}>Connect GitHub</Button></ItemActions>
+          <ItemActions><Button variant="outline" size="sm" className="w-24 shadow-none" aria-label="Connect GitHub" disabled={busy} onClick={() => { setPickerOpen(false); setConnectOpen(true); }}>Connect</Button></ItemActions>
         </Item> : null}
-        {accounts.reply?.apps.filter(app => !app.account && matchesApp(pickerQuery, app)).map(app => <Item key={app.provider} className="flex-nowrap gap-3 px-2 py-3"><ItemMedia><AppMark app={app} /></ItemMedia><ItemContent><ItemTitle>{app.name}</ItemTitle></ItemContent><ItemActions><Button variant="outline" size="sm" disabled={accounts.busy} onClick={() => { setPickerOpen(false); void accounts.choose(app); }}>Connect {app.name}</Button></ItemActions></Item>)}
+        {accounts.reply?.apps.filter(app => !app.account && matchesApp(pickerQuery, app)).map(app => <Item key={app.provider} className="flex-nowrap gap-3 px-2 py-3"><ItemMedia><AppMark app={app} /></ItemMedia><ItemContent><ItemTitle>{app.name}{!app.configured && <Badge variant="outline">Setup required</Badge>}</ItemTitle></ItemContent><ItemActions><Button variant="outline" size="sm" className="w-24 shadow-none" aria-label={`Connect ${app.name}`} disabled={accounts.busy} onClick={() => { setPickerOpen(false); void accounts.choose(app); }}>Connect</Button></ItemActions></Item>)}
         {!accounts.reply && <p className="py-4 text-sm text-muted-foreground">{accounts.error ? 'Could not read available apps.' : 'Loading apps…'}</p>}
         {accounts.reply && !accounts.reply.apps.some(app => !app.account && matchesApp(pickerQuery, app)) && (connected || unavailable || !matches(pickerQuery)) && <p className="py-8 text-center text-sm text-muted-foreground">No matching apps</p>}
       </DialogContent>
     </Dialog>
     <AccountConnectorDialogs state={accounts} focusTarget={() => addButton.current} />
     {connectOpen && <GitHubConnectDialog connection={connection} checking={loading} onConnect={() => changeConnection('connect')} onSignInEnded={readGitHubAgain} onClose={() => setConnectOpen(false)} focusTargets={() => [addButton.current]} />}
-    <AlertDialog open={disconnectOpen} onOpenChange={open => { if (!action) setDisconnectOpen(open); }}>
-      <AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); restoreFocus([menuButton.current, addButton.current]); }}>
-        <AlertDialogHeader><AlertDialogTitle>Disconnect GitHub?</AlertDialogTitle><AlertDialogDescription>Your projects and tests stay saved. GitHub access pauses until you reconnect.</AlertDialogDescription></AlertDialogHeader>
-        {error && <p role="alert" className="text-sm text-destructive [overflow-wrap:anywhere]">{error}</p>}
-        <AlertDialogFooter><AlertDialogCancel disabled={Boolean(action)}>Cancel</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={event => { event.preventDefault(); void changeConnection('disconnect').catch(() => {}); }}>{action === 'disconnect' && <LoaderCircle className="motion-safe:animate-spin" />}Disconnect</AlertDialogAction></AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <DisconnectConnectorDialog open={disconnectOpen} provider="GitHub" account={account} mark={<GitHubMark />} busy={busy} error={error} onOpenChange={setDisconnectOpen} onConfirm={() => { void changeConnection('disconnect').catch(() => {}); }} focusTargets={() => [menuButton.current, addButton.current]} />
   </main>;
 }

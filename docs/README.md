@@ -10,6 +10,7 @@
 - [Releases](releases.md): requesting an exact-commit deployment through a configured GitHub handler and following its real result.
 - [Build repair](repair.md): the agent that fixes a failed build in a Docker box, its change rules, its pull request, the journey gates at its head and the merge.
 - [Provider connections](providers.md): GitHub, Vercel and Railway.
+- [Connectors](connectors.md): local Better Auth by default for Slack, Linear and Jira, optional broker routing for Slack/Linear/Jira, and Gmail through the local Composio broker trial.
 - [CLI](cli.md): commands, scripts and tests.
 - [Desktop sandbox](desktop-sandbox.md): the optional, experimental Cua desktop for desktop applications.
 - [Asset provenance](ASSETS.md): logos, fonts, registry components and their licenses.
@@ -27,6 +28,9 @@
 - [Architecture decision records](adr/README.md): the convention and the index.
 - [ADR 0001: Gate and manual runs execute approved Playwright code](adr/0001-gate-runs-approved-playwright-code.md).
 - [ADR 0002: A repair merges itself only after CI and every journey gate pass at its exact head](adr/0002-repairs-merge-after-ci-and-journey-gates.md).
+- [ADR 0006: Self-host connector authorization inside the local controller](adr/0006-local-connector-authorization.md) (superseded for Gmail).
+- [ADR 0007: Route Gmail through the local Composio broker](adr/0007-gmail-uses-the-local-composio-broker.md).
+- [ADR 0008: Allow optional broker routing for Slack and Jira](adr/0008-optional-slack-jira-broker-routing.md).
 
 ## Project
 

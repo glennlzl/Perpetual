@@ -2,7 +2,7 @@
 // it is written. Every manager keeps its own file, its own size limits, its own words for a bad file
 // and its own restart recovery; what they share is here, so a guard exists once.
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 /** Creates `path` as the controller's own directory (mode 0700), refuses a symbolic link with `message`, and returns its real path. */
@@ -28,6 +28,28 @@ export async function readStateFile(file: string, options: { limit: number; inva
   const text = await readPrivateFile(file, options);
   // The controller's own file; the caller decides whether what it holds is state it can load.
   return text === undefined ? undefined : JSON.parse(text) as unknown;
+}
+
+/** Check whether an owned regular file exists, without following a symbolic link. */
+export async function privateFileExists(file: string, invalid: string): Promise<boolean> {
+  try {
+    const entry = await lstat(file);
+    if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(invalid);
+    return true;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+}
+
+/** Prepare an owned SQLite file before handing it to the database library; refuse redirected files and journals. */
+export async function privateDatabaseFile(file: string, invalid: string): Promise<void> {
+  for (const path of [file, `${file}-journal`, `${file}-wal`, `${file}-shm`]) {
+    try {
+      const entry = await lstat(path);
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(invalid);
+      await chmod(path, 0o600);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  try { const handle = await open(file, 'wx', 0o600); await handle.close(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
 }
 
 /** Remove a retired state file only after its replacement has been saved. Never follow links. */
