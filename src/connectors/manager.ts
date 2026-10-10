@@ -1,203 +1,153 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
-import { createSaveQueue, privateDirectory, readStateFile, writeStateFile } from '../store.ts';
-import { redact } from '../redaction.ts';
-import { authUrl, ComposioError, createComposio, identifier, object } from './composio.ts';
-import { createConsumerConnections } from './consumer.ts';
+import { createSaveQueue, privateDirectory, privateFileExists, readStateFile, writeStateFile } from '../store.ts';
+import { createLocalAuth, localOrigin } from './auth-runtime.ts';
+import { APPS, ConnectorAuthError, object, providerAuthorizationUrl, providerOf } from './providers.ts';
 import { createConnectorObservations } from './observations.ts';
-import type { ConnectorOptionsReply, ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
+import { createLocalBrokerTrial } from './broker-trial.ts';
+import type { ConnectorProvider, ConnectorsReply } from '../../contract/connectors.ts';
 
-const APPS = [{ provider: 'slack', name: 'Slack' }, { provider: 'linear', name: 'Linear' }, { provider: 'gmail', name: 'Gmail' }, { provider: 'jira', name: 'Jira' }] as const;
-const INVALID = 'Cannot load saved connectors. Keep connectors.json and restore a valid snapshot.';
-const PENDING = new Set(['INITIATED', 'INITIALIZING']);
-interface Record { configId: string; alias: string; id?: string; redirectUrl?: string; expiresAt?: string }
-interface ConfigSetup { name: string; id?: string }
-interface State { schema: 1; userId: string; apiKey?: string; method?: 'browser' | 'project'; accounts: Partial<{ [K in ConnectorProvider]: Record }>; configSetups: Partial<{ [K in ConnectorProvider]: ConfigSetup }> }
-export type ConnectorManagerOptions = { dataDir: string; transport?: typeof fetch; callbackUrl?: () => string; consumerTransport?: typeof fetch };
-function providerOf(value: unknown): ConnectorProvider {
-  if (!APPS.some(app => app.provider === value)) throw new Error('Choose an available app.');
-  return value as ConnectorProvider;
-}
-function keyOf(value: unknown): string {
-  if (typeof value !== 'string' || !/^[\x21-\x7e]{8,512}$/.test(value)) throw new Error('Enter a valid Composio project API key.');
-  return value;
-}
-function load(value: unknown): State {
-  const state = object(value), accounts = object(state.accounts), configSetups = object(state.configSetups);
-  if (state.schema !== 1 || typeof state.userId !== 'string' || !/^perpetual-[a-f0-9-]{36}$/.test(state.userId) || !state.accounts || typeof state.accounts !== 'object' || Array.isArray(state.accounts) || Object.keys(accounts).some(key => !APPS.some(app => app.provider === key))) throw new Error(INVALID);
-  if (state.apiKey !== undefined) keyOf(state.apiKey);
-  if (state.method !== undefined && state.method !== 'browser' && state.method !== 'project') throw new Error(INVALID);
-  if (state.configSetups !== undefined && (!state.configSetups || typeof state.configSetups !== 'object' || Array.isArray(state.configSetups) || Object.keys(configSetups).some(key => !APPS.some(app => app.provider === key)))) throw new Error(INVALID);
-  const result: State = { schema: 1, userId: state.userId, ...(state.apiKey ? { apiKey: state.apiKey as string } : {}), ...(state.method ? { method: state.method as 'browser' | 'project' } : {}), accounts: {}, configSetups: {} };
+const INVALID = 'Cannot load local connector authorization. Restore auth.json and auth.sqlite together.';
+const TTL = 10 * 60_000;
+interface Attempt { state: string; url: string; cookie: string; origin: string; createdAt: number; exchanging?: true }
+interface Binding { id?: string; accountId?: string; label?: string; pending?: Attempt; needsAuth?: true; error?: string }
+interface State { schema: 2; secret: string; ownerId: string; accounts: Partial<Record<ConnectorProvider, Binding>> }
+export type ConnectorManagerOptions = { dataDir: string; origin: () => string; env?: NodeJS.ProcessEnv; transport?: typeof fetch };
+const text = (value: unknown, max = 1024): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+function load(raw: unknown): State {
+  const state = object(raw), accounts = object(state.accounts);
+  if (state.schema !== 2 || !text(state.secret, 128) || !/^[a-f0-9]{64}$/.test(state.secret) || !text(state.ownerId) || !/^[a-f0-9-]{36}$/.test(state.ownerId) || accounts !== state.accounts || Object.keys(accounts).some(key => !APPS.some(app => app.provider === key))) throw new Error(INVALID);
+  const result: State = { schema: 2, secret: state.secret, ownerId: state.ownerId, accounts: {} };
   for (const app of APPS) {
-    const setup = configSetups[app.provider];
-    if (setup !== undefined) {
-      const config = object(setup);
-      if (!identifier(config.name) || (config.id !== undefined && !identifier(config.id))) throw new Error(INVALID);
-      result.configSetups[app.provider] = { name: config.name, ...(config.id ? { id: config.id as string } : {}) };
+    if (accounts[app.provider] === undefined) continue;
+    const item = object(accounts[app.provider]);
+    if (['id', 'accountId', 'label', 'error'].some(key => item[key] !== undefined && !text(item[key])) || item.needsAuth !== undefined && item.needsAuth !== true || Boolean(item.id) !== Boolean(item.accountId)) throw new Error(INVALID);
+    const binding: Binding = { ...(item.id ? { id: item.id as string, accountId: item.accountId as string } : {}), ...(item.label ? { label: item.label as string } : {}), ...(item.needsAuth ? { needsAuth: true } : {}), ...(item.error ? { error: item.error as string } : {}) };
+    if (item.pending !== undefined) {
+      const p = object(item.pending);
+      if (!text(p.state, 256) || !text(p.cookie, 16384) || !text(p.origin) || !providerAuthorizationUrl(app.provider, p.url) || typeof p.createdAt !== 'number' || !Number.isFinite(p.createdAt) || p.exchanging !== undefined && p.exchanging !== true) throw new Error(INVALID);
+      const target = new URL(p.url as string);
+      if (localOrigin(p.origin) !== p.origin || target.searchParams.get('state') !== p.state) throw new Error(INVALID);
+      binding.pending = { state: p.state, cookie: p.cookie, url: p.url as string, origin: p.origin, createdAt: p.createdAt, ...(p.exchanging ? { exchanging: true } : {}) };
     }
-    const raw = accounts[app.provider]; if (raw === undefined) continue;
-    const record = object(raw);
-    if (!identifier(record.configId) || !identifier(record.alias) || (record.id !== undefined && !identifier(record.id)) || (record.redirectUrl !== undefined && !authUrl(record.redirectUrl)) || (record.expiresAt !== undefined && (typeof record.expiresAt !== 'string' || !Number.isFinite(Date.parse(record.expiresAt))))) throw new Error(INVALID);
-    result.accounts[app.provider] = { configId: record.configId, alias: record.alias, ...(record.id ? { id: record.id as string } : {}), ...(record.redirectUrl ? { redirectUrl: record.redirectUrl as string } : {}), ...(record.expiresAt ? { expiresAt: record.expiresAt as string } : {}) };
+    result.accounts[app.provider] = binding;
   }
-  if ((Object.keys(result.accounts).length || Object.keys(result.configSetups).length) && !result.apiKey) throw new Error(INVALID);
   return result;
 }
 
-/** A local installation owns only accounts it explicitly initiated. Opening the page only reads them. */
-export async function createConnectorManager({ dataDir, transport, callbackUrl, consumerTransport }: ConnectorManagerOptions) {
-  const directory = await privateDirectory(join(dataDir, 'connectors'), INVALID), file = join(directory, 'connectors.json');
-  const saved = await readStateFile(file, { limit: 32768, invalid: INVALID });
-  let state: State = saved === undefined ? { schema: 1, userId: `perpetual-${randomUUID()}`, accounts: {}, configSetups: {} } : load(saved);
-  const queue = createSaveQueue(), vendor = createComposio({ transport });
-  const consumer = callbackUrl ? await createConsumerConnections({ dataDir, callbackUrl, transport: consumerTransport }) : undefined;
-  const observations = createConnectorObservations();
-  let closed = false;
-  let revision = 0, readTask: { revision: number; promise: Promise<ConnectorsReply> } | undefined;
-  const enqueue = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new Error('The controller is stopping.'); return work(); });
-  const serialize = <T>(work: () => Promise<T>) => { revision++; return enqueue(work); };
+/** Local records render immediately. Better Auth owns provider grants; observations never grant access. */
+export async function createConnectorManager({ dataDir, origin, env = process.env, transport }: ConnectorManagerOptions) {
+  const directory = await privateDirectory(join(dataDir, 'connectors'), INVALID), file = join(directory, 'auth.json');
+  const saved = await readStateFile(file, { limit: 128 * 1024, invalid: INVALID });
+  if (saved === undefined && await privateFileExists(join(directory, 'auth.sqlite'), INVALID)) throw new Error(INVALID);
+  let state: State = saved === undefined ? { schema: 2, secret: randomBytes(32).toString('hex'), ownerId: randomUUID(), accounts: {} } : load(saved);
+  await writeStateFile(file, JSON.stringify(state));
+  const brokers = {
+    linear: await createLocalBrokerTrial({ dataDir, env, transport, provider: 'linear' }),
+    gmail: await createLocalBrokerTrial({ dataDir, env, transport, provider: 'gmail' }),
+    slack: await createLocalBrokerTrial({ dataDir, env, transport, provider: 'slack' }),
+    jira: await createLocalBrokerTrial({ dataDir, env, transport, provider: 'jira' }),
+  };
+  const brokerFor = (provider: ConnectorProvider) => brokers[provider];
+  for (const provider of Object.keys(brokers) as ConnectorProvider[]) {
+    if (brokers[provider] && (state.accounts[provider]?.id || state.accounts[provider]?.pending)) throw new Error(`Disconnect the existing ${APPS.find(app => app.provider === provider)!.name} account before enabling the connection trial.`);
+  }
+  const runtime = await createLocalAuth({ file: join(directory, 'auth.sqlite'), secret: state.secret, ownerId: state.ownerId, origin, env, transport });
+  const queue = createSaveQueue(), observations = createConnectorObservations();
+  const checked = new Map<ConnectorProvider, number>();
+  let closed = false, revision = 0;
+  const reads = new Map<string, Promise<ConnectorsReply>>();
   async function save(next: State) { await writeStateFile(file, JSON.stringify(next)); state = next; }
-  function key() { if (!state.apiKey) throw new Error('Set up Composio to connect this app.'); return state.apiKey; }
-  const method = () => state.method ?? (consumer ? 'browser' : 'project');
-  function snapshot(browserAccounts = consumer?.snapshot()): ConnectorsReply {
-    if (closed) throw new Error('The controller is stopping.');
-    return { configured: Boolean(state.apiKey), method: method(), apps: APPS.map(app => ({ ...app, account: state.accounts[app.provider] ? { ...observations.snapshot(app.provider, state.accounts[app.provider]!.alias), method: 'project' as const } : browserAccounts?.[app.provider] ?? null })) };
+  const enqueue = <T>(work: () => Promise<T>) => queue.run(async () => { if (closed) throw new Error('The controller is stopping.'); return work(); });
+  const mutate = <T>(work: () => Promise<T>) => { revision++; return enqueue(work); };
+  const usableAttempt = (p: Attempt) => !p.exchanging && p.createdAt <= Date.now() + 60_000 && Date.now() - p.createdAt < TTL && p.origin === localOrigin(origin());
+  function snapshot(): ConnectorsReply {
+    return { apps: APPS.map(app => {
+      const broker = brokerFor(app.provider);
+      if (broker) return broker.snapshot();
+      const binding = state.accounts[app.provider];
+      const account = !binding ? null : binding.pending && usableAttempt(binding.pending) ? { status: 'pending' as const, redirectUrl: binding.pending.url } : binding.needsAuth || !binding.id || binding.pending ? { status: 'needs-auth' as const, error: binding.error ?? 'Sign in again to reconnect.' } : { ...observations.snapshot(app.provider, binding.id), ...(binding.label ? { label: binding.label } : {}) };
+      return { ...app, ...runtime.providers.configuration(app.provider), account };
+    }) };
   }
-  async function view(): Promise<ConnectorsReply> {
-    const browserAccounts = await consumer?.read();
-    return snapshot(browserAccounts);
-  }
-  function owned(raw: unknown, provider: ConnectorProvider, record: Record) {
-    const account = object(raw);
-    if (!identifier(account.id) || (record.id && account.id !== record.id) || account.user_id !== state.userId || object(account.toolkit).slug !== provider || object(account.auth_config).id !== record.configId || object(account.auth_config).auth_scheme !== 'OAUTH2') throw new Error('The account does not match this connection. Check the Composio project.');
-    return account;
-  }
-  async function inspect(provider: ConnectorProvider, record: Record, apiKey = key()) {
-    if (!record.id) {
-      const matches = (await vendor.accounts(apiKey, state.userId, provider)).filter(raw => object(raw).alias === record.alias);
-      if (!matches.length) throw new ComposioError(404, 'No account was created for this sign-in.');
-      if (matches.length !== 1) throw new Error('Sign-in could not be confirmed. Refresh before trying again.');
-      const found = owned(matches[0], provider, record);
-      record = { ...record, id: found.id as string };
-      await save({ ...state, accounts: { ...state.accounts, [provider]: record } });
-    }
-    const account = owned(await vendor.details(apiKey, record.id!), provider, record);
-    if (account.status === 'ACTIVE' && account.is_disabled !== true && object(account.auth_config).is_disabled !== true) return { status: 'connected' as const };
-    if (typeof account.status === 'string' && PENDING.has(account.status)) {
-      if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) return { status: 'needs-auth' as const };
-      return { status: 'pending' as const, ...(record.redirectUrl ? { redirectUrl: record.redirectUrl } : {}) };
-    }
-    if (['EXPIRED', 'FAILED', 'REVOKED', 'INACTIVE', 'DISABLED'].includes(String(account.status)) || account.is_disabled === true || object(account.auth_config).is_disabled === true) return { status: 'needs-auth' as const };
-    throw new Error('Composio returned an unknown account status. Refresh and try again.');
-  }
-  async function refresh(provider: ConnectorProvider) {
-    const record = state.accounts[provider]; if (!record) return;
-    try { observations.remember(provider, record.alias, await inspect(provider, record)); }
-    catch (error) { observations.remember(provider, record.alias, { status: 'unverified', error: error instanceof ComposioError && error.status === 404 ? 'The connection was removed from Composio. Disconnect it here, then sign in again.' : redact(error instanceof Error ? error.message : 'Could not verify the connection.', { secrets: [state.apiKey] }) }); }
-  }
-  async function clearConfigSetup(provider: ConnectorProvider) {
-    const configSetups = { ...state.configSetups }; delete configSetups[provider];
-    await save({ ...state, configSetups });
-  }
-  async function prepareConfig(provider: ConnectorProvider, selected: unknown) {
-    const apiKey = key(), configs = await vendor.configRecords(apiKey, provider), pending = state.configSetups[provider];
-    if (selected !== undefined && !identifier(selected)) throw new Error('Choose an enabled OAuth configuration for this app.');
-    if (pending) {
-      const matches = configs.filter(config => pending.id ? config.id === pending.id : config.name === pending.name);
-      if (matches.length !== 1) throw new Error('Sign-in setup could not be confirmed. Check the configuration in Composio, then Refresh.');
-      if (!matches[0].enabled) throw new Error('Enable the OAuth configuration in Composio, then Refresh.');
-      if (selected !== undefined && selected !== matches[0].id) throw new Error('Refresh and choose the prepared authorization.');
-      await clearConfigSetup(provider); return matches[0].id;
-    }
-    const enabled = configs.filter(config => config.enabled);
-    if (selected !== undefined) {
-      if (!enabled.some(config => config.id === selected)) throw new Error('Choose an enabled OAuth configuration for this app.');
-      return selected;
-    }
-    if (enabled.length === 1) return enabled[0].id;
-    if (enabled.length > 1) throw new Error('Choose an enabled OAuth configuration for this app.');
-    if (configs.length) throw new Error('Check the OAuth configuration in Composio, then Refresh.');
-    if (!await vendor.supportsManagedOAuth(apiKey, provider)) throw new Error('This app needs an OAuth configuration in Composio. Configure it there, then Refresh.');
-    const name = `perpetual-${provider}-${randomUUID()}`;
-    // A lost creation reply must be recovered by name, never repeated after a restart.
-    await save({ ...state, configSetups: { ...state.configSetups, [provider]: { name } } });
+  async function refresh(provider: ConnectorProvider, force: boolean) {
+    const broker = brokerFor(provider);
+    if (broker) { await broker.read(force); return; }
+    const binding = state.accounts[provider];
+    if (!binding?.id || binding.pending || binding.needsAuth || !force && (checked.get(provider) ?? 0) > Date.now()) return;
+    const config = runtime.providers.configuration(provider);
+    if (!config.configured) { observations.remember(provider, binding.id, { status: 'unverified', error: config.setupError }); return; }
     try {
-      const id = await vendor.createManagedConfig(apiKey, provider, name);
-      await save({ ...state, configSetups: { ...state.configSetups, [provider]: { name, id } } });
-      const verified = (await vendor.configRecords(apiKey, provider)).find(config => config.id === id && config.enabled);
-      if (!verified) throw new Error('Sign-in setup is not verified yet. Refresh before trying again.');
-      await clearConfigSetup(provider); return id;
+      const stored = await runtime.account(binding.id);
+      if (!stored || stored.providerId !== provider || stored.accountId !== binding.accountId) throw new ConnectorAuthError('Sign in again to reconnect.', true);
+      const accessToken = await runtime.token(binding.id);
+      const account = await runtime.providers.verifyAccount(provider, accessToken);
+      if (account.id !== binding.accountId) throw new ConnectorAuthError('The service returned a different account. Sign in again.', true);
+      observations.remember(provider, binding.id, { status: 'connected', label: account.label });
+      checked.set(provider, Date.now() + 30_000);
     } catch (error) {
-      if (error instanceof ComposioError && [400, 401, 403, 404, 422, 429, 501].includes(error.status)) await clearConfigSetup(provider);
-      throw error;
+      const failure = error instanceof ConnectorAuthError ? error : runtime.providers.refreshFailure(provider);
+      const needsAuth = failure?.needsAuth === true;
+      observations.remember(provider, binding.id, { status: needsAuth ? 'needs-auth' : 'unverified', error: failure?.message ?? 'Could not verify this account. Try again.' });
+      checked.set(provider, Date.now() + 5_000);
     }
   }
   return {
     snapshot,
-    read: () => {
-      if (!readTask || readTask.revision !== revision) {
-        const task = { revision, promise: enqueue(async () => { for (const app of APPS) await refresh(app.provider); return view(); }) };
-        readTask = task;
-        void task.promise.finally(() => { if (readTask === task) readTask = undefined; }).catch(() => {});
+    read(force?: unknown) {
+      const selected = force === 'all' ? 'all' : force === undefined || force === null ? undefined : providerOf(force);
+      const key = `${revision}:${selected ?? ''}`;
+      if (!reads.has(key)) {
+        const task = enqueue(async () => { await Promise.all(APPS.map(app => refresh(app.provider, selected === 'all' || selected === app.provider))); return snapshot(); });
+        reads.set(key, task); void task.finally(() => { if (reads.get(key) === task) reads.delete(key); }).catch(() => {});
       }
-      return readTask.promise.then(reply => structuredClone(reply));
+      return reads.get(key)!.then(value => structuredClone(value));
     },
-    setup: (input: unknown) => serialize(async () => {
-      const apiKey = keyOf(object(input).apiKey);
-      if (apiKey.startsWith('ck_')) throw new Error('This is a Composio Connect key. Get a project API key in Platform → your project → API Keys.');
-      if (apiKey.startsWith('uak_')) throw new Error('This is a Composio user key. Get a project API key in Platform → your project → API Keys.');
-      // Validate access without creating configs, accounts, or invoking provider tools.
-      await vendor.configs(apiKey, 'slack');
-      for (const app of APPS) { const record = state.accounts[app.provider]; if (record) await inspect(app.provider, record, apiKey); }
-      for (const app of APPS) { const pending = state.configSetups[app.provider]; if (pending && !(await vendor.configRecords(apiKey, app.provider)).some(config => pending.id ? config.id === pending.id : config.name === pending.name)) throw new Error('Resolve the pending sign-in setup in Composio before replacing its project key.'); }
-      await save({ ...state, apiKey, method: 'project' }); return view();
-    }),
-    options: (input: unknown): Promise<ConnectorOptionsReply> => serialize(async () => {
+    start: (input: unknown) => mutate(async () => {
       const provider = providerOf(object(input).provider);
-      return !state.accounts[provider] && consumer && (method() === 'browser' || consumer.owns(provider)) ? { configs: [], accounts: await consumer.options(provider) } : { configs: await vendor.configs(key(), provider) };
+      const broker = brokerFor(provider);
+      if (broker) { await broker.start(); return snapshot(); }
+      const config = runtime.providers.configuration(provider);
+      if (!config.configured) throw new Error(config.setupError);
+      const binding = state.accounts[provider];
+      if (binding?.pending && usableAttempt(binding.pending)) return snapshot();
+      if (binding?.id && observations.snapshot(provider, binding.id).status === 'connected') throw new Error('This app is already connected. Disconnect it before changing accounts.');
+      if (binding?.pending) await runtime.cancel(binding.pending.state);
+      // Reconnection is an explicit replacement. Clear unusable grants before starting another attempt.
+      await runtime.remove(provider);
+      await save({ ...state, accounts: { ...state.accounts, [provider]: { needsAuth: true } } });
+      const prepared = await runtime.prepare(provider);
+      await save({ ...state, accounts: { ...state.accounts, [provider]: { pending: { ...prepared, createdAt: Date.now() } } } });
+      observations.remove(provider); checked.delete(provider);
+      return snapshot();
     }),
-    start: (input: unknown) => serialize(async () => {
-      const data = object(input), provider = providerOf(data.provider);
-      if (state.accounts[provider]) throw new Error('This app already has a connection. Continue sign-in or disconnect it first.');
-      if (consumer && (method() === 'browser' || consumer.owns(provider))) { await consumer.start(provider, data.accountId); return view(); }
-      const apiKey = key();
-      const configId = await prepareConfig(provider, data.configId);
-      const record: Record = { configId, alias: `perpetual-${randomUUID()}` };
-      // Persist intent before the remote write, so an uncertain response can be recovered without another account.
-      await save({ ...state, accounts: { ...state.accounts, [provider]: record } });
+    complete: (selected: unknown, params: URLSearchParams) => mutate(async () => {
+      const provider = providerOf(selected), binding = state.accounts[provider], attempt = binding?.pending, nonce = params.get('state');
+      if (provider === 'gmail' || brokerFor(provider)) throw new Error('Complete sign-in through the connection service.');
+      if (['state', 'code', 'error', 'error_description', 'iss'].some(name => params.getAll(name).length > 1) || !attempt || !usableAttempt(attempt) || !nonce || nonce.length !== attempt.state.length || !timingSafeEqual(Buffer.from(nonce), Buffer.from(attempt.state))) throw new Error('Sign-in expired or does not match this request.');
+      if (!params.has('error') && !text(params.get('code'), 4096)) throw new Error('The service did not return a valid sign-in code.');
+      await save({ ...state, accounts: { ...state.accounts, [provider]: { pending: { ...attempt, exchanging: true } } } });
       try {
-        const reply = object(await vendor.link(apiKey, record.configId, state.userId, record.alias));
-        if (!identifier(reply.connected_account_id)) throw new Error('Sign-in could not be confirmed. Refresh before trying again.');
-        const next = { ...record, id: reply.connected_account_id };
-        await save({ ...state, accounts: { ...state.accounts, [provider]: next } });
-        const redirectUrl = authUrl(reply.redirect_url), expiresAt = typeof reply.expires_at === 'string' && Number.isFinite(Date.parse(reply.expires_at)) ? reply.expires_at : undefined;
-        if (!redirectUrl || !expiresAt) throw new Error('Composio returned an invalid sign-in link. Disconnect and try again.');
-        await save({ ...state, accounts: { ...state.accounts, [provider]: { ...next, redirectUrl, expiresAt } } });
-        await refresh(provider); return view();
-      } catch (error) {
-        // Definitive rejection created no account; transport/unknown replies retain the intent for recovery.
-        if (error instanceof ComposioError && [400, 401, 403, 404, 422, 429, 501].includes(error.status)) { const accounts = { ...state.accounts }; delete accounts[provider]; await save({ ...state, accounts }); }
-        throw error;
+        const account = await runtime.complete(provider, params, attempt.cookie);
+        await save({ ...state, accounts: { ...state.accounts, [provider]: account } });
+        await refresh(provider, true);
+      } catch {
+        await save({ ...state, accounts: { ...state.accounts, [provider]: { needsAuth: true, error: params.has('error') ? 'Sign-in was cancelled. Connect again when ready.' : 'Sign-in could not finish. Connect again.' } } });
+        throw new Error('Sign-in could not finish. Return to Perpetual and connect again.');
       }
     }),
-    remove: (input: unknown) => serialize(async () => {
-      const data = object(input), provider = providerOf(data.provider), record = state.accounts[provider];
-      if (!record) { await consumer?.remove(provider, data.cancel === true); return view(); }
-      // Cancellation cannot silently delete an account whose sign-in just finished.
-      try {
-        const observed = await inspect(provider, record);
-        observations.remember(provider, record.alias, observed);
-        if (data.cancel === true && observed.status === 'connected') throw new Error('Sign-in completed. Use Disconnect to remove this account.');
-        await vendor.remove(key(), state.accounts[provider]!.id!);
-      } catch (error) {
-        if (!(error instanceof ComposioError && error.status === 404)) throw error;
-      }
+    remove: (input: unknown) => mutate(async () => {
+      const data = object(input), provider = providerOf(data.provider), binding = state.accounts[provider];
+      const broker = brokerFor(provider);
+      if (broker) { await broker.remove(data.cancel === true); return snapshot(); }
+      if (!binding) return snapshot();
+      if (data.cancel === true && !binding.pending && binding.id) throw new Error('Sign-in completed. Use Disconnect to remove this account.');
+      if (binding.pending) await runtime.cancel(binding.pending.state);
+      await runtime.remove(provider);
       const accounts = { ...state.accounts }; delete accounts[provider];
-      await save({ ...state, accounts }); observations.remove(provider); return view();
+      await save({ ...state, accounts }); observations.remove(provider); checked.delete(provider);
+      return snapshot();
     }),
-    useBrowser: () => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); await save({ ...state, method: 'browser' }); return view(); }),
-    complete: (input: unknown) => serialize(async () => { if (!consumer) throw new Error('Browser authorization is unavailable.'); return consumer.complete(input); }),
-    async close() { closed = true; await queue.idle(); await consumer?.close(); },
+    async close() { if (closed) return; closed = true; await queue.idle(); await Promise.all(Object.values(brokers).map(broker => broker?.close())); runtime.close(); },
   };
 }

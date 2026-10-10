@@ -149,6 +149,7 @@ Perpetual's goal is to make a reliable delivery pipeline practical to set up and
 - [CI/CD gate](docs/gate.md): commit statuses, release and branch protection
 - [Build repair](docs/repair.md): the agent's box, its change rules, the pull request, the journey gates at its head and the merge
 - [Providers](docs/providers.md): GitHub, Vercel and Railway connections
+- [Connectors](docs/connectors.md): local Better Auth by default for Slack, Linear and Jira, optional broker routing for Slack/Linear/Jira, and Gmail through the local Composio broker trial
 - [CLI](docs/cli.md) and the experimental [desktop sandbox](docs/desktop-sandbox.md)
 - [Architecture](docs/README.md#architecture), [decision records](docs/adr/README.md) and the [glossary](CONTEXT.md)
 

@@ -41,10 +41,10 @@
     "scan": "node src/cli.ts scan"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
     "@openrouter/ai-sdk-provider": "3.1.0",
     "@playwright/test": "1.63.0",
     "ai": "7.0.127",
+    "better-auth": "1.7.7",
     "jsonc-parser": "3.3.1",
     "smol-toml": "1.9.0",
     "supabase": "2.119.0",

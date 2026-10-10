@@ -1,0 +1,14 @@
+:is([data-slot="dialog-content"], [data-slot="alert-dialog-content"]).connector-account-dialog {
+  width: 400px;
+  max-width: calc(100vw - 48px);
+  gap: 24px;
+  padding: 24px;
+  border-radius: 12px;
+}
+.connector-account-dialog[data-state="closed"] { animation: none; }
+.connector-account-dialog :is([data-slot="dialog-header"], [data-slot="alert-dialog-header"]) { gap: 4px; padding: 0; }
+.connector-account-dialog :is([data-slot="dialog-title"], [data-slot="alert-dialog-title"]) { font-size: 18px; line-height: 26px; letter-spacing: -.02em; }
+.connector-account-dialog :is([data-slot="dialog-footer"], [data-slot="alert-dialog-footer"]) { flex-direction: row; justify-content: flex-end; margin: 0; padding: 0; border: 0; }
+.connector-account-dialog [role="alert"] { padding: 0; border: 0; background: transparent; }
+.disconnect-connector-dialog [data-slot="alert-dialog-action"] { color: var(--destructive); background: color-mix(in srgb, var(--destructive) 12%, transparent); }
+.disconnect-connector-dialog [data-slot="alert-dialog-action"]:hover { background: color-mix(in srgb, var(--destructive) 20%, transparent); }

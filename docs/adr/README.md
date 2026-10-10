@@ -19,3 +19,7 @@ An architecture decision record (ADR) notes one decision that is hard to reverse
 - [0004: Review application callback aliases independently of published ports](0004-review-application-callbacks.md) (accepted)
 
 - [0005: Production branch is explicit and independent of browsing](0005-production-branch-is-independent-of-browsing.md) (accepted)
+
+- [0006: Self-host connector authorization inside the local controller](0006-local-connector-authorization.md) (accepted for Slack, Linear and Jira; Gmail superseded by ADR-0007; Slack/Jira broker opt-in in ADR-0008)
+- [0007: Route Gmail through the local Composio broker](0007-gmail-uses-the-local-composio-broker.md) (accepted)
+- [0008: Allow optional broker routing for Slack and Jira](0008-optional-slack-jira-broker-routing.md) (accepted)
