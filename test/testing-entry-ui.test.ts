@@ -78,12 +78,18 @@ for (const reducedMotion of ['no-preference', 'reduce'] as const) test(`testing 
     const started = performance.now();
     while (performance.now() - started < 800) {
       const node = document.querySelector<HTMLElement>('.react-flow__node[data-id="production"]');
-      if (node) positions.push(new DOMMatrix(getComputedStyle(node).transform).m41);
+      if (node) {
+        positions.push(new DOMMatrix(getComputedStyle(node).transform).m41);
+        if (positions.length === 1) document.documentElement.dataset.testingEntryMotionSampled = 'true';
+      }
       revealed ||= [...document.querySelectorAll('.pipeline-stage')].some(card => card.getAnimations().some(animation => (animation as CSSAnimation).animationName === 'stage-insert'));
       await new Promise(requestAnimationFrame);
     }
+    delete document.documentElement.dataset.testingEntryMotionSampled;
     return { positions, revealed };
   });
+  // Reduced motion can move Production immediately, so record its original position before releasing the save.
+  await page.waitForFunction(() => document.documentElement.dataset.testingEntryMotionSampled === 'true');
   saving.resolve();
   const sheet = page.getByRole('dialog', { name: 'Beta', exact: true });
   await expect(setup).toHaveCount(0);
